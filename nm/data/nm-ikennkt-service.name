@@ -1,0 +1,16 @@
+[VPN Connection]
+name=ikennkt
+service=org.freedesktop.NetworkManager.ikennkt
+program=/usr/lib/NetworkManager/nm-ikennkt-service
+supports-multiple-connections=false
+
+# Phase 2 (graphical Add-VPN form + secret prompt) will add:
+# [libnm]
+# plugin=libnm-vpn-plugin-ikennkt.so
+# [GNOME]
+# auth-dialog=/usr/lib/NetworkManager/nm-ikennkt-auth-dialog
+# properties=libnm-ikennkt-properties
+# supports-external-ui-mode=true
+#
+# Until then, connections are created with nmcli / a keyfile (see the runbook in
+# doc/networkmanager-plugin.md) and NM manages their lifecycle + toggle.

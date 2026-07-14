@@ -4,6 +4,7 @@
 # Local build output (see Makefile)
 /bin/
 /coverage/
+nm/bin/
 
 # Compiled test/binaries and coverage profiles
 *.test
