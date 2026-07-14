@@ -43,6 +43,10 @@ contents:
     dst: /usr/lib/NetworkManager/nm-ikennkt-service
     file_info:
       mode: 0755
+  - src: bin/nm-ikennkt-auth-dialog
+    dst: /usr/lib/NetworkManager/nm-ikennkt-auth-dialog
+    file_info:
+      mode: 0755
   - src: bin/libnm-vpn-plugin-ikennkt.so
     dst: /usr/lib/@MULTIARCH@/NetworkManager/libnm-vpn-plugin-ikennkt.so
     file_info:

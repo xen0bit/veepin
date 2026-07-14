@@ -24,6 +24,7 @@ PKG_ARCH ?= amd64
 BIN_DIR ?= bin
 SERVICE := $(BIN_DIR)/nm-ikennkt-service
 EDITOR_SO := $(BIN_DIR)/libnm-vpn-plugin-ikennkt.so
+AUTHDIALOG := $(BIN_DIR)/nm-ikennkt-auth-dialog
 
 # Install locations (Debian/Pop!_OS layout; override on other distros).
 DESTDIR      ?=
@@ -34,12 +35,18 @@ DBUS_POLICY  ?= /usr/share/dbus-1/system.d
 MULTIARCH    ?= $(shell $(CC) -print-multiarch 2>/dev/null)
 NM_PLUGIN_DIR ?= $(if $(MULTIARCH),/usr/lib/$(MULTIARCH)/NetworkManager,/usr/lib/NetworkManager)
 
-# The editor plugin is C/libnm/GTK; built only when the dev packages are present
-# (never linked into any Go binary, so the core stays CGO-free).
+# The editor plugin and auth-dialog are C/libnm/GTK/libnma; built only when the
+# dev packages are present (never linked into any Go binary, so the core stays
+# CGO-free).
 EDITOR_PKGS := libnm gtk+-3.0 gmodule-2.0
 HAVE_EDITOR := $(shell $(PKG_CONFIG) --exists $(EDITOR_PKGS) 2>/dev/null && echo yes)
 EDITOR_CFLAGS := -Wall -Wextra -fPIC $(shell $(PKG_CONFIG) --cflags $(EDITOR_PKGS) 2>/dev/null)
 EDITOR_LIBS := $(shell $(PKG_CONFIG) --libs $(EDITOR_PKGS) 2>/dev/null)
+
+AUTH_PKGS := libnm libnma gtk+-3.0
+HAVE_AUTHDIALOG := $(shell $(PKG_CONFIG) --exists $(AUTH_PKGS) 2>/dev/null && echo yes)
+AUTH_CFLAGS := -Wall -Wextra $(shell $(PKG_CONFIG) --cflags $(AUTH_PKGS) 2>/dev/null)
+AUTH_LIBS := $(shell $(PKG_CONFIG) --libs $(AUTH_PKGS) 2>/dev/null)
 
 LDFLAGS ?= -s -w
 
@@ -76,17 +83,42 @@ else
 	@echo "SKIP editor-test: editor dev packages not present"
 endif
 
-## all: build the service and (if possible) the editor plugin
-.PHONY: all
-all: build editor
+## authdialog: build the C/libnma interactive secret prompt (if deps present)
+.PHONY: authdialog
+authdialog: $(AUTHDIALOG)
 
-## packages: build the ikennkt-nm .deb and .rpm (needs nfpm + editor deps)
+$(AUTHDIALOG): authdialog/ikennkt-auth-dialog.c
+ifeq ($(HAVE_AUTHDIALOG),yes)
+	@mkdir -p $(BIN_DIR)
+	$(CC) $(AUTH_CFLAGS) -o $@ $< $(AUTH_LIBS)
+	@echo "Built $@"
+else
+	@echo "SKIP authdialog: install dev packages ($(AUTH_PKGS)) — e.g. libnm-dev libnma-dev libgtk-3-dev"
+endif
+
+## authdialog-test: build + run the auth-dialog non-interactive tests
+.PHONY: authdialog-test
+authdialog-test: $(AUTHDIALOG)
+ifeq ($(HAVE_AUTHDIALOG),yes)
+	./authdialog/authdialog_test.sh $(AUTHDIALOG)
+else
+	@echo "SKIP authdialog-test: dev packages not present"
+endif
+
+## all: build the service and (if possible) the editor + auth-dialog
+.PHONY: all
+all: build editor authdialog
+
+## packages: build the ikennkt-nm .deb and .rpm (needs nfpm + editor/auth deps)
 .PHONY: packages
-packages: build editor
+packages: build editor authdialog
 	@command -v $(NFPM) >/dev/null 2>&1 || { \
 		echo "nfpm not found: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest"; exit 1; }
 ifneq ($(HAVE_EDITOR),yes)
 	@echo "Refusing to package without the editor .so (install libnm-dev libgtk-3-dev)"; exit 1
+endif
+ifneq ($(HAVE_AUTHDIALOG),yes)
+	@echo "Refusing to package without the auth-dialog (install libnma-dev)"; exit 1
 endif
 	@mkdir -p $(BIN_DIR)/pkg
 	@# nfpm does not expand env vars in contents paths, so template with sed.
@@ -127,16 +159,18 @@ ifeq ($(HAVE_EDITOR),yes)
 	@$(MAKE) editor
 	install -d $(DESTDIR)$(NM_PLUGIN_DIR)
 	install -m 0644 $(EDITOR_SO) $(DESTDIR)$(NM_PLUGIN_DIR)/libnm-vpn-plugin-ikennkt.so
-	@echo "Installed service + GUI editor. Reload NetworkManager:  sudo systemctl reload NetworkManager"
-else
-	@echo "Installed service (no editor; install libnm-dev libgtk-3-dev for the GUI form)."
-	@echo "Reload NetworkManager:  sudo systemctl reload NetworkManager"
 endif
+ifeq ($(HAVE_AUTHDIALOG),yes)
+	@$(MAKE) authdialog
+	install -m 0755 $(AUTHDIALOG) $(DESTDIR)$(NM_LIBDIR)/nm-ikennkt-auth-dialog
+endif
+	@echo "Installed. Reload NetworkManager:  sudo systemctl reload NetworkManager"
 
 ## uninstall: remove installed files (needs root)
 .PHONY: uninstall
 uninstall:
 	rm -f $(DESTDIR)$(NM_LIBDIR)/nm-ikennkt-service
+	rm -f $(DESTDIR)$(NM_LIBDIR)/nm-ikennkt-auth-dialog
 	rm -f $(DESTDIR)$(VPN_DIR)/nm-ikennkt-service.name
 	rm -f $(DESTDIR)$(DBUS_POLICY)/nm-ikennkt-service.conf
 	rm -f $(DESTDIR)$(NM_PLUGIN_DIR)/libnm-vpn-plugin-ikennkt.so

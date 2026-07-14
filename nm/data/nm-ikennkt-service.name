@@ -8,10 +8,9 @@ supports-multiple-connections=false
 plugin=libnm-vpn-plugin-ikennkt.so
 
 [GNOME]
+auth-dialog=/usr/lib/NetworkManager/nm-ikennkt-auth-dialog
 properties=libnm-vpn-plugin-ikennkt.so
 supports-external-ui-mode=true
 
-# The [libnm] editor .so provides the graphical Add-VPN form. Secrets (PSK /
-# password) entered there are saved with the connection; an interactive
-# auth-dialog (for "ask every time" secrets) is the remaining Phase 2 item, so
-# no auth-dialog= line is listed yet.
+# The [libnm] editor .so provides the graphical Add-VPN form; the auth-dialog
+# prompts for secrets that are not saved with the connection ("ask every time").

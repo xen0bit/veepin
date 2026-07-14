@@ -5,11 +5,10 @@ Design document and implementation plan for integrating the ikennkt VPN client
 the tunnel up and down from its native VPN UI — **without** depending on
 strongSwan or the `network-manager-strongswan` packages.
 
-Status: **Phases D1, 0, 1, 2 (editor) and 3 (packaging) implemented.** The public
-`client` facade, a hardened D-Bus VPN service, the C/libnm **graphical Add-VPN
-form** (with saved-secret support), and **`.deb`/`.rpm` packaging** all exist.
-The only remaining item is the interactive secret auth-dialog (for "ask every
-time" secrets; saved secrets work today). See
+Status: **complete — all phases implemented.** The public `client` facade, a
+hardened D-Bus VPN service, the C/libnm **graphical Add-VPN form** (with
+saved-secret support), the interactive **auth-dialog** (for "ask every time"
+secrets), and **`.deb`/`.rpm` packaging** all exist and are tested. See
 [§13 Implementation status](#13-implementation-status--runbook) for what is built
 and how to run it.
 
@@ -507,6 +506,7 @@ budget is spent solely in Phase 2 on the one artifact NM's design forces into C.
 | D-Bus VPN service | `nm/internal/dbusplugin`, `nm/cmd/nm-ikennkt-service` | implements `VPN.Plugin`; integration-tested on a private bus |
 | `.name` descriptor + D-Bus policy | `nm/data/` | references the editor `.so` |
 | GUI editor plugin (`.so`) | `nm/editor/ikennkt-editor.c` | C/libnm GObject; graphical Add-VPN form; saved secrets; dlopen smoke-tested |
+| Auth-dialog | `nm/authdialog/ikennkt-auth-dialog.c` | C/libnma; prompts for not-saved secrets; non-interactive paths tested |
 | Packaging | `nm/nfpm.yaml.in` | `ikennkt-nm` `.deb`/`.rpm` via `make packages` |
 | Build/install | `nm/Makefile` | `make build` (Go, CGO-free) / `make editor` (C) / `make packages` / `sudo make install` |
 
@@ -542,10 +542,18 @@ factory → get_editor → update_connection round-trip and the validation path.
 Saved secrets: the editor stores the PSK/password with `NM_SETTING_SECRET_FLAG_NONE`
 (system-saved) by default, so the root service receives them at Connect with no
 prompt; a "Save the pre-shared key / password" checkbox can switch them to
-`NOT_SAVED` (which will need the auth-dialog below).
+`NOT_SAVED`, which the auth-dialog then prompts for.
 
-Remaining: the interactive **auth-dialog** (for "ask every time" secrets);
-saved-secret connections — the default — work without it.
+### Phase 2b — auth-dialog (done)
+
+`nm/authdialog/ikennkt-auth-dialog.c` is the C/libnma helper NM runs when a
+connection has secrets flagged `NOT_SAVED`. It speaks NM's auth-dialog stdio
+protocol (`nm_vpn_service_plugin_read_vpn_details` in, `key\nvalue\n` pairs +
+blank-line terminator out), prompts for the missing PSK/password via
+`NMAVpnPasswordDialog`, and is referenced from the `.name`'s `[GNOME]
+auth-dialog=`. The non-interactive paths (saved secret echoed, EAP emits both,
+foreign service refused) are covered by `authdialog_test.sh`, run in CI; the
+GTK prompt itself needs a user and is exercised manually.
 
 ### Phase 3 progress
 
