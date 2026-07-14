@@ -47,6 +47,7 @@ typedef struct {
     GtkWidget *password;
     GtkWidget *full_tunnel;
     GtkWidget *mtu;
+    GtkWidget *save_secrets;
 } IkennktEditor;
 
 typedef struct {
@@ -122,13 +123,25 @@ update_connection(NMVpnEditor *editor, NMConnection *connection, GError **error)
                                  gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(self->full_tunnel))
                                      ? "yes" : "no");
 
+    /* Secret storage: NONE means "the system saves this secret with the
+     * connection" (the root service reads it at Connect, no prompt needed);
+     * NOT_SAVED means "ask every time" (needs the auth-dialog, still TODO). */
+    NMSettingSecretFlags flags =
+        gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(self->save_secrets))
+            ? NM_SETTING_SECRET_FLAG_NONE
+            : NM_SETTING_SECRET_FLAG_NOT_SAVED;
+
     s = gtk_entry_get_text(GTK_ENTRY(self->psk));
-    if (s && *s)
+    if (s && *s) {
         nm_setting_vpn_add_secret(vpn, KEY_PSK, s);
+        nm_setting_set_secret_flags(NM_SETTING(vpn), KEY_PSK, flags, NULL);
+    }
 
     s = gtk_entry_get_text(GTK_ENTRY(self->password));
-    if (s && *s)
+    if (s && *s) {
         nm_setting_vpn_add_secret(vpn, KEY_PASSWORD, s);
+        nm_setting_set_secret_flags(NM_SETTING(vpn), KEY_PASSWORD, flags, NULL);
+    }
 
     nm_connection_add_setting(connection, NM_SETTING(vpn));
     return TRUE;
@@ -189,6 +202,10 @@ build_ui(IkennktEditor *self, NMConnection *connection)
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(self->full_tunnel), TRUE);
     gtk_grid_attach(grid, self->full_tunnel, 0, row++, 2, 1);
 
+    self->save_secrets = gtk_check_button_new_with_label("Save the pre-shared key / password");
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(self->save_secrets), TRUE);
+    gtk_grid_attach(grid, self->save_secrets, 0, row++, 2, 1);
+
     /* Pre-fill from an existing connection. */
     set_entry_from_data(self->gateway, vpn, KEY_GATEWAY);
     set_entry_from_data(self->local_id, vpn, KEY_LOCAL_ID);
@@ -203,6 +220,11 @@ build_ui(IkennktEditor *self, NMConnection *connection)
         const char *psk = nm_setting_vpn_get_secret(vpn, KEY_PSK);
         if (psk)
             gtk_entry_set_text(GTK_ENTRY(self->psk), psk);
+        /* Reflect the stored secret's flag in the checkbox. */
+        NMSettingSecretFlags fl = NM_SETTING_SECRET_FLAG_NONE;
+        nm_setting_get_secret_flags(NM_SETTING(vpn), KEY_PSK, &fl, NULL);
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(self->save_secrets),
+                                     fl != NM_SETTING_SECRET_FLAG_NOT_SAVED);
     }
 
     /* Re-validate on any edit. */
@@ -214,6 +236,7 @@ build_ui(IkennktEditor *self, NMConnection *connection)
     g_signal_connect(self->password, "changed", G_CALLBACK(field_changed), self);
     g_signal_connect(self->mtu, "changed", G_CALLBACK(field_changed), self);
     g_signal_connect(self->full_tunnel, "toggled", G_CALLBACK(field_changed), self);
+    g_signal_connect(self->save_secrets, "toggled", G_CALLBACK(field_changed), self);
 
     self->widget = g_object_ref_sink(GTK_WIDGET(grid));
     gtk_widget_show_all(self->widget);

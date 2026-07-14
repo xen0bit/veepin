@@ -117,6 +117,14 @@ main(int argc, char **argv)
         g_printerr("FAIL: psk secret not round-tripped\n");
         return 1;
     }
+    /* Saved-secrets: the PSK must be flagged NONE (system-saved) by default so
+     * the root service gets it at Connect without an auth-dialog. */
+    NMSettingSecretFlags flags = NM_SETTING_SECRET_FLAG_AGENT_OWNED;
+    if (!nm_setting_get_secret_flags(NM_SETTING(ovpn), "psk", &flags, &err)
+        || flags != NM_SETTING_SECRET_FLAG_NONE) {
+        g_printerr("FAIL: psk secret flag = %d, want NONE(0)\n", flags);
+        return 1;
+    }
     if (g_strcmp0(nm_setting_vpn_get_service_type(ovpn), SERVICE) != 0) {
         g_printerr("FAIL: service-type = %s\n", nm_setting_vpn_get_service_type(ovpn));
         return 1;
