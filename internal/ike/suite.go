@@ -3,8 +3,8 @@ package ike
 import (
 	"fmt"
 
-	"github.com/example/ikev2-go/internal/crypto"
-	"github.com/example/ikev2-go/internal/payload"
+	"github.com/xen0bit/ikennkt/internal/crypto"
+	"github.com/xen0bit/ikennkt/internal/payload"
 )
 
 // Suite is a fully-resolved IKE cipher suite ready for key derivation and SK

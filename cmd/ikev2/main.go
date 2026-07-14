@@ -22,8 +22,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/example/ikev2-go/internal/dataplane"
-	"github.com/example/ikev2-go/internal/ike"
+	"github.com/xen0bit/ikennkt/internal/dataplane"
+	"github.com/xen0bit/ikennkt/internal/ike"
 )
 
 func main() {

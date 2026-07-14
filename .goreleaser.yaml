@@ -1,4 +1,4 @@
-# GoReleaser configuration for ikev2-go.
+# GoReleaser configuration for ikennkt.
 # https://goreleaser.com  —  docs for every stanza below.
 #
 # Local usage:
@@ -14,7 +14,7 @@
 
 version: 2
 
-project_name: ikev2-go
+project_name: ikennkt
 
 before:
   hooks:
@@ -98,9 +98,9 @@ archives:
 # ---------------------------------------------------------------------------
 nfpms:
   - id: packages
-    package_name: ikev2-go
+    package_name: ikennkt
     ids: [ikev2d, ikev2, testclient]
-    vendor: ikev2-go
+    vendor: ikennkt
     homepage: https://github.com/xen0bit/ikennkt
     maintainer: Remy <remaclematt@gmail.com>
     description: |-
@@ -115,7 +115,7 @@ nfpms:
     # rather than enforced, since packaging can't grant capabilities portably.
     contents:
       - src: README.md
-        dst: /usr/share/doc/ikev2-go/README.md
+        dst: /usr/share/doc/ikennkt/README.md
 
 # ---------------------------------------------------------------------------
 # Checksums, signing hook (optional), snapshots, changelog, release.

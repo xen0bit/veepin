@@ -3,8 +3,8 @@ package ike
 import (
 	"fmt"
 
-	"github.com/example/ikev2-go/internal/crypto"
-	"github.com/example/ikev2-go/internal/esp"
+	"github.com/xen0bit/ikennkt/internal/crypto"
+	"github.com/xen0bit/ikennkt/internal/esp"
 )
 
 // BuildESPSA converts a negotiated Child SA into a userspace esp.SA, wiring the

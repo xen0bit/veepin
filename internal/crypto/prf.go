@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"hash"
 
-	"github.com/example/ikev2-go/internal/payload"
+	"github.com/xen0bit/ikennkt/internal/payload"
 )
 
 // PRF is a keyed pseudorandom function (RFC 7296 section 2.13).

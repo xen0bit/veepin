@@ -1,4 +1,4 @@
-# ikev2-go
+# ikennkt
 
 A **working userspace IKEv2 VPN in Go** — both a server (responder) and a client
 (initiator) — written from scratch with no external dependencies beyond the Go

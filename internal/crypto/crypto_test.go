@@ -5,7 +5,7 @@ import (
 	"encoding/hex"
 	"testing"
 
-	"github.com/example/ikev2-go/internal/payload"
+	"github.com/xen0bit/ikennkt/internal/payload"
 )
 
 func TestDHAgreement(t *testing.T) {

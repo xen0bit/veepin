@@ -3,7 +3,7 @@ package ike
 import (
 	"net"
 
-	"github.com/example/ikev2-go/internal/payload"
+	"github.com/xen0bit/ikennkt/internal/payload"
 )
 
 // handleSecured decrypts and dispatches a protected exchange (everything after

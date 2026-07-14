@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/example/ikev2-go/internal/crypto"
+	"github.com/xen0bit/ikennkt/internal/crypto"
 )
 
 // Transform bundles the ESP cipher and (optional) integrity for one direction.

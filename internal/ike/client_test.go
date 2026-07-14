@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/example/ikev2-go/internal/esp"
+	"github.com/xen0bit/ikennkt/internal/esp"
 )
 
 // startTestServer spins up a real server on loopback and returns its ports.

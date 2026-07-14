@@ -1,4 +1,4 @@
-# ikev2-go — Makefile
+# ikennkt — Makefile
 #
 # A pure-Go userspace IKEv2 VPN (server + client). This Makefile drives the
 # common build, test, benchmark, quality and packaging workflows.
@@ -261,7 +261,7 @@ ci: tidy-check fmt-check vet build test
 dist: release
 	@mkdir -p $(DIST_DIR)
 	@os=$${GOOS:-$$($(GO) env GOOS)}; arch=$${GOARCH:-$$($(GO) env GOARCH)}; \
-	name=ikev2-go-$(VERSION)-$$os-$$arch; \
+	name=ikennkt-$(VERSION)-$$os-$$arch; \
 	tar -C $(BIN_DIR) -czf $(DIST_DIR)/$$name.tar.gz $(CMDS); \
 	echo "Wrote $(DIST_DIR)/$$name.tar.gz"
 
@@ -289,7 +289,7 @@ tools:
 ## help: list available targets
 .PHONY: help
 help:
-	@echo "ikev2-go — make targets (version $(VERSION)):"
+	@echo "ikennkt — make targets (version $(VERSION)):"
 	@echo
 	@grep -hE '^## [a-zA-Z0-9_-]+:' $(MAKEFILE_LIST) \
 		| sed -E 's/^## ([a-zA-Z0-9_-]+): (.*)/  \1|\2/' \

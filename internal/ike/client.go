@@ -8,10 +8,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/example/ikev2-go/internal/crypto"
-	"github.com/example/ikev2-go/internal/eap"
-	"github.com/example/ikev2-go/internal/esp"
-	"github.com/example/ikev2-go/internal/payload"
+	"github.com/xen0bit/ikennkt/internal/crypto"
+	"github.com/xen0bit/ikennkt/internal/eap"
+	"github.com/xen0bit/ikennkt/internal/esp"
+	"github.com/xen0bit/ikennkt/internal/payload"
 )
 
 // ClientConfig configures an IKEv2 client (initiator).

@@ -4,8 +4,8 @@ import (
 	"net"
 	"sync"
 
-	"github.com/example/ikev2-go/internal/dataplane"
-	"github.com/example/ikev2-go/internal/esp"
+	"github.com/xen0bit/ikennkt/internal/dataplane"
+	"github.com/xen0bit/ikennkt/internal/esp"
 )
 
 // espTunnel adapts an established Child SA to the dataplane.ESPTunnel interface,

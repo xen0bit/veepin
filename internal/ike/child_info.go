@@ -3,7 +3,7 @@ package ike
 import (
 	"net"
 
-	"github.com/example/ikev2-go/internal/payload"
+	"github.com/xen0bit/ikennkt/internal/payload"
 )
 
 // handleCreateChildSA processes a CREATE_CHILD_SA request. It supports

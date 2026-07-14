@@ -1,3 +1,3 @@
-module github.com/example/ikev2-go
+module github.com/xen0bit/ikennkt
 
 go 1.21

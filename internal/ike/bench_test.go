@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/example/ikev2-go/internal/payload"
+	"github.com/xen0bit/ikennkt/internal/payload"
 )
 
 // BenchmarkSKSeal measures building an encrypted (SK) IKE message: padding,

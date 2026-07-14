@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/example/ikev2-go/internal/crypto"
-	"github.com/example/ikev2-go/internal/payload"
+	"github.com/xen0bit/ikennkt/internal/crypto"
+	"github.com/xen0bit/ikennkt/internal/payload"
 )
 
 func gcmTransform(t *testing.T, key byte) Transform {

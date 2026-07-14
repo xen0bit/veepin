@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the full ikev2-go benchmark suite.
+# Run the full ikennkt benchmark suite.
 #
 # Usage:
 #   ./bench.sh                 # all benchmarks, default 1s each
