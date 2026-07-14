@@ -36,6 +36,62 @@ func cbcTransform(t *testing.T, ek, ik byte) Transform {
 	}
 }
 
+// TestDataPathAllocationsGCM guards the AES-GCM hot path: encapsulate and
+// decapsulate must each allocate at most once per packet (the returned buffer).
+// A regression here (e.g. an argument escaping through the AEAD interface) means
+// extra per-packet garbage on the data path.
+func TestDataPathAllocationsGCM(t *testing.T) {
+	if raceEnabled {
+		t.Skip("allocation counts are perturbed by the race detector")
+	}
+	kOut := gcmTransform(t, 0x11)
+	kIn := gcmTransform(t, 0x22)
+	sender := &SA{SPIOut: 0xaaaa, SPIIn: 0xbbbb, Out: kOut, In: kIn}
+	receiver := &SA{SPIOut: 0xbbbb, SPIIn: 0xaaaa, Out: kIn, In: kOut}
+	msg := bytes.Repeat([]byte{0xab}, 1400)
+
+	// Warm prepared crypters and the scratch pool before measuring.
+	if _, err := sender.Encapsulate(msg, 4); err != nil {
+		t.Fatal(err)
+	}
+
+	if n := testing.AllocsPerRun(200, func() {
+		if _, err := sender.Encapsulate(msg, 4); err != nil {
+			t.Fatal(err)
+		}
+	}); n > 1 {
+		t.Errorf("Encapsulate allocs/op = %v, want <= 1", n)
+	}
+
+	// Decapsulate a valid packet. Reset the replay window each iteration so the
+	// decap succeeds (a replayed packet would take the error path, where
+	// fmt.Errorf allocates and would mask the data-path allocation we measure).
+	pkt, err := sender.Encapsulate(msg, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := testing.AllocsPerRun(200, func() {
+		receiver.ResetReplayWindow()
+		if _, _, derr := receiver.Decapsulate(pkt); derr != nil {
+			t.Fatal(derr)
+		}
+	}); n > 1 {
+		t.Errorf("Decapsulate allocs/op = %v, want <= 1", n)
+	}
+
+	// A misrouted packet (unknown SPI) must be rejected with zero allocations,
+	// so a flood of stray datagrams creates no per-packet garbage.
+	bad := append([]byte(nil), pkt...)
+	bad[0] ^= 0xff // corrupt the SPI so it matches no SA
+	if n := testing.AllocsPerRun(200, func() {
+		if _, _, derr := receiver.Decapsulate(bad); derr == nil {
+			t.Fatal("expected unknown-SPI rejection")
+		}
+	}); n != 0 {
+		t.Errorf("unknown-SPI drop allocs/op = %v, want 0", n)
+	}
+}
+
 func TestESPRoundTripGCM(t *testing.T) {
 	// Shared keys so one SA's Out pairs with the other's In.
 	kOut := gcmTransform(t, 0x11)

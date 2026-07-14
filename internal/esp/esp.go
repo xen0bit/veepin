@@ -7,10 +7,23 @@ package esp
 import (
 	"crypto/subtle"
 	"encoding/binary"
-	"fmt"
+	"errors"
 	"sync"
 
 	"github.com/xen0bit/ikennkt/internal/crypto"
+)
+
+// Drop-path sentinel errors. Decapsulate can be called for every inbound packet
+// including duplicates, replays and misrouted datagrams; returning static errors
+// (rather than fmt.Errorf) keeps the reject path allocation-free so a flood of
+// dropped packets does not create per-packet garbage. The pump logs the SPI/seq
+// separately, so the error values need not carry them.
+var (
+	errShortPacket  = errors.New("esp: packet too short")
+	errUnknownSPI   = errors.New("esp: unknown SPI")
+	errReplayed     = errors.New("esp: replayed sequence")
+	errShortTrailer = errors.New("esp: plaintext too short for trailer")
+	errBadPadLength = errors.New("esp: bad pad length")
 )
 
 // Transform bundles the ESP cipher and (optional) integrity for one direction.
@@ -126,10 +139,7 @@ func (s *SA) Encapsulate(inner []byte, nextHeader uint8) ([]byte, error) {
 	seq := s.seqOut
 	s.mu.Unlock()
 
-	block := s.outCrypter.BlockLen()
-	if block < 1 {
-		block = 1
-	}
+	block := max(s.outCrypter.BlockLen(), 1)
 	payloadLen := len(inner)
 	padLen := (block - (payloadLen+2)%block) % block
 
@@ -137,11 +147,12 @@ func (s *SA) Encapsulate(inner []byte, nextHeader uint8) ([]byte, error) {
 	// buffer sized exactly, then seal appending into the final output buffer.
 	ptLen := payloadLen + padLen + 2
 	// Output = SPI(4) | Seq(4) | crypter overhead | ciphertext-sized region.
-	out := make([]byte, 0, espHeaderLen+s.outCrypter.Overhead()+ptLen)
-	var hdr [espHeaderLen]byte
-	binary.BigEndian.PutUint32(hdr[0:4], s.SPIOut)
-	binary.BigEndian.PutUint32(hdr[4:8], seq)
-	out = append(out, hdr[:]...)
+	// The ESP header is written into the (heap) output buffer and that prefix is
+	// reused as the AAD, so no separate stack array escapes through the AEAD
+	// interface (that escape was the second per-packet allocation on this path).
+	out := make([]byte, espHeaderLen, espHeaderLen+s.outCrypter.Overhead()+ptLen)
+	binary.BigEndian.PutUint32(out[0:4], s.SPIOut)
+	binary.BigEndian.PutUint32(out[4:8], seq)
 
 	// Build plaintext in a pooled scratch buffer to avoid a per-packet alloc.
 	ptp := ptPool.Get().(*[]byte)
@@ -159,7 +170,7 @@ func (s *SA) Encapsulate(inner []byte, nextHeader uint8) ([]byte, error) {
 	pt[ptLen-1] = nextHeader
 
 	// AAD covers SPI|Seq (the ESP header). Seal appends iv||ct||icv to out.
-	result, err := s.outCrypter.Seal(out, hdr[:], pt)
+	result, err := s.outCrypter.Seal(out, out[:espHeaderLen], pt)
 	*ptp = pt[:0]
 	ptPool.Put(ptp)
 	return result, err
@@ -175,11 +186,11 @@ func (s *SA) Decapsulate(pkt []byte) (inner []byte, nextHeader uint8, err error)
 		return nil, 0, err
 	}
 	if len(pkt) < espHeaderLen {
-		return nil, 0, fmt.Errorf("esp: packet too short")
+		return nil, 0, errShortPacket
 	}
 	spi := binary.BigEndian.Uint32(pkt[0:4])
 	if spi != s.SPIIn {
-		return nil, 0, fmt.Errorf("esp: unknown SPI %#x", spi)
+		return nil, 0, errUnknownSPI
 	}
 	seq := binary.BigEndian.Uint32(pkt[4:8])
 
@@ -197,17 +208,17 @@ func (s *SA) Decapsulate(pkt []byte) (inner []byte, nextHeader uint8, err error)
 	replayed := s.window.check(seq)
 	s.mu.Unlock()
 	if replayed {
-		return nil, 0, fmt.Errorf("esp: replayed sequence %d", seq)
+		return nil, 0, errReplayed
 	}
 
 	// Strip trailer: last octet next-header, previous octet pad length.
 	if len(plaintext) < 2 {
-		return nil, 0, fmt.Errorf("esp: plaintext too short for trailer")
+		return nil, 0, errShortTrailer
 	}
 	nextHeader = plaintext[len(plaintext)-1]
 	padLen := int(plaintext[len(plaintext)-2])
 	if padLen+2 > len(plaintext) {
-		return nil, 0, fmt.Errorf("esp: bad pad length %d", padLen)
+		return nil, 0, errBadPadLength
 	}
 	inner = plaintext[:len(plaintext)-padLen-2]
 

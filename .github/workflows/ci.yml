@@ -43,6 +43,9 @@ jobs:
       - name: Test (race)
         run: go test -race ./...
 
+      - name: Test (no race, for allocation assertions)
+        run: go test ./...
+
   lint:
     name: lint & vet
     runs-on: ubuntu-latest

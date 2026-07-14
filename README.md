@@ -352,11 +352,24 @@ reused GCM nonce buffer (avoiding a heap escape through the AEAD interface), a
 pooled plaintext scratch buffer, a cached HMAC for the CBC path, and removing a
 redundant packet copy in the pump, this took the AES-256-GCM 1400-byte paths
 from roughly 517→1640 MB/s (encap) and 910→2030 MB/s (decap), and cut
-allocations from 10→2 and 5→1 per packet respectively. The single remaining
-allocation on each path is the returned packet buffer. The `ESPCrypter` is
-intended to be driven by one goroutine per SA direction (matching the pump);
-across multiple clients, work scales across cores, as `BenchmarkESPDecapParallel`
-exercises.
+allocations from 10→2 and 5→1 per packet respectively.
+
+A later pass closed the remaining gap on the AES-GCM path so that **both encap
+and decap are a single allocation per packet** — the returned packet buffer.
+Encapsulate had been writing the ESP header into a stack array and passing it as
+the AEAD's additional data; because that argument crosses the `cipher.AEAD`
+interface it escaped to the heap, a second allocation. Writing the header into
+the (already heap-allocated) output buffer and reusing that prefix as the AAD
+removes the escape. On the inbound side the decapsulate reject paths (unknown
+SPI, replay, malformed trailer) were switched from `fmt.Errorf` to pre-allocated
+sentinel errors, so dropping a flood of duplicate or misrouted datagrams now
+allocates nothing on the unknown-SPI path (and only the decrypt buffer on the
+replay path). `TestDataPathAllocationsGCM` asserts these counts (via
+`testing.AllocsPerRun`) so they cannot silently regress.
+
+The `ESPCrypter` is intended to be driven by one goroutine per SA direction
+(matching the pump); across multiple clients, work scales across cores, as
+`BenchmarkESPDecapParallel` exercises.
 
 ## Scope and limitations
 

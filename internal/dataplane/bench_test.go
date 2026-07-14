@@ -65,15 +65,23 @@ func BenchmarkPumpInbound(b *testing.B) {
 
 // benchTunnel adapts an esp.SA to the ESPTunnel interface for the pump.
 type benchTunnel struct {
-	sa *esp.SA
-	in uint32
-	ip net.IP
+	sa   *esp.SA
+	in   uint32
+	ip   net.IP
+	peer *net.UDPAddr
 }
 
 func (t *benchTunnel) InboundSPI() uint32 { return t.in }
 func (t *benchTunnel) ClientIP() net.IP   { return t.ip }
+
+// PeerAddr returns a stored address, mirroring the production espTunnel (which
+// holds a fixed *net.UDPAddr). Building it per call would allocate and make the
+// pump benchmarks over-report the data path's real per-packet allocations.
 func (t *benchTunnel) PeerAddr() *net.UDPAddr {
-	return &net.UDPAddr{IP: net.IPv4(203, 0, 113, 1), Port: 4500}
+	if t.peer == nil {
+		t.peer = &net.UDPAddr{IP: net.IPv4(203, 0, 113, 1), Port: 4500}
+	}
+	return t.peer
 }
 func (t *benchTunnel) UDPEncap() bool { return true }
 func (t *benchTunnel) Encapsulate(p []byte) ([]byte, error) {
