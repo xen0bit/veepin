@@ -1,0 +1,99 @@
+package ike
+
+import (
+	"net"
+
+	"github.com/example/ikev2-go/internal/payload"
+)
+
+// handleSecured decrypts and dispatches a protected exchange (everything after
+// IKE_SA_INIT).
+func (s *Server) handleSecured(pkt []byte, hdr payload.Header, remote *net.UDPAddr, ex payload.ExchangeType, on4500 bool) {
+	if hdr.IsResponse() {
+		return // pure responder
+	}
+	sa := s.lookupByRSPI(hdr.ResponderSPI)
+	if sa == nil {
+		s.log.Printf("ikev2: %s from %s has no IKE SA (rSPI=%#x)", ex, remote, hdr.ResponderSPI)
+		return
+	}
+
+	sa.mu.Lock()
+	defer sa.mu.Unlock()
+	sa.touch()
+
+	// Track the peer floating to port 4500 (NAT-T) and any address change so
+	// responses and ESP go to the right place.
+	if on4500 && !sa.OnPort4500 {
+		sa.OnPort4500 = true
+	}
+	sa.RemoteAddr = remote
+
+	if hdr.MessageID != sa.RecvMsgID {
+		s.log.Printf("ikev2: %s from %s bad msgid %d (want %d)", ex, remote, hdr.MessageID, sa.RecvMsgID)
+		return
+	}
+
+	msg, err := payload.ParseMessage(pkt)
+	if err != nil {
+		s.log.Printf("ikev2: %s parse from %s: %v", ex, remote, err)
+		return
+	}
+	skPay := msg.Find(payload.TypeSK)
+	if skPay == nil {
+		s.log.Printf("ikev2: %s from %s missing SK payload", ex, remote)
+		return
+	}
+
+	firstInner, inner, err := decryptSK(pkt, hdr, *skPay, sa.Suite, sa.Keys, sa.dirForInbound())
+	if err != nil {
+		s.log.Printf("ikev2: %s from %s decrypt failed: %v", ex, remote, err)
+		return
+	}
+	inners, err := parseInnerPayloads(firstInner, inner)
+	if err != nil {
+		s.log.Printf("ikev2: %s from %s inner parse: %v", ex, remote, err)
+		return
+	}
+
+	switch ex {
+	case payload.IKE_AUTH:
+		s.handleIKEAuth(sa, hdr, inners, remote)
+	case payload.CREATE_CHILD_SA:
+		s.handleCreateChildSA(sa, hdr, inners, remote)
+	case payload.INFORMATIONAL:
+		s.handleInformational(sa, hdr, inners, remote)
+	}
+}
+
+// respondEncrypted builds and sends an encrypted response for the given
+// request message ID, wrapping the supplied inner payload chain. The response
+// is sent on whichever port the SA has floated to.
+func (s *Server) respondEncrypted(sa *IKESA, ex payload.ExchangeType, msgID uint32,
+	firstInner payload.PayloadType, innerChain []byte, remote *net.UDPAddr) {
+
+	hdr := payload.Header{
+		InitiatorSPI: sa.InitiatorSPI,
+		ResponderSPI: sa.ResponderSPI,
+		ExchangeType: ex,
+		Flags:        payload.FlagResponse,
+		MessageID:    msgID,
+	}
+	pkt, err := buildEncryptedMessage(hdr, sa.Suite, sa.Keys, sa.dirForOutbound(), firstInner, innerChain)
+	if err != nil {
+		s.log.Printf("ikev2: build encrypted %s response: %v", ex, err)
+		return
+	}
+	s.send(pkt, remote, sa.OnPort4500)
+}
+
+// respondEncryptedNotify sends an encrypted response carrying a single Notify.
+func (s *Server) respondEncryptedNotify(sa *IKESA, ex payload.ExchangeType, msgID uint32,
+	nt payload.NotifyType, remote *net.UDPAddr) {
+
+	b := payload.NewBuilder()
+	b.Add(payload.TypeNotify, false, payload.MarshalNotify(payload.NotifyPayload{
+		Protocol: payload.ProtoNone, Type: nt,
+	}))
+	s.respondEncrypted(sa, ex, msgID, b.FirstType(), b.Bytes(), remote)
+}
