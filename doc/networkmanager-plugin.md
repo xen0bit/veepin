@@ -5,10 +5,11 @@ Design document and implementation plan for integrating the ikennkt VPN client
 the tunnel up and down from its native VPN UI — **without** depending on
 strongSwan or the `network-manager-strongswan` packages.
 
-Status: **Phases D1, 0, 1, and the Phase 2 editor implemented.** The public
-`client` facade, a hardened D-Bus VPN service, and the C/libnm **graphical
-Add-VPN form** all exist. Remaining: the interactive secret auth-dialog and the
-Phase 3 packaging/CI polish. See
+Status: **Phases D1, 0, 1, 2 (editor) and 3 (packaging) implemented.** The public
+`client` facade, a hardened D-Bus VPN service, the C/libnm **graphical Add-VPN
+form** (with saved-secret support), and **`.deb`/`.rpm` packaging** all exist.
+The only remaining item is the interactive secret auth-dialog (for "ask every
+time" secrets; saved secrets work today). See
 [§13 Implementation status](#13-implementation-status--runbook) for what is built
 and how to run it.
 
@@ -505,8 +506,9 @@ budget is spent solely in Phase 2 on the one artifact NM's design forces into C.
 | Connection-dict mapping | `nm/internal/nmconfig` | bus-free, unit-tested |
 | D-Bus VPN service | `nm/internal/dbusplugin`, `nm/cmd/nm-ikennkt-service` | implements `VPN.Plugin`; integration-tested on a private bus |
 | `.name` descriptor + D-Bus policy | `nm/data/` | references the editor `.so` |
-| GUI editor plugin (`.so`) | `nm/editor/ikennkt-editor.c` | C/libnm GObject; graphical Add-VPN form; dlopen smoke-tested |
-| Build/install | `nm/Makefile` | `make build` (Go, CGO-free) / `make editor` (C) / `sudo make install` |
+| GUI editor plugin (`.so`) | `nm/editor/ikennkt-editor.c` | C/libnm GObject; graphical Add-VPN form; saved secrets; dlopen smoke-tested |
+| Packaging | `nm/nfpm.yaml.in` | `ikennkt-nm` `.deb`/`.rpm` via `make packages` |
+| Build/install | `nm/Makefile` | `make build` (Go, CGO-free) / `make editor` (C) / `make packages` / `sudo make install` |
 
 The core binaries (`ikev2d`/`ikev2`/`testclient`) remain CGO-free and the root
 module remains dependency-free — the root `go build ./...` never descends into
@@ -537,26 +539,45 @@ smoke-test (`make editor-test`, headless via `xvfb`) that drives the real
 factory → get_editor → update_connection round-trip and the validation path. The
 `nm` CI job now installs `libnm-dev`/`libgtk-3-dev` and builds+tests it.
 
+Saved secrets: the editor stores the PSK/password with `NM_SETTING_SECRET_FLAG_NONE`
+(system-saved) by default, so the root service receives them at Connect with no
+prompt; a "Save the pre-shared key / password" checkbox can switch them to
+`NOT_SAVED` (which will need the auth-dialog below).
+
 Remaining: the interactive **auth-dialog** (for "ask every time" secrets);
-saved-secret connections work without it.
+saved-secret connections — the default — work without it.
 
-### Not yet built
+### Phase 3 progress
 
-Phase 3: the `ikennkt-nm` deb/rpm packaging (the editor `.so` adds a
-`libnm`/`libgtk-3` runtime dependency, so the plugin ships as its own package
-separate from the CGO-free core).
+Done: the **`ikennkt-nm` package** (`nm/nfpm.yaml.in` + `make packages`) builds a
+`.deb` and `.rpm` bundling the service, the editor `.so` (into the multiarch NM
+plugin dir), the `.name` descriptor and the D-Bus policy, with runtime deps on
+`network-manager`/`libgtk-3-0` (rpm: `NetworkManager`/`gtk3`) and
+post-install/-remove hooks that reload NetworkManager. It is a **separate**
+package from the CGO-free core so the core release pipeline never gains a
+`libnm`/`libgtk` dependency. The `nm` CI job builds and uploads the packages.
 
-### Install (Pop!\_OS / Debian layout)
+### Install — package (recommended)
 
 ```sh
-# 1. Build and install the service, .name descriptor, and D-Bus policy.
 cd nm
-make build
+make packages                       # builds bin/pkg/ikennkt-nm_*.deb and .rpm
+sudo apt install ./bin/pkg/ikennkt-nm_*.deb   # (or: sudo dnf install ./bin/pkg/ikennkt-nm-*.rpm)
+```
+
+The package installs the service, editor `.so`, `.name` and D-Bus policy, and its
+post-install hook reloads NetworkManager.
+
+### Install — from source
+
+```sh
+# Build and install the service, editor .so, .name descriptor, and D-Bus policy.
+cd nm
+make build editor
 sudo make install          # -> /usr/lib/NetworkManager/nm-ikennkt-service
+                           #    /usr/lib/<multiarch>/NetworkManager/libnm-vpn-plugin-ikennkt.so
                            #    /usr/lib/NetworkManager/VPN/nm-ikennkt-service.name
                            #    /usr/share/dbus-1/system.d/nm-ikennkt-service.conf
-
-# 2. Let NM pick up the new VPN type and D-Bus policy.
 sudo systemctl reload NetworkManager
 ```
 

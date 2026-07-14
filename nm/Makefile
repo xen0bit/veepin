@@ -15,6 +15,11 @@ GO      ?= go
 GOFLAGS ?=
 CC      ?= cc
 PKG_CONFIG ?= pkg-config
+NFPM    ?= nfpm
+
+# Package metadata (overridable). VERSION defaults to a git describe.
+VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//' || echo 0.0.0)
+PKG_ARCH ?= amd64
 
 BIN_DIR ?= bin
 SERVICE := $(BIN_DIR)/nm-ikennkt-service
@@ -74,6 +79,22 @@ endif
 ## all: build the service and (if possible) the editor plugin
 .PHONY: all
 all: build editor
+
+## packages: build the ikennkt-nm .deb and .rpm (needs nfpm + editor deps)
+.PHONY: packages
+packages: build editor
+	@command -v $(NFPM) >/dev/null 2>&1 || { \
+		echo "nfpm not found: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest"; exit 1; }
+ifneq ($(HAVE_EDITOR),yes)
+	@echo "Refusing to package without the editor .so (install libnm-dev libgtk-3-dev)"; exit 1
+endif
+	@mkdir -p $(BIN_DIR)/pkg
+	@# nfpm does not expand env vars in contents paths, so template with sed.
+	sed -e 's/@VERSION@/$(VERSION)/g' -e 's/@PKG_ARCH@/$(PKG_ARCH)/g' \
+	    -e 's/@MULTIARCH@/$(MULTIARCH)/g' nfpm.yaml.in > $(BIN_DIR)/nfpm.yaml
+	$(NFPM) package -f $(BIN_DIR)/nfpm.yaml -p deb -t $(BIN_DIR)/pkg
+	$(NFPM) package -f $(BIN_DIR)/nfpm.yaml -p rpm -t $(BIN_DIR)/pkg
+	@echo "Packages in $(BIN_DIR)/pkg/:"; ls -1 $(BIN_DIR)/pkg
 
 ## test: run the nested module's tests (needs dbus-daemon for the integration test)
 .PHONY: test

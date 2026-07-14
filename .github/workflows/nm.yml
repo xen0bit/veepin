@@ -64,3 +64,15 @@ jobs:
 
       - name: Test editor plugin (headless via xvfb)
         run: xvfb-run -a make editor-test
+
+      - name: Build packages (.deb/.rpm)
+        run: |
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+          make packages VERSION=0.0.0 NFPM="$(go env GOPATH)/bin/nfpm"
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: ikennkt-nm-packages
+          path: nm/bin/pkg/*
+          if-no-files-found: error
