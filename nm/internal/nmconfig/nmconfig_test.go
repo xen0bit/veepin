@@ -80,6 +80,35 @@ func TestParseBadPort(t *testing.T) {
 	}
 }
 
+func TestParseMTU(t *testing.T) {
+	c, err := Parse(settings(
+		map[string]string{KeyGateway: "g", KeyLocalID: "id", KeyMTU: "1380"},
+		map[string]string{KeyPSK: "p"},
+	))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if c.MTU != 1380 {
+		t.Errorf("MTU = %d, want 1380", c.MTU)
+	}
+
+	// Absent -> 0 (use client default).
+	c, _ = Parse(settings(map[string]string{KeyGateway: "g", KeyLocalID: "id"}, map[string]string{KeyPSK: "p"}))
+	if c.MTU != 0 {
+		t.Errorf("absent MTU = %d, want 0", c.MTU)
+	}
+
+	// Out of range / non-numeric -> error.
+	for _, bad := range []string{"100", "99999", "nope"} {
+		if _, err := Parse(settings(
+			map[string]string{KeyGateway: "g", KeyLocalID: "id", KeyMTU: bad},
+			map[string]string{KeyPSK: "p"},
+		)); err == nil {
+			t.Errorf("MTU %q should be rejected", bad)
+		}
+	}
+}
+
 func TestMissingSecret(t *testing.T) {
 	// PSK present, no user: satisfied.
 	if got, err := MissingSecret(settings(

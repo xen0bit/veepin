@@ -510,9 +510,22 @@ The core binaries (`ikev2d`/`ikev2`/`testclient`) remain CGO-free and the root
 module remains dependency-free — the root `go build ./...` never descends into
 `nm/`.
 
+### Phase 1 progress
+
+Done: context-cancellable handshake (`client.Dial` aborts an in-flight IKE
+exchange instead of waiting out its read deadlines); the
+Disconnect-during-handshake race is fixed (no session leak, correct terminal
+state); auth-vs-transport failure classification (a rejected PSK/password maps to
+NM `LoginFailed` so NM re-prompts, everything else to `ConnectFailed`), carried
+by `ike.ErrAuthFailed` → `client.ErrAuth`; and an optional per-connection `mtu`
+override in `vpn.data`.
+
+Remaining: interactive secrets (`ConnectInteractive`/`SecretsRequired`/
+`NewSecrets`) — currently secrets must be present at Connect (NM's
+`NeedSecrets` → agent → Connect flow covers the common case).
+
 ### Not yet built
 
-Phase 1 (state-machine hardening, `NewSecrets`/agent round-trip, MTU discovery),
 Phase 2 (the C `libnm` editor `.so` + auth-dialog for the graphical *Add VPN*
 form), Phase 3 (the `ikennkt-nm` deb/rpm and the dedicated CI job — a
 build/test-only workflow that installs `libnm-dev`).

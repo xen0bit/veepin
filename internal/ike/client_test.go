@@ -3,6 +3,7 @@ package ike
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"io"
 	"log"
 	"net"
@@ -156,9 +157,13 @@ func TestClientWrongPSK(t *testing.T) {
 		LocalID: FQDNIdentity("client.example"),
 		Logger:  log.New(io.Discard, "", 0),
 	})
-	if _, err := client.Connect(); err == nil {
+	_, err := client.Connect()
+	if err == nil {
 		client.Close()
 		t.Fatal("connect should have failed with wrong PSK")
+	}
+	if !errors.Is(err, ErrAuthFailed) {
+		t.Fatalf("wrong PSK should be an auth failure, got: %v", err)
 	}
 }
 

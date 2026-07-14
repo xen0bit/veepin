@@ -21,6 +21,7 @@ type Settings = map[string]map[string]dbus.Variant
 type Connection struct {
 	Client     client.Config
 	FullTunnel bool // maps to Ip4Config never-default = !FullTunnel
+	MTU        int  // 0 = use the client's default tunnel MTU
 }
 
 // Data-dictionary keys recognised in vpn.data.
@@ -31,6 +32,7 @@ const (
 	KeyServerID   = "server-id"
 	KeyUser       = "user"
 	KeyFullTunnel = "full-tunnel" // "yes"/"no", default "yes"
+	KeyMTU        = "mtu"         // optional inner-interface MTU override
 )
 
 // Secret keys recognised in vpn.secrets.
@@ -62,6 +64,15 @@ func Parse(s Settings) (Connection, error) {
 			return Connection{}, fmt.Errorf("nmconfig: invalid %q: %q", KeyPort, p)
 		}
 		c.Client.Port = n
+	}
+
+	if m := data[KeyMTU]; m != "" {
+		n, err := strconv.Atoi(m)
+		// 576 is the IPv4 minimum practical MTU; 9000 covers jumbo frames.
+		if err != nil || n < 576 || n > 9000 {
+			return Connection{}, fmt.Errorf("nmconfig: invalid %q: %q", KeyMTU, m)
+		}
+		c.MTU = n
 	}
 
 	if c.Client.Server == "" {

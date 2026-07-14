@@ -2,14 +2,18 @@ package dbusplugin
 
 import (
 	"bufio"
+	"errors"
+	"fmt"
 	"io"
 	"log"
+	"net"
 	"os/exec"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/godbus/dbus/v5"
+	"github.com/xen0bit/ikennkt/client"
 	"github.com/xen0bit/ikennkt/nm/internal/nmconfig"
 )
 
@@ -174,6 +178,61 @@ func TestConnectHandshakeFailureEmitsSignals(t *testing.T) {
 	}
 	if !sawStarting {
 		t.Error("never saw StateChanged(Starting)")
+	}
+}
+
+func TestClassifyFailure(t *testing.T) {
+	if got := classifyFailure(fmt.Errorf("wrap: %w", client.ErrAuth)); got != FailureLoginFailed {
+		t.Errorf("auth error -> %d, want FailureLoginFailed(%d)", got, FailureLoginFailed)
+	}
+	if got := classifyFailure(errors.New("connection refused")); got != FailureConnectFailed {
+		t.Errorf("transport error -> %d, want FailureConnectFailed(%d)", got, FailureConnectFailed)
+	}
+}
+
+// TestDisconnectDuringConnect exercises the race the P1 hardening targets: a
+// Disconnect that arrives while a handshake is still in flight must cancel it
+// and leave the plugin in the Stopped state with no leaked session. A silent
+// UDP server keeps the handshake pending. Run under -race.
+func TestDisconnectDuringConnect(t *testing.T) {
+	silent, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer silent.Close()
+	port := fmt.Sprintf("%d", silent.LocalAddr().(*net.UDPAddr).Port)
+
+	server, caller := newTestBus(t)
+	p := exportTestPlugin(t, server)
+	obj := caller.Object(BusName, ObjectPath)
+
+	call := obj.Call(Iface+".Connect", 0, settings(
+		map[string]string{nmconfig.KeyGateway: "127.0.0.1", nmconfig.KeyPort: port, nmconfig.KeyLocalID: "client.example"},
+		map[string]string{nmconfig.KeyPSK: "p"},
+	))
+	if call.Err != nil {
+		t.Fatalf("Connect: %v", call.Err)
+	}
+
+	// Give the handshake a moment to be genuinely in flight, then disconnect.
+	time.Sleep(100 * time.Millisecond)
+	if dcall := obj.Call(Iface+".Disconnect", 0); dcall.Err != nil {
+		t.Fatalf("Disconnect: %v", dcall.Err)
+	}
+
+	// State must be Stopped and no session retained.
+	v, err := obj.GetProperty(Iface + ".State")
+	if err != nil {
+		t.Fatalf("get State: %v", err)
+	}
+	if s, _ := v.Value().(uint32); s != StateStopped {
+		t.Errorf("State = %d, want Stopped(%d)", s, StateStopped)
+	}
+	p.mu.Lock()
+	leaked := p.session != nil
+	p.mu.Unlock()
+	if leaked {
+		t.Error("session leaked after disconnect-during-connect")
 	}
 }
 

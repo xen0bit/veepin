@@ -2,6 +2,7 @@ package ike
 
 import (
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -13,6 +14,11 @@ import (
 	"github.com/xen0bit/ikennkt/internal/esp"
 	"github.com/xen0bit/ikennkt/internal/payload"
 )
+
+// ErrAuthFailed indicates the peer's authentication could not be verified —
+// typically a wrong PSK or EAP password. Callers can errors.Is-check it to
+// distinguish credential failures from transport/negotiation failures.
+var ErrAuthFailed = errors.New("authentication failed")
 
 // ClientConfig configures an IKEv2 client (initiator).
 type ClientConfig struct {
@@ -103,7 +109,16 @@ func (c *Client) Connect() (*ClientResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dial server: %w", err)
 	}
+	// Publish the socket under the lock so a concurrent Close (used to abort an
+	// in-flight handshake) observes it, and abort if Close already fired.
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		conn.Close()
+		return nil, fmt.Errorf("client closed")
+	}
 	c.conn = conn
+	c.mu.Unlock()
 	c.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 
 	if err := c.saInit(); err != nil {
@@ -288,7 +303,7 @@ func (c *Client) authEAP() error {
 	}
 	successReq, _ := eap.Parse(eapPay.Body)
 	if successReq.Code == eap.CodeRequest && len(successReq.Data) > 0 && successReq.Data[0] == 4 {
-		return fmt.Errorf("authentication failed")
+		return fmt.Errorf("server rejected credentials: %w", ErrAuthFailed)
 	}
 
 	// Message 3: acknowledge success.
@@ -393,11 +408,14 @@ func (c *Client) verifyServerAuth(inners []payload.RawPayload, key []byte, eapMS
 		octets := crypto.AuthOctets(c.suite.PRF, c.saInitResp, c.ni, c.keys.SKpr, peerIDBody)
 		want := crypto.PSKAuth(c.suite.PRF, key, octets)
 		if !equalBytes(want, auth.Data) {
-			return fmt.Errorf("server AUTH (MSK) verification failed")
+			return fmt.Errorf("server AUTH (MSK) verification failed: %w", ErrAuthFailed)
 		}
 		return nil
 	}
-	return verifyPeerPSKAuth(c.suite.PRF, key, c.saInitResp, c.ni, c.keys.SKpr, peerIDBody, auth.Data)
+	if err := verifyPeerPSKAuth(c.suite.PRF, key, c.saInitResp, c.ni, c.keys.SKpr, peerIDBody, auth.Data); err != nil {
+		return fmt.Errorf("%w: %v", ErrAuthFailed, err)
+	}
+	return nil
 }
 
 // finishAuth verifies server AUTH (unless already done for EAP), captures the
@@ -502,7 +520,34 @@ func (c *Client) recvInners() ([]payload.RawPayload, error) {
 	if err != nil {
 		return nil, err
 	}
-	return parseInnerPayloads(first, inner)
+	inners, err := parseInnerPayloads(first, inner)
+	if err != nil {
+		return nil, err
+	}
+	// A rejection arrives as an encrypted (inner) error notify; surface
+	// AUTHENTICATION_FAILED as ErrAuthFailed so callers can tell a bad
+	// credential from a transport failure.
+	if n := findInnerNotifyError(inners); n != 0 {
+		if n == uint16(payload.AuthenticationFailed) {
+			return nil, fmt.Errorf("server: notify %d: %w", n, ErrAuthFailed)
+		}
+		return nil, fmt.Errorf("server error notify %d", n)
+	}
+	return inners, nil
+}
+
+// findInnerNotifyError returns the first error-class notify type (< 16384) among
+// decrypted inner payloads, or 0 if none.
+func findInnerNotifyError(inners []payload.RawPayload) uint16 {
+	for _, p := range inners {
+		if p.Type == payload.TypeNotify {
+			n, err := payload.ParseNotify(p.Body)
+			if err == nil && uint16(n.Type) < 16384 && n.Type != 0 {
+				return uint16(n.Type)
+			}
+		}
+	}
+	return 0
 }
 
 // readMessage reads one UDP datagram, stripping the 4-byte non-ESP marker if
@@ -521,7 +566,9 @@ func (c *Client) readMessage() ([]byte, error) {
 	return pkt, nil
 }
 
-// Close tears down the IKE SA socket.
+// Close tears down the IKE SA socket. It is idempotent and may be called
+// concurrently with an in-flight Connect to abort it (closing the socket
+// unblocks Connect's blocked read).
 func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -12,6 +12,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -21,6 +22,11 @@ import (
 	"github.com/xen0bit/ikennkt/internal/dataplane"
 	"github.com/xen0bit/ikennkt/internal/ike"
 )
+
+// ErrAuth wraps a handshake failure caused by rejected credentials (a wrong PSK
+// or EAP password). Dial's returned error satisfies errors.Is(err, ErrAuth),
+// letting callers distinguish a bad password from a transport failure.
+var ErrAuth = errors.New("authentication failed")
 
 // defaultTunnelMTU is a conservative MTU for the inner interface. ESP-in-UDP
 // over a 1500-byte path leaves room for the outer IP+UDP+ESP overhead; 1400 is
@@ -117,10 +123,15 @@ func Dial(ctx context.Context, cfg Config) (*Session, Result, error) {
 		ikeCfg.RemoteID = &id
 	}
 
-	// 1. Handshake.
+	// 1. Handshake, honoring ctx cancellation. Connect has its own read
+	// deadlines, but a caller (e.g. an NM Disconnect mid-handshake) must be able
+	// to abort promptly rather than wait them out.
 	c := ike.NewClient(ikeCfg)
-	res, err := c.Connect()
+	res, err := connect(ctx, c)
 	if err != nil {
+		if errors.Is(err, ike.ErrAuthFailed) {
+			return nil, Result{}, fmt.Errorf("client: %w: %v", ErrAuth, err)
+		}
 		return nil, Result{}, fmt.Errorf("client: connect: %w", err)
 	}
 	// From here on, any failure must close the IKE client.
@@ -245,6 +256,29 @@ func (s *Session) Close() error {
 		}
 	})
 	return s.closeErr
+}
+
+// connect runs the IKE handshake but returns early if ctx is cancelled,
+// interrupting the in-flight Connect by closing the client's socket so the
+// caller does not have to wait out Connect's read deadlines.
+func connect(ctx context.Context, c *ike.Client) (*ike.ClientResult, error) {
+	type outcome struct {
+		res *ike.ClientResult
+		err error
+	}
+	ch := make(chan outcome, 1)
+	go func() {
+		res, err := c.Connect()
+		ch <- outcome{res, err}
+	}()
+	select {
+	case <-ctx.Done():
+		c.Close() // unblocks Connect's socket read
+		<-ch      // let the goroutine finish so nothing leaks
+		return nil, ctx.Err()
+	case o := <-ch:
+		return o.res, o.err
+	}
 }
 
 // serverGateway resolves the server's outer IPv4 address for the host route.

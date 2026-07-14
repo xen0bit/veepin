@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/xen0bit/ikennkt/internal/ike"
 )
@@ -46,6 +47,45 @@ func TestDialConnectFailure(t *testing.T) {
 	}
 	if sess != nil {
 		t.Fatalf("expected nil session on connect failure, got %v", sess)
+	}
+}
+
+// TestDialContextCancelled verifies Dial aborts an in-flight handshake when the
+// context is cancelled, instead of waiting out the IKE read deadlines. A silent
+// UDP server accepts the SA_INIT but never replies, so the handshake would
+// otherwise block for ~10s.
+func TestDialContextCancelled(t *testing.T) {
+	silent, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer silent.Close()
+	srvPort := silent.LocalAddr().(*net.UDPAddr).Port
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	sess, _, err := Dial(ctx, Config{
+		Server:  "127.0.0.1",
+		Port:    srvPort,
+		PSK:     "k",
+		LocalID: "client.example",
+	})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		sess.Close()
+		t.Fatal("expected Dial to fail after cancellation")
+	}
+	if sess != nil {
+		t.Fatal("expected nil session on cancellation")
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("Dial took %v; cancellation did not abort the handshake promptly", elapsed)
 	}
 }
 

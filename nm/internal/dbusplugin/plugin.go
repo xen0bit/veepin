@@ -9,6 +9,7 @@ package dbusplugin
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"log"
 	"net"
 	"sync"
@@ -55,9 +56,10 @@ type Plugin struct {
 	quit   chan struct{}
 	closer sync.Once
 
-	mu      sync.Mutex
-	state   uint32
-	session *client.Session
+	mu         sync.Mutex
+	state      uint32
+	session    *client.Session
+	dialCancel context.CancelFunc // cancels an in-flight handshake
 }
 
 // New creates a Plugin bound to conn.
@@ -121,20 +123,23 @@ func (p *Plugin) Wait() { <-p.quit }
 func (p *Plugin) Connect(settings nmconfig.Settings) *dbus.Error {
 	conn, err := nmconfig.Parse(settings)
 	if err != nil {
+		// A synchronous validation failure: report it as the method result. No
+		// Failure signal — nothing was started.
 		p.log.Printf("Connect: bad settings: %v", err)
-		p.fail(FailureConnectFailed)
 		return dbus.MakeFailedError(err)
 	}
 
 	p.mu.Lock()
-	if p.session != nil {
+	if p.session != nil || p.dialCancel != nil {
 		p.mu.Unlock()
 		return dbus.MakeFailedError(errAlreadyConnected)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	p.dialCancel = cancel
 	p.mu.Unlock()
 
 	p.setState(StateStarting)
-	go p.dial(conn)
+	go p.dial(ctx, conn)
 	return nil
 }
 
@@ -158,6 +163,10 @@ func (p *Plugin) Disconnect() *dbus.Error {
 	p.log.Printf("Disconnect requested")
 	p.setState(StateStopping)
 	p.mu.Lock()
+	if p.dialCancel != nil {
+		p.dialCancel() // abort an in-flight handshake
+		p.dialCancel = nil
+	}
 	sess := p.session
 	p.session = nil
 	p.mu.Unlock()
@@ -171,19 +180,42 @@ func (p *Plugin) Disconnect() *dbus.Error {
 
 // --- internals ---
 
-func (p *Plugin) dial(conn nmconfig.Connection) {
-	sess, res, err := client.Dial(context.Background(), conn.Client)
+func (p *Plugin) dial(ctx context.Context, conn nmconfig.Connection) {
+	sess, res, err := client.Dial(ctx, conn.Client)
+
+	p.mu.Lock()
+	p.dialCancel = nil
+	aborted := ctx.Err() != nil
+	p.mu.Unlock()
+
 	if err != nil {
-		p.log.Printf("Connect: handshake failed: %v", err)
-		p.fail(FailureConnectFailed)
+		if aborted {
+			p.log.Printf("Connect: aborted by disconnect")
+		} else {
+			p.log.Printf("Connect: handshake failed: %v", err)
+			p.fail(classifyFailure(err))
+		}
 		return
 	}
+
+	// Handshake succeeded. Publish the session unless a Disconnect raced in
+	// while we were dialing (checked under the lock so the two orderings — set
+	// then close, or cancel then skip — are both leak-free).
 	p.mu.Lock()
+	if ctx.Err() != nil {
+		p.mu.Unlock()
+		sess.Close()
+		p.log.Printf("Connect: succeeded but aborted by disconnect")
+		return
+	}
 	p.session = sess
 	p.mu.Unlock()
 
-	if err := p.emitConfig(res, conn.FullTunnel); err != nil {
-		p.log.Printf("Connect: emit config failed: %v", err)
+	if cerr := p.emitConfig(res, conn.FullTunnel, conn.MTU); cerr != nil {
+		p.log.Printf("Connect: emit config failed: %v", cerr)
+		p.mu.Lock()
+		p.session = nil
+		p.mu.Unlock()
 		sess.Close()
 		p.fail(FailureBadIPConfig)
 		return
@@ -192,12 +224,27 @@ func (p *Plugin) dial(conn nmconfig.Connection) {
 	p.log.Printf("tunnel up: %s addr=%s dns=%v", res.TUNName, res.AssignedIP, res.DNS)
 }
 
+// classifyFailure maps a client.Dial error to an NM failure reason: a rejected
+// credential becomes LoginFailed (so NM re-prompts for the secret), anything
+// else ConnectFailed.
+func classifyFailure(err error) uint32 {
+	if errors.Is(err, client.ErrAuth) {
+		return FailureLoginFailed
+	}
+	return FailureConnectFailed
+}
+
 // emitConfig sends the Config and Ip4Config signals NM applies to the system.
-func (p *Plugin) emitConfig(res client.Result, fullTunnel bool) error {
+// mtuOverride, when > 0, replaces the client's default tunnel MTU.
+func (p *Plugin) emitConfig(res client.Result, fullTunnel bool, mtuOverride int) error {
+	mtu := res.MTU
+	if mtuOverride > 0 {
+		mtu = mtuOverride
+	}
 	gw := ip4ToNM(res.Gateway)
 	cfg := map[string]dbus.Variant{
 		"tundev":  dbus.MakeVariant(res.TUNName),
-		"mtu":     dbus.MakeVariant(uint32(res.MTU)),
+		"mtu":     dbus.MakeVariant(uint32(mtu)),
 		"has-ip4": dbus.MakeVariant(true),
 		"has-ip6": dbus.MakeVariant(false),
 		"gateway": dbus.MakeVariant(gw),
@@ -215,7 +262,7 @@ func (p *Plugin) emitConfig(res client.Result, fullTunnel bool) error {
 		"prefix":        dbus.MakeVariant(prefixFromMask(res.Netmask)),
 		"gateway":       dbus.MakeVariant(gw),
 		"dns":           dbus.MakeVariant(dns),
-		"mtu":           dbus.MakeVariant(uint32(res.MTU)),
+		"mtu":           dbus.MakeVariant(uint32(mtu)),
 		"never-default": dbus.MakeVariant(!fullTunnel),
 	}
 	return p.conn.Emit(ObjectPath, Iface+".Ip4Config", ip4)
