@@ -35,8 +35,10 @@ jobs:
           cache: true
           cache-dependency-path: nm/go.sum
 
-      - name: Install D-Bus (for the integration test)
-        run: sudo apt-get update && sudo apt-get install -y dbus
+      - name: Install D-Bus + editor build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dbus libnm-dev libgtk-3-dev libglib2.0-dev xvfb
 
       - name: Verify go.mod is tidy
         run: |
@@ -56,3 +58,9 @@ jobs:
 
       - name: Test (race)
         run: go test -race ./...
+
+      - name: Build editor plugin (.so)
+        run: make editor
+
+      - name: Test editor plugin (headless via xvfb)
+        run: xvfb-run -a make editor-test

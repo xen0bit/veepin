@@ -5,9 +5,10 @@ Design document and implementation plan for integrating the ikennkt VPN client
 the tunnel up and down from its native VPN UI — **without** depending on
 strongSwan or the `network-manager-strongswan` packages.
 
-Status: **Phase D1 + Phase 0 implemented.** The public `client` facade and a
-working D-Bus VPN service (`nm/`) exist; connections are provisioned with
-`nmcli`. Phases 1–3 (hardening, the graphical form, packaging polish) remain. See
+Status: **Phases D1, 0, 1, and the Phase 2 editor implemented.** The public
+`client` facade, a hardened D-Bus VPN service, and the C/libnm **graphical
+Add-VPN form** all exist. Remaining: the interactive secret auth-dialog and the
+Phase 3 packaging/CI polish. See
 [§13 Implementation status](#13-implementation-status--runbook) for what is built
 and how to run it.
 
@@ -503,8 +504,9 @@ budget is spent solely in Phase 2 on the one artifact NM's design forces into C.
 | Nested plugin module | `nm/go.mod` | `github.com/xen0bit/ikennkt/nm`; the **only** module that uses godbus |
 | Connection-dict mapping | `nm/internal/nmconfig` | bus-free, unit-tested |
 | D-Bus VPN service | `nm/internal/dbusplugin`, `nm/cmd/nm-ikennkt-service` | implements `VPN.Plugin`; integration-tested on a private bus |
-| `.name` descriptor + D-Bus policy | `nm/data/` | Phase-0 form (no editor `.so` yet) |
-| Build/install | `nm/Makefile` | `make build` / `sudo make install` |
+| `.name` descriptor + D-Bus policy | `nm/data/` | references the editor `.so` |
+| GUI editor plugin (`.so`) | `nm/editor/ikennkt-editor.c` | C/libnm GObject; graphical Add-VPN form; dlopen smoke-tested |
+| Build/install | `nm/Makefile` | `make build` (Go, CGO-free) / `make editor` (C) / `sudo make install` |
 
 The core binaries (`ikev2d`/`ikev2`/`testclient`) remain CGO-free and the root
 module remains dependency-free — the root `go build ./...` never descends into
@@ -524,11 +526,25 @@ Remaining: interactive secrets (`ConnectInteractive`/`SecretsRequired`/
 `NewSecrets`) — currently secrets must be present at Connect (NM's
 `NeedSecrets` → agent → Connect flow covers the common case).
 
+### Phase 2 progress
+
+Done: the **C/libnm GUI editor plugin** (`nm/editor/ikennkt-editor.c`) — a
+GObject shared library providing the graphical *Add VPN* form (gateway, local/
+server ID, PSK, username/password, full-tunnel, MTU), mapping widgets to the
+`vpn.data`/`vpn.secrets` keys the service consumes and pre-filling from an
+existing connection. Built with `make editor` and verified by a dlopen
+smoke-test (`make editor-test`, headless via `xvfb`) that drives the real
+factory → get_editor → update_connection round-trip and the validation path. The
+`nm` CI job now installs `libnm-dev`/`libgtk-3-dev` and builds+tests it.
+
+Remaining: the interactive **auth-dialog** (for "ask every time" secrets);
+saved-secret connections work without it.
+
 ### Not yet built
 
-Phase 2 (the C `libnm` editor `.so` + auth-dialog for the graphical *Add VPN*
-form), Phase 3 (the `ikennkt-nm` deb/rpm and the dedicated CI job — a
-build/test-only workflow that installs `libnm-dev`).
+Phase 3: the `ikennkt-nm` deb/rpm packaging (the editor `.so` adds a
+`libnm`/`libgtk-3` runtime dependency, so the plugin ships as its own package
+separate from the CGO-free core).
 
 ### Install (Pop!\_OS / Debian layout)
 
@@ -544,7 +560,14 @@ sudo make install          # -> /usr/lib/NetworkManager/nm-ikennkt-service
 sudo systemctl reload NetworkManager
 ```
 
-### Create and use a connection (Phase 0: via nmcli)
+### Create a connection — GUI
+
+With the editor `.so` installed, GNOME Settings / nm-connection-editor →
+**Add VPN → "IKEv2 (ikennkt)"** now shows a form (gateway, local/server ID, PSK,
+username/password, full-tunnel, MTU). Fill it in and save. Equivalently, `nmcli`
+still works:
+
+### Create a connection — nmcli
 
 ```sh
 # PSK:
