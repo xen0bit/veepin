@@ -27,6 +27,9 @@ type ClientConfig struct {
 	ServerHost string
 	// ServerPort is the IKE port (default 500).
 	ServerPort int
+	// NATTPort is the port IKE floats to and ESP rides on (default 4500). It is
+	// configurable only so tests can use an ephemeral port; production is 4500.
+	NATTPort int
 
 	// PSK authenticates the server (and the client too, unless EAP is used).
 	PSK []byte
@@ -77,6 +80,7 @@ type Client struct {
 	saInitReq  []byte
 	saInitResp []byte
 	sendMsgID  uint32
+	on4500     bool // true once floated to NAT-T port 4500 (IKE needs the marker)
 
 	result *ClientResult
 
@@ -90,6 +94,9 @@ type Client struct {
 func NewClient(cfg ClientConfig) *Client {
 	if cfg.ServerPort == 0 {
 		cfg.ServerPort = 500
+	}
+	if cfg.NATTPort == 0 {
+		cfg.NATTPort = 4500
 	}
 	logger := cfg.Logger
 	if logger == nil {
@@ -130,6 +137,14 @@ func (c *Client) Connect() (*ClientResult, error) {
 	}
 	c.log.Printf("ikev2 client: IKE_SA_INIT complete")
 
+	// Float to the NAT-T port: IKE_AUTH and ESP both run on 4500 over one socket,
+	// as RFC 3948 requires. Sharing the socket is what lets a standards-compliant
+	// responder (e.g. strongSwan) send return ESP to our IKE source port.
+	if err := c.floatToNATT(); err != nil {
+		c.Close()
+		return nil, fmt.Errorf("NAT-T float: %w", err)
+	}
+
 	if c.cfg.EAPUsername != "" {
 		if err := c.authEAP(); err != nil {
 			c.conn.Close()
@@ -142,8 +157,56 @@ func (c *Client) Connect() (*ClientResult, error) {
 		}
 	}
 	c.log.Printf("ikev2 client: authenticated, assigned %v", c.result.AssignedIP)
+	// Clear the handshake read deadline; the data path (which now shares this
+	// socket via DataConn) does its own blocking reads.
+	_ = c.conn.SetReadDeadline(time.Time{})
 	return c.result, nil
 }
+
+// floatToNATT switches the IKE socket to the server's NAT-T port (4500) after
+// IKE_SA_INIT. It re-dials (a new local port is fine: a NAT-T responder tracks
+// the peer's current source address), so IKE_AUTH and the ESP data path share
+// one socket on 4500.
+func (c *Client) floatToNATT() error {
+	srv := c.conn.RemoteAddr().(*net.UDPAddr)
+	nconn, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: srv.IP, Port: c.cfg.NATTPort})
+	if err != nil {
+		return err
+	}
+	if err := nconn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		nconn.Close()
+		return err
+	}
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		nconn.Close()
+		return fmt.Errorf("client closed")
+	}
+	old := c.conn
+	c.conn = nconn
+	c.on4500 = true
+	c.mu.Unlock()
+	old.Close()
+	return nil
+}
+
+// writeIKE sends one IKE message, prefixing the 4-byte non-ESP marker once the
+// socket has floated to 4500 (so the peer's ESP demux can tell IKE from ESP).
+func (c *Client) writeIKE(pkt []byte) error {
+	if c.on4500 {
+		framed := make([]byte, 4+len(pkt))
+		copy(framed[4:], pkt)
+		_, err := c.conn.Write(framed)
+		return err
+	}
+	_, err := c.conn.Write(pkt)
+	return err
+}
+
+// DataConn returns the IKE socket (floated to 4500) for the data path to share
+// for ESP. Ownership stays with the Client; Close closes it.
+func (c *Client) DataConn() *net.UDPConn { return c.conn }
 
 // --- IKE_SA_INIT ---
 
@@ -182,7 +245,7 @@ func (c *Client) saInit() error {
 	}
 	req := append(hdr.Marshal(nil), chain...)
 	c.saInitReq = req
-	if _, err := c.conn.Write(req); err != nil {
+	if err := c.writeIKE(req); err != nil {
 		return err
 	}
 
@@ -243,7 +306,7 @@ func (c *Client) authPSK() error {
 	if err != nil {
 		return err
 	}
-	if _, err := c.conn.Write(pkt); err != nil {
+	if err := c.writeIKE(pkt); err != nil {
 		return err
 	}
 
@@ -266,7 +329,7 @@ func (c *Client) authEAP() error {
 	if err != nil {
 		return err
 	}
-	if _, err := c.conn.Write(pkt); err != nil {
+	if err := c.writeIKE(pkt); err != nil {
 		return err
 	}
 
@@ -332,7 +395,7 @@ func (c *Client) authEAP() error {
 	if err != nil {
 		return err
 	}
-	if _, err := c.conn.Write(pkt); err != nil {
+	if err := c.writeIKE(pkt); err != nil {
 		return err
 	}
 
@@ -350,8 +413,7 @@ func (c *Client) sendEAP(msgID uint32, p eap.Packet) error {
 	if err != nil {
 		return err
 	}
-	_, err = c.conn.Write(pkt)
-	return err
+	return c.writeIKE(pkt)
 }
 
 // buildAuthInner assembles the IKE_AUTH inner payloads. If auth is nil the AUTH
@@ -484,9 +546,9 @@ func (c *Client) finishAuth(inners []payload.RawPayload, childOutSPI uint32, aut
 		res.IntegKeyIn = take(integLen)
 	}
 
-	// Server ESP endpoint: under NAT-T this is the server on port 4500.
+	// Server ESP endpoint: the NAT-T port the socket floated to (4500 in prod).
 	srv := c.conn.RemoteAddr().(*net.UDPAddr)
-	res.ServerAddr = &net.UDPAddr{IP: srv.IP, Port: 4500}
+	res.ServerAddr = &net.UDPAddr{IP: srv.IP, Port: srv.Port}
 	res.UDPEncap = true
 
 	c.result = res
