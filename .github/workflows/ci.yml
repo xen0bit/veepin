@@ -89,7 +89,10 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          # Latest stable: govulncheck reports standard-library vulnerabilities
+          # against the toolchain it runs under, so scanning on the newest Go
+          # picks up stdlib patches (e.g. the net fix for GO-2026-4971).
+          go-version: "1.x"
           cache: true
 
       - name: Run govulncheck
