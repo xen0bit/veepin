@@ -43,7 +43,13 @@ jobs:
   # host libnm/GTK, and the desktop this targets is amd64.
   nm-packages:
     needs: goreleaser
-    runs-on: ubuntu-latest
+    # Pin to the oldest supported LTS: the editor .so and auth-dialog link
+    # against the host's GLib/GTK, and GLib symbols are NOT version-scoped, so a
+    # binary built on a newer GLib can pull in symbols absent on older systems
+    # (e.g. g_once_init_enter_pointer, GLib >= 2.80, which crashes the loader on
+    # GLib 2.72 / Ubuntu 22.04 / Pop!_OS 22.04). Build on the baseline so the
+    # released package loads everywhere from that GLib up.
+    runs-on: ubuntu-22.04
     defaults:
       run:
         working-directory: nm

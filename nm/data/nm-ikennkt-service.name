@@ -10,7 +10,10 @@ plugin=libnm-vpn-plugin-ikennkt.so
 [GNOME]
 auth-dialog=/usr/lib/NetworkManager/nm-ikennkt-auth-dialog
 properties=libnm-vpn-plugin-ikennkt.so
-supports-external-ui-mode=true
+# false: our auth-dialog implements only the classic GTK prompt (it does not
+# honour --external-ui-mode), so we must not advertise external-UI-mode or a
+# GNOME-Shell secret request would get no usable UI description back.
+supports-external-ui-mode=false
 
 # The [libnm] editor .so provides the graphical Add-VPN form; the auth-dialog
 # prompts for secrets that are not saved with the connection ("ask every time").

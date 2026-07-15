@@ -20,7 +20,12 @@ permissions:
 
 jobs:
   build-test:
-    runs-on: ubuntu-latest
+    # Match the release baseline (see release.yml): build the C editor .so /
+    # auth-dialog against the oldest supported GLib so they stay loadable on it.
+    # The `make editor-test` step below dlopen()s the .so, so an accidental
+    # dependency on a newer GLib symbol fails CI here rather than at a user's
+    # gnome-control-center.
+    runs-on: ubuntu-22.04
     defaults:
       run:
         working-directory: nm
