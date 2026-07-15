@@ -1,0 +1,57 @@
+name: interop
+
+# Docker-based interoperability tests (ikennkt vs strongSwan). Kept in its own
+# workflow — like nm.yml — so the toolchain-light core jobs never pull in Docker
+# or a strongSwan image. Path-filtered to the code that affects the data path /
+# handshake so it does not run on unrelated changes.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "internal/**"
+      - "client/**"
+      - "cmd/ikev2/**"
+      - "cmd/ikev2d/**"
+      - "Dockerfile"
+      - "tests/interop/**"
+      - ".github/workflows/interop.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "internal/**"
+      - "client/**"
+      - "cmd/ikev2/**"
+      - "cmd/ikev2d/**"
+      - "Dockerfile"
+      - "tests/interop/**"
+      - ".github/workflows/interop.yml"
+
+concurrency:
+  group: interop-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  interop:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Enable TUN + IPsec kernel modules
+        run: |
+          # The ikennkt containers need /dev/net/tun; strongSwan uses kernel XFRM.
+          sudo modprobe tun || true
+          sudo modprobe esp4 xfrm_user af_key || true
+          ls -l /dev/net/tun
+
+      - name: Run interop tests (vs strongSwan, over Docker)
+        run: go test -tags interop -count=1 -timeout 25m -v ./tests/interop/...
