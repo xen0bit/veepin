@@ -40,7 +40,7 @@ func startTestServer(t *testing.T, eapUsers map[string]string) (p500, p4500 int,
 	if err != nil {
 		t.Fatal(err)
 	}
-	go srv.ListenAndServe()
+	go func() { _ = srv.ListenAndServe() }()
 	time.Sleep(50 * time.Millisecond)
 	return p500, p4500, srv, childCh
 }

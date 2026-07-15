@@ -208,7 +208,7 @@ func Dial(ctx context.Context, cfg Config) (*Session, Result, error) {
 			case <-s.stopKA:
 				return
 			case <-t.C:
-				espConn.Write([]byte{0xff})
+				_, _ = espConn.Write([]byte{0xff})
 			}
 		}
 	}()

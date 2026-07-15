@@ -56,10 +56,8 @@ func buildEncryptedMessage(hdr payload.Header, suite Suite, keys crypto.SAKeys,
 	ptLen := len(innerPayloads)
 	var ctLen int
 	if block <= 1 {
-		ctLen = ptLen // stream/AEAD: no block padding, +0 (pad handled internally? no)
-		// For AEAD we still append a pad-length octet of 0 per RFC 7296? No:
-		// RFC 7296 requires the Pad Length field always. For AEAD ciphers the
-		// padding+padlen are part of the plaintext. We add a single 0 padlen.
+		// Stream/AEAD ciphers do no block padding, but RFC 7296 still mandates
+		// the Pad Length octet, so the plaintext carries a single 0 pad-length.
 		ctLen = ptLen + 1
 	} else {
 		padLen := block - (ptLen+1)%block

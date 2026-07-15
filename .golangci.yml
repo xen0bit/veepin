@@ -1,0 +1,22 @@
+# golangci-lint configuration (v2 schema). The version is pinned in
+# .github/workflows/ci.yml so this schema stays valid.
+#
+# We keep the default linter set — errcheck, staticcheck, ineffassign, unused,
+# govet — and stay strict about unchecked errors on real logic paths (Write,
+# Read, deadlines, handshake steps). The single carve-out below is Close(): an
+# unchecked Close on a defer/teardown path carries no actionable error (nothing
+# is left to flush on a UDP socket or a TUN fd), and wrapping every
+# `defer x.Close()` in a closure just to discard the result is noise.
+version: "2"
+
+linters:
+  exclusions:
+    rules:
+      - linters:
+          - errcheck
+        source: '\.Close\(\)'
+
+issues:
+  # Report every finding; don't collapse repeats.
+  max-issues-per-linter: 0
+  max-same-issues: 0

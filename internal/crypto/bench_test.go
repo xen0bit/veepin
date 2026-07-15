@@ -146,7 +146,7 @@ func BenchmarkCipherSeal(b *testing.B) {
 
 func randBytes(n int) []byte {
 	b := make([]byte, n)
-	rand.Read(b)
+	_, _ = rand.Read(b)
 	return b
 }
 

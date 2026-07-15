@@ -72,9 +72,12 @@ jobs:
         run: go vet ./...
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
-          version: latest
+          # Pinned (v7 action → golangci-lint v2 line). Pinning keeps a new
+          # release from turning green CI red without a code change; matches the
+          # v2 schema in .golangci.yml.
+          version: v2.12.2
 
   govulncheck:
     name: govulncheck

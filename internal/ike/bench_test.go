@@ -89,7 +89,7 @@ func BenchmarkFullHandshakePSK(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	go srv.ListenAndServe()
+	go func() { _ = srv.ListenAndServe() }()
 	defer srv.Close()
 	time.Sleep(50 * time.Millisecond)
 
@@ -102,7 +102,7 @@ func BenchmarkFullHandshakePSK(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
 		it := &initiator{tb: b, conn: conn, psk: psk, id: FQDNIdentity("client")}
 		it.doSAInit()
 		it.doAuth()

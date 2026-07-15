@@ -37,7 +37,7 @@ func TestEndToEndHandshake(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	go srv.ListenAndServe()
+	go func() { _ = srv.ListenAndServe() }()
 	defer srv.Close()
 	time.Sleep(50 * time.Millisecond) // let sockets bind
 
@@ -49,7 +49,7 @@ func TestEndToEndHandshake(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer cli.Close()
-	cli.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_ = cli.SetReadDeadline(time.Now().Add(3 * time.Second))
 
 	it := &initiator{tb: t, conn: cli, psk: psk, id: FQDNIdentity("initiator.test")}
 	it.doSAInit()
@@ -163,6 +163,7 @@ func (it *initiator) doSAInit() {
 	noncePay := msg.Find(payload.TypeNonce)
 	if saPay == nil || kePay == nil || noncePay == nil {
 		it.tb.Fatalf("SA_INIT resp missing payloads")
+		return
 	}
 	sa, err := payload.ParseSA(saPay.Body)
 	if err != nil {
@@ -230,6 +231,7 @@ func (it *initiator) doAuth() {
 	authPay := findInner(inners, payload.TypeAUTH)
 	if idrPay == nil || authPay == nil {
 		it.tb.Fatalf("AUTH resp missing IDr/AUTH; got %d payloads", len(inners))
+		return
 	}
 	ra, _ := payload.ParseAuth(authPay.Body)
 	idr, _ := payload.ParseID(idrPay.Body)
@@ -253,6 +255,7 @@ func (it *initiator) doAuth() {
 	saPay := findInner(inners, payload.TypeSA)
 	if saPay == nil {
 		it.tb.Fatalf("AUTH resp did not carry a Child SA")
+		return
 	}
 	espSA, _ := payload.ParseSA(saPay.Body)
 	es, _, serr := SelectESPSuite(espSA)
@@ -329,6 +332,7 @@ func (it *initiator) openEnc(pkt []byte) (payload.PayloadType, []byte) {
 	sk := msg.Find(payload.TypeSK)
 	if sk == nil {
 		it.tb.Fatalf("resp missing SK payload")
+		return 0, nil
 	}
 	first, inner, err := decryptSK(pkt, msg.Header, *sk, it.suite, it.keys, dirResponderToInitiator)
 	if err != nil {

@@ -83,7 +83,7 @@ func TestFullVPNFlow(t *testing.T) {
 	go pump.Run()
 	defer pump.Close()
 
-	go srv.ListenAndServe()
+	go func() { _ = srv.ListenAndServe() }()
 	defer srv.Close()
 	time.Sleep(50 * time.Millisecond)
 
@@ -96,7 +96,7 @@ func TestFullVPNFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer cli.Close()
-	cli.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_ = cli.SetReadDeadline(time.Now().Add(3 * time.Second))
 
 	it := &initiator{tb: t, conn: cli, psk: psk, id: FQDNIdentity("client.example")}
 	it.doSAInit()

@@ -119,7 +119,10 @@ func (c *Client) Connect() (*ClientResult, error) {
 	}
 	c.conn = conn
 	c.mu.Unlock()
-	c.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if err := c.conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		c.conn.Close()
+		return nil, fmt.Errorf("set read deadline: %w", err)
+	}
 
 	if err := c.saInit(); err != nil {
 		c.conn.Close()

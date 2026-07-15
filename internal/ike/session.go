@@ -56,9 +56,6 @@ type ChildSA struct {
 	TSi payload.TSPayload
 	TSr payload.TSPayload
 
-	// Replay window state for inbound (userspace ESP).
-	lastSeq uint32
-
 	// UDPEncap indicates ESP must be UDP-encapsulated (NAT-T, port 4500).
 	UDPEncap bool
 	// ClientIP is the internal tunnel address assigned to the peer via CP.
@@ -83,7 +80,6 @@ type IKESA struct {
 	Suite Suite
 
 	// DH exchange material (kept only until keys are derived).
-	dh        crypto.DHGroup
 	Ni, Nr    []byte
 	SharedKey []byte
 

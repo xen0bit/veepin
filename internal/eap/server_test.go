@@ -22,7 +22,7 @@ func simulateClient(t *testing.T, challengeReq Packet, username, password string
 	copy(authChallenge[:], data[5:21])
 
 	var peerChallenge [16]byte
-	rand.Read(peerChallenge[:])
+	_, _ = rand.Read(peerChallenge[:])
 
 	ntHash := ntPasswordHash(password)
 	ntResp := generateNTResponse(authChallenge, peerChallenge, username, ntHash)

@@ -58,7 +58,7 @@ func benchSAPair(b *testing.B, encrID uint16, keyBits int, integID uint16) (send
 
 func randKey(n int) []byte {
 	k := make([]byte, n)
-	rand.Read(k)
+	_, _ = rand.Read(k)
 	return k
 }
 

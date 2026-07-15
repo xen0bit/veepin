@@ -42,7 +42,7 @@ func TestEAPMSCHAPv2Flow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	go srv.ListenAndServe()
+	go func() { _ = srv.ListenAndServe() }()
 	defer srv.Close()
 	time.Sleep(50 * time.Millisecond)
 
@@ -52,7 +52,7 @@ func TestEAPMSCHAPv2Flow(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
 
 	it := &initiator{tb: t, conn: conn, psk: psk, id: FQDNIdentity("alice")}
 	it.doSAInit()
@@ -189,7 +189,7 @@ func TestEAPWrongPassword(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	go srv.ListenAndServe()
+	go func() { _ = srv.ListenAndServe() }()
 	defer srv.Close()
 	time.Sleep(50 * time.Millisecond)
 
@@ -198,7 +198,7 @@ func TestEAPWrongPassword(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
 
 	it := &initiator{tb: t, conn: conn, psk: psk, id: FQDNIdentity("alice")}
 	it.doSAInit()

@@ -41,7 +41,9 @@ func main() {
 		log.Fatal(err)
 	}
 	defer conn.Close()
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		log.Fatal(err)
+	}
 	c.conn = conn
 
 	if err := c.saInit(); err != nil {
@@ -118,7 +120,9 @@ func (c *client) saInit() error {
 	hdr := payload.Header{InitiatorSPI: c.spiI, NextPayload: b.FirstType(), Version: 0x20, ExchangeType: payload.IKE_SA_INIT, Flags: payload.FlagInitiator, Length: uint32(payload.HeaderLen + len(chain))}
 	req := append(hdr.Marshal(nil), chain...)
 	c.saInitReq = req
-	c.conn.Write(req)
+	if _, err := c.conn.Write(req); err != nil {
+		return err
+	}
 
 	resp := make([]byte, 65535)
 	n, err := c.conn.Read(resp)
@@ -172,7 +176,9 @@ func (c *client) auth() error {
 	if err != nil {
 		return err
 	}
-	c.conn.Write(pkt)
+	if _, err := c.conn.Write(pkt); err != nil {
+		return err
+	}
 
 	resp := make([]byte, 65535)
 	n, err := c.conn.Read(resp)
@@ -385,7 +391,9 @@ func (c *client) authEAP() error {
 	if err != nil {
 		return err
 	}
-	c.conn.Write(pkt)
+	if _, err := c.conn.Write(pkt); err != nil {
+		return err
+	}
 
 	// Response: IDr, AUTH (server PSK), EAP challenge.
 	inners, err := c.recvInners()
@@ -411,7 +419,9 @@ func (c *client) authEAP() error {
 	b2 := payload.NewBuilder()
 	b2.Add(payload.TypeEAP, false, eapResp.Marshal())
 	pkt, _ = c.seal(payload.IKE_AUTH, 2, b2.FirstType(), b2.Bytes())
-	c.conn.Write(pkt)
+	if _, err := c.conn.Write(pkt); err != nil {
+		return err
+	}
 
 	// Response: MSCHAPv2 Success request.
 	inners, err = c.recvInners()
@@ -432,7 +442,9 @@ func (c *client) authEAP() error {
 	b3 := payload.NewBuilder()
 	b3.Add(payload.TypeEAP, false, ack.Marshal())
 	pkt, _ = c.seal(payload.IKE_AUTH, 3, b3.FirstType(), b3.Bytes())
-	c.conn.Write(pkt)
+	if _, err := c.conn.Write(pkt); err != nil {
+		return err
+	}
 
 	// Response: EAP-Success.
 	inners, err = c.recvInners()
@@ -451,7 +463,9 @@ func (c *client) authEAP() error {
 	b4 := payload.NewBuilder()
 	b4.Add(payload.TypeAUTH, false, payload.MarshalAuth(payload.AuthPayload{Method: payload.AuthSharedKeyMIC, Data: authData}))
 	pkt, _ = c.seal(payload.IKE_AUTH, 4, b4.FirstType(), b4.Bytes())
-	c.conn.Write(pkt)
+	if _, err := c.conn.Write(pkt); err != nil {
+		return err
+	}
 
 	// Final response: server AUTH + Child SA + CP reply.
 	inners, err = c.recvInners()
