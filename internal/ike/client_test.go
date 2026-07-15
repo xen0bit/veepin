@@ -48,11 +48,11 @@ func startTestServer(t *testing.T, eapUsers map[string]string) (p500, p4500 int,
 // TestClientConnectPSK drives the production Client through a PSK handshake
 // against the live server and verifies the data path end to end.
 func TestClientConnectPSK(t *testing.T) {
-	p500, _, srv, childCh := startTestServer(t, nil)
+	p500, p4500, srv, childCh := startTestServer(t, nil)
 	defer srv.Close()
 
 	client := NewClient(ClientConfig{
-		ServerHost: "127.0.0.1", ServerPort: p500,
+		ServerHost: "127.0.0.1", ServerPort: p500, NATTPort: p4500,
 		PSK:     []byte("test-psk"),
 		LocalID: FQDNIdentity("client.example"),
 		Logger:  log.New(io.Discard, "", 0),
@@ -120,11 +120,11 @@ func TestClientConnectPSK(t *testing.T) {
 
 // TestClientConnectEAP drives the Client through an EAP-MSCHAPv2 handshake.
 func TestClientConnectEAP(t *testing.T) {
-	p500, _, srv, childCh := startTestServer(t, map[string]string{"alice": "wonderland"})
+	p500, p4500, srv, childCh := startTestServer(t, map[string]string{"alice": "wonderland"})
 	defer srv.Close()
 
 	client := NewClient(ClientConfig{
-		ServerHost: "127.0.0.1", ServerPort: p500,
+		ServerHost: "127.0.0.1", ServerPort: p500, NATTPort: p4500,
 		PSK:         []byte("test-psk"),
 		LocalID:     FQDNIdentity("alice"),
 		EAPUsername: "alice", EAPPassword: "wonderland",
@@ -148,11 +148,11 @@ func TestClientConnectEAP(t *testing.T) {
 
 // TestClientWrongPSK confirms the client rejects a server it can't authenticate.
 func TestClientWrongPSK(t *testing.T) {
-	p500, _, srv, _ := startTestServer(t, nil)
+	p500, p4500, srv, _ := startTestServer(t, nil)
 	defer srv.Close()
 
 	client := NewClient(ClientConfig{
-		ServerHost: "127.0.0.1", ServerPort: p500,
+		ServerHost: "127.0.0.1", ServerPort: p500, NATTPort: p4500,
 		PSK:     []byte("WRONG-psk"),
 		LocalID: FQDNIdentity("client.example"),
 		Logger:  log.New(io.Discard, "", 0),

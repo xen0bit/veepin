@@ -1,0 +1,42 @@
+# Direction A: ikennkt client (ikev2) -> strongSwan responder.
+# The ikennkt client forces NAT-T, so strongSwan auto-enables UDP-encapsulated
+# ESP on 4500 — no NAT router needed. Data-path check: the client pings
+# 10.20.30.254 (a strongSwan-side address inside the tunnel).
+name: ikennkt-interop-a
+
+services:
+  strongswan-server:
+    build:
+      context: strongswan
+    image: interop-strongswan
+    cap_add: [NET_ADMIN]
+    # rp_filter must be 0 or the kernel drops XFRM-decrypted packets (their
+    # inner source arrives on the "wrong" interface); standard strongSwan
+    # requirement. Docker forbids sysctl from inside the container, so set the
+    # namespaced sysctls at creation here.
+    sysctls:
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+      net.ipv4.ip_forward: "1"
+    # strongSwan uses kernel XFRM, not a TUN device.
+    volumes:
+      - ./strongswan/swanctl-server.conf:/etc/swanctl/swanctl.conf:ro
+      - ./strongswan/server-entrypoint.sh:/entrypoint.sh:ro
+    command: ["/bin/sh", "/entrypoint.sh"]
+
+  ikennkt-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: ikennkt:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [strongswan-server]
+    environment:
+      SERVER: "strongswan-server"
+      PSK: "interop-test-psk"
+      CLIENT_ID: "client.example.com"
+      SERVER_ID: "vpn.example.com"
+    volumes:
+      - ./ikennkt/client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

@@ -141,6 +141,11 @@ test:
 test-short:
 	$(GO) test -short $(GOFLAGS) ./...
 
+## interop: Docker-based interop tests vs strongSwan (needs Docker; not in `test`)
+.PHONY: interop
+interop:
+	$(GO) test -tags interop -count=1 -timeout 20m ./tests/interop/...
+
 ## test-v: run all tests verbosely with the race detector
 .PHONY: test-v
 test-v:

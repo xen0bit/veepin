@@ -57,7 +57,7 @@ func BenchmarkPumpInbound(b *testing.B) {
 					// numbers from the batch are accepted.
 					serverSA.ResetReplayWindow()
 				}
-				pump.HandleESP(pkts[i%batch])
+				pump.HandleESP(pkts[i%batch], nil)
 			}
 		})
 	}

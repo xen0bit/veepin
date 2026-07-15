@@ -82,11 +82,14 @@ type Result struct {
 // Session is a running tunnel: the IKE SA, the TUN device, and the ESP pump.
 // Close tears everything down; Wait blocks until that happens.
 type Session struct {
-	ike     *ike.Client
-	tun     *dataplane.TUN
-	pump    *dataplane.Pump
-	espConn *net.UDPConn
-	logger  *log.Logger
+	ike  *ike.Client
+	tun  *dataplane.TUN
+	pump *dataplane.Pump
+	// dataConn is the IKE socket (floated to 4500), shared for the ESP data
+	// path so ESP and IKE share one source port as RFC 3948 NAT-T requires. It
+	// is owned by ike; Session.Close closes it via ike.Close().
+	dataConn *net.UDPConn
+	logger   *log.Logger
 
 	closeOnce sync.Once
 	closeErr  error
@@ -153,25 +156,23 @@ func Dial(ctx context.Context, cfg Config) (*Session, Result, error) {
 		return fail(fmt.Errorf("client: build tunnel: %w", err))
 	}
 
-	// 4. ESP socket (NAT-T port 4500).
-	espConn, err := net.DialUDP("udp", nil, res.ServerAddr)
-	if err != nil {
-		tun.Close()
-		return fail(fmt.Errorf("client: ESP socket: %w", err))
-	}
+	// 4. ESP shares the IKE socket (already floated to NAT-T port 4500), so ESP
+	// and IKE leave from one source port — the standards-compliant NAT-T layout a
+	// responder relies on to route return ESP back to us.
+	dataConn := c.DataConn()
 
 	s := &Session{
-		ike:     c,
-		tun:     tun,
-		pump:    nil,
-		espConn: espConn,
-		logger:  logger,
-		done:    make(chan struct{}),
-		stopKA:  make(chan struct{}),
+		ike:      c,
+		tun:      tun,
+		pump:     nil,
+		dataConn: dataConn,
+		logger:   logger,
+		done:     make(chan struct{}),
+		stopKA:   make(chan struct{}),
 	}
 
 	send := func(esp []byte, _ *net.UDPAddr, _ bool) {
-		if _, werr := espConn.Write(esp); werr != nil {
+		if _, werr := dataConn.Write(esp); werr != nil {
 			logger.Printf("client: ESP send error: %v", werr)
 		}
 	}
@@ -181,21 +182,24 @@ func Dial(ctx context.Context, cfg Config) (*Session, Result, error) {
 	s.pump = pump
 	go pump.Run()
 
-	// Inbound ESP read loop. Exits when espConn is closed (on Close).
+	// Inbound read loop on the shared socket. Exits when the socket is closed
+	// (on Close, via ike.Close()). A 4-zero-octet prefix marks a non-ESP datagram
+	// (NAT keepalive, or any late IKE) — skip it; everything else is ESP.
 	go func() {
 		defer close(s.done)
 		buf := make([]byte, 65535)
 		for {
-			n, rerr := espConn.Read(buf)
+			n, rerr := dataConn.Read(buf)
 			if rerr != nil {
 				return
 			}
 			pkt := buf[:n]
-			// Non-ESP marker (keepalive / non-ESP): 4 leading zero octets.
 			if len(pkt) >= 4 && pkt[0] == 0 && pkt[1] == 0 && pkt[2] == 0 && pkt[3] == 0 {
 				continue
 			}
-			pump.HandleESP(append([]byte(nil), pkt...))
+			// Connected socket: the source is implicitly the server, so no
+			// return-address update is needed (pass nil).
+			pump.HandleESP(append([]byte(nil), pkt...), nil)
 		}
 	}()
 
@@ -208,7 +212,7 @@ func Dial(ctx context.Context, cfg Config) (*Session, Result, error) {
 			case <-s.stopKA:
 				return
 			case <-t.C:
-				_, _ = espConn.Write([]byte{0xff})
+				_, _ = dataConn.Write([]byte{0xff})
 			}
 		}
 	}()
@@ -245,14 +249,13 @@ func (s *Session) Close() error {
 		if s.pump != nil {
 			s.pump.Close()
 		}
-		if s.espConn != nil {
-			s.closeErr = s.espConn.Close() // unblocks the read loop
-		}
 		if s.tun != nil {
 			s.tun.Close()
 		}
+		// Closing the IKE client closes the shared socket, which unblocks the
+		// inbound read loop.
 		if s.ike != nil {
-			s.ike.Close()
+			s.closeErr = s.ike.Close()
 		}
 	})
 	return s.closeErr
