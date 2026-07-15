@@ -622,13 +622,14 @@ func (r *ClientResult) BuildTunnel() (*espTunnel, error) {
 			EncKey: r.EncKeyIn, IntegKey: r.IntegKeyIn,
 		},
 	}
-	return &espTunnel{
+	t := &espTunnel{
 		espSA:    sa,
 		inSPI:    r.InboundSPI,
 		clientIP: r.AssignedIP,
-		peer:     r.ServerAddr,
 		udpEncap: r.UDPEncap,
-	}, nil
+	}
+	t.peer.Store(r.ServerAddr)
+	return t, nil
 }
 
 func mustNonce(n int) []byte {

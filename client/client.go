@@ -195,7 +195,9 @@ func Dial(ctx context.Context, cfg Config) (*Session, Result, error) {
 			if len(pkt) >= 4 && pkt[0] == 0 && pkt[1] == 0 && pkt[2] == 0 && pkt[3] == 0 {
 				continue
 			}
-			pump.HandleESP(append([]byte(nil), pkt...))
+			// Connected ESP socket: the source is implicitly the server, so no
+			// return-address update is needed (pass nil).
+			pump.HandleESP(append([]byte(nil), pkt...), nil)
 		}
 	}()
 

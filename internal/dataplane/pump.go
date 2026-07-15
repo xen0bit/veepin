@@ -96,8 +96,12 @@ func (p *Pump) RemoveTunnel(t ESPTunnel) {
 
 // HandleESP processes an inbound ESP datagram (already stripped of any UDP-encap
 // marker). It demuxes by SPI, decapsulates, and writes the inner IP packet to
-// the TUN device.
-func (p *Pump) HandleESP(esp []byte) {
+// the TUN device. from, when non-nil, is the datagram's UDP source: the tunnel's
+// return address is updated to it so replies reach the peer's actual ESP socket
+// (a road-warrior client sends ESP from a different port than IKE, so the IKE
+// peer address is not a valid ESP return address). Pass nil on a connected
+// socket where the source is implicit (client mode).
+func (p *Pump) HandleESP(esp []byte, from *net.UDPAddr) {
 	if len(esp) < 4 {
 		return
 	}
@@ -107,6 +111,11 @@ func (p *Pump) HandleESP(esp []byte) {
 	p.mu.RUnlock()
 	if t == nil {
 		return // unknown SPI
+	}
+	if from != nil {
+		if u, ok := t.(interface{ SetPeerAddr(*net.UDPAddr) }); ok {
+			u.SetPeerAddr(from)
+		}
 	}
 	inner, err := t.Decapsulate(esp)
 	if err != nil {

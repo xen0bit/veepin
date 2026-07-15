@@ -177,15 +177,17 @@ func (s *Server) Close() error {
 	return nil
 }
 
-// handleESP forwards inbound ESP datagrams (port 4500) to the data plane.
+// handleESP forwards inbound ESP datagrams (port 4500) to the data plane, along
+// with the UDP source address so replies can be sent back to the peer's actual
+// ESP socket (which differs from its IKE port for a road-warrior client).
 func (s *Server) handleESP(esp []byte, from *net.UDPAddr) {
 	if dp, ok := s.cfg.DataPath.(espReceiver); ok {
-		dp.HandleESP(esp)
+		dp.HandleESP(esp, from)
 	}
 }
 
 type espReceiver interface {
-	HandleESP(esp []byte)
+	HandleESP(esp []byte, from *net.UDPAddr)
 }
 
 // SetDataPath attaches a data plane after construction (used by the daemon so

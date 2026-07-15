@@ -66,6 +66,7 @@ func (t *fakeTunnel) PeerAddr() *net.UDPAddr               { return t.peer }
 func (t *fakeTunnel) UDPEncap() bool                       { return true }
 func (t *fakeTunnel) Encapsulate(p []byte) ([]byte, error) { return t.enc(p) }
 func (t *fakeTunnel) Decapsulate(p []byte) ([]byte, error) { return t.dec(p) }
+func (t *fakeTunnel) SetPeerAddr(a *net.UDPAddr)           { t.peer = a }
 
 // makeIPv4 builds a minimal IPv4 packet with the given dst address and payload.
 func makeIPv4(dst net.IP, payload []byte) []byte {
@@ -143,7 +144,10 @@ func TestPumpRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pump.HandleESP(espIn)
+	// Deliver from an ESP source that differs from the IKE-derived peer, so the
+	// return address must be updated to it (the road-warrior return-path fix).
+	espSrc := &net.UDPAddr{IP: net.IPv4(203, 0, 113, 9), Port: 4500}
+	pump.HandleESP(espIn, espSrc)
 
 	select {
 	case <-tun.writeSig:
@@ -154,6 +158,9 @@ func TestPumpRoundTrip(t *testing.T) {
 	if !bytes.Equal(got, reply) {
 		t.Fatalf("TUN write mismatch: got %d bytes", len(got))
 	}
+	if p := tunnel.PeerAddr(); p == nil || !p.IP.Equal(espSrc.IP) || p.Port != espSrc.Port {
+		t.Fatalf("peer address not updated to ESP source: got %v, want %v", p, espSrc)
+	}
 }
 
 // TestPumpUnknownSPIDropped ensures an ESP packet with an unknown SPI is
@@ -163,7 +170,7 @@ func TestPumpUnknownSPIDropped(t *testing.T) {
 	pump := NewPump(tun, func([]byte, *net.UDPAddr, bool) {}, nil)
 	esp := make([]byte, 40)
 	binary.BigEndian.PutUint32(esp[:4], 0xdeadbeef)
-	pump.HandleESP(esp)
+	pump.HandleESP(esp, nil)
 	select {
 	case <-tun.writeSig:
 		t.Fatal("unknown SPI should not produce a TUN write")
