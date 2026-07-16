@@ -4,8 +4,8 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/xen0bit/ikennkt/internal/crypto"
-	"github.com/xen0bit/ikennkt/internal/payload"
+	"github.com/xen0bit/veepin/internal/crypto"
+	"github.com/xen0bit/veepin/internal/payload"
 )
 
 // keyDir selects which directional keys to use.

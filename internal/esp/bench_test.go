@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/xen0bit/ikennkt/internal/crypto"
-	"github.com/xen0bit/ikennkt/internal/payload"
+	"github.com/xen0bit/veepin/internal/crypto"
+	"github.com/xen0bit/veepin/internal/payload"
 )
 
 // benchSAPair builds a pair of ESP SAs sharing keys so that one can encapsulate

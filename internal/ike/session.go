@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xen0bit/ikennkt/internal/crypto"
-	"github.com/xen0bit/ikennkt/internal/eap"
-	"github.com/xen0bit/ikennkt/internal/payload"
+	"github.com/xen0bit/veepin/internal/crypto"
+	"github.com/xen0bit/veepin/internal/eap"
+	"github.com/xen0bit/veepin/internal/payload"
 )
 
 // SAState is the lifecycle state of an IKE SA.

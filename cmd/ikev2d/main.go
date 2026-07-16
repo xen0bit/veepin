@@ -30,9 +30,9 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/xen0bit/ikennkt/internal/dataplane"
-	"github.com/xen0bit/ikennkt/internal/eap"
-	"github.com/xen0bit/ikennkt/internal/ike"
+	"github.com/xen0bit/veepin/internal/dataplane"
+	"github.com/xen0bit/veepin/internal/eap"
+	"github.com/xen0bit/veepin/internal/ike"
 )
 
 // Build metadata, stamped via -ldflags at release time (see .goreleaser.yaml).

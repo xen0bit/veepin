@@ -3,8 +3,8 @@ package ike
 import (
 	"net"
 
-	"github.com/xen0bit/ikennkt/internal/crypto"
-	"github.com/xen0bit/ikennkt/internal/payload"
+	"github.com/xen0bit/veepin/internal/crypto"
+	"github.com/xen0bit/veepin/internal/payload"
 )
 
 // handleIKESAInit processes an IKE_SA_INIT request and sends the response.

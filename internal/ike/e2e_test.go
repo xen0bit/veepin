@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xen0bit/ikennkt/internal/crypto"
-	"github.com/xen0bit/ikennkt/internal/payload"
+	"github.com/xen0bit/veepin/internal/crypto"
+	"github.com/xen0bit/veepin/internal/payload"
 )
 
 // TestEndToEndHandshake drives a full IKE_SA_INIT + IKE_AUTH exchange as an

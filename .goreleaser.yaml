@@ -1,4 +1,4 @@
-# GoReleaser configuration for ikennkt.
+# GoReleaser configuration for veepin.
 # https://goreleaser.com  —  docs for every stanza below.
 #
 # Local usage:
@@ -14,7 +14,7 @@
 
 version: 2
 
-project_name: ikennkt
+project_name: veepin
 
 before:
   hooks:
@@ -98,10 +98,10 @@ archives:
 # ---------------------------------------------------------------------------
 nfpms:
   - id: packages
-    package_name: ikennkt
+    package_name: veepin
     ids: [ikev2d, ikev2, testclient]
-    vendor: ikennkt
-    homepage: https://github.com/xen0bit/ikennkt
+    vendor: veepin
+    homepage: https://github.com/xen0bit/veepin
     maintainer: Remy <remaclematt@gmail.com>
     description: |-
       Pure-Go userspace IKEv2 VPN — server (responder) and client (initiator).
@@ -115,7 +115,7 @@ nfpms:
     # rather than enforced, since packaging can't grant capabilities portably.
     contents:
       - src: README.md
-        dst: /usr/share/doc/ikennkt/README.md
+        dst: /usr/share/doc/veepin/README.md
 
 # ---------------------------------------------------------------------------
 # Checksums, signing hook (optional), snapshots, changelog, release.
@@ -150,7 +150,7 @@ changelog:
 release:
   github:
     owner: xen0bit
-    name: ikennkt
+    name: veepin
   draft: false
   prerelease: auto
   name_template: "v{{ .Version }}"

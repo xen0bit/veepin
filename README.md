@@ -1,4 +1,4 @@
-# ikennkt
+# veepin
 
 A **working userspace IKEv2 VPN in Go** — both a server (responder) and a client
 (initiator) — written from scratch with no external dependencies beyond the Go
@@ -237,7 +237,7 @@ RFC 7296 responders that accept these authentication methods.
 ### Embedding the client
 
 The handshake and data path are also available as a reusable, dependency-free
-package, `github.com/xen0bit/ikennkt/client`: `client.Dial` performs the
+package, `github.com/xen0bit/veepin/client`: `client.Dial` performs the
 handshake and brings up the ESP data path over a TUN **without** installing
 routes, returning the assigned address/DNS/gateway for the caller to apply. The
 `ikev2` command is a thin wrapper over it.
@@ -253,11 +253,11 @@ stay CGO-free and stdlib-only):
 ```sh
 cd nm && make build && sudo make install
 sudo systemctl reload NetworkManager
-nmcli connection add type vpn con-name home-ikennkt ifname '*' \
-  vpn-type org.freedesktop.NetworkManager.ikennkt \
+nmcli connection add type vpn con-name home-veepin ifname '*' \
+  vpn-type org.freedesktop.NetworkManager.veepin \
   vpn.data 'gateway=vpn.example.com, local-id=client.example.com, full-tunnel=yes'
-nmcli connection modify home-ikennkt vpn.secrets 'psk=a-strong-preshared-key'
-nmcli connection up home-ikennkt
+nmcli connection modify home-veepin vpn.secrets 'psk=a-strong-preshared-key'
+nmcli connection up home-veepin
 ```
 
 See [`doc/networkmanager-plugin.md`](doc/networkmanager-plugin.md) for the full

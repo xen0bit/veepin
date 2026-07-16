@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/xen0bit/ikennkt/internal/crypto"
-	"github.com/xen0bit/ikennkt/internal/payload"
+	"github.com/xen0bit/veepin/internal/crypto"
+	"github.com/xen0bit/veepin/internal/payload"
 )
 
 // Identity describes a local or peer identity for IKE_AUTH.

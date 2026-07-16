@@ -15,10 +15,10 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/xen0bit/ikennkt/internal/crypto"
-	"github.com/xen0bit/ikennkt/internal/eap"
-	"github.com/xen0bit/ikennkt/internal/esp"
-	"github.com/xen0bit/ikennkt/internal/payload"
+	"github.com/xen0bit/veepin/internal/crypto"
+	"github.com/xen0bit/veepin/internal/eap"
+	"github.com/xen0bit/veepin/internal/esp"
+	"github.com/xen0bit/veepin/internal/payload"
 )
 
 // Build metadata, stamped via -ldflags at release time (see .goreleaser.yaml).

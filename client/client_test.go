@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xen0bit/ikennkt/internal/ike"
+	"github.com/xen0bit/veepin/internal/ike"
 )
 
 func TestDialValidation(t *testing.T) {

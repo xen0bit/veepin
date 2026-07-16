@@ -1,4 +1,4 @@
-# ikennkt — NetworkManager plugin (nested module)
+# veepin — NetworkManager plugin (nested module)
 #
 # This module is intentionally separate from the root module so the core
 # binaries (ikev2d/ikev2/testclient) stay CGO-free and dependency-free: the root
@@ -22,9 +22,9 @@ VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v
 PKG_ARCH ?= amd64
 
 BIN_DIR ?= bin
-SERVICE := $(BIN_DIR)/nm-ikennkt-service
-EDITOR_SO := $(BIN_DIR)/libnm-vpn-plugin-ikennkt.so
-AUTHDIALOG := $(BIN_DIR)/nm-ikennkt-auth-dialog
+SERVICE := $(BIN_DIR)/nm-veepin-service
+EDITOR_SO := $(BIN_DIR)/libnm-vpn-plugin-veepin.so
+AUTHDIALOG := $(BIN_DIR)/nm-veepin-auth-dialog
 
 # Install locations (Debian/Pop!_OS layout; override on other distros).
 DESTDIR      ?=
@@ -58,13 +58,13 @@ build: $(SERVICE)
 
 $(SERVICE): $(shell find . -name '*.go') go.mod
 	@mkdir -p $(BIN_DIR)
-	CGO_ENABLED=0 $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $@ ./cmd/nm-ikennkt-service
+	CGO_ENABLED=0 $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $@ ./cmd/nm-veepin-service
 
 ## editor: build the C/libnm GUI editor plugin (.so) if dev packages are present
 .PHONY: editor
 editor: $(EDITOR_SO)
 
-$(EDITOR_SO): editor/ikennkt-editor.c
+$(EDITOR_SO): editor/veepin-editor.c
 ifeq ($(HAVE_EDITOR),yes)
 	@mkdir -p $(BIN_DIR)
 	$(CC) -shared $(EDITOR_CFLAGS) -o $@ $< $(EDITOR_LIBS)
@@ -87,7 +87,7 @@ endif
 .PHONY: authdialog
 authdialog: $(AUTHDIALOG)
 
-$(AUTHDIALOG): authdialog/ikennkt-auth-dialog.c
+$(AUTHDIALOG): authdialog/veepin-auth-dialog.c
 ifeq ($(HAVE_AUTHDIALOG),yes)
 	@mkdir -p $(BIN_DIR)
 	$(CC) $(AUTH_CFLAGS) -o $@ $< $(AUTH_LIBS)
@@ -109,7 +109,7 @@ endif
 .PHONY: all
 all: build editor authdialog
 
-## packages: build the ikennkt-nm .deb and .rpm (needs nfpm + editor/auth deps)
+## packages: build the veepin-nm .deb and .rpm (needs nfpm + editor/auth deps)
 .PHONY: packages
 packages: build editor authdialog
 	@command -v $(NFPM) >/dev/null 2>&1 || { \
@@ -152,28 +152,28 @@ tidy:
 .PHONY: install
 install: build
 	install -d $(DESTDIR)$(NM_LIBDIR) $(DESTDIR)$(VPN_DIR) $(DESTDIR)$(DBUS_POLICY)
-	install -m 0755 $(SERVICE) $(DESTDIR)$(NM_LIBDIR)/nm-ikennkt-service
-	install -m 0644 data/nm-ikennkt-service.name $(DESTDIR)$(VPN_DIR)/nm-ikennkt-service.name
-	install -m 0644 data/nm-ikennkt-service.conf $(DESTDIR)$(DBUS_POLICY)/nm-ikennkt-service.conf
+	install -m 0755 $(SERVICE) $(DESTDIR)$(NM_LIBDIR)/nm-veepin-service
+	install -m 0644 data/nm-veepin-service.name $(DESTDIR)$(VPN_DIR)/nm-veepin-service.name
+	install -m 0644 data/nm-veepin-service.conf $(DESTDIR)$(DBUS_POLICY)/nm-veepin-service.conf
 ifeq ($(HAVE_EDITOR),yes)
 	@$(MAKE) editor
 	install -d $(DESTDIR)$(NM_PLUGIN_DIR)
-	install -m 0644 $(EDITOR_SO) $(DESTDIR)$(NM_PLUGIN_DIR)/libnm-vpn-plugin-ikennkt.so
+	install -m 0644 $(EDITOR_SO) $(DESTDIR)$(NM_PLUGIN_DIR)/libnm-vpn-plugin-veepin.so
 endif
 ifeq ($(HAVE_AUTHDIALOG),yes)
 	@$(MAKE) authdialog
-	install -m 0755 $(AUTHDIALOG) $(DESTDIR)$(NM_LIBDIR)/nm-ikennkt-auth-dialog
+	install -m 0755 $(AUTHDIALOG) $(DESTDIR)$(NM_LIBDIR)/nm-veepin-auth-dialog
 endif
 	@echo "Installed. Reload NetworkManager:  sudo systemctl reload NetworkManager"
 
 ## uninstall: remove installed files (needs root)
 .PHONY: uninstall
 uninstall:
-	rm -f $(DESTDIR)$(NM_LIBDIR)/nm-ikennkt-service
-	rm -f $(DESTDIR)$(NM_LIBDIR)/nm-ikennkt-auth-dialog
-	rm -f $(DESTDIR)$(VPN_DIR)/nm-ikennkt-service.name
-	rm -f $(DESTDIR)$(DBUS_POLICY)/nm-ikennkt-service.conf
-	rm -f $(DESTDIR)$(NM_PLUGIN_DIR)/libnm-vpn-plugin-ikennkt.so
+	rm -f $(DESTDIR)$(NM_LIBDIR)/nm-veepin-service
+	rm -f $(DESTDIR)$(NM_LIBDIR)/nm-veepin-auth-dialog
+	rm -f $(DESTDIR)$(VPN_DIR)/nm-veepin-service.name
+	rm -f $(DESTDIR)$(DBUS_POLICY)/nm-veepin-service.conf
+	rm -f $(DESTDIR)$(NM_PLUGIN_DIR)/libnm-vpn-plugin-veepin.so
 	@echo "Removed. Reload NetworkManager:  sudo systemctl reload NetworkManager"
 
 ## clean: remove build output
@@ -184,7 +184,7 @@ clean:
 ## help: list targets
 .PHONY: help
 help:
-	@echo "ikennkt NetworkManager plugin — make targets:"
+	@echo "veepin NetworkManager plugin — make targets:"
 	@grep -hE '^## [a-zA-Z0-9_-]+:' $(MAKEFILE_LIST) \
 		| sed -E 's/^## ([a-zA-Z0-9_-]+): (.*)/  \1|\2/' \
 		| awk -F'|' '{ printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2 }'

@@ -9,7 +9,7 @@ import (
 	"strconv"
 
 	"github.com/godbus/dbus/v5"
-	"github.com/xen0bit/ikennkt/client"
+	"github.com/xen0bit/veepin/client"
 )
 
 // Settings is the wire shape NetworkManager passes to VPN.Plugin.Connect:

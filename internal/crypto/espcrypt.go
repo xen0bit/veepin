@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"hash"
 
-	"github.com/xen0bit/ikennkt/internal/payload"
+	"github.com/xen0bit/veepin/internal/payload"
 )
 
 // ESPCrypter is an allocation-conscious cipher for the ESP data path. Unlike

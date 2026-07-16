@@ -6,8 +6,8 @@ import (
 	"net"
 	"sync"
 
-	"github.com/xen0bit/ikennkt/internal/eap"
-	"github.com/xen0bit/ikennkt/internal/payload"
+	"github.com/xen0bit/veepin/internal/eap"
+	"github.com/xen0bit/veepin/internal/payload"
 )
 
 // Config configures the IKEv2 server.

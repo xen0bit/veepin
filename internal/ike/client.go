@@ -9,10 +9,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xen0bit/ikennkt/internal/crypto"
-	"github.com/xen0bit/ikennkt/internal/eap"
-	"github.com/xen0bit/ikennkt/internal/esp"
-	"github.com/xen0bit/ikennkt/internal/payload"
+	"github.com/xen0bit/veepin/internal/crypto"
+	"github.com/xen0bit/veepin/internal/eap"
+	"github.com/xen0bit/veepin/internal/esp"
+	"github.com/xen0bit/veepin/internal/payload"
 )
 
 // ErrAuthFailed indicates the peer's authentication could not be verified —

@@ -1,4 +1,4 @@
-// Package interop holds Docker-based interoperability tests that run the ikennkt
+// Package interop holds Docker-based interoperability tests that run the veepin
 // client and server against strongSwan.
 //
 // The tests are guarded by the "interop" build tag and require Docker, so they

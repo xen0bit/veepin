@@ -1,11 +1,11 @@
-# Phase 0 infra sanity: ikennkt client <-> ikennkt server, no strongSwan.
+# Phase 0 infra sanity: veepin client <-> veepin server, no strongSwan.
 # Proves containers + /dev/net/tun + NET_ADMIN + forced NAT-T UDP-encap ESP +
 # a cross-tunnel ping all work with our own binaries before adding strongSwan.
-name: ikennkt-selftest
+name: veepin-selftest
 
 services:
   server:
-    image: ikennkt:interop
+    image: veepin:interop
     build:
       context: ../..
       dockerfile: Dockerfile
@@ -16,11 +16,11 @@ services:
       SERVER_ID: "vpn.example.com"
       POOL: "10.10.10.0/24"
     volumes:
-      - ./ikennkt/server-entrypoint.sh:/entrypoint.sh:ro
+      - ./veepin/server-entrypoint.sh:/entrypoint.sh:ro
     entrypoint: ["/bin/sh", "/entrypoint.sh"]
 
   client:
-    image: ikennkt:interop
+    image: veepin:interop
     build:
       context: ../..
       dockerfile: Dockerfile
@@ -33,5 +33,5 @@ services:
       CLIENT_ID: "client.example.com"
       SERVER_ID: "vpn.example.com"
     volumes:
-      - ./ikennkt/client-entrypoint.sh:/entrypoint.sh:ro
+      - ./veepin/client-entrypoint.sh:/entrypoint.sh:ro
     entrypoint: ["/bin/sh", "/entrypoint.sh"]

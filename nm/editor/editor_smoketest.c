@@ -13,7 +13,7 @@
 #include <libnm/nm-vpn-editor-plugin.h>
 #include <libnm/nm-vpn-editor.h>
 
-#define SERVICE "org.freedesktop.NetworkManager.ikennkt"
+#define SERVICE "org.freedesktop.NetworkManager.veepin"
 
 typedef NMVpnEditorPlugin *(*FactoryFunc)(GError **);
 
@@ -22,7 +22,7 @@ make_source_connection(void)
 {
     NMConnection *c = nm_simple_connection_new();
     NMSetting *sc = nm_setting_connection_new();
-    g_object_set(sc, NM_SETTING_CONNECTION_ID, "test-ikennkt",
+    g_object_set(sc, NM_SETTING_CONNECTION_ID, "test-veepin",
                  NM_SETTING_CONNECTION_TYPE, "vpn", NULL);
     nm_connection_add_setting(c, sc);
 
@@ -48,7 +48,7 @@ main(int argc, char **argv)
         return 77; /* automake-style skip */
     }
 
-    const char *path = (argc > 1) ? argv[1] : "./libnm-vpn-plugin-ikennkt.so";
+    const char *path = (argc > 1) ? argv[1] : "./libnm-vpn-plugin-veepin.so";
     GModule *mod = g_module_open(path, G_MODULE_BIND_LOCAL);
     if (!mod) {
         g_printerr("FAIL: g_module_open: %s\n", g_module_error());

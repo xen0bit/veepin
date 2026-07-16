@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the full ikennkt benchmark suite.
+# Run the full veepin benchmark suite.
 #
 # Usage:
 #   ./bench.sh                 # all benchmarks, default 1s each

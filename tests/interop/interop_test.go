@@ -1,6 +1,6 @@
 //go:build interop
 
-// Docker-based interoperability tests: they stand up ikennkt and strongSwan in
+// Docker-based interoperability tests: they stand up veepin and strongSwan in
 // containers and prove a real ESP-in-UDP tunnel by pinging across it, in both
 // directions. Run with `make interop` or `go test -tags interop ./tests/interop/`.
 //
@@ -21,21 +21,21 @@ import (
 // strongSwan) charon startup.
 const pingDeadline = 100 * time.Second
 
-// TestInteropSelf is the infra sanity check: ikennkt client <-> ikennkt server.
+// TestInteropSelf is the infra sanity check: veepin client <-> veepin server.
 // It isolates the container/TUN/NAT-T/ping harness from strongSwan.
 func TestInteropSelf(t *testing.T) {
 	runInterop(t, "compose.selftest.yml", "client", "10.10.10.1")
 }
 
-// TestInteropIkennktClientStrongswanServer is Direction A: the ikennkt client
+// TestInteropVeepinClientStrongswanServer is Direction A: the veepin client
 // (ikev2) tunnels to a strongSwan responder and pings a strongSwan-side address.
-func TestInteropIkennktClientStrongswanServer(t *testing.T) {
-	runInterop(t, "compose.client-ss.yml", "ikennkt-client", "10.20.30.254")
+func TestInteropVeepinClientStrongswanServer(t *testing.T) {
+	runInterop(t, "compose.client-ss.yml", "veepin-client", "10.20.30.254")
 }
 
-// TestInteropStrongswanClientIkennktServer is Direction B: a strongSwan
-// initiator tunnels to the ikennkt server (ikev2d) and pings its TUN gateway.
-func TestInteropStrongswanClientIkennktServer(t *testing.T) {
+// TestInteropStrongswanClientVeepinServer is Direction B: a strongSwan
+// initiator tunnels to the veepin server (ikev2d) and pings its TUN gateway.
+func TestInteropStrongswanClientVeepinServer(t *testing.T) {
 	runInterop(t, "compose.server-ss.yml", "strongswan-client", "10.10.10.1")
 }
 

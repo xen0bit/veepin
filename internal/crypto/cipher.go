@@ -8,7 +8,7 @@ import (
 	"crypto/subtle"
 	"fmt"
 
-	"github.com/xen0bit/ikennkt/internal/payload"
+	"github.com/xen0bit/veepin/internal/payload"
 )
 
 // SKCipher protects the encrypted (SK) payload. It handles both AEAD ciphers

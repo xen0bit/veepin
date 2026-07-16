@@ -1,6 +1,6 @@
 name: interop
 
-# Docker-based interoperability tests (ikennkt vs strongSwan). Kept in its own
+# Docker-based interoperability tests (veepin vs strongSwan). Kept in its own
 # workflow — like nm.yml — so the toolchain-light core jobs never pull in Docker
 # or a strongSwan image. Path-filtered to the code that affects the data path /
 # handshake so it does not run on unrelated changes.
@@ -48,7 +48,7 @@ jobs:
 
       - name: Enable TUN + IPsec kernel modules
         run: |
-          # The ikennkt containers need /dev/net/tun; strongSwan uses kernel XFRM.
+          # The veepin containers need /dev/net/tun; strongSwan uses kernel XFRM.
           sudo modprobe tun || true
           sudo modprobe esp4 xfrm_user af_key || true
           ls -l /dev/net/tun

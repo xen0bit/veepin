@@ -10,7 +10,7 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/xen0bit/ikennkt/internal/crypto"
+	"github.com/xen0bit/veepin/internal/crypto"
 )
 
 // Drop-path sentinel errors. Decapsulate can be called for every inbound packet

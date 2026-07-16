@@ -1,15 +1,15 @@
-# Direction B: strongSwan client (initiator) -> ikennkt server (ikev2d).
-# strongSwan forces UDP encapsulation (encap=yes in its config) since ikennkt
+# Direction B: strongSwan client (initiator) -> veepin server (ikev2d).
+# strongSwan forces UDP encapsulation (encap=yes in its config) since veepin
 # only does UDP-encapsulated ESP on 4500. Data-path check: the strongSwan client
-# pings 10.10.10.1 (the ikennkt server's TUN gateway) through the tunnel.
-name: ikennkt-interop-b
+# pings 10.10.10.1 (the veepin server's TUN gateway) through the tunnel.
+name: veepin-interop-b
 
 services:
-  ikennkt-server:
+  veepin-server:
     build:
       context: ../..
       dockerfile: Dockerfile
-    image: ikennkt:interop
+    image: veepin:interop
     cap_add: [NET_ADMIN]
     devices: ["/dev/net/tun:/dev/net/tun"]
     sysctls:
@@ -21,7 +21,7 @@ services:
       SERVER_ID: "vpn.example.com"
       POOL: "10.10.10.0/24"
     volumes:
-      - ./ikennkt/server-entrypoint.sh:/entrypoint.sh:ro
+      - ./veepin/server-entrypoint.sh:/entrypoint.sh:ro
     entrypoint: ["/bin/sh", "/entrypoint.sh"]
 
   strongswan-client:
@@ -32,7 +32,7 @@ services:
     sysctls:
       net.ipv4.conf.all.rp_filter: "0"
       net.ipv4.conf.default.rp_filter: "0"
-    depends_on: [ikennkt-server]
+    depends_on: [veepin-server]
     volumes:
       - ./strongswan/swanctl-client.conf:/etc/swanctl/swanctl.conf:ro
       - ./strongswan/client-entrypoint.sh:/entrypoint.sh:ro

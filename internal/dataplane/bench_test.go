@@ -5,9 +5,9 @@ import (
 	"net"
 	"testing"
 
-	"github.com/xen0bit/ikennkt/internal/crypto"
-	"github.com/xen0bit/ikennkt/internal/esp"
-	"github.com/xen0bit/ikennkt/internal/payload"
+	"github.com/xen0bit/veepin/internal/crypto"
+	"github.com/xen0bit/veepin/internal/esp"
+	"github.com/xen0bit/veepin/internal/payload"
 )
 
 // discardTUN drops everything written to it and never yields reads; it isolates

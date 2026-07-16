@@ -3,9 +3,9 @@ package ike
 import (
 	"net"
 
-	"github.com/xen0bit/ikennkt/internal/crypto"
-	"github.com/xen0bit/ikennkt/internal/eap"
-	"github.com/xen0bit/ikennkt/internal/payload"
+	"github.com/xen0bit/veepin/internal/crypto"
+	"github.com/xen0bit/veepin/internal/eap"
+	"github.com/xen0bit/veepin/internal/payload"
 )
 
 // handleIKEAuth processes an IKE_AUTH request. Two authentication modes are

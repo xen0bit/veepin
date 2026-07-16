@@ -1,8 +1,8 @@
-# Direction A: ikennkt client (ikev2) -> strongSwan responder.
-# The ikennkt client forces NAT-T, so strongSwan auto-enables UDP-encapsulated
+# Direction A: veepin client (ikev2) -> strongSwan responder.
+# The veepin client forces NAT-T, so strongSwan auto-enables UDP-encapsulated
 # ESP on 4500 — no NAT router needed. Data-path check: the client pings
 # 10.20.30.254 (a strongSwan-side address inside the tunnel).
-name: ikennkt-interop-a
+name: veepin-interop-a
 
 services:
   strongswan-server:
@@ -24,11 +24,11 @@ services:
       - ./strongswan/server-entrypoint.sh:/entrypoint.sh:ro
     command: ["/bin/sh", "/entrypoint.sh"]
 
-  ikennkt-client:
+  veepin-client:
     build:
       context: ../..
       dockerfile: Dockerfile
-    image: ikennkt:interop
+    image: veepin:interop
     cap_add: [NET_ADMIN]
     devices: ["/dev/net/tun:/dev/net/tun"]
     depends_on: [strongswan-server]
@@ -38,5 +38,5 @@ services:
       CLIENT_ID: "client.example.com"
       SERVER_ID: "vpn.example.com"
     volumes:
-      - ./ikennkt/client-entrypoint.sh:/entrypoint.sh:ro
+      - ./veepin/client-entrypoint.sh:/entrypoint.sh:ro
     entrypoint: ["/bin/sh", "/entrypoint.sh"]

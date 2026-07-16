@@ -1,15 +1,15 @@
 /*
- * ikennkt-editor.c — NetworkManager VPN editor plugin for ikennkt.
+ * veepin-editor.c — NetworkManager VPN editor plugin for veepin.
  *
  * This is the graphical half of the plugin: a GObject shared library that
  * nm-connection-editor / GNOME Settings dlopen() to draw the "Add VPN" form and
  * translate its fields to/from the connection's vpn.data / vpn.secrets maps that
- * the D-Bus service (nm-ikennkt-service) consumes.
+ * the D-Bus service (nm-veepin-service) consumes.
  *
  * It is written in C against libnm/libnma because NetworkManager loads editor
  * plugins as GObject types — this is the one piece the project cannot express in
  * Go. It is built separately (see ../Makefile) and never linked into any Go
- * binary, so the core ikennkt binaries stay CGO-free.
+ * binary, so the core veepin binaries stay CGO-free.
  *
  * Keys must match nm/internal/nmconfig: gateway, local-id, server-id, user,
  * full-tunnel, mtu (data) and psk, password (secrets).
@@ -20,7 +20,7 @@
 #include <libnm/nm-vpn-editor-plugin.h>
 #include <libnm/nm-vpn-editor.h>
 
-#define IKENNKT_SERVICE "org.freedesktop.NetworkManager.ikennkt"
+#define VEEPIN_SERVICE "org.freedesktop.NetworkManager.veepin"
 
 /* Data / secret keys (kept in sync with nm/internal/nmconfig). */
 #define KEY_GATEWAY     "gateway"
@@ -48,26 +48,26 @@ typedef struct {
     GtkWidget *full_tunnel;
     GtkWidget *mtu;
     GtkWidget *save_secrets;
-} IkennktEditor;
+} VeepinEditor;
 
 typedef struct {
     GObjectClass parent;
-} IkennktEditorClass;
+} VeepinEditorClass;
 
-static void ikennkt_editor_interface_init(NMVpnEditorInterface *iface);
+static void veepin_editor_interface_init(NMVpnEditorInterface *iface);
 
-GType ikennkt_editor_get_type(void);
-G_DEFINE_TYPE_WITH_CODE(IkennktEditor, ikennkt_editor, G_TYPE_OBJECT,
+GType veepin_editor_get_type(void);
+G_DEFINE_TYPE_WITH_CODE(VeepinEditor, veepin_editor, G_TYPE_OBJECT,
                         G_IMPLEMENT_INTERFACE(NM_TYPE_VPN_EDITOR,
-                                              ikennkt_editor_interface_init))
+                                              veepin_editor_interface_init))
 
-#define IKENNKT_TYPE_EDITOR (ikennkt_editor_get_type())
-#define IKENNKT_EDITOR(o)   (G_TYPE_CHECK_INSTANCE_CAST((o), IKENNKT_TYPE_EDITOR, IkennktEditor))
+#define VEEPIN_TYPE_EDITOR (veepin_editor_get_type())
+#define VEEPIN_EDITOR(o)   (G_TYPE_CHECK_INSTANCE_CAST((o), VEEPIN_TYPE_EDITOR, VeepinEditor))
 
 static GObject *
 get_widget(NMVpnEditor *editor)
 {
-    IkennktEditor *self = IKENNKT_EDITOR(editor);
+    VeepinEditor *self = VEEPIN_EDITOR(editor);
     return G_OBJECT(self->widget);
 }
 
@@ -82,12 +82,12 @@ field_changed(GtkWidget *w, gpointer user_data)
 static gboolean
 update_connection(NMVpnEditor *editor, NMConnection *connection, GError **error)
 {
-    IkennktEditor *self = IKENNKT_EDITOR(editor);
+    VeepinEditor *self = VEEPIN_EDITOR(editor);
     NMSettingVpn *vpn;
     const char *s;
 
     vpn = NM_SETTING_VPN(nm_setting_vpn_new());
-    g_object_set(vpn, NM_SETTING_VPN_SERVICE_TYPE, IKENNKT_SERVICE, NULL);
+    g_object_set(vpn, NM_SETTING_VPN_SERVICE_TYPE, VEEPIN_SERVICE, NULL);
 
     s = gtk_entry_get_text(GTK_ENTRY(self->gateway));
     if (!s || !*s) {
@@ -179,7 +179,7 @@ make_entry(gboolean secret)
 }
 
 static void
-build_ui(IkennktEditor *self, NMConnection *connection)
+build_ui(VeepinEditor *self, NMConnection *connection)
 {
     NMSettingVpn *vpn = connection ? nm_connection_get_setting_vpn(connection) : NULL;
     GtkGrid *grid;
@@ -243,27 +243,27 @@ build_ui(IkennktEditor *self, NMConnection *connection)
 }
 
 static void
-ikennkt_editor_init(IkennktEditor *self)
+veepin_editor_init(VeepinEditor *self)
 {
     (void) self;
 }
 
 static void
-ikennkt_editor_dispose(GObject *object)
+veepin_editor_dispose(GObject *object)
 {
-    IkennktEditor *self = IKENNKT_EDITOR(object);
+    VeepinEditor *self = VEEPIN_EDITOR(object);
     g_clear_object(&self->widget);
-    G_OBJECT_CLASS(ikennkt_editor_parent_class)->dispose(object);
+    G_OBJECT_CLASS(veepin_editor_parent_class)->dispose(object);
 }
 
 static void
-ikennkt_editor_class_init(IkennktEditorClass *klass)
+veepin_editor_class_init(VeepinEditorClass *klass)
 {
-    G_OBJECT_CLASS(klass)->dispose = ikennkt_editor_dispose;
+    G_OBJECT_CLASS(klass)->dispose = veepin_editor_dispose;
 }
 
 static void
-ikennkt_editor_interface_init(NMVpnEditorInterface *iface)
+veepin_editor_interface_init(NMVpnEditorInterface *iface)
 {
     iface->get_widget = get_widget;
     iface->update_connection = update_connection;
@@ -271,12 +271,12 @@ ikennkt_editor_interface_init(NMVpnEditorInterface *iface)
 
 /* Constructor used by the plugin's get_editor(). */
 static NMVpnEditor *
-ikennkt_editor_new(NMConnection *connection, GError **error)
+veepin_editor_new(NMConnection *connection, GError **error)
 {
-    IkennktEditor *self;
+    VeepinEditor *self;
 
     (void) error;
-    self = g_object_new(IKENNKT_TYPE_EDITOR, NULL);
+    self = g_object_new(VEEPIN_TYPE_EDITOR, NULL);
     build_ui(self, connection);
     return NM_VPN_EDITOR(self);
 }
@@ -287,20 +287,20 @@ ikennkt_editor_new(NMConnection *connection, GError **error)
 
 typedef struct {
     GObject parent;
-} IkennktEditorPlugin;
+} VeepinEditorPlugin;
 
 typedef struct {
     GObjectClass parent;
-} IkennktEditorPluginClass;
+} VeepinEditorPluginClass;
 
-static void ikennkt_editor_plugin_interface_init(NMVpnEditorPluginInterface *iface);
+static void veepin_editor_plugin_interface_init(NMVpnEditorPluginInterface *iface);
 
-GType ikennkt_editor_plugin_get_type(void);
-G_DEFINE_TYPE_WITH_CODE(IkennktEditorPlugin, ikennkt_editor_plugin, G_TYPE_OBJECT,
+GType veepin_editor_plugin_get_type(void);
+G_DEFINE_TYPE_WITH_CODE(VeepinEditorPlugin, veepin_editor_plugin, G_TYPE_OBJECT,
                         G_IMPLEMENT_INTERFACE(NM_TYPE_VPN_EDITOR_PLUGIN,
-                                              ikennkt_editor_plugin_interface_init))
+                                              veepin_editor_plugin_interface_init))
 
-#define IKENNKT_TYPE_EDITOR_PLUGIN (ikennkt_editor_plugin_get_type())
+#define VEEPIN_TYPE_EDITOR_PLUGIN (veepin_editor_plugin_get_type())
 
 enum { PROP_0, PROP_NAME, PROP_DESC, PROP_SERVICE };
 
@@ -308,7 +308,7 @@ static NMVpnEditor *
 get_editor(NMVpnEditorPlugin *plugin, NMConnection *connection, GError **error)
 {
     (void) plugin;
-    return ikennkt_editor_new(connection, error);
+    return veepin_editor_new(connection, error);
 }
 
 static NMVpnEditorPluginCapability
@@ -324,13 +324,13 @@ plugin_get_property(GObject *object, guint prop_id, GValue *value, GParamSpec *p
     (void) object;
     switch (prop_id) {
     case PROP_NAME:
-        g_value_set_string(value, "IKEv2 (ikennkt)");
+        g_value_set_string(value, "IKEv2 (veepin)");
         break;
     case PROP_DESC:
-        g_value_set_string(value, "Compatible with the ikennkt IKEv2 VPN server.");
+        g_value_set_string(value, "Compatible with the veepin IKEv2 VPN server.");
         break;
     case PROP_SERVICE:
-        g_value_set_string(value, IKENNKT_SERVICE);
+        g_value_set_string(value, VEEPIN_SERVICE);
         break;
     default:
         G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
@@ -338,13 +338,13 @@ plugin_get_property(GObject *object, guint prop_id, GValue *value, GParamSpec *p
 }
 
 static void
-ikennkt_editor_plugin_init(IkennktEditorPlugin *self)
+veepin_editor_plugin_init(VeepinEditorPlugin *self)
 {
     (void) self;
 }
 
 static void
-ikennkt_editor_plugin_class_init(IkennktEditorPluginClass *klass)
+veepin_editor_plugin_class_init(VeepinEditorPluginClass *klass)
 {
     GObjectClass *object_class = G_OBJECT_CLASS(klass);
     object_class->get_property = plugin_get_property;
@@ -355,7 +355,7 @@ ikennkt_editor_plugin_class_init(IkennktEditorPluginClass *klass)
 }
 
 static void
-ikennkt_editor_plugin_interface_init(NMVpnEditorPluginInterface *iface)
+veepin_editor_plugin_interface_init(NMVpnEditorPluginInterface *iface)
 {
     iface->get_editor = get_editor;
     iface->get_capabilities = get_capabilities;
@@ -369,5 +369,5 @@ G_MODULE_EXPORT NMVpnEditorPlugin *
 nm_vpn_editor_plugin_factory(GError **error)
 {
     (void) error;
-    return g_object_new(IKENNKT_TYPE_EDITOR_PLUGIN, NULL);
+    return g_object_new(VEEPIN_TYPE_EDITOR_PLUGIN, NULL);
 }

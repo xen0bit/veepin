@@ -17,13 +17,13 @@ import (
 	"github.com/godbus/dbus/v5"
 	"github.com/godbus/dbus/v5/introspect"
 	"github.com/godbus/dbus/v5/prop"
-	"github.com/xen0bit/ikennkt/client"
-	"github.com/xen0bit/ikennkt/nm/internal/nmconfig"
+	"github.com/xen0bit/veepin/client"
+	"github.com/xen0bit/veepin/nm/internal/nmconfig"
 )
 
 // D-Bus identifiers for the plugin.
 const (
-	BusName    = "org.freedesktop.NetworkManager.ikennkt"
+	BusName    = "org.freedesktop.NetworkManager.veepin"
 	ObjectPath = dbus.ObjectPath("/org/freedesktop/NetworkManager/VPN/Plugin")
 	Iface      = "org.freedesktop.NetworkManager.VPN.Plugin"
 )
@@ -65,7 +65,7 @@ type Plugin struct {
 // New creates a Plugin bound to conn.
 func New(conn *dbus.Conn, logger *log.Logger) *Plugin {
 	if logger == nil {
-		logger = log.New(log.Writer(), "nm-ikennkt: ", log.LstdFlags)
+		logger = log.New(log.Writer(), "nm-veepin: ", log.LstdFlags)
 	}
 	return &Plugin{conn: conn, log: logger, quit: make(chan struct{}), state: StateInit}
 }

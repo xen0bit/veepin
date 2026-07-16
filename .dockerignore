@@ -1,4 +1,4 @@
-# Keep the ikennkt build context small and deterministic. The root Dockerfile
+# Keep the veepin build context small and deterministic. The root Dockerfile
 # only needs the Go module source under cmd/, internal/, client/ (+ go.mod).
 .git
 dist/

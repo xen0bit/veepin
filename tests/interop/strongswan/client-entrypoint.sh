@@ -1,6 +1,6 @@
 #!/bin/sh
 # strongSwan initiator entrypoint (Direction B). Starts charon, loads config,
-# and initiates the SA to the ikennkt server, retrying until it is reachable.
+# and initiates the SA to the veepin server, retrying until it is reachable.
 set -e
 
 /usr/lib/ipsec/charon &
@@ -14,7 +14,7 @@ while [ ! -S /run/charon.vici ] && [ ! -S /var/run/charon.vici ]; do
 done
 
 swanctl --load-all
-echo "strongswan-client: config loaded; initiating to ikennkt-server"
+echo "strongswan-client: config loaded; initiating to veepin-server"
 
 i=1
 while [ "$i" -le 30 ]; do

@@ -1,4 +1,4 @@
-// Package client is an embeddable ikennkt VPN client. It performs the IKEv2
+// Package client is an embeddable veepin VPN client. It performs the IKEv2
 // handshake (PSK or EAP-MSCHAPv2) and runs the userspace ESP-in-UDP data path
 // over a TUN device — but it deliberately does NOT install addresses, routes or
 // DNS. The caller is responsible for applying the returned Result to the system
@@ -19,8 +19,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xen0bit/ikennkt/internal/dataplane"
-	"github.com/xen0bit/ikennkt/internal/ike"
+	"github.com/xen0bit/veepin/internal/dataplane"
+	"github.com/xen0bit/veepin/internal/ike"
 )
 
 // ErrAuth wraps a handshake failure caused by rejected credentials (a wrong PSK

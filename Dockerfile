@@ -1,4 +1,4 @@
-# ikennkt runtime image — used by the interop test harness (tests/interop) to run
+# veepin runtime image — used by the interop test harness (tests/interop) to run
 # the real ikev2d / ikev2 / testclient binaries in containers against strongSwan.
 #
 # The core binaries are pure-Go and CGO-free, so the build is fully static and the

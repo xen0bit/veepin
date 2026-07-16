@@ -1,10 +1,10 @@
-# nfpm config for the ikennkt NetworkManager plugin package.
+# nfpm config for the veepin NetworkManager plugin package.
 #
 # Built via `make packages` (which exports VERSION, PKG_ARCH, MULTIARCH). This
 # is a SEPARATE package from the CGO-free core: it carries a libnm/libgtk-3
 # runtime dependency because of the GUI editor .so, so it must not be bundled
 # with the static core binaries.
-name: ikennkt-nm
+name: veepin-nm
 arch: @PKG_ARCH@
 platform: linux
 version: @VERSION@
@@ -12,12 +12,12 @@ section: net
 priority: optional
 maintainer: Remy <remaclematt@gmail.com>
 description: |
-  NetworkManager VPN plugin for the ikennkt IKEv2 VPN.
-  Adds an "IKEv2 (ikennkt)" VPN type to NetworkManager: a D-Bus service that
-  drives the ikennkt VPN client plus a GTK editor for the connection form.
+  NetworkManager VPN plugin for the veepin IKEv2 VPN.
+  Adds an "IKEv2 (veepin)" VPN type to NetworkManager: a D-Bus service that
+  drives the veepin VPN client plus a GTK editor for the connection form.
   No dependency on strongSwan.
-vendor: ikennkt
-homepage: https://github.com/xen0bit/ikennkt
+vendor: veepin
+homepage: https://github.com/xen0bit/veepin
 license: MIT
 
 depends:
@@ -39,23 +39,23 @@ scripts:
   postremove: scripts/postremove.sh
 
 contents:
-  - src: bin/nm-ikennkt-service
-    dst: /usr/lib/NetworkManager/nm-ikennkt-service
+  - src: bin/nm-veepin-service
+    dst: /usr/lib/NetworkManager/nm-veepin-service
     file_info:
       mode: 0755
-  - src: bin/nm-ikennkt-auth-dialog
-    dst: /usr/lib/NetworkManager/nm-ikennkt-auth-dialog
+  - src: bin/nm-veepin-auth-dialog
+    dst: /usr/lib/NetworkManager/nm-veepin-auth-dialog
     file_info:
       mode: 0755
-  - src: bin/libnm-vpn-plugin-ikennkt.so
-    dst: /usr/lib/@MULTIARCH@/NetworkManager/libnm-vpn-plugin-ikennkt.so
+  - src: bin/libnm-vpn-plugin-veepin.so
+    dst: /usr/lib/@MULTIARCH@/NetworkManager/libnm-vpn-plugin-veepin.so
     file_info:
       mode: 0644
-  - src: data/nm-ikennkt-service.name
-    dst: /usr/lib/NetworkManager/VPN/nm-ikennkt-service.name
+  - src: data/nm-veepin-service.name
+    dst: /usr/lib/NetworkManager/VPN/nm-veepin-service.name
     file_info:
       mode: 0644
-  - src: data/nm-ikennkt-service.conf
-    dst: /usr/share/dbus-1/system.d/nm-ikennkt-service.conf
+  - src: data/nm-veepin-service.conf
+    dst: /usr/share/dbus-1/system.d/nm-veepin-service.conf
     file_info:
       mode: 0644

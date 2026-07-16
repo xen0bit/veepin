@@ -1,6 +1,6 @@
-# NetworkManager plugin for ikennkt
+# NetworkManager plugin for veepin
 
-Design document and implementation plan for integrating the ikennkt VPN client
+Design document and implementation plan for integrating the veepin VPN client
 (`./ikev2`) into NetworkManager, so a Linux desktop (GNOME / Pop!\_OS) can bring
 the tunnel up and down from its native VPN UI — **without** depending on
 strongSwan or the `network-manager-strongswan` packages.
@@ -16,7 +16,7 @@ and how to run it.
 
 ## 1. Goals and constraints
 
-**Goal.** A NetworkManager VPN type, "IKEv2 (ikennkt)", that:
+**Goal.** A NetworkManager VPN type, "IKEv2 (veepin)", that:
 
 - appears alongside OpenVPN / WireGuard / PPTP in the desktop VPN UI (eventually)
   and, at minimum, is toggleable from the GNOME quick-settings VPN menu;
@@ -76,7 +76,7 @@ interface `org.freedesktop.NetworkManager.VPN.Plugin`:
   - `StateChanged(u state)` — lifecycle (see enum below).
   - `Config(a{sv})` — generic tunnel config (`tundev`, `mtu`, `has-ip4`, …).
   - `Ip4Config(a{sv})` — IPv4 address/DNS/routes for NM to apply.
-  - `Ip6Config(a{sv})` — (unused; ikennkt is IPv4-only).
+  - `Ip6Config(a{sv})` — (unused; veepin is IPv4-only).
   - `SecretsRequired(s message, as hints)` — ask NM's secret agent for more.
   - `Failure(u reason)` — fatal error.
 - **Property:** `State (u)`.
@@ -101,7 +101,7 @@ against, the installed header at build time.
 
 ### 2.3 `Ip4Config` dict keys we populate
 
-| Key | Sig | Source in ikennkt |
+| Key | Sig | Source in veepin |
 |-----|-----|-------------------|
 | `address` | `u` | `ClientResult.AssignedIP` (network byte order uint32) |
 | `prefix` | `u` | prefix length derived from `ClientResult.Netmask` |
@@ -134,7 +134,7 @@ D-Bus shell around existing code:
 - **D1 — Public client facade.** Promote the handshake+datapath wiring currently
   inlined in `cmd/ikev2/main.go` into a small **public** package so external code
   can drive a session without reaching into `internal/`. Proposed
-  `client` package (`github.com/xen0bit/ikennkt/client`) exposing:
+  `client` package (`github.com/xen0bit/veepin/client`) exposing:
 
   ```go
   type Config struct {
@@ -176,27 +176,27 @@ libnm pieces. This is the mechanism that *structurally* guarantees constraints
 1–2.
 
 ```
-ikennkt/                      # ROOT MODULE — zero deps, CGO_ENABLED=0
-├── go.mod                    #   github.com/xen0bit/ikennkt   (unchanged: stdlib only)
+veepin/                      # ROOT MODULE — zero deps, CGO_ENABLED=0
+├── go.mod                    #   github.com/xen0bit/veepin   (unchanged: stdlib only)
 ├── client/                   #   NEW public facade (D1) — CGO-free, no deps
 ├── cmd/{ikev2d,ikev2,testclient}
 ├── internal/...
 └── nm/                       # NESTED MODULE — may use deps + CGO/C
-    ├── go.mod                #   github.com/xen0bit/ikennkt/nm
-    │                         #   require github.com/xen0bit/ikennkt  (+ replace ../)
+    ├── go.mod                #   github.com/xen0bit/veepin/nm
+    │                         #   require github.com/xen0bit/veepin  (+ replace ../)
     │                         #   require github.com/godbus/dbus/v5
     ├── cmd/
-    │   └── nm-ikennkt-service/   # the D-Bus VPN daemon (Go + godbus, CGO-free)
+    │   └── nm-veepin-service/   # the D-Bus VPN daemon (Go + godbus, CGO-free)
     ├── internal/
     │   ├── dbusplugin/       # NM VPN.Plugin contract impl over godbus
     │   └── nmconfig/         # connection-dict <-> client.Config mapping
     ├── editor/               # GUI editor plugin — C against libnm (built by gcc)
-    │   ├── ikennkt-editor.c
+    │   ├── veepin-editor.c
     │   └── Makefile
     ├── authdialog/           # optional secret-prompt helper (C or Go)
     ├── data/
-    │   ├── nm-ikennkt-service.name          # NM VPN descriptor
-    │   └── nm-ikennkt-service.conf          # D-Bus system policy
+    │   ├── nm-veepin-service.name          # NM VPN descriptor
+    │   └── nm-veepin-service.conf          # D-Bus system policy
     └── Makefile              # builds the nested module + C artifacts + packaging
 ```
 
@@ -209,7 +209,7 @@ ikennkt/                      # ROOT MODULE — zero deps, CGO_ENABLED=0
 - The root `go.mod` stays byte-for-byte dependency-free; only `nm/go.mod` lists
   godbus.
 - The nested module imports the core via
-  `require github.com/xen0bit/ikennkt v0.0.0` + `replace github.com/xen0bit/ikennkt => ../`.
+  `require github.com/xen0bit/veepin v0.0.0` + `replace github.com/xen0bit/veepin => ../`.
   It imports the **public** `client` package (D1), not `internal/` — clean across
   the module boundary and not reliant on the `internal` path exemption.
 
@@ -250,33 +250,33 @@ replace it later behind the same internal interface if desired.
 
 ## 5. Component specifications
 
-### 5.1 `.name` descriptor (`nm/data/nm-ikennkt-service.name`)
+### 5.1 `.name` descriptor (`nm/data/nm-veepin-service.name`)
 
 ```ini
 [VPN Connection]
-name=ikennkt
-service=org.freedesktop.NetworkManager.ikennkt
-program=/usr/libexec/nm-ikennkt-service
+name=veepin
+service=org.freedesktop.NetworkManager.veepin
+program=/usr/libexec/nm-veepin-service
 supports-multiple-connections=true
 
 [GNOME]
-auth-dialog=/usr/libexec/nm-ikennkt-auth-dialog
-properties=/usr/lib/NetworkManager/libnm-vpn-plugin-ikennkt.so
+auth-dialog=/usr/libexec/nm-veepin-auth-dialog
+properties=/usr/lib/NetworkManager/libnm-vpn-plugin-veepin.so
 supports-external-ui-mode=true
-service=org.freedesktop.NetworkManager.ikennkt
+service=org.freedesktop.NetworkManager.veepin
 
 [libnm]
-plugin=/usr/lib/NetworkManager/libnm-vpn-plugin-ikennkt.so
+plugin=/usr/lib/NetworkManager/libnm-vpn-plugin-veepin.so
 ```
 
 The `service=` name, the bus name the daemon requests, the policy file, and the
 `vpn-type` used with `nmcli` must all be exactly
-`org.freedesktop.NetworkManager.ikennkt`. In Phase 0 the `[GNOME]`/`[libnm]`
+`org.freedesktop.NetworkManager.veepin`. In Phase 0 the `[GNOME]`/`[libnm]`
 lines can be omitted (no editor yet).
 
-### 5.2 D-Bus daemon (`nm/cmd/nm-ikennkt-service`)
+### 5.2 D-Bus daemon (`nm/cmd/nm-veepin-service`)
 
-- Requests bus name `org.freedesktop.NetworkManager.ikennkt` on the **system**
+- Requests bus name `org.freedesktop.NetworkManager.veepin` on the **system**
   bus; exports the `VPN.Plugin` object.
 - **`Connect`**: parse the `a{sa{sv}}` connection dict via `nmconfig` →
   `client.Config`; call `client.Dial`; on success emit `Config` + `Ip4Config`,
@@ -310,7 +310,7 @@ Maps NM's `vpn.data` / `vpn.secrets` string maps to `client.Config`:
 This package is plain data mapping and is **unit-testable without a bus** — the
 bulk of the daemon's correctness tests live here.
 
-### 5.4 D-Bus system policy (`nm/data/nm-ikennkt-service.conf`)
+### 5.4 D-Bus system policy (`nm/data/nm-veepin-service.conf`)
 
 Installed to `/usr/share/dbus-1/system.d/`. Allows `root` to own the well-known
 name and NM to call it:
@@ -320,12 +320,12 @@ name and NM to call it:
  "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
 <busconfig>
   <policy user="root">
-    <allow own="org.freedesktop.NetworkManager.ikennkt"/>
-    <allow send_destination="org.freedesktop.NetworkManager.ikennkt"/>
+    <allow own="org.freedesktop.NetworkManager.veepin"/>
+    <allow send_destination="org.freedesktop.NetworkManager.veepin"/>
   </policy>
   <policy context="default">
-    <deny own="org.freedesktop.NetworkManager.ikennkt"/>
-    <allow send_destination="org.freedesktop.NetworkManager.ikennkt"/>
+    <deny own="org.freedesktop.NetworkManager.veepin"/>
+    <allow send_destination="org.freedesktop.NetworkManager.veepin"/>
   </policy>
 </busconfig>
 ```
@@ -336,11 +336,11 @@ Until the editor `.so` exists, create connections with `nmcli` (or a keyfile in
 `/etc/NetworkManager/system-connections/`):
 
 ```sh
-nmcli connection add type vpn con-name home-ikennkt ifname '*' \
-  vpn-type org.freedesktop.NetworkManager.ikennkt \
+nmcli connection add type vpn con-name home-veepin ifname '*' \
+  vpn-type org.freedesktop.NetworkManager.veepin \
   vpn.data 'gateway=vpn.example.com, local-id=client.example.com, server-id=vpn.example.com, full-tunnel=yes'
-nmcli connection modify home-ikennkt vpn.secrets 'psk=a-strong-preshared-key'
-nmcli connection up home-ikennkt
+nmcli connection modify home-veepin vpn.secrets 'psk=a-strong-preshared-key'
+nmcli connection up home-veepin
 ```
 
 Once created, the connection appears in the GNOME quick-settings VPN toggle and
@@ -353,7 +353,7 @@ Plain C against `libnm` (+ `libnma`/`libnm-gtk` for the widget). Implements the
 `NMVpnEditor` that binds a GTK form (gateway, local id, server id, auth mode
 PSK/EAP, PSK/username/password) to the `vpn.data`/`vpn.secrets` maps above. Built
 with `pkg-config --cflags --libs libnm` into
-`libnm-vpn-plugin-ikennkt.so`. Modeled on the `properties/` directory of existing
+`libnm-vpn-plugin-veepin.so`. Modeled on the `properties/` directory of existing
 in-tree NM plugins (e.g. network-manager-vpnc), which are the reference
 implementations. No Go here.
 
@@ -370,14 +370,14 @@ are always provisioned via `nmcli`/keyfile.
 - **Root build is untouched.** `make build`, `go build ./...`, and GoReleaser
   continue to compile only the three CGO-free binaries. No new deps, no CGO.
 - **`nm/Makefile`** drives the plugin:
-  - `make -C nm service` → `go build ./cmd/nm-ikennkt-service` (CGO-free, godbus).
+  - `make -C nm service` → `go build ./cmd/nm-veepin-service` (CGO-free, godbus).
   - `make -C nm editor` → `gcc $(pkg-config --cflags --libs libnm libnma) -shared`
-    → `libnm-vpn-plugin-ikennkt.so`.
+    → `libnm-vpn-plugin-veepin.so`.
   - `make -C nm install` → drop the `.name`, `.conf`, service binary
     (`/usr/libexec`), and `.so` (`/usr/lib/NetworkManager/`) into place.
   - `make -C nm deb` → a standalone `.deb` (see below).
-- **Packaging.** The plugin ships as its **own** package `ikennkt-nm` (deb/rpm),
-  separate from the core `ikennkt` package, and declares a runtime dependency on
+- **Packaging.** The plugin ships as its **own** package `veepin-nm` (deb/rpm),
+  separate from the core `veepin` package, and declares a runtime dependency on
   `libnm0` (+ `libnma` if the editor is included) and `networkmanager`. Two
   options:
   - keep the plugin's packaging in `nm/` (its own nfpms or `dpkg-deb`), so the
@@ -454,7 +454,7 @@ separation and avoids teaching the core release pipeline about CGO or libnm.
 | **0** | Working, toggleable VPN via `nmcli` (no graphical form) | `.name`, D-Bus daemon, `nmconfig`, policy `.conf`, provisioning docs | 4–6 d | no |
 | **1** | Robustness: full state machine, `NeedSecrets`/agent flow, MTU, failure/reporting, integration tests | daemon hardening + tests | 3–5 d | no |
 | **2** | Graphical *Add VPN* form + secret prompt | C `libnm` editor `.so`, auth-dialog | 4–7 d | **yes** |
-| **3** | Packaging + CI | `ikennkt-nm` deb/rpm, `nm` CI job, runbook | 2–3 d | build-only |
+| **3** | Packaging + CI | `veepin-nm` deb/rpm, `nm` CI job, runbook | 2–3 d | build-only |
 
 **Milestone "minimal wrapper" = end of Phase 0:** a NetworkManager-managed IKEv2
 connection to an `ikev2d` server, created with `nmcli`, toggled from the GNOME
@@ -501,13 +501,13 @@ budget is spent solely in Phase 2 on the one artifact NM's design forces into C.
 | Piece | Location | Notes |
 |-------|----------|-------|
 | Public client facade | `client/` (root module) | `Dial`/`Session`/`Result`; CGO-free, no deps; `cmd/ikev2` refactored onto it |
-| Nested plugin module | `nm/go.mod` | `github.com/xen0bit/ikennkt/nm`; the **only** module that uses godbus |
+| Nested plugin module | `nm/go.mod` | `github.com/xen0bit/veepin/nm`; the **only** module that uses godbus |
 | Connection-dict mapping | `nm/internal/nmconfig` | bus-free, unit-tested |
-| D-Bus VPN service | `nm/internal/dbusplugin`, `nm/cmd/nm-ikennkt-service` | implements `VPN.Plugin`; integration-tested on a private bus |
+| D-Bus VPN service | `nm/internal/dbusplugin`, `nm/cmd/nm-veepin-service` | implements `VPN.Plugin`; integration-tested on a private bus |
 | `.name` descriptor + D-Bus policy | `nm/data/` | references the editor `.so` |
-| GUI editor plugin (`.so`) | `nm/editor/ikennkt-editor.c` | C/libnm GObject; graphical Add-VPN form; saved secrets; dlopen smoke-tested |
-| Auth-dialog | `nm/authdialog/ikennkt-auth-dialog.c` | C/libnma; prompts for not-saved secrets; non-interactive paths tested |
-| Packaging | `nm/nfpm.yaml.in` | `ikennkt-nm` `.deb`/`.rpm` via `make packages` |
+| GUI editor plugin (`.so`) | `nm/editor/veepin-editor.c` | C/libnm GObject; graphical Add-VPN form; saved secrets; dlopen smoke-tested |
+| Auth-dialog | `nm/authdialog/veepin-auth-dialog.c` | C/libnma; prompts for not-saved secrets; non-interactive paths tested |
+| Packaging | `nm/nfpm.yaml.in` | `veepin-nm` `.deb`/`.rpm` via `make packages` |
 | Build/install | `nm/Makefile` | `make build` (Go, CGO-free) / `make editor` (C) / `make packages` / `sudo make install` |
 
 The core binaries (`ikev2d`/`ikev2`/`testclient`) remain CGO-free and the root
@@ -530,7 +530,7 @@ Remaining: interactive secrets (`ConnectInteractive`/`SecretsRequired`/
 
 ### Phase 2 progress
 
-Done: the **C/libnm GUI editor plugin** (`nm/editor/ikennkt-editor.c`) — a
+Done: the **C/libnm GUI editor plugin** (`nm/editor/veepin-editor.c`) — a
 GObject shared library providing the graphical *Add VPN* form (gateway, local/
 server ID, PSK, username/password, full-tunnel, MTU), mapping widgets to the
 `vpn.data`/`vpn.secrets` keys the service consumes and pre-filling from an
@@ -546,7 +546,7 @@ prompt; a "Save the pre-shared key / password" checkbox can switch them to
 
 ### Phase 2b — auth-dialog (done)
 
-`nm/authdialog/ikennkt-auth-dialog.c` is the C/libnma helper NM runs when a
+`nm/authdialog/veepin-auth-dialog.c` is the C/libnma helper NM runs when a
 connection has secrets flagged `NOT_SAVED`. It speaks NM's auth-dialog stdio
 protocol (`nm_vpn_service_plugin_read_vpn_details` in, `key\nvalue\n` pairs +
 blank-line terminator out), prompts for the missing PSK/password via
@@ -557,7 +557,7 @@ GTK prompt itself needs a user and is exercised manually.
 
 ### Phase 3 progress
 
-Done: the **`ikennkt-nm` package** (`nm/nfpm.yaml.in` + `make packages`) builds a
+Done: the **`veepin-nm` package** (`nm/nfpm.yaml.in` + `make packages`) builds a
 `.deb` and `.rpm` bundling the service, the editor `.so` (into the multiarch NM
 plugin dir), the `.name` descriptor and the D-Bus policy, with runtime deps on
 `network-manager`/`libgtk-3-0` (rpm: `NetworkManager`/`gtk3`) and
@@ -569,8 +569,8 @@ package from the CGO-free core so the core release pipeline never gains a
 
 ```sh
 cd nm
-make packages                       # builds bin/pkg/ikennkt-nm_*.deb and .rpm
-sudo apt install ./bin/pkg/ikennkt-nm_*.deb   # (or: sudo dnf install ./bin/pkg/ikennkt-nm-*.rpm)
+make packages                       # builds bin/pkg/veepin-nm_*.deb and .rpm
+sudo apt install ./bin/pkg/veepin-nm_*.deb   # (or: sudo dnf install ./bin/pkg/veepin-nm-*.rpm)
 ```
 
 The package installs the service, editor `.so`, `.name` and D-Bus policy, and its
@@ -582,17 +582,17 @@ post-install hook reloads NetworkManager.
 # Build and install the service, editor .so, .name descriptor, and D-Bus policy.
 cd nm
 make build editor
-sudo make install          # -> /usr/lib/NetworkManager/nm-ikennkt-service
-                           #    /usr/lib/<multiarch>/NetworkManager/libnm-vpn-plugin-ikennkt.so
-                           #    /usr/lib/NetworkManager/VPN/nm-ikennkt-service.name
-                           #    /usr/share/dbus-1/system.d/nm-ikennkt-service.conf
+sudo make install          # -> /usr/lib/NetworkManager/nm-veepin-service
+                           #    /usr/lib/<multiarch>/NetworkManager/libnm-vpn-plugin-veepin.so
+                           #    /usr/lib/NetworkManager/VPN/nm-veepin-service.name
+                           #    /usr/share/dbus-1/system.d/nm-veepin-service.conf
 sudo systemctl reload NetworkManager
 ```
 
 ### Create a connection — GUI
 
 With the editor `.so` installed, GNOME Settings / nm-connection-editor →
-**Add VPN → "IKEv2 (ikennkt)"** now shows a form (gateway, local/server ID, PSK,
+**Add VPN → "IKEv2 (veepin)"** now shows a form (gateway, local/server ID, PSK,
 username/password, full-tunnel, MTU). Fill it in and save. Equivalently, `nmcli`
 still works:
 
@@ -600,16 +600,16 @@ still works:
 
 ```sh
 # PSK:
-nmcli connection add type vpn con-name home-ikennkt ifname '*' \
-  vpn-type org.freedesktop.NetworkManager.ikennkt \
+nmcli connection add type vpn con-name home-veepin ifname '*' \
+  vpn-type org.freedesktop.NetworkManager.veepin \
   vpn.data 'gateway=vpn.example.com, local-id=client.example.com, server-id=vpn.example.com, full-tunnel=yes'
-nmcli connection modify home-ikennkt vpn.secrets 'psk=a-strong-preshared-key'
+nmcli connection modify home-veepin vpn.secrets 'psk=a-strong-preshared-key'
 
 # EAP-MSCHAPv2 (username/password) instead:
 #   vpn.data '... , user=alice'
 #   vpn.secrets 'psk=a-strong-preshared-key, password=wonderland'
 
-nmcli connection up home-ikennkt
+nmcli connection up home-veepin
 ```
 
 Once created, the connection also appears in the GNOME quick-settings VPN toggle.
@@ -617,12 +617,12 @@ Once created, the connection also appears in the GNOME quick-settings VPN toggle
 ### Verify
 
 ```sh
-nmcli connection show --active           # home-ikennkt listed, state activated
+nmcli connection show --active           # home-veepin listed, state activated
 ip addr show                             # tun device has the assigned internal IP
 ip route                                 # default via tun (full tunnel) + host route to the server
 resolvectl status                        # pushed DNS servers present
 journalctl -u NetworkManager -f          # watch Connect/StateChanged/Ip4Config
-nmcli connection down home-ikennkt       # tears down; routes/DNS reverted by NM
+nmcli connection down home-veepin       # tears down; routes/DNS reverted by NM
 ```
 
 ### Debugging the service directly
@@ -631,14 +631,14 @@ The service normally talks to the **system** bus (needs the installed policy +
 root). For local inspection without installing, run it on the session bus:
 
 ```sh
-nm/bin/nm-ikennkt-service -session &
-busctl --user introspect org.freedesktop.NetworkManager.ikennkt \
+nm/bin/nm-veepin-service -session &
+busctl --user introspect org.freedesktop.NetworkManager.veepin \
   /org/freedesktop/NetworkManager/VPN/Plugin org.freedesktop.NetworkManager.VPN.Plugin
 ```
 
 ### Uninstall
 
 ```sh
-nmcli connection delete home-ikennkt
+nmcli connection delete home-veepin
 cd nm && sudo make uninstall && sudo systemctl reload NetworkManager
 ```

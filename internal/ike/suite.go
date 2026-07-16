@@ -3,8 +3,8 @@ package ike
 import (
 	"fmt"
 
-	"github.com/xen0bit/ikennkt/internal/crypto"
-	"github.com/xen0bit/ikennkt/internal/payload"
+	"github.com/xen0bit/veepin/internal/crypto"
+	"github.com/xen0bit/veepin/internal/payload"
 )
 
 // Suite is a fully-resolved IKE cipher suite ready for key derivation and SK

@@ -4,8 +4,8 @@
 # covered here. Usage: authdialog_test.sh <path-to-binary>
 set -eu
 
-BIN="${1:-./bin/nm-ikennkt-auth-dialog}"
-SVC=org.freedesktop.NetworkManager.ikennkt
+BIN="${1:-./bin/nm-veepin-auth-dialog}"
+SVC=org.freedesktop.NetworkManager.veepin
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
 # 1. PSK-only, saved secret -> emits psk value, no password.

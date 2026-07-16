@@ -1,11 +1,11 @@
-// Command nm-ikennkt-service is the NetworkManager VPN plugin service for
-// ikennkt. NetworkManager spawns it (as root) when an ikennkt VPN connection is
+// Command nm-veepin-service is the NetworkManager VPN plugin service for
+// veepin. NetworkManager spawns it (as root) when an veepin VPN connection is
 // activated; it speaks the org.freedesktop.NetworkManager.VPN.Plugin D-Bus
-// contract and drives the reusable ikennkt client to establish the tunnel,
+// contract and drives the reusable veepin client to establish the tunnel,
 // reporting the assigned address/DNS/routes back to NM for it to apply.
 //
 // It is not run directly by users. See doc/networkmanager-plugin.md and the
-// nm-ikennkt-service.name descriptor.
+// nm-veepin-service.name descriptor.
 package main
 
 import (
@@ -14,7 +14,7 @@ import (
 	"os"
 
 	"github.com/godbus/dbus/v5"
-	"github.com/xen0bit/ikennkt/nm/internal/dbusplugin"
+	"github.com/xen0bit/veepin/nm/internal/dbusplugin"
 )
 
 func main() {
@@ -26,7 +26,7 @@ func main() {
 	flag.Parse()
 	_ = persist
 
-	logger := log.New(os.Stderr, "nm-ikennkt: ", log.LstdFlags)
+	logger := log.New(os.Stderr, "nm-veepin: ", log.LstdFlags)
 
 	connect := dbus.ConnectSystemBus
 	if *session {

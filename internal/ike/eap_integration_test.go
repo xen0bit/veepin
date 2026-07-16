@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xen0bit/ikennkt/internal/crypto"
-	"github.com/xen0bit/ikennkt/internal/eap"
-	"github.com/xen0bit/ikennkt/internal/payload"
+	"github.com/xen0bit/veepin/internal/crypto"
+	"github.com/xen0bit/veepin/internal/eap"
+	"github.com/xen0bit/veepin/internal/payload"
 )
 
 // TestEAPMSCHAPv2Flow drives a full IKEv2 + EAP-MSCHAPv2 handshake against the

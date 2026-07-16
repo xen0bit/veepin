@@ -1,15 +1,15 @@
 [VPN Connection]
-name=ikennkt
-service=org.freedesktop.NetworkManager.ikennkt
-program=/usr/lib/NetworkManager/nm-ikennkt-service
+name=veepin
+service=org.freedesktop.NetworkManager.veepin
+program=/usr/lib/NetworkManager/nm-veepin-service
 supports-multiple-connections=false
 
 [libnm]
-plugin=libnm-vpn-plugin-ikennkt.so
+plugin=libnm-vpn-plugin-veepin.so
 
 [GNOME]
-auth-dialog=/usr/lib/NetworkManager/nm-ikennkt-auth-dialog
-properties=libnm-vpn-plugin-ikennkt.so
+auth-dialog=/usr/lib/NetworkManager/nm-veepin-auth-dialog
+properties=libnm-vpn-plugin-veepin.so
 # false: our auth-dialog implements only the classic GTK prompt (it does not
 # honour --external-ui-mode), so we must not advertise external-UI-mode or a
 # GNOME-Shell secret request would get no usable UI description back.

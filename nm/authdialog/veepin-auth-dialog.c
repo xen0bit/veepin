@@ -1,7 +1,7 @@
 /*
- * ikennkt-auth-dialog.c — NetworkManager VPN auth-dialog for ikennkt.
+ * veepin-auth-dialog.c — NetworkManager VPN auth-dialog for veepin.
  *
- * NetworkManager runs this helper when an ikennkt connection needs secrets that
+ * NetworkManager runs this helper when an veepin connection needs secrets that
  * are not saved (flag NOT_SAVED, "ask every time") — the interactive complement
  * to the editor's saved-secret support. It speaks NM's auth-dialog stdio
  * protocol: NM writes the connection's data/secrets to stdin (DATA_KEY/DATA_VAL,
@@ -22,7 +22,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define IKENNKT_SERVICE "org.freedesktop.NetworkManager.ikennkt"
+#define VEEPIN_SERVICE "org.freedesktop.NetworkManager.veepin"
 #define KEY_PSK      "psk"
 #define KEY_PASSWORD "password"
 #define KEY_USER     "user"
@@ -95,18 +95,18 @@ main(int argc, char **argv)
     /* GTK options are parsed lazily below (only when we actually prompt). */
     g_option_context_set_help_enabled(ctx, FALSE);
     if (!g_option_context_parse(ctx, &argc, &argv, &error)) {
-        g_printerr("ikennkt-auth-dialog: %s\n", error->message);
+        g_printerr("veepin-auth-dialog: %s\n", error->message);
         return 1;
     }
     g_option_context_free(ctx);
 
-    if (opt_service && g_strcmp0(opt_service, IKENNKT_SERVICE) != 0) {
-        g_printerr("ikennkt-auth-dialog: not my service (%s)\n", opt_service);
+    if (opt_service && g_strcmp0(opt_service, VEEPIN_SERVICE) != 0) {
+        g_printerr("veepin-auth-dialog: not my service (%s)\n", opt_service);
         return 1;
     }
 
     if (!nm_vpn_service_plugin_read_vpn_details(0, &data, &secrets)) {
-        g_printerr("ikennkt-auth-dialog: failed to read connection details from stdin\n");
+        g_printerr("veepin-auth-dialog: failed to read connection details from stdin\n");
         return 1;
     }
 
@@ -121,7 +121,7 @@ main(int argc, char **argv)
     /* Prompt only if something is missing and NM permits interaction. */
     if ((need_psk || need_pw) && opt_interaction && gtk_init_check(&argc, &argv)) {
         GtkWidget *dlg = nma_vpn_password_dialog_new(
-            "Authenticate VPN", "Enter the ikennkt VPN credentials.", NULL);
+            "Authenticate VPN", "Enter the veepin VPN credentials.", NULL);
         NMAVpnPasswordDialog *pd = NMA_VPN_PASSWORD_DIALOG(dlg);
 
         /* Assign the needed secrets to the primary/secondary fields in order. */
