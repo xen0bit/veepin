@@ -5,54 +5,51 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/xen0bit/veepin/internal/crypto"
+	"github.com/xen0bit/veepin/internal/ikev2/transform"
 	"github.com/xen0bit/veepin/internal/payload"
 )
 
 // benchSAPair builds a pair of ESP SAs sharing keys so that one can encapsulate
-// and the other decapsulate. suite selects the ESP cipher.
+// and the other decapsulate. encrID/keyBits/integID select the ESP suite;
+// integID is 0 for AEAD.
 func benchSAPair(b *testing.B, encrID uint16, keyBits int, integID uint16) (send, recv *SA) {
 	b.Helper()
-	mkCipher := func() crypto.SKCipher {
-		c, err := crypto.NewSKCipher(encrID, keyBits)
-		if err != nil {
-			b.Fatal(err)
-		}
-		return c
+	c, err := transform.Cipher(encrID, keyBits)
+	if err != nil {
+		b.Fatal(err)
 	}
-	var integ *crypto.Integrity
+	encA := randKey(c.KeyLen())
+	encB := randKey(c.KeyLen())
+
 	var integKeyA, integKeyB []byte
 	if integID != 0 {
-		ig, err := crypto.NewIntegrity(integID)
+		ig, err := transform.Integrity(integID)
 		if err != nil {
 			b.Fatal(err)
 		}
-		integ = ig
 		integKeyA = randKey(ig.KeyLen)
 		integKeyB = randKey(ig.KeyLen)
 	}
-	encA := randKey(mkCipher().KeyLen())
-	encB := randKey(mkCipher().KeyLen())
 
-	mkInteg := func() *crypto.Integrity {
-		if integID == 0 {
-			return nil
+	mk := func(encKey, integKey []byte) Transform {
+		return Transform{
+			EncrID:    encrID,
+			EncrKeyLn: uint16(keyBits),
+			IntegID:   integID,
+			EncKey:    encKey,
+			IntegKey:  integKey,
 		}
-		ig, _ := crypto.NewIntegrity(integID)
-		return ig
 	}
-
 	send = &SA{
 		SPIOut: 0xbbbb, SPIIn: 0xaaaa,
-		Out: Transform{Cipher: mkCipher(), Integ: mkInteg(), EncKey: encA, IntegKey: integKeyA},
-		In:  Transform{Cipher: mkCipher(), Integ: mkInteg(), EncKey: encB, IntegKey: integKeyB},
+		Out: mk(encA, integKeyA),
+		In:  mk(encB, integKeyB),
 	}
 	recv = &SA{
 		SPIOut: 0xaaaa, SPIIn: 0xbbbb,
-		Out: Transform{Cipher: mkCipher(), Integ: mkInteg(), EncKey: encB, IntegKey: integKeyB},
-		In:  Transform{Cipher: mkCipher(), Integ: mkInteg(), EncKey: encA, IntegKey: integKeyA},
+		Out: mk(encB, integKeyB),
+		In:  mk(encA, integKeyA),
 	}
-	_ = integ
 	return send, recv
 }
 

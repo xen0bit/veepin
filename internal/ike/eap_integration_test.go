@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xen0bit/veepin/internal/crypto"
 	"github.com/xen0bit/veepin/internal/eap"
 	"github.com/xen0bit/veepin/internal/payload"
 )
@@ -121,8 +120,8 @@ func TestEAPMSCHAPv2Flow(t *testing.T) {
 	}
 
 	// --- IKE_AUTH #4: final AUTH computed from the MSK. ---
-	octets := crypto.AuthOctets(it.suite.PRF, it.saInitReq, it.nr, it.keys.SKpi, idBody)
-	authData := crypto.PSKAuth(it.suite.PRF, clientMSK, octets)
+	octets := AuthOctets(it.suite.PRF, it.saInitReq, it.nr, it.keys.SKpi, idBody)
+	authData := PSKAuth(it.suite.PRF, clientMSK, octets)
 	b4 := payload.NewBuilder()
 	b4.Add(payload.TypeAUTH, false, payload.MarshalAuth(payload.AuthPayload{Method: payload.AuthSharedKeyMIC, Data: authData}))
 	it.send(it.buildEnc(payload.IKE_AUTH, 4, b4.FirstType(), b4.Bytes()))
@@ -135,8 +134,8 @@ func TestEAPMSCHAPv2Flow(t *testing.T) {
 	}
 	// Verify the server's MSK-based AUTH.
 	sAuth, _ := payload.ParseAuth(authPay.Body)
-	respOctets := crypto.AuthOctets(it.suite.PRF, it.saInitResp, it.ni, it.keys.SKpr, idPayloadBody(FQDNIdentity("vpn.example")))
-	wantServerAuth := crypto.PSKAuth(it.suite.PRF, clientMSK, respOctets)
+	respOctets := AuthOctets(it.suite.PRF, it.saInitResp, it.ni, it.keys.SKpr, idPayloadBody(FQDNIdentity("vpn.example")))
+	wantServerAuth := PSKAuth(it.suite.PRF, clientMSK, respOctets)
 	if !equalBytes(wantServerAuth, sAuth.Data) {
 		t.Fatal("server final AUTH did not verify against MSK")
 	}

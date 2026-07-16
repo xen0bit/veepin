@@ -10,7 +10,8 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/xen0bit/veepin/internal/crypto"
+	"github.com/xen0bit/veepin/internal/cryptoutil"
+	"github.com/xen0bit/veepin/internal/ikev2/transform"
 )
 
 // Drop-path sentinel errors. Decapsulate can be called for every inbound packet
@@ -26,17 +27,18 @@ var (
 	errBadPadLength = errors.New("esp: bad pad length")
 )
 
-// Transform bundles the ESP cipher and (optional) integrity for one direction.
-// It is the configuration for one direction of an SA; the actual per-packet
-// cipher state is prepared once and cached on the SA.
+// Transform is the negotiated ESP algorithm configuration for one direction of
+// an SA. It is plain data: the per-packet cipher state is built from it once and
+// cached on the SA.
 type Transform struct {
-	// EncrID / EncrKeyLn identify the ESP encryption transform. When zero,
-	// they are inferred from Cipher for backward compatibility.
-	EncrID    uint16
+	// EncrID is the negotiated ESP encryption transform (required).
+	EncrID uint16
+	// EncrKeyLn is the encryption key length in bits; 0 selects the
+	// algorithm's default.
 	EncrKeyLn uint16
-
-	Cipher crypto.SKCipher   // retained for suite metadata / back-compat
-	Integ  *crypto.Integrity // nil for AEAD
+	// IntegID is the negotiated integrity transform, or 0 for AEAD suites,
+	// which authenticate with the cipher itself.
+	IntegID uint16
 
 	EncKey   []byte
 	IntegKey []byte
@@ -55,8 +57,8 @@ type SA struct {
 	window replayWindow
 
 	// Prepared per-direction crypters (built lazily from Out/In on first use).
-	outCrypter crypto.ESPCrypter
-	inCrypter  crypto.ESPCrypter
+	outCrypter cryptoutil.ESPCrypter
+	inCrypter  cryptoutil.ESPCrypter
 	prepErr    error
 	prepOnce   sync.Once
 }
@@ -64,55 +66,23 @@ type SA struct {
 // espHeaderLen is SPI(4) + Sequence(4).
 const espHeaderLen = 8
 
-// prepare builds the per-direction ESP crypters once. The transform's cipher
-// metadata (EncrID/EncrKeyLn, or inferred from Cipher) selects the algorithm.
+// prepare builds the per-direction ESP crypters once, from the transform IDs the
+// Child SA negotiated.
 func (s *SA) prepare() error {
 	s.prepOnce.Do(func() {
-		outID, outBits := transformAlg(s.Out)
-		inID, inBits := transformAlg(s.In)
-		var outInteg, inInteg uint16
-		if s.Out.Integ != nil {
-			outInteg = s.Out.Integ.ID()
-		}
-		if s.In.Integ != nil {
-			inInteg = s.In.Integ.ID()
-		}
-		s.outCrypter, s.prepErr = crypto.NewESPCrypter(outID, outBits, s.Out.EncKey, outInteg, s.Out.IntegKey)
+		s.outCrypter, s.prepErr = crypterFor(s.Out)
 		if s.prepErr != nil {
 			return
 		}
-		s.inCrypter, s.prepErr = crypto.NewESPCrypter(inID, inBits, s.In.EncKey, inInteg, s.In.IntegKey)
+		s.inCrypter, s.prepErr = crypterFor(s.In)
 	})
 	return s.prepErr
 }
 
-// transformAlg resolves the ESP encryption algorithm ID and key length in bits
-// for a transform, inferring from the cipher metadata when not set explicitly.
-func transformAlg(t Transform) (uint16, int) {
-	id := t.EncrID
-	bits := int(t.EncrKeyLn)
-	if id == 0 {
-		// Infer from the SKCipher: AEAD vs CBC and key length from EncKey.
-		if t.Integ == nil {
-			id = espAESGCM16
-			// GCM EncKey is enc-key + 4-octet salt.
-			bits = (len(t.EncKey) - 4) * 8
-		} else {
-			id = espAESCBC
-			bits = len(t.EncKey) * 8
-		}
-	}
-	if bits == 0 {
-		bits = 256
-	}
-	return id, bits
+// crypterFor builds the prepared data-path cipher for one direction.
+func crypterFor(t Transform) (cryptoutil.ESPCrypter, error) {
+	return transform.ESPCrypter(t.EncrID, int(t.EncrKeyLn), t.EncKey, t.IntegID, t.IntegKey)
 }
-
-// Algorithm IDs mirrored from payload to avoid an import cycle at this layer.
-const (
-	espAESCBC   uint16 = 12
-	espAESGCM16 uint16 = 20
-)
 
 // ResetReplayWindow clears the inbound anti-replay window and outbound sequence
 // counter. It is used when an SA's keys are rekeyed (a fresh SA restarts its

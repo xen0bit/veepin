@@ -5,8 +5,8 @@ import (
 	"net"
 	"testing"
 
-	"github.com/xen0bit/veepin/internal/crypto"
 	"github.com/xen0bit/veepin/internal/esp"
+	"github.com/xen0bit/veepin/internal/ikev2/transform"
 	"github.com/xen0bit/veepin/internal/payload"
 )
 
@@ -94,26 +94,32 @@ func (t *benchTunnel) Decapsulate(p []byte) ([]byte, error) {
 
 func benchESPPair(b *testing.B) (server, client *esp.SA) {
 	b.Helper()
-	mk := func() crypto.SKCipher {
-		c, _ := crypto.NewSKCipher(payload.ENCR_AES_GCM_16, 256)
-		return c
+	c, err := transform.Cipher(payload.ENCR_AES_GCM_16, 256)
+	if err != nil {
+		b.Fatal(err)
 	}
-	kA := make([]byte, mk().KeyLen())
-	kB := make([]byte, mk().KeyLen())
+	kA := make([]byte, c.KeyLen())
+	kB := make([]byte, c.KeyLen())
 	for i := range kA {
 		kA[i] = byte(i)
 		kB[i] = byte(255 - i)
 	}
+	// AEAD suite: IntegID stays zero.
+	mk := func(encKey []byte) esp.Transform {
+		return esp.Transform{
+			EncrID:    payload.ENCR_AES_GCM_16,
+			EncrKeyLn: 256,
+			EncKey:    encKey,
+		}
+	}
 	const spiS, spiC = uint32(0x11111111), uint32(0x22222222)
 	server = &esp.SA{
 		SPIOut: spiC, SPIIn: spiS,
-		Out: esp.Transform{Cipher: mk(), EncKey: kA},
-		In:  esp.Transform{Cipher: mk(), EncKey: kB},
+		Out: mk(kA), In: mk(kB),
 	}
 	client = &esp.SA{
 		SPIOut: spiS, SPIIn: spiC,
-		Out: esp.Transform{Cipher: mk(), EncKey: kB},
-		In:  esp.Transform{Cipher: mk(), EncKey: kA},
+		Out: mk(kB), In: mk(kA),
 	}
 	return server, client
 }

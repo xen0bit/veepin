@@ -7,7 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xen0bit/veepin/internal/crypto"
+	"github.com/xen0bit/veepin/internal/cryptoutil"
+	"github.com/xen0bit/veepin/internal/ikev2/transform"
 	"github.com/xen0bit/veepin/internal/payload"
 )
 
@@ -76,9 +77,9 @@ type initiator struct {
 
 	spiI, spiR uint64
 	suite      Suite
-	dh         crypto.DHGroup
+	dh         cryptoutil.DHGroup
 	ni, nr     []byte
-	keys       crypto.SAKeys
+	keys       SAKeys
 	saInitReq  []byte
 	saInitResp []byte
 	sendMsgID  uint32
@@ -108,7 +109,7 @@ func (it *initiator) recv() []byte {
 
 func (it *initiator) doSAInit() {
 	it.spiI = newIKESPI()
-	dh, err := crypto.NewDHGroup(payload.DH_CURVE25519)
+	dh, err := transform.DH(payload.DH_CURVE25519)
 	if err != nil {
 		it.tb.Fatal(err)
 	}
@@ -182,7 +183,7 @@ func (it *initiator) doSAInit() {
 	}
 	it.nr = payload.ParseNonce(noncePay.Body)
 
-	_, keys := crypto.DeriveIKEKeys(suite.PRF, shared, it.ni, it.nr,
+	_, keys := DeriveIKEKeys(suite.PRF, shared, it.ni, it.nr,
 		it.spiI, it.spiR, suite.encKeyLen(), suite.integKeyLen())
 	it.keys = keys
 }
@@ -280,7 +281,7 @@ func (it *initiator) deriveChildKeys() {
 		integLen = es.Integ.KeyLen
 	}
 	total := 2*encLen + 2*integLen
-	km := crypto.DeriveChildKeys(it.suite.PRF, it.keys.SKd, nil, it.ni, it.nr, total)
+	km := DeriveChildKeys(it.suite.PRF, it.keys.SKd, nil, it.ni, it.nr, total)
 	off := 0
 	take := func(n int) []byte { b := km[off : off+n]; off += n; return b }
 	it.childEncI = take(encLen)

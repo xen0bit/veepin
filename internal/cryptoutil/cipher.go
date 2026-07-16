@@ -1,4 +1,4 @@
-package crypto
+package cryptoutil
 
 import (
 	"crypto/aes"
@@ -7,8 +7,6 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"fmt"
-
-	"github.com/xen0bit/veepin/internal/payload"
 )
 
 // SKCipher protects the encrypted (SK) payload. It handles both AEAD ciphers
@@ -49,31 +47,38 @@ type SKParams struct {
 	Integ  *Integrity // nil for AEAD
 }
 
-// NewSKCipher returns the SK cipher for the given ENCR transform ID and key
-// length (in bits; 0 selects a default where applicable).
-func NewSKCipher(encrID uint16, keyBits int) (SKCipher, error) {
-	switch encrID {
-	case payload.ENCR_AES_GCM_16:
-		kl := keyBits / 8
-		if kl == 0 {
-			kl = 32
-		}
-		if kl != 16 && kl != 24 && kl != 32 {
-			return nil, fmt.Errorf("crypto: bad AES-GCM key length %d bits", keyBits)
-		}
-		return &gcmCipher{keyLen: kl}, nil
-	case payload.ENCR_AES_CBC:
-		kl := keyBits / 8
-		if kl == 0 {
-			kl = 32
-		}
-		if kl != 16 && kl != 24 && kl != 32 {
-			return nil, fmt.Errorf("crypto: bad AES-CBC key length %d bits", keyBits)
-		}
-		return &cbcCipher{keyLen: kl}, nil
-	default:
-		return nil, fmt.Errorf("crypto: unsupported ENCR %d", encrID)
+// aesKeyLen validates an AES key length in bits, mapping 0 to the 256-bit
+// default, and returns it in bytes.
+func aesKeyLen(keyBits int) (int, error) {
+	kl := keyBits / 8
+	if kl == 0 {
+		kl = 32
 	}
+	if kl != 16 && kl != 24 && kl != 32 {
+		return 0, fmt.Errorf("cryptoutil: bad AES key length %d bits", keyBits)
+	}
+	return kl, nil
+}
+
+// NewAESGCMSKCipher returns an AES-GCM-16 SK cipher (RFC 5282) for the given
+// key length in bits; 0 selects AES-256.
+func NewAESGCMSKCipher(keyBits int) (SKCipher, error) {
+	kl, err := aesKeyLen(keyBits)
+	if err != nil {
+		return nil, err
+	}
+	return &gcmCipher{keyLen: kl}, nil
+}
+
+// NewAESCBCSKCipher returns an AES-CBC SK cipher for the given key length in
+// bits; 0 selects AES-256. Integrity is supplied separately by an Integrity
+// transform, and callers must route Seal/Open through SealETM/OpenETM.
+func NewAESCBCSKCipher(keyBits int) (SKCipher, error) {
+	kl, err := aesKeyLen(keyBits)
+	if err != nil {
+		return nil, err
+	}
+	return &cbcCipher{keyLen: kl}, nil
 }
 
 // --- AES-GCM (RFC 5282) ---
@@ -117,7 +122,7 @@ func (c *gcmCipher) Seal(encKey, _ /*integ*/, aad, plaintext []byte) ([]byte, er
 
 func (c *gcmCipher) Open(encKey, _ /*integ*/, aad, ivCtIcv []byte) ([]byte, error) {
 	if len(ivCtIcv) < c.IVLen()+c.ICVLen() {
-		return nil, fmt.Errorf("crypto: GCM payload too short")
+		return nil, fmt.Errorf("cryptoutil: GCM payload too short")
 	}
 	a, salt, err := c.aead(encKey)
 	if err != nil {
@@ -146,11 +151,11 @@ func (c *cbcCipher) AEAD() bool    { return false }
 // methods panic if called directly; the message layer always routes CBC via
 // SealETM/OpenETM.
 func (c *cbcCipher) Seal(encKey, integKey, aad, plaintext []byte) ([]byte, error) {
-	return nil, fmt.Errorf("crypto: CBC requires SealETM")
+	return nil, fmt.Errorf("cryptoutil: CBC requires SealETM")
 }
 
 func (c *cbcCipher) Open(encKey, integKey, aad, ivCtIcv []byte) ([]byte, error) {
-	return nil, fmt.Errorf("crypto: CBC requires OpenETM")
+	return nil, fmt.Errorf("cryptoutil: CBC requires OpenETM")
 }
 
 // SealETM performs AES-CBC encrypt-then-MAC. It returns iv||ciphertext||icv.
@@ -162,7 +167,7 @@ func (c *cbcCipher) SealETM(encKey, integKey, aad, plaintext []byte, integ *Inte
 		return nil, err
 	}
 	if len(plaintext)%aes.BlockSize != 0 {
-		return nil, fmt.Errorf("crypto: CBC plaintext not block-aligned (%d)", len(plaintext))
+		return nil, fmt.Errorf("cryptoutil: CBC plaintext not block-aligned (%d)", len(plaintext))
 	}
 	iv := make([]byte, aes.BlockSize)
 	if _, err := rand.Read(iv); err != nil {
@@ -184,7 +189,7 @@ func (c *cbcCipher) SealETM(encKey, integKey, aad, plaintext []byte, integ *Inte
 // OpenETM verifies then decrypts an AES-CBC encrypt-then-MAC SK body.
 func (c *cbcCipher) OpenETM(encKey, integKey, aad, ivCtIcv []byte, integ *Integrity) ([]byte, error) {
 	if len(ivCtIcv) < aes.BlockSize+integ.ICVLen {
-		return nil, fmt.Errorf("crypto: CBC payload too short")
+		return nil, fmt.Errorf("cryptoutil: CBC payload too short")
 	}
 	icv := ivCtIcv[len(ivCtIcv)-integ.ICVLen:]
 	rest := ivCtIcv[:len(ivCtIcv)-integ.ICVLen]
@@ -194,12 +199,12 @@ func (c *cbcCipher) OpenETM(encKey, integKey, aad, ivCtIcv []byte, integ *Integr
 	macInput = append(macInput, rest...)
 	want := integ.Sum(integKey, macInput)
 	if subtle.ConstantTimeCompare(want, icv) != 1 {
-		return nil, fmt.Errorf("crypto: SK integrity check failed")
+		return nil, fmt.Errorf("cryptoutil: SK integrity check failed")
 	}
 	iv := rest[:aes.BlockSize]
 	ct := rest[aes.BlockSize:]
 	if len(ct)%aes.BlockSize != 0 {
-		return nil, fmt.Errorf("crypto: CBC ciphertext not block-aligned")
+		return nil, fmt.Errorf("cryptoutil: CBC ciphertext not block-aligned")
 	}
 	block, err := aes.NewCipher(encKey)
 	if err != nil {

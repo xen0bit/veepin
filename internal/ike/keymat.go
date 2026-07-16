@@ -1,6 +1,10 @@
-package crypto
+package ike
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+
+	"github.com/xen0bit/veepin/internal/cryptoutil"
+)
 
 // SAKeys holds the derived IKE SA keying material (RFC 7296 section 2.14).
 type SAKeys struct {
@@ -21,7 +25,7 @@ type SAKeys struct {
 //
 // encKeyLen and integKeyLen are per-direction key lengths in bytes. For AEAD
 // ciphers integKeyLen is 0.
-func DeriveIKEKeys(prf *PRF, sharedSecret, ni, nr []byte, spiI, spiR uint64,
+func DeriveIKEKeys(prf *cryptoutil.PRF, sharedSecret, ni, nr []byte, spiI, spiR uint64,
 	encKeyLen, integKeyLen int) (skeyseed []byte, keys SAKeys) {
 
 	nonces := append(append([]byte(nil), ni...), nr...)
@@ -62,7 +66,7 @@ func DeriveIKEKeys(prf *PRF, sharedSecret, ni, nr []byte, spiI, spiR uint64,
 // When there is no new DH exchange for the child (the common case), the DH
 // output is empty. The caller slices the result per the negotiated ESP
 // suite: encr_i | integ_i | encr_r | integ_r.
-func DeriveChildKeys(prf *PRF, skd, dhSecret, ni, nr []byte, total int) []byte {
+func DeriveChildKeys(prf *cryptoutil.PRF, skd, dhSecret, ni, nr []byte, total int) []byte {
 	seed := make([]byte, 0, len(dhSecret)+len(ni)+len(nr))
 	seed = append(seed, dhSecret...)
 	seed = append(seed, ni...)
@@ -81,7 +85,7 @@ func DeriveChildKeys(prf *PRF, skd, dhSecret, ni, nr []byte, total int) []byte {
 // other side's nonce. idPayload is the ID payload body (type + reserved +
 // data), i.e. everything after the generic payload header, hashed with the
 // endpoint's own SK_p.
-func AuthOctets(prf *PRF, realMessage, peerNonce, skp, idPayload []byte) []byte {
+func AuthOctets(prf *cryptoutil.PRF, realMessage, peerNonce, skp, idPayload []byte) []byte {
 	idPrime := prf.Apply(skp, idPayload)
 	out := make([]byte, 0, len(realMessage)+len(peerNonce)+len(idPrime))
 	out = append(out, realMessage...)
@@ -94,7 +98,7 @@ func AuthOctets(prf *PRF, realMessage, peerNonce, skp, idPayload []byte) []byte 
 // (RFC 7296 section 2.15):
 //
 //	AUTH = prf(prf(Shared Secret, "Key Pad for IKEv2"), <signed octets>)
-func PSKAuth(prf *PRF, psk, signedOctets []byte) []byte {
+func PSKAuth(prf *cryptoutil.PRF, psk, signedOctets []byte) []byte {
 	const keyPad = "Key Pad for IKEv2"
 	inner := prf.Apply(psk, []byte(keyPad))
 	return prf.Apply(inner, signedOctets)

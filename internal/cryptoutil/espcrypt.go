@@ -1,4 +1,4 @@
-package crypto
+package cryptoutil
 
 import (
 	"crypto/aes"
@@ -7,8 +7,6 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"hash"
-
-	"github.com/xen0bit/veepin/internal/payload"
 )
 
 // ESPCrypter is an allocation-conscious cipher for the ESP data path. Unlike
@@ -35,50 +33,49 @@ type ESPCrypter interface {
 	Open(dst, aad, ivCtIcv []byte) ([]byte, error)
 }
 
-// NewESPCrypter builds a prepared ESP crypter for the negotiated transform.
-// encKey is the ESP encryption key (including the 4-octet GCM salt for AEAD);
-// integKey and integ are used only for non-AEAD (CBC) suites.
-func NewESPCrypter(encrID uint16, keyBits int, encKey []byte, integID uint16, integKey []byte) (ESPCrypter, error) {
-	switch encrID {
-	case payload.ENCR_AES_GCM_16:
-		kl := keyBits / 8
-		if kl == 0 {
-			kl = 32
-		}
-		if len(encKey) < kl+4 {
-			return nil, fmt.Errorf("crypto: GCM key too short (%d, need %d)", len(encKey), kl+4)
-		}
-		block, err := aes.NewCipher(encKey[:kl])
-		if err != nil {
-			return nil, err
-		}
-		aead, err := cipher.NewGCM(block)
-		if err != nil {
-			return nil, err
-		}
-		g := &espGCM{aead: aead}
-		copy(g.salt[:], encKey[kl:kl+4])
-		return g, nil
-	case payload.ENCR_AES_CBC:
-		kl := keyBits / 8
-		if kl == 0 {
-			kl = 32
-		}
-		if len(encKey) < kl {
-			return nil, fmt.Errorf("crypto: CBC key too short")
-		}
-		block, err := aes.NewCipher(encKey[:kl])
-		if err != nil {
-			return nil, err
-		}
-		integ, err := NewIntegrity(integID)
-		if err != nil {
-			return nil, err
-		}
-		return &espCBC{block: block, integ: integ, integKey: integKey, mac: integ.newMAC(integKey)}, nil
-	default:
-		return nil, fmt.Errorf("crypto: unsupported ESP ENCR %d", encrID)
+// NewAESGCMESPCrypter builds a prepared AES-GCM-16 ESP crypter. keyBits is the
+// AES key length (0 selects AES-256); encKey is the ESP encryption key followed
+// by its 4-octet GCM salt (RFC 4106).
+func NewAESGCMESPCrypter(keyBits int, encKey []byte) (ESPCrypter, error) {
+	kl, err := aesKeyLen(keyBits)
+	if err != nil {
+		return nil, err
 	}
+	if len(encKey) < kl+4 {
+		return nil, fmt.Errorf("cryptoutil: GCM key too short (%d, need %d)", len(encKey), kl+4)
+	}
+	block, err := aes.NewCipher(encKey[:kl])
+	if err != nil {
+		return nil, err
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	g := &espGCM{aead: aead}
+	copy(g.salt[:], encKey[kl:kl+4])
+	return g, nil
+}
+
+// NewAESCBCESPCrypter builds a prepared AES-CBC + HMAC (encrypt-then-MAC) ESP
+// crypter. keyBits is the AES key length (0 selects AES-256); integ and integKey
+// supply the MAC.
+func NewAESCBCESPCrypter(keyBits int, encKey []byte, integ *Integrity, integKey []byte) (ESPCrypter, error) {
+	kl, err := aesKeyLen(keyBits)
+	if err != nil {
+		return nil, err
+	}
+	if len(encKey) < kl {
+		return nil, fmt.Errorf("cryptoutil: CBC key too short")
+	}
+	if integ == nil {
+		return nil, fmt.Errorf("cryptoutil: CBC ESP requires an integrity transform")
+	}
+	block, err := aes.NewCipher(encKey[:kl])
+	if err != nil {
+		return nil, err
+	}
+	return &espCBC{block: block, integ: integ, integKey: integKey, mac: integ.newMAC(integKey)}, nil
 }
 
 // --- AES-GCM ESP crypter ---
@@ -111,7 +108,7 @@ func (g *espGCM) Seal(dst, aad, plaintext []byte) ([]byte, error) {
 
 func (g *espGCM) Open(dst, aad, ivCtIcv []byte) ([]byte, error) {
 	if len(ivCtIcv) < 8+16 {
-		return nil, fmt.Errorf("crypto: GCM payload too short")
+		return nil, fmt.Errorf("cryptoutil: GCM payload too short")
 	}
 	if g.nonce == nil {
 		g.nonce = make([]byte, 12)
@@ -135,7 +132,7 @@ func (c *espCBC) BlockLen() int { return aes.BlockSize }
 
 func (c *espCBC) Seal(dst, aad, plaintext []byte) ([]byte, error) {
 	if len(plaintext)%aes.BlockSize != 0 {
-		return nil, fmt.Errorf("crypto: CBC plaintext not block-aligned (%d)", len(plaintext))
+		return nil, fmt.Errorf("cryptoutil: CBC plaintext not block-aligned (%d)", len(plaintext))
 	}
 	start := len(dst)
 	// Reserve IV + ciphertext region, then fill.
@@ -158,7 +155,7 @@ func (c *espCBC) Seal(dst, aad, plaintext []byte) ([]byte, error) {
 
 func (c *espCBC) Open(dst, aad, ivCtIcv []byte) ([]byte, error) {
 	if len(ivCtIcv) < aes.BlockSize+c.integ.ICVLen {
-		return nil, fmt.Errorf("crypto: CBC payload too short")
+		return nil, fmt.Errorf("cryptoutil: CBC payload too short")
 	}
 	icv := ivCtIcv[len(ivCtIcv)-c.integ.ICVLen:]
 	rest := ivCtIcv[:len(ivCtIcv)-c.integ.ICVLen]
@@ -168,12 +165,12 @@ func (c *espCBC) Open(dst, aad, ivCtIcv []byte) ([]byte, error) {
 	var macBuf [64]byte
 	want := c.mac.Sum(macBuf[:0])[:c.integ.ICVLen]
 	if subtle.ConstantTimeCompare(want, icv) != 1 {
-		return nil, fmt.Errorf("crypto: ESP integrity check failed")
+		return nil, fmt.Errorf("cryptoutil: ESP integrity check failed")
 	}
 	iv := rest[:aes.BlockSize]
 	ct := rest[aes.BlockSize:]
 	if len(ct)%aes.BlockSize != 0 {
-		return nil, fmt.Errorf("crypto: CBC ciphertext not block-aligned")
+		return nil, fmt.Errorf("cryptoutil: CBC ciphertext not block-aligned")
 	}
 	start := len(dst)
 	dst = append(dst, make([]byte, len(ct))...)

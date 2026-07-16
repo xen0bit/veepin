@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/xen0bit/veepin/internal/crypto"
 	"github.com/xen0bit/veepin/internal/payload"
 )
 
@@ -25,7 +24,7 @@ func buildTestSuite(t testing.TB, encrID uint16) Suite {
 	return s
 }
 
-func randomKeys(suite Suite) crypto.SAKeys {
+func randomKeys(suite Suite) SAKeys {
 	encLen := suite.encKeyLen()
 	integLen := suite.integKeyLen()
 	mk := func(n, seed int) []byte {
@@ -35,7 +34,7 @@ func randomKeys(suite Suite) crypto.SAKeys {
 		}
 		return b
 	}
-	return crypto.SAKeys{
+	return SAKeys{
 		SKd:  mk(suite.PRF.Size, 1),
 		SKai: mk(integLen, 2),
 		SKar: mk(integLen, 3),

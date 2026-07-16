@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xen0bit/veepin/internal/crypto"
 	"github.com/xen0bit/veepin/internal/dataplane"
 	"github.com/xen0bit/veepin/internal/esp"
 )
@@ -114,25 +113,15 @@ func TestFullVPNFlow(t *testing.T) {
 	// --- Data path: client sends an IP packet through ESP to the server. ---
 	// Build the client-side ESP SA from the negotiated keys. The client's
 	// outbound uses the initiator->responder keys; the server opens with those.
-	outCipher, err := cryptoNewSKCipher(it.childES)
-	if err != nil {
-		t.Fatal(err)
-	}
-	inCipher, err := cryptoNewSKCipher(it.childES)
-	if err != nil {
-		t.Fatal(err)
-	}
 	clientESP := &esp.SA{
 		SPIOut: it.childRespSPI, // server's inbound SPI
 		SPIIn:  it.childOutSPI,
 		Out: esp.Transform{
-			Cipher: outCipher,
-			Integ:  it.childES.Integ,
+			EncrID: it.childES.EncrID, EncrKeyLn: it.childES.EncrKeyLn, IntegID: it.childES.IntegID,
 			EncKey: it.childEncI, IntegKey: it.childIntegI,
 		},
 		In: esp.Transform{
-			Cipher: inCipher,
-			Integ:  it.childES.Integ,
+			EncrID: it.childES.EncrID, EncrKeyLn: it.childES.EncrKeyLn, IntegID: it.childES.IntegID,
 			EncKey: it.childEncR, IntegKey: it.childIntegR,
 		},
 	}
@@ -165,12 +154,6 @@ func TestFullVPNFlow(t *testing.T) {
 		t.Fatalf("TUN packet mismatch: got %d bytes, want %d", len(got), len(innerPkt))
 	}
 	t.Logf("inner packet (%d bytes) successfully traversed client -> ESP -> server TUN", len(got))
-}
-
-// cryptoNewSKCipher builds a fresh SK cipher instance for the ESP suite so the
-// client and server hold independent cipher state.
-func cryptoNewSKCipher(es ESPSuite) (crypto.SKCipher, error) {
-	return crypto.NewSKCipher(es.EncrID, int(es.EncrKeyLn))
 }
 
 // buildIPv4 constructs a minimal IPv4/UDP packet.

@@ -3,56 +3,36 @@ package ike
 import (
 	"fmt"
 
-	"github.com/xen0bit/veepin/internal/crypto"
 	"github.com/xen0bit/veepin/internal/esp"
 )
 
 // BuildESPSA converts a negotiated Child SA into a userspace esp.SA, wiring the
-// directional keys and cipher/integrity transforms into the ESP data path.
+// directional keys and the negotiated transform IDs into the ESP data path.
 //
 // The returned SA uses the Child SA's inbound SPI to open received packets and
 // its outbound SPI to protect sent packets, mirroring the key directions
-// assigned during negotiation.
+// assigned during negotiation. IntegID is zero for AEAD suites, which
+// authenticate with the cipher itself.
 func BuildESPSA(child *ChildSA) (*esp.SA, error) {
-	if child.Suite.Cipher == nil {
-		return nil, fmt.Errorf("ike: child SA has no cipher")
+	if child.Suite.EncrID == 0 {
+		return nil, fmt.Errorf("ike: child SA has no negotiated cipher")
 	}
-
-	// Fresh cipher instances (the negotiated Suite.Cipher captured key length
-	// but AEAD/CBC state is keyed per call, so we can reuse the same value).
-	outCipher, err := crypto.NewSKCipher(child.Suite.EncrID, int(child.Suite.EncrKeyLn))
-	if err != nil {
-		return nil, err
-	}
-	inCipher, err := crypto.NewSKCipher(child.Suite.EncrID, int(child.Suite.EncrKeyLn))
-	if err != nil {
-		return nil, err
-	}
-
-	var outInteg, inInteg *crypto.Integrity
-	if child.Suite.Integ != nil {
-		if outInteg, err = crypto.NewIntegrity(child.Suite.IntegID); err != nil {
-			return nil, err
-		}
-		if inInteg, err = crypto.NewIntegrity(child.Suite.IntegID); err != nil {
-			return nil, err
-		}
-	}
-
 	return &esp.SA{
 		SPIOut: child.OutboundSPI,
 		SPIIn:  child.InboundSPI,
 		Out: esp.Transform{
-			Cipher:   outCipher,
-			Integ:    outInteg,
-			EncKey:   child.EncrOut,
-			IntegKey: child.IntegOut,
+			EncrID:    child.Suite.EncrID,
+			EncrKeyLn: child.Suite.EncrKeyLn,
+			IntegID:   child.Suite.IntegID,
+			EncKey:    child.EncrOut,
+			IntegKey:  child.IntegOut,
 		},
 		In: esp.Transform{
-			Cipher:   inCipher,
-			Integ:    inInteg,
-			EncKey:   child.EncrIn,
-			IntegKey: child.IntegIn,
+			EncrID:    child.Suite.EncrID,
+			EncrKeyLn: child.Suite.EncrKeyLn,
+			IntegID:   child.Suite.IntegID,
+			EncKey:    child.EncrIn,
+			IntegKey:  child.IntegIn,
 		},
 	}, nil
 }

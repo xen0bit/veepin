@@ -3,8 +3,8 @@ package dataplane
 import (
 	"bytes"
 	"encoding/binary"
-	"github.com/xen0bit/veepin/internal/crypto"
 	"github.com/xen0bit/veepin/internal/esp"
+	"github.com/xen0bit/veepin/internal/ikev2/transform"
 	"github.com/xen0bit/veepin/internal/payload"
 	"net"
 	"sync"
@@ -182,25 +182,28 @@ func TestPumpUnknownSPIDropped(t *testing.T) {
 // and vice versa, so packets encrypted by one decrypt on the other.
 func espPair(t *testing.T) (server, client *esp.SA) {
 	t.Helper()
-	c1, err := crypto.NewSKCipher(payload.ENCR_AES_GCM_16, 256)
+	c, err := transform.Cipher(payload.ENCR_AES_GCM_16, 256)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c2, _ := crypto.NewSKCipher(payload.ENCR_AES_GCM_16, 256)
-	c3, _ := crypto.NewSKCipher(payload.ENCR_AES_GCM_16, 256)
-	c4, _ := crypto.NewSKCipher(payload.ENCR_AES_GCM_16, 256)
-	keyA := bytes.Repeat([]byte{0xa1}, c1.KeyLen())
-	keyB := bytes.Repeat([]byte{0xb2}, c1.KeyLen())
+	keyA := bytes.Repeat([]byte{0xa1}, c.KeyLen())
+	keyB := bytes.Repeat([]byte{0xb2}, c.KeyLen())
+	// AEAD suite: IntegID stays zero.
+	mk := func(encKey []byte) esp.Transform {
+		return esp.Transform{
+			EncrID:    payload.ENCR_AES_GCM_16,
+			EncrKeyLn: 256,
+			EncKey:    encKey,
+		}
+	}
 	const spiS, spiC = uint32(0x11111111), uint32(0x22222222)
 	server = &esp.SA{
 		SPIOut: spiC, SPIIn: spiS,
-		Out: esp.Transform{Cipher: c1, EncKey: keyA},
-		In:  esp.Transform{Cipher: c2, EncKey: keyB},
+		Out: mk(keyA), In: mk(keyB),
 	}
 	client = &esp.SA{
 		SPIOut: spiS, SPIIn: spiC,
-		Out: esp.Transform{Cipher: c3, EncKey: keyB},
-		In:  esp.Transform{Cipher: c4, EncKey: keyA},
+		Out: mk(keyB), In: mk(keyA),
 	}
 	return server, client
 }

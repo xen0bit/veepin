@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/xen0bit/veepin/internal/crypto"
+	"github.com/xen0bit/veepin/internal/cryptoutil"
 	"github.com/xen0bit/veepin/internal/payload"
 )
 
@@ -17,7 +17,7 @@ const (
 )
 
 // encryptKeys returns (encKey, integKey) for the given direction.
-func encryptKeys(keys crypto.SAKeys, dir keyDir) (enc, integ []byte) {
+func encryptKeys(keys SAKeys, dir keyDir) (enc, integ []byte) {
 	switch dir {
 	case dirInitiatorToResponder:
 		return keys.SKei, keys.SKai
@@ -34,7 +34,7 @@ func encryptKeys(keys crypto.SAKeys, dir keyDir) (enc, integ []byte) {
 // The AAD for the SK cipher is: IKE header (with final length) followed by the
 // SK payload's own generic header. Since the SK payload is the only top-level
 // payload, that is exactly the message bytes up to the start of the SK body.
-func buildEncryptedMessage(hdr payload.Header, suite Suite, keys crypto.SAKeys,
+func buildEncryptedMessage(hdr payload.Header, suite Suite, keys SAKeys,
 	dir keyDir, firstInner payload.PayloadType, innerPayloads []byte) ([]byte, error) {
 
 	encKey, integKey := encryptKeys(keys, dir)
@@ -113,7 +113,7 @@ func sealSK(suite Suite, encKey, integKey, aad, inner []byte) ([]byte, error) {
 	// CBC encrypt-then-MAC path. Apply RFC 7296 padding (pad octets counting
 	// 1..padLen, then a pad-length octet) so the result is block-aligned.
 	cbc, ok := suite.Cipher.(interface {
-		SealETM(encKey, integKey, aad, plaintext []byte, integ *crypto.Integrity) ([]byte, error)
+		SealETM(encKey, integKey, aad, plaintext []byte, integ *cryptoutil.Integrity) ([]byte, error)
 	})
 	if !ok {
 		return nil, fmt.Errorf("ike: non-AEAD cipher lacks SealETM")
@@ -145,7 +145,7 @@ func padRFC7296(pt []byte, block int) []byte {
 // returns the inner payload chain plus the SK generic header's NextPayload
 // (type of the first inner payload).
 func decryptSK(raw []byte, hdr payload.Header, skPayload payload.RawPayload,
-	suite Suite, keys crypto.SAKeys, dir keyDir) (firstInner payload.PayloadType, inner []byte, err error) {
+	suite Suite, keys SAKeys, dir keyDir) (firstInner payload.PayloadType, inner []byte, err error) {
 
 	encKey, integKey := encryptKeys(keys, dir)
 
@@ -168,7 +168,7 @@ func decryptSK(raw []byte, hdr payload.Header, skPayload payload.RawPayload,
 		}
 	} else {
 		cbc, ok := suite.Cipher.(interface {
-			OpenETM(encKey, integKey, aad, ivCtIcv []byte, integ *crypto.Integrity) ([]byte, error)
+			OpenETM(encKey, integKey, aad, ivCtIcv []byte, integ *cryptoutil.Integrity) ([]byte, error)
 		})
 		if !ok {
 			return 0, nil, fmt.Errorf("ike: non-AEAD cipher lacks OpenETM")

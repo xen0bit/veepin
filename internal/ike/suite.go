@@ -3,7 +3,8 @@ package ike
 import (
 	"fmt"
 
-	"github.com/xen0bit/veepin/internal/crypto"
+	"github.com/xen0bit/veepin/internal/cryptoutil"
+	"github.com/xen0bit/veepin/internal/ikev2/transform"
 	"github.com/xen0bit/veepin/internal/payload"
 )
 
@@ -16,9 +17,9 @@ type Suite struct {
 	IntegID   uint16 // 0 for AEAD
 	DHID      uint16
 
-	Cipher crypto.SKCipher
-	PRF    *crypto.PRF
-	Integ  *crypto.Integrity // nil for AEAD
+	Cipher cryptoutil.SKCipher
+	PRF    *cryptoutil.PRF
+	Integ  *cryptoutil.Integrity // nil for AEAD
 }
 
 // DefaultIKEProposal returns the proposal this server offers/accepts for the
@@ -171,11 +172,11 @@ func SelectIKESuite(sa payload.SAPayload) (Suite, payload.Proposal, error) {
 }
 
 func buildSuite(encr, prf, integ, dh payload.Transform) (Suite, error) {
-	c, err := crypto.NewSKCipher(encr.ID, int(encr.KeyLen))
+	c, err := transform.Cipher(encr.ID, int(encr.KeyLen))
 	if err != nil {
 		return Suite{}, err
 	}
-	pf, err := crypto.NewPRF(prf.ID)
+	pf, err := transform.PRF(prf.ID)
 	if err != nil {
 		return Suite{}, err
 	}
@@ -184,7 +185,7 @@ func buildSuite(encr, prf, integ, dh payload.Transform) (Suite, error) {
 		Cipher: c, PRF: pf,
 	}
 	if !isAEAD(encr.ID) {
-		ig, err := crypto.NewIntegrity(integ.ID)
+		ig, err := transform.Integrity(integ.ID)
 		if err != nil {
 			return Suite{}, err
 		}
@@ -210,8 +211,8 @@ type ESPSuite struct {
 	EncrID    uint16
 	EncrKeyLn uint16
 	IntegID   uint16
-	Cipher    crypto.SKCipher
-	Integ     *crypto.Integrity
+	Cipher    cryptoutil.SKCipher
+	Integ     *cryptoutil.Integrity
 }
 
 // SelectESPSuite picks the first acceptable ESP proposal from the peer.
@@ -231,7 +232,7 @@ func SelectESPSuite(sa payload.SAPayload) (ESPSuite, payload.Proposal, error) {
 				continue
 			}
 		}
-		c, err := crypto.NewSKCipher(encr.ID, int(encr.KeyLen))
+		c, err := transform.Cipher(encr.ID, int(encr.KeyLen))
 		if err != nil {
 			continue
 		}
@@ -245,7 +246,7 @@ func SelectESPSuite(sa payload.SAPayload) (ESPSuite, payload.Proposal, error) {
 			},
 		}
 		if !isAEAD(encr.ID) {
-			ig, err := crypto.NewIntegrity(integ.ID)
+			ig, err := transform.Integrity(integ.ID)
 			if err != nil {
 				continue
 			}

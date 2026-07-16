@@ -4,35 +4,44 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/xen0bit/veepin/internal/crypto"
+	"github.com/xen0bit/veepin/internal/ikev2/transform"
 	"github.com/xen0bit/veepin/internal/payload"
 )
 
-func gcmTransform(t *testing.T, key byte) Transform {
+// keyLen reports the encryption key length an ENCR transform expects, so the
+// helpers below size their test keys without hardcoding magic numbers.
+func keyLen(t *testing.T, encrID uint16, bits int) int {
 	t.Helper()
-	c, err := crypto.NewSKCipher(payload.ENCR_AES_GCM_16, 256)
+	c, err := transform.Cipher(encrID, bits)
 	if err != nil {
 		t.Fatal(err)
 	}
-	k := bytes.Repeat([]byte{key}, c.KeyLen())
-	return Transform{Cipher: c, EncKey: k}
+	return c.KeyLen()
+}
+
+func gcmTransform(t *testing.T, key byte) Transform {
+	t.Helper()
+	// AEAD: IntegID stays zero, the cipher authenticates. EncKey includes the
+	// 4-octet GCM salt, which KeyLen accounts for.
+	return Transform{
+		EncrID:    payload.ENCR_AES_GCM_16,
+		EncrKeyLn: 256,
+		EncKey:    bytes.Repeat([]byte{key}, keyLen(t, payload.ENCR_AES_GCM_16, 256)),
+	}
 }
 
 func cbcTransform(t *testing.T, ek, ik byte) Transform {
 	t.Helper()
-	c, err := crypto.NewSKCipher(payload.ENCR_AES_CBC, 256)
-	if err != nil {
-		t.Fatal(err)
-	}
-	integ, err := crypto.NewIntegrity(payload.AUTH_HMAC_SHA2_256_128)
+	integ, err := transform.Integrity(payload.AUTH_HMAC_SHA2_256_128)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return Transform{
-		Cipher:   c,
-		Integ:    integ,
-		EncKey:   bytes.Repeat([]byte{ek}, c.KeyLen()),
-		IntegKey: bytes.Repeat([]byte{ik}, integ.KeyLen),
+		EncrID:    payload.ENCR_AES_CBC,
+		EncrKeyLn: 256,
+		IntegID:   payload.AUTH_HMAC_SHA2_256_128,
+		EncKey:    bytes.Repeat([]byte{ek}, keyLen(t, payload.ENCR_AES_CBC, 256)),
+		IntegKey:  bytes.Repeat([]byte{ik}, integ.KeyLen),
 	}
 }
 

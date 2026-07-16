@@ -3,7 +3,6 @@ package ike
 import (
 	"net"
 
-	"github.com/xen0bit/veepin/internal/crypto"
 	"github.com/xen0bit/veepin/internal/eap"
 	"github.com/xen0bit/veepin/internal/payload"
 )
@@ -193,8 +192,8 @@ func (s *Server) handleEAPFinalAuth(sa *IKESA, hdr payload.Header, inners []payl
 
 	// The initiator signs InitiatorSAInit | Nr | prf(SK_pi, IDi'), keyed by the
 	// EAP MSK instead of a PSK (RFC 7296 2.16).
-	octets := crypto.AuthOctets(sa.Suite.PRF, sa.InitiatorSAInit, sa.Nr, sa.Keys.SKpi, sa.IDiForAuth)
-	want := crypto.PSKAuth(sa.Suite.PRF, sa.eapMSK, octets)
+	octets := AuthOctets(sa.Suite.PRF, sa.InitiatorSAInit, sa.Nr, sa.Keys.SKpi, sa.IDiForAuth)
+	want := PSKAuth(sa.Suite.PRF, sa.eapMSK, octets)
 	if !equalBytes(want, auth.Data) {
 		s.log.Printf("ikev2: EAP final AUTH from %s failed", remote)
 		s.respondEncryptedNotify(sa, payload.IKE_AUTH, hdr.MessageID, payload.AuthenticationFailed, remote)
@@ -203,8 +202,8 @@ func (s *Server) handleEAPFinalAuth(sa *IKESA, hdr payload.Header, inners []payl
 
 	// Our final AUTH, also keyed by the MSK.
 	localIDBody := idPayloadBody(s.cfg.LocalID)
-	respOctets := crypto.AuthOctets(sa.Suite.PRF, sa.ResponderSAInit, sa.Ni, sa.Keys.SKpr, localIDBody)
-	ourAuth := crypto.PSKAuth(sa.Suite.PRF, sa.eapMSK, respOctets)
+	respOctets := AuthOctets(sa.Suite.PRF, sa.ResponderSAInit, sa.Ni, sa.Keys.SKpr, localIDBody)
+	ourAuth := PSKAuth(sa.Suite.PRF, sa.eapMSK, respOctets)
 
 	b := payload.NewBuilder()
 	b.Add(payload.TypeAUTH, false, payload.MarshalAuth(payload.AuthPayload{
@@ -341,7 +340,7 @@ func (s *Server) setupChildSA(sa *IKESA, es ESPSuite, accepted payload.Proposal,
 		integLen = es.Integ.KeyLen
 	}
 	total := 2*encLen + 2*integLen
-	km := crypto.DeriveChildKeys(sa.Suite.PRF, sa.Keys.SKd, nil, sa.Ni, sa.Nr, total)
+	km := DeriveChildKeys(sa.Suite.PRF, sa.Keys.SKd, nil, sa.Ni, sa.Nr, total)
 
 	off := 0
 	take := func(n int) []byte { b := km[off : off+n]; off += n; return b }

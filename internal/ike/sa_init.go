@@ -3,7 +3,7 @@ package ike
 import (
 	"net"
 
-	"github.com/xen0bit/veepin/internal/crypto"
+	"github.com/xen0bit/veepin/internal/ikev2/transform"
 	"github.com/xen0bit/veepin/internal/payload"
 )
 
@@ -53,7 +53,7 @@ func (s *Server) handleIKESAInit(pkt []byte, hdr payload.Header, remote *net.UDP
 		return
 	}
 
-	dh, err := crypto.NewDHGroup(suite.DHID)
+	dh, err := transform.DH(suite.DHID)
 	if err != nil {
 		s.sendUnauthNotify(hdr, remote, on4500, payload.NoProposalChosen)
 		return
@@ -86,7 +86,7 @@ func (s *Server) handleIKESAInit(pkt []byte, hdr payload.Header, remote *net.UDP
 	// what we actually observe for source (the peer) and destination (us).
 	newSA.NAT = s.detectNAT(msg, hdr, remote, on4500)
 
-	_, keys := crypto.DeriveIKEKeys(
+	_, keys := DeriveIKEKeys(
 		suite.PRF, shared, newSA.Ni, newSA.Nr,
 		newSA.InitiatorSPI, newSA.ResponderSPI,
 		suite.encKeyLen(), suite.integKeyLen(),

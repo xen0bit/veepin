@@ -9,9 +9,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xen0bit/veepin/internal/crypto"
+	"github.com/xen0bit/veepin/internal/cryptoutil"
 	"github.com/xen0bit/veepin/internal/eap"
 	"github.com/xen0bit/veepin/internal/esp"
+	"github.com/xen0bit/veepin/internal/ikev2/transform"
 	"github.com/xen0bit/veepin/internal/payload"
 )
 
@@ -74,9 +75,9 @@ type Client struct {
 
 	spiI, spiR uint64
 	suite      Suite
-	dh         crypto.DHGroup
+	dh         cryptoutil.DHGroup
 	ni, nr     []byte
-	keys       crypto.SAKeys
+	keys       SAKeys
 	saInitReq  []byte
 	saInitResp []byte
 	sendMsgID  uint32
@@ -212,7 +213,7 @@ func (c *Client) DataConn() *net.UDPConn { return c.conn }
 
 func (c *Client) saInit() error {
 	c.spiI = newIKESPI()
-	dh, err := crypto.NewDHGroup(payload.DH_CURVE25519)
+	dh, err := transform.DH(payload.DH_CURVE25519)
 	if err != nil {
 		return err
 	}
@@ -286,7 +287,7 @@ func (c *Client) saInit() error {
 	}
 	c.nr = payload.ParseNonce(noncePay.Body)
 
-	_, keys := crypto.DeriveIKEKeys(suite.PRF, shared, c.ni, c.nr, c.spiI, c.spiR,
+	_, keys := DeriveIKEKeys(suite.PRF, shared, c.ni, c.nr, c.spiI, c.spiR,
 		suite.encKeyLen(), suite.integKeyLen())
 	c.keys = keys
 	return nil
@@ -387,8 +388,8 @@ func (c *Client) authEAP() error {
 	}
 
 	// Message 4: final AUTH keyed by the MSK.
-	octets := crypto.AuthOctets(c.suite.PRF, c.saInitReq, c.nr, c.keys.SKpi, idBody)
-	authData := crypto.PSKAuth(c.suite.PRF, msk, octets)
+	octets := AuthOctets(c.suite.PRF, c.saInitReq, c.nr, c.keys.SKpi, idBody)
+	authData := PSKAuth(c.suite.PRF, msk, octets)
 	b := payload.NewBuilder()
 	b.Add(payload.TypeAUTH, false, payload.MarshalAuth(payload.AuthPayload{Method: payload.AuthSharedKeyMIC, Data: authData}))
 	pkt, err = c.seal(payload.IKE_AUTH, 4, b.FirstType(), b.Bytes())
@@ -470,8 +471,8 @@ func (c *Client) verifyServerAuth(inners []payload.RawPayload, key []byte, eapMS
 	}
 
 	if eapMSK {
-		octets := crypto.AuthOctets(c.suite.PRF, c.saInitResp, c.ni, c.keys.SKpr, peerIDBody)
-		want := crypto.PSKAuth(c.suite.PRF, key, octets)
+		octets := AuthOctets(c.suite.PRF, c.saInitResp, c.ni, c.keys.SKpr, peerIDBody)
+		want := PSKAuth(c.suite.PRF, key, octets)
 		if !equalBytes(want, auth.Data) {
 			return fmt.Errorf("server AUTH (MSK) verification failed: %w", ErrAuthFailed)
 		}
@@ -534,7 +535,7 @@ func (c *Client) finishAuth(inners []payload.RawPayload, childOutSPI uint32, aut
 		integLen = es.Integ.KeyLen
 	}
 	total := 2*encLen + 2*integLen
-	km := crypto.DeriveChildKeys(c.suite.PRF, c.keys.SKd, nil, c.ni, c.nr, total)
+	km := DeriveChildKeys(c.suite.PRF, c.keys.SKd, nil, c.ni, c.nr, total)
 	off := 0
 	take := func(n int) []byte { b := km[off : off+n]; off += n; return b }
 	res.EncKeyOut = take(encLen)
@@ -652,35 +653,18 @@ func (c *Client) Close() error {
 // outbound with the initiator->responder keys and decrypts inbound with the
 // responder->initiator keys.
 func (r *ClientResult) BuildTunnel() (*espTunnel, error) {
-	if r.Suite.Cipher == nil {
-		return nil, fmt.Errorf("ike: client result has no cipher")
-	}
-	outCipher, err := crypto.NewSKCipher(r.Suite.EncrID, int(r.Suite.EncrKeyLn))
-	if err != nil {
-		return nil, err
-	}
-	inCipher, err := crypto.NewSKCipher(r.Suite.EncrID, int(r.Suite.EncrKeyLn))
-	if err != nil {
-		return nil, err
-	}
-	var outInteg, inInteg *crypto.Integrity
-	if r.Suite.Integ != nil {
-		if outInteg, err = crypto.NewIntegrity(r.Suite.IntegID); err != nil {
-			return nil, err
-		}
-		if inInteg, err = crypto.NewIntegrity(r.Suite.IntegID); err != nil {
-			return nil, err
-		}
+	if r.Suite.EncrID == 0 {
+		return nil, fmt.Errorf("ike: client result has no negotiated cipher")
 	}
 	sa := &esp.SA{
 		SPIOut: r.OutboundSPI, // server's inbound SPI (we send to it)
 		SPIIn:  r.InboundSPI,  // our SPI (server sends to it)
 		Out: esp.Transform{
-			Cipher: outCipher, Integ: outInteg,
+			EncrID: r.Suite.EncrID, EncrKeyLn: r.Suite.EncrKeyLn, IntegID: r.Suite.IntegID,
 			EncKey: r.EncKeyOut, IntegKey: r.IntegKeyOut,
 		},
 		In: esp.Transform{
-			Cipher: inCipher, Integ: inInteg,
+			EncrID: r.Suite.EncrID, EncrKeyLn: r.Suite.EncrKeyLn, IntegID: r.Suite.IntegID,
 			EncKey: r.EncKeyIn, IntegKey: r.IntegKeyIn,
 		},
 	}

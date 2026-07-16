@@ -15,9 +15,11 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/xen0bit/veepin/internal/crypto"
+	"github.com/xen0bit/veepin/internal/cryptoutil"
 	"github.com/xen0bit/veepin/internal/eap"
 	"github.com/xen0bit/veepin/internal/esp"
+	"github.com/xen0bit/veepin/internal/ike"
+	"github.com/xen0bit/veepin/internal/ikev2/transform"
 	"github.com/xen0bit/veepin/internal/payload"
 )
 
@@ -96,9 +98,9 @@ type client struct {
 	id                        payload.IDPayload
 	spiI, spiR                uint64
 	suite                     resolvedSuite
-	dh                        crypto.DHGroup
+	dh                        cryptoutil.DHGroup
 	ni, nr                    []byte
-	keys                      crypto.SAKeys
+	keys                      ike.SAKeys
 	saInitReq, saInitResp     []byte
 	assignedIP                net.IP
 	childOutSPI, childRespSPI uint32
@@ -109,14 +111,14 @@ type client struct {
 }
 
 type resolvedSuite struct {
-	prf      *crypto.PRF
+	prf      *cryptoutil.PRF
 	encKey   int
 	integKey int
 }
 
 func (c *client) saInit() error {
 	c.spiI = randU64()
-	dh, err := crypto.NewDHGroup(payload.DH_CURVE25519)
+	dh, err := transform.DH(payload.DH_CURVE25519)
 	if err != nil {
 		return err
 	}
@@ -163,10 +165,10 @@ func (c *client) saInit() error {
 		return err
 	}
 	c.nr = payload.ParseNonce(noncePay.Body)
-	prf, _ := crypto.NewPRF(payload.PRF_HMAC_SHA2_256)
-	cipher, _ := crypto.NewSKCipher(payload.ENCR_AES_GCM_16, 256)
+	prf, _ := transform.PRF(payload.PRF_HMAC_SHA2_256)
+	cipher, _ := transform.Cipher(payload.ENCR_AES_GCM_16, 256)
 	c.suite = resolvedSuite{prf: prf, encKey: cipher.KeyLen(), integKey: 0}
-	_, keys := crypto.DeriveIKEKeys(prf, shared, c.ni, c.nr, c.spiI, c.spiR, cipher.KeyLen(), 0)
+	_, keys := ike.DeriveIKEKeys(prf, shared, c.ni, c.nr, c.spiI, c.spiR, cipher.KeyLen(), 0)
 	c.keys = keys
 	return nil
 }
@@ -174,7 +176,7 @@ func (c *client) saInit() error {
 func (c *client) auth() error {
 	prf := c.suite.prf
 	idBody := payload.MarshalID(c.id)
-	inner := crypto.PSKAuth(prf, c.psk, crypto.AuthOctets(prf, c.saInitReq, c.nr, c.keys.SKpi, idBody))
+	inner := ike.PSKAuth(prf, c.psk, ike.AuthOctets(prf, c.saInitReq, c.nr, c.keys.SKpi, idBody))
 	c.childOutSPI = randU32()
 	tsAll := payload.TSPayload{Selectors: []payload.TrafficSelector{allTraffic()}}
 	cpReq := payload.CPPayload{Type: payload.CFGRequest, Attrs: []payload.CFGAttr{{Type: payload.CFGInternalIP4Address}, {Type: payload.CFGInternalIP4Netmask}, {Type: payload.CFGInternalIP4DNS}}}
@@ -223,9 +225,9 @@ func (c *client) auth() error {
 		c.childRespSPI = binary.BigEndian.Uint32(espSA.Proposals[0].SPI)
 	}
 	// Derive child keys (AES-GCM-256, no integ).
-	cipher, _ := crypto.NewSKCipher(payload.ENCR_AES_GCM_16, 256)
+	cipher, _ := transform.Cipher(payload.ENCR_AES_GCM_16, 256)
 	total := 2 * cipher.KeyLen()
-	km := crypto.DeriveChildKeys(c.suite.prf, c.keys.SKd, nil, c.ni, c.nr, total)
+	km := ike.DeriveChildKeys(c.suite.prf, c.keys.SKd, nil, c.ni, c.nr, total)
 	c.encI = km[:cipher.KeyLen()]
 	c.encR = km[cipher.KeyLen():]
 	c.espEncID = payload.ENCR_AES_GCM_16
@@ -234,12 +236,12 @@ func (c *client) auth() error {
 }
 
 func (c *client) sendESP(addr string) error {
-	oc, _ := crypto.NewSKCipher(c.espEncID, int(c.espKeyLn))
-	ic, _ := crypto.NewSKCipher(c.espEncID, int(c.espKeyLn))
+	// IntegID is left zero: this client negotiates AES-GCM only, which
+	// authenticates with the cipher itself.
 	sa := &esp.SA{
 		SPIOut: c.childRespSPI, SPIIn: c.childOutSPI,
-		Out: esp.Transform{Cipher: oc, EncKey: c.encI},
-		In:  esp.Transform{Cipher: ic, EncKey: c.encR},
+		Out: esp.Transform{EncrID: c.espEncID, EncrKeyLn: c.espKeyLn, EncKey: c.encI},
+		In:  esp.Transform{EncrID: c.espEncID, EncrKeyLn: c.espKeyLn, EncKey: c.encR},
 	}
 	pkt := ipv4(c.assignedIP, net.ParseIP("93.184.216.34"), []byte("hello tunnel"))
 	enc, err := sa.Encapsulate(pkt, 4)
@@ -259,7 +261,7 @@ func (c *client) sendESP(addr string) error {
 // --- helpers ---
 
 func (c *client) seal(ex payload.ExchangeType, msgID uint32, first payload.PayloadType, inner []byte) ([]byte, error) {
-	cipher, _ := crypto.NewSKCipher(payload.ENCR_AES_GCM_16, 256)
+	cipher, _ := transform.Cipher(payload.ENCR_AES_GCM_16, 256)
 	ivLen, icvLen := cipher.IVLen(), cipher.ICVLen()
 	ctLen := len(inner) + 1
 	skLen := 4 + ivLen + ctLen + icvLen
@@ -284,7 +286,7 @@ func (c *client) open(pkt []byte) (payload.PayloadType, []byte, error) {
 	if sk == nil {
 		return 0, nil, fmt.Errorf("no SK payload")
 	}
-	cipher, _ := crypto.NewSKCipher(payload.ENCR_AES_GCM_16, 256)
+	cipher, _ := transform.Cipher(payload.ENCR_AES_GCM_16, 256)
 	bodyStart := len(pkt) - len(sk.Body)
 	aad := pkt[:bodyStart]
 	first := payload.PayloadType(pkt[bodyStart-4])
@@ -473,8 +475,8 @@ func (c *client) authEAP() error {
 	}
 
 	// IKE_AUTH #4: final AUTH from MSK.
-	octets := crypto.AuthOctets(prf, c.saInitReq, c.nr, c.keys.SKpi, idBody)
-	authData := crypto.PSKAuth(prf, msk, octets)
+	octets := ike.AuthOctets(prf, c.saInitReq, c.nr, c.keys.SKpi, idBody)
+	authData := ike.PSKAuth(prf, msk, octets)
 	b4 := payload.NewBuilder()
 	b4.Add(payload.TypeAUTH, false, payload.MarshalAuth(payload.AuthPayload{Method: payload.AuthSharedKeyMIC, Data: authData}))
 	pkt, _ = c.seal(payload.IKE_AUTH, 4, b4.FirstType(), b4.Bytes())
@@ -504,9 +506,9 @@ func (c *client) authEAP() error {
 	if len(espSA.Proposals) > 0 && len(espSA.Proposals[0].SPI) == 4 {
 		c.childRespSPI = binary.BigEndian.Uint32(espSA.Proposals[0].SPI)
 	}
-	cipher, _ := crypto.NewSKCipher(payload.ENCR_AES_GCM_16, 256)
+	cipher, _ := transform.Cipher(payload.ENCR_AES_GCM_16, 256)
 	total := 2 * cipher.KeyLen()
-	km := crypto.DeriveChildKeys(prf, c.keys.SKd, nil, c.ni, c.nr, total)
+	km := ike.DeriveChildKeys(prf, c.keys.SKd, nil, c.ni, c.nr, total)
 	c.encI = km[:cipher.KeyLen()]
 	c.encR = km[cipher.KeyLen():]
 	c.espEncID = payload.ENCR_AES_GCM_16

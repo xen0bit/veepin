@@ -40,8 +40,10 @@ drives the production client against the live server and checks bidirectional ES
 | Integrity | HMAC-SHA1-96, HMAC-SHA2-256-128/384-192/512-256 |
 
 All from the standard library. (ChaCha20-Poly1305's transform ID is defined but
-not wired in, because Go ships that cipher only in `golang.org/x/crypto`; adding
-it is a drop-in `SKCipher` if that dependency is acceptable.)
+not wired in, because Go ships that cipher only in `golang.org/x/crypto`. If that
+dependency is acceptable, adding it is a `cryptoutil` constructor plus a case in
+`internal/ikev2/transform` — the negotiated transform ID selects the algorithm, so
+nothing else has to change.)
 
 EAP-MSCHAPv2 additionally uses MD4 (for the NT password hash) and single-DES
 (for the challenge response), as the protocol mandates. Go's standard library
@@ -52,15 +54,21 @@ transport security.
 ## Architecture
 
 ```
-cmd/ikev2d            server daemon: flags, TUN + pool wiring, signal handling
-cmd/ikev2             client daemon: connect, TUN, routing, data path
-internal/payload      wire codec: header, payloads, SA/KE/Nonce/Notify/ID/AUTH/TS/Delete/CP
-internal/crypto       DH, PRF + prf+, SK ciphers, key derivation, PSK AUTH
-internal/ike          negotiation, SK seal/open, NAT-T, CP, exchange handlers, Client, transport
-internal/dataplane    TUN device, address pool, ESP pump (SPI demux + routing), client routing
-internal/eap          EAP packet codec + EAP-MSCHAPv2 (MD4/DES/SHA1, MSK derivation)
-internal/esp          ESP encapsulate/decapsulate + anti-replay
+cmd/ikev2d               server daemon: flags, TUN + pool wiring, signal handling
+cmd/ikev2                client daemon: connect, TUN, routing, data path
+internal/cryptoutil      DH, PRF + prf+, integrity, SK/ESP ciphers — protocol-agnostic
+internal/dataplane       TUN device, address pool, ESP pump (SPI demux + routing), client routing
+internal/eap             EAP packet codec + EAP-MSCHAPv2 (MD4/DES/SHA1, MSK derivation)
+internal/esp             ESP encapsulate/decapsulate + anti-replay
+internal/payload         wire codec: header, payloads, SA/KE/Nonce/Notify/ID/AUTH/TS/Delete/CP
+internal/ikev2/transform IANA transform ID -> cryptoutil primitive
+internal/ike             negotiation, SK seal/open, NAT-T, CP, exchange handlers, keymat, Client
 ```
+
+`cryptoutil` and `dataplane` are deliberately protocol-agnostic — they import nothing
+from this module and know nothing about IKEv2, so a second VPN protocol can reuse them
+as-is. Everything IKEv2-specific about the algorithms lives in `ikev2/transform`, which
+is the only package that translates IANA transform IDs into primitives.
 
 Data flow once a client is connected:
 
@@ -287,8 +295,11 @@ Highlights:
   (matching MSKs on success, rejection on wrong password/unknown user).
 - `internal/dataplane` — `TestPumpRoundTrip` (TUN → ESP → demux → decap round
   trip), address-pool allocation/exhaustion/reuse, unknown-SPI drop.
-- `internal/crypto` — DH agreement across all five groups, prf+, GCM/CBC round
-  trips with tamper detection.
+- `internal/cryptoutil` — DH agreement across all five groups, the RFC 5903 point
+  prefix, prf+, GCM/CBC round trips with tamper detection.
+- `internal/ikev2/transform` — every negotiable transform ID resolves to a
+  primitive, unsupported IDs are rejected, and the negotiated ID (not a guess
+  from key length) selects the ESP algorithm.
 - `internal/esp` — ESP round trips and anti-replay.
 - `internal/payload` — header/payload/SA/TS/CP codec round trips.
 
@@ -315,9 +326,9 @@ What's measured:
 - **Handshake** (`internal/ike`) — SK message seal/open, and a full PSK
   handshake (IKE_SA_INIT + IKE_AUTH) over real UDP loopback against the live
   server.
-- **Asymmetric crypto** (`internal/crypto`) — DH key generation and shared-secret
-  computation for each group, IKE/Child key derivation, prf+ expansion, and raw
-  cipher seal.
+- **Asymmetric crypto** (`internal/cryptoutil`, `internal/ike`) — DH key generation
+  and shared-secret computation for each group, prf+ expansion and raw cipher seal,
+  plus IKE/Child key derivation.
 - **Login** (`internal/eap`) — NT hashing, MSCHAPv2 challenge response, MSK
   derivation, and a full server-side authentication.
 - **Codec** (`internal/payload`) — message parse/build and SA/TS round-trips.

@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xen0bit/veepin/internal/crypto"
 	"github.com/xen0bit/veepin/internal/eap"
 	"github.com/xen0bit/veepin/internal/payload"
 )
@@ -83,7 +82,7 @@ type IKESA struct {
 	Ni, Nr    []byte
 	SharedKey []byte
 
-	Keys crypto.SAKeys
+	Keys SAKeys
 
 	// First IKE_SA_INIT messages, needed for AUTH computation.
 	InitiatorSAInit []byte
