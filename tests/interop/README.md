@@ -16,15 +16,15 @@ dependency. Tests skip cleanly if Docker is unavailable.
 
 | Test | Client | Server | Ping |
 |------|--------|--------|------|
-| `TestInteropSelf` | veepin `ikev2` | veepin `ikev2d` | `10.10.10.1` |
-| `TestInteropVeepinClientStrongswanServer` (A) | veepin `ikev2` | strongSwan | `10.20.30.254` |
-| `TestInteropStrongswanClientVeepinServer` (B) | strongSwan | veepin `ikev2d` | `10.10.10.1` |
+| `TestInteropSelf` | `veepin connect ikev2` | `veepin serve ikev2` | `10.10.10.1` |
+| `TestInteropVeepinClientStrongswanServer` (A) | `veepin connect ikev2` | strongSwan | `10.20.30.254` |
+| `TestInteropStrongswanClientVeepinServer` (B) | strongSwan | `veepin serve ikev2` | `10.10.10.1` |
 
 ## Layout
 
 - `Dockerfile` (repo root) — veepin runtime image (static binaries + ip/iptables/ping).
 - `strongswan/` — strongSwan image + swanctl configs for responder and initiator roles.
-- `veepin/` — entrypoints for `ikev2d` / `ikev2`.
+- `veepin/` — entrypoints for `veepin serve` / `veepin connect`.
 - `compose.*.yml` — one per scenario.
 - `interop_test.go` — the `//go:build interop` harness (compose up → retry ping → down).
 

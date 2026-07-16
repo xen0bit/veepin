@@ -57,9 +57,9 @@ The tree separates machinery any VPN protocol needs from what is specific to one
 protocol. IKEv2 is the first protocol; others become siblings under `internal/`.
 
 ```
-cmd/ikev2d               server daemon: flags, TUN + pool wiring, signal handling
-cmd/ikev2                client daemon: connect, TUN, routing, data path
-client                   embeddable client: Dial -> Session + Result
+cmd/veepin               CLI: connect / serve / probe subcommands, flags, routing
+client                   protocol registry + the Session/Result contract
+ikev2                    public IKEv2 entry point: Dial, NewServer, Config
 
 dataplane                TUN device, address pool, packet pump (demux + routing), client routing
 internal/cryptoutil      DH, PRF + prf+, integrity, SK/ESP ciphers
@@ -91,8 +91,8 @@ primitives. Those two seams are what keep the boundary honest.
 Data flow once a client is connected:
 
 ```
-client app → client OS ESP → UDP:4500 → ikev2d → decapsulate → TUN → kernel routing → internet
-internet → kernel → TUN → ikev2d → encapsulate → UDP:4500 → client OS → client app
+client app → client OS ESP → UDP:4500 → veepin serve → decapsulate → TUN → kernel routing → internet
+internet → kernel → TUN → veepin serve → encapsulate → UDP:4500 → client OS → client app
 ```
 
 ## Build
@@ -102,8 +102,19 @@ Requires Go 1.21+ (developed against Go 1.26).
 ```sh
 go build ./...
 go test ./...
-go build -o ikev2d ./cmd/ikev2d
+go build -o veepin ./cmd/veepin
 ```
+
+One binary does everything, dispatching on a subcommand and a protocol:
+
+```
+veepin connect <protocol> [flags]   bring up a tunnel to a server
+veepin serve   <protocol> [flags]   run a VPN server
+veepin probe   <protocol> [flags]   diagnostic: handshake + one data packet
+```
+
+IKEv2 is currently the only protocol; `veepin` with no arguments lists what is
+registered.
 
 ## Run
 
@@ -111,13 +122,13 @@ Creating a TUN device needs `CAP_NET_ADMIN`. Either run as root, or grant the
 binary the capability once:
 
 ```sh
-sudo setcap cap_net_admin+ep ./ikev2d
+sudo setcap cap_net_admin+ep ./veepin
 ```
 
 Start the server (auto-configuring the tunnel interface and NAT):
 
 ```sh
-sudo ./ikev2d \
+sudo ./veepin serve ikev2 \
   -listen 0.0.0.0 \
   -public YOUR.PUBLIC.IP \
   -psk 'a-strong-preshared-key' \
@@ -156,7 +167,7 @@ bob:hunter2
 and pass it with `-eap-users`:
 
 ```sh
-sudo ./ikev2d \
+sudo ./veepin serve ikev2 \
   -public YOUR.PUBLIC.IP \
   -psk 'a-strong-preshared-key' \
   -id vpn.example.com \
@@ -216,31 +227,30 @@ with `eap_identity` and a password secret.
 
 ### Smoke-testing without an OS client
 
-The `testclient` command is a minimal built-in initiator for verifying a running
-server end to end (handshake, address assignment, one ESP packet):
+`veepin probe` is a minimal built-in initiator for verifying a running server end
+to end (handshake, address assignment, one ESP packet). It needs no TUN device
+and no privileges:
 
 ```sh
-go build -o testclient ./cmd/testclient
-
 # PSK auth:
-./testclient -server 127.0.0.1:500 -esp 127.0.0.1:4500 -psk 'a-strong-preshared-key' -id roadwarrior
+./veepin probe ikev2 -server 127.0.0.1:500 -esp 127.0.0.1:4500 \
+    -psk 'a-strong-preshared-key' -id roadwarrior
 
 # EAP username/password auth:
-./testclient -server 127.0.0.1:500 -esp 127.0.0.1:4500 -psk 'a-strong-preshared-key' \
-    -id alice -user alice -pass wonderland
+./veepin probe ikev2 -server 127.0.0.1:500 -esp 127.0.0.1:4500 \
+    -psk 'a-strong-preshared-key' -id alice -user alice -pass wonderland
 ```
 
 It prints the internal address it was assigned and confirms the ESP data path.
 
 ## Using the bundled client
 
-The `ikev2` command is a full VPN client: it connects to a server, obtains an
+`veepin connect` is a full VPN client: it connects to a server, obtains an
 address, brings up a local TUN, installs routes, and tunnels the host's traffic.
 Like the server it needs `CAP_NET_ADMIN` (for the TUN device and routing table):
 
 ```sh
-go build -o ikev2 ./cmd/ikev2
-sudo ./ikev2 -server vpn.example.com -psk 'a-strong-preshared-key' \
+sudo ./veepin connect ikev2 -server vpn.example.com -psk 'a-strong-preshared-key' \
     -id client.example.com -server-id vpn.example.com
 ```
 
@@ -257,31 +267,63 @@ reverted. Useful flags:
 - `-server-id` — verify the server presents this identity in its IDr.
 
 The client speaks the same PSK and EAP-MSCHAPv2 flows the server accepts, so
-`ikev2` ↔ `ikev2d` interoperate directly, and `ikev2` also works against other
-RFC 7296 responders that accept these authentication methods.
+`veepin connect` ↔ `veepin serve` interoperate directly, and the client also works
+against other RFC 7296 responders that accept these authentication methods.
 
 ### Embedding the client
 
-The handshake and data path are also available as a reusable, dependency-free
-package, `github.com/xen0bit/veepin/client`: `client.Dial` performs the
-handshake and brings up the ESP data path over a TUN **without** installing
-routes, returning the assigned address/DNS/gateway for the caller to apply. The
-`ikev2` command is a thin wrapper over it.
+The handshake and data path are a reusable, dependency-free library. Dial
+performs the handshake and brings up the ESP data path over a TUN **without**
+installing routes, returning the assigned address/DNS/gateway for the caller to
+apply; `veepin connect` is a thin wrapper over it.
+
+There are two ways in. Go code that knows which protocol it wants imports the
+protocol package and gets a typed config:
+
+```go
+import "github.com/xen0bit/veepin/ikev2"
+
+sess, res, err := ikev2.Dial(ctx, ikev2.Config{
+    Server: "vpn.example.com", PSK: "…", LocalID: "client.example.com",
+})
+defer sess.Close()
+// apply res.AssignedIP / res.DNS / res.Gateway yourself
+```
+
+Callers whose parameters arrive as strings — a CLI's flags, NetworkManager's
+settings dictionary — dial by name instead, selecting protocols by importing
+them:
+
+```go
+import (
+    "github.com/xen0bit/veepin/client"
+    _ "github.com/xen0bit/veepin/ikev2" // registers "ikev2"
+)
+
+sess, res, err := client.Dial(ctx, "ikev2", map[string]string{
+    "gateway": "vpn.example.com", "psk": "…", "local-id": "client.example.com",
+})
+```
+
+`client.Result` and `client.Session` are protocol-agnostic, so code that applies
+a Result or manages a Session does not change when a protocol is added. Running
+a server is the same shape: `ikev2.NewServer(ikev2.ServerConfig{…})` wires the
+TUN, address pool and data path, and leaves host routing/NAT to the caller.
 
 ### Desktop integration (NetworkManager)
 
 A NetworkManager VPN plugin lets a Linux desktop (GNOME / Pop!\_OS) bring the
 tunnel up and down from its native VPN UI, with **no** dependency on strongSwan.
 It lives in the nested `nm/` module (the only part that uses a third-party
-dependency and is kept out of the core build so `ikev2d`/`ikev2`/`testclient`
-stay CGO-free and stdlib-only):
+dependency and is kept out of the core build so the `veepin` binary stays
+CGO-free and stdlib-only):
 
 ```sh
 cd nm && make build && sudo make install
 sudo systemctl reload NetworkManager
 nmcli connection add type vpn con-name home-veepin ifname '*' \
   vpn-type org.freedesktop.NetworkManager.veepin \
-  vpn.data 'gateway=vpn.example.com, local-id=client.example.com, full-tunnel=yes'
+  vpn.data 'protocol=ikev2, gateway=vpn.example.com, local-id=client.example.com, full-tunnel=yes'
 nmcli connection modify home-veepin vpn.secrets 'psk=a-strong-preshared-key'
 nmcli connection up home-veepin
 ```

@@ -2,110 +2,117 @@ package client
 
 import (
 	"context"
-	"net"
+	"errors"
+	"fmt"
 	"testing"
-	"time"
-
-	"github.com/xen0bit/veepin/internal/ikev2/ike"
 )
 
-func TestDialValidation(t *testing.T) {
-	cases := []struct {
-		name string
-		cfg  Config
-	}{
-		{"missing server", Config{PSK: "k", LocalID: "id"}},
-		{"missing psk", Config{Server: "s", LocalID: "id"}},
-		{"missing localid", Config{Server: "s", PSK: "k"}},
-		{"all empty", Config{}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			sess, _, err := Dial(context.Background(), tc.cfg)
-			if err == nil {
-				sess.Close()
-				t.Fatal("expected validation error, got nil")
-			}
-			if sess != nil {
-				t.Fatal("expected nil session on error")
-			}
-		})
-	}
+// stubDialer records the options it was built from.
+type stubDialer struct{ opts map[string]string }
+
+func (d stubDialer) Dial(context.Context) (Session, Result, error) {
+	return nil, Result{TUNName: d.opts["tun"]}, nil
 }
 
-// TestDialConnectFailure ensures a failed handshake reports an error and leaves
-// nothing running. An unresolvable host fails fast (no TUN, no root needed).
-func TestDialConnectFailure(t *testing.T) {
-	sess, _, err := Dial(context.Background(), Config{
-		Server:  "no-such-host.invalid",
-		PSK:     "k",
-		LocalID: "client.example",
+// withRegistry swaps the package registry for the duration of a test, so tests
+// do not depend on which protocol packages happen to be linked in.
+func withRegistry(t *testing.T, entries map[string]ParseFunc) {
+	t.Helper()
+	mu.Lock()
+	saved := protocols
+	protocols = entries
+	mu.Unlock()
+	t.Cleanup(func() {
+		mu.Lock()
+		protocols = saved
+		mu.Unlock()
 	})
-	if err == nil {
-		sess.Close()
-		t.Fatal("expected connect failure, got nil")
+}
+
+func TestDialUnknownProtocol(t *testing.T) {
+	withRegistry(t, map[string]ParseFunc{
+		"ikev2": func(map[string]string) (Dialer, error) { return stubDialer{}, nil },
+	})
+
+	_, _, err := Dial(context.Background(), "wireguard", nil)
+	if !errors.Is(err, ErrUnknownProtocol) {
+		t.Fatalf("err = %v, want ErrUnknownProtocol", err)
 	}
-	if sess != nil {
-		t.Fatalf("expected nil session on connect failure, got %v", sess)
+	// The message should name what *is* available, since the usual cause is a
+	// missing blank import of the protocol package.
+	if got := err.Error(); !contains(got, "ikev2") {
+		t.Errorf("error %q does not mention the registered protocols", got)
 	}
 }
 
-// TestDialContextCancelled verifies Dial aborts an in-flight handshake when the
-// context is cancelled, instead of waiting out the IKE read deadlines. A silent
-// UDP server accepts the SA_INIT but never replies, so the handshake would
-// otherwise block for ~10s.
-func TestDialContextCancelled(t *testing.T) {
-	silent, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+func TestDialRoutesToRegisteredProtocol(t *testing.T) {
+	var gotOpts map[string]string
+	withRegistry(t, map[string]ParseFunc{
+		"ikev2": func(opts map[string]string) (Dialer, error) {
+			gotOpts = opts
+			return stubDialer{opts}, nil
+		},
+	})
+
+	_, res, err := Dial(context.Background(), "ikev2", map[string]string{"tun": "tun7"})
 	if err != nil {
-		t.Fatalf("listen: %v", err)
+		t.Fatal(err)
 	}
-	defer silent.Close()
-	srvPort := silent.LocalAddr().(*net.UDPAddr).Port
+	if gotOpts["tun"] != "tun7" {
+		t.Errorf("ParseFunc got opts %v, want tun=tun7", gotOpts)
+	}
+	if res.TUNName != "tun7" {
+		t.Errorf("Result.TUNName = %q, want tun7", res.TUNName)
+	}
+}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(150 * time.Millisecond)
-		cancel()
-	}()
-
-	start := time.Now()
-	sess, _, err := Dial(ctx, Config{
-		Server:  "127.0.0.1",
-		Port:    srvPort,
-		PSK:     "k",
-		LocalID: "client.example",
+// TestDialParseErrorIsReported ensures a protocol's validation error reaches the
+// caller rather than being swallowed into a generic failure.
+func TestDialParseErrorIsReported(t *testing.T) {
+	sentinel := errors.New("psk is required")
+	withRegistry(t, map[string]ParseFunc{
+		"ikev2": func(map[string]string) (Dialer, error) { return nil, sentinel },
 	})
-	elapsed := time.Since(start)
 
-	if err == nil {
-		sess.Close()
-		t.Fatal("expected Dial to fail after cancellation")
-	}
-	if sess != nil {
-		t.Fatal("expected nil session on cancellation")
-	}
-	if elapsed > 3*time.Second {
-		t.Fatalf("Dial took %v; cancellation did not abort the handshake promptly", elapsed)
+	_, _, err := Dial(context.Background(), "ikev2", nil)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("err = %v, want it to wrap %v", err, sentinel)
 	}
 }
 
-func TestParseIdentity(t *testing.T) {
-	if id := parseIdentity("10.0.0.1"); id.Type != ike.IPIdentity(net.IPv4(10, 0, 0, 1)).Type {
-		t.Errorf("IP literal did not parse as an IP identity: %+v", id)
-	}
-	if id := parseIdentity("vpn.example.com"); id.Type != ike.FQDNIdentity("vpn.example.com").Type {
-		t.Errorf("hostname did not parse as an FQDN identity: %+v", id)
+func TestProtocolsIsSorted(t *testing.T) {
+	stub := func(map[string]string) (Dialer, error) { return stubDialer{}, nil }
+	withRegistry(t, map[string]ParseFunc{
+		"wireguard": stub,
+		"ikev2":     stub,
+		"openvpn":   stub,
+	})
+
+	got := Protocols()
+	want := []string{"ikev2", "openvpn", "wireguard"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("Protocols() = %v, want %v", got, want)
 	}
 }
 
-func TestServerGateway(t *testing.T) {
-	// ServerAddr present: use it directly.
-	res := &ike.ClientResult{ServerAddr: &net.UDPAddr{IP: net.IPv4(203, 0, 113, 5), Port: 4500}}
-	if gw := serverGateway(res, "ignored.example"); !gw.Equal(net.IPv4(203, 0, 113, 5)) {
-		t.Errorf("gateway from ServerAddr = %v, want 203.0.113.5", gw)
+func TestRegisterRejectsDuplicates(t *testing.T) {
+	withRegistry(t, map[string]ParseFunc{})
+	stub := func(map[string]string) (Dialer, error) { return stubDialer{}, nil }
+
+	Register("ikev2", stub)
+	defer func() {
+		if recover() == nil {
+			t.Fatal("registering the same protocol twice did not panic")
+		}
+	}()
+	Register("ikev2", stub)
+}
+
+func contains(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
 	}
-	// No ServerAddr: parse an IP-literal host.
-	if gw := serverGateway(&ike.ClientResult{}, "198.51.100.7"); !gw.Equal(net.IPv4(198, 51, 100, 7)) {
-		t.Errorf("gateway from host literal = %v, want 198.51.100.7", gw)
-	}
+	return false
 }

@@ -1,8 +1,11 @@
-// Command testclient is a minimal IKEv2 initiator used to smoke-test a running
-// ikev2d server: it performs IKE_SA_INIT + IKE_AUTH with PSK, requests a config
-// address, then sends one ESP packet and reports the assigned address. It is a
-// diagnostic tool, not a full client.
-package main
+// Package probe is a minimal IKEv2 initiator used to smoke-test a running
+// server: it performs IKE_SA_INIT + IKE_AUTH (PSK or EAP-MSCHAPv2), requests a
+// config address, then sends one ESP packet and reports the assigned address.
+//
+// It hand-rolls the exchange against the payload codec rather than going through
+// the production client, so it exercises the wire format directly. It is a
+// diagnostic tool, not a full client — it needs no TUN device and no privileges.
+package probe
 
 import (
 	crand "crypto/rand"
@@ -12,7 +15,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"runtime"
 	"time"
 
 	"github.com/xen0bit/veepin/internal/cryptoutil"
@@ -23,73 +25,69 @@ import (
 	"github.com/xen0bit/veepin/internal/ikev2/transform"
 )
 
-// Build metadata, stamped via -ldflags at release time (see .goreleaser.yaml).
-// Defaults apply to `go build`/`go run` and development binaries.
-var (
-	version = "dev"
-	commit  = "none"
-	date    = "unknown"
-)
-
-func main() {
-	showVersion := flag.Bool("version", false, "print version information and exit")
-	server := flag.String("server", "127.0.0.1:500", "server IKE address")
-	espAddr := flag.String("esp", "127.0.0.1:4500", "server NAT-T/ESP address")
-	psk := flag.String("psk", "", "pre-shared key")
-	id := flag.String("id", "client.example", "client identity (FQDN)")
-	user := flag.String("user", "", "EAP username (enables EAP-MSCHAPv2 instead of client PSK)")
-	pass := flag.String("pass", "", "EAP password")
-	flag.Parse()
-	if *showVersion {
-		fmt.Printf("testclient %s (commit %s, built %s, %s)\n",
-			version, commit, date, runtime.Version())
-		return
+// Run parses args and drives one probe exchange against a server, logging
+// progress. It returns an error rather than exiting so the caller owns the
+// process's exit status.
+func Run(args []string) error {
+	fs := flag.NewFlagSet("probe ikev2", flag.ContinueOnError)
+	server := fs.String("server", "127.0.0.1:500", "server IKE address")
+	espAddr := fs.String("esp", "127.0.0.1:4500", "server NAT-T/ESP address")
+	psk := fs.String("psk", "", "pre-shared key (required)")
+	id := fs.String("id", "client.example", "client identity (FQDN)")
+	user := fs.String("user", "", "EAP username (enables EAP-MSCHAPv2 instead of client PSK)")
+	pass := fs.String("pass", "", "EAP password")
+	if err := fs.Parse(args); err != nil {
+		return err
 	}
 	if *psk == "" {
-		log.Fatal("-psk required")
+		return fmt.Errorf("-psk is required")
 	}
 
 	c := &client{psk: []byte(*psk), id: payload.IDPayload{Type: payload.IDFQDN, Data: []byte(*id)}}
 	c.eapUser = *user
 	c.eapPass = *pass
-	saddr, _ := net.ResolveUDPAddr("udp", *server)
+	saddr, err := net.ResolveUDPAddr("udp", *server)
+	if err != nil {
+		return fmt.Errorf("resolve %s: %w", *server, err)
+	}
 	conn, err := net.DialUDP("udp", nil, saddr)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	defer conn.Close()
 	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	c.conn = conn
 
 	if err := c.saInit(); err != nil {
-		log.Fatalf("IKE_SA_INIT failed: %v", err)
+		return fmt.Errorf("IKE_SA_INIT failed: %w", err)
 	}
 	log.Printf("IKE_SA_INIT ok (responder SPI %#x)", c.spiR)
 
 	if *user != "" {
 		if err := c.authEAP(); err != nil {
-			log.Fatalf("EAP IKE_AUTH failed: %v", err)
+			return fmt.Errorf("EAP IKE_AUTH failed: %w", err)
 		}
 		log.Printf("EAP-MSCHAPv2 ok — user %q authenticated, assigned internal IP: %v", *user, c.assignedIP)
 	} else {
 		if err := c.auth(); err != nil {
-			log.Fatalf("IKE_AUTH failed: %v", err)
+			return fmt.Errorf("IKE_AUTH failed: %w", err)
 		}
 		log.Printf("IKE_AUTH (PSK) ok — assigned internal IP: %v", c.assignedIP)
 	}
 
 	if c.assignedIP == nil {
-		log.Fatal("no address assigned")
+		return fmt.Errorf("no address assigned")
 	}
 
 	// Send one ESP packet through the tunnel.
 	if err := c.sendESP(*espAddr); err != nil {
-		log.Fatalf("ESP send failed: %v", err)
+		return fmt.Errorf("ESP send failed: %w", err)
 	}
 	log.Printf("sent one ESP-encapsulated IP packet to %s", *espAddr)
 	fmt.Println("SUCCESS: handshake + address assignment + ESP data path all working")
+	return nil
 }
 
 type client struct {

@@ -1,4 +1,4 @@
-# Direction B: strongSwan client (initiator) -> veepin server (ikev2d).
+# Direction B: strongSwan client (initiator) -> veepin server (`veepin serve ikev2`).
 # strongSwan forces UDP encapsulation (encap=yes in its config) since veepin
 # only does UDP-encapsulated ESP on 4500. Data-path check: the strongSwan client
 # pings 10.10.10.1 (the veepin server's TUN gateway) through the tunnel.

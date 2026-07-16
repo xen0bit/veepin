@@ -15,6 +15,11 @@ import (
 
 	"github.com/godbus/dbus/v5"
 	"github.com/xen0bit/veepin/nm/internal/dbusplugin"
+
+	// Registers the protocols this plugin can dial with the client registry.
+	// Without the import the binary still links, and every Connect fails at
+	// runtime with "unknown protocol" — so a new protocol must be added here.
+	_ "github.com/xen0bit/veepin/ikev2"
 )
 
 func main() {

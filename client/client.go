@@ -1,73 +1,61 @@
-// Package client is an embeddable veepin VPN client. It performs the IKEv2
-// handshake (PSK or EAP-MSCHAPv2) and runs the userspace ESP-in-UDP data path
-// over a TUN device — but it deliberately does NOT install addresses, routes or
-// DNS. The caller is responsible for applying the returned Result to the system
-// (the ikev2 command uses internal/dataplane's router; the NetworkManager
-// plugin hands the Result to NM, which applies it).
+// Package client is the protocol-agnostic entry point for bringing up a VPN
+// tunnel. It defines what every protocol produces — a Session and a Result —
+// and a registry that dials one by name.
 //
-// This package is CGO-free and depends only on the standard library and this
-// module's own packages, so it is safe to embed in the core binaries and to
-// import from the separate nm/ plugin module.
+// It deliberately does NOT install addresses, routes or DNS: Dial returns the
+// negotiated Result and the caller applies it. That is what lets the same dial
+// path serve both the veepin command (which hands Result to dataplane's router)
+// and the NetworkManager plugin (which hands Result to NM).
+//
+// Two ways in, for two kinds of caller:
+//
+//   - Go code that knows which protocol it wants uses the protocol package
+//     directly and gets a typed config: ikev2.Dial(ctx, ikev2.Config{...}).
+//   - Callers whose parameters arrive as strings — the CLI's flags, the NM
+//     plugin's settings dictionary — use client.Dial(ctx, "ikev2", opts) and let
+//     the registry parse them.
+//
+// Protocols register themselves in an init function, so a caller selects the
+// protocols it can dial by importing them:
+//
+//	import _ "github.com/xen0bit/veepin/ikev2"
+//
+// This package is CGO-free and depends only on the standard library, so it is
+// safe to embed in the core binaries and to import from the separate nm/ module.
 package client
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net"
+	"sort"
 	"sync"
-	"time"
-
-	"github.com/xen0bit/veepin/dataplane"
-	"github.com/xen0bit/veepin/internal/ikev2/ike"
 )
 
 // ErrAuth wraps a handshake failure caused by rejected credentials (a wrong PSK
-// or EAP password). Dial's returned error satisfies errors.Is(err, ErrAuth),
-// letting callers distinguish a bad password from a transport failure.
+// or EAP password). A Dial error satisfies errors.Is(err, ErrAuth), letting
+// callers distinguish a bad password from a transport failure.
 var ErrAuth = errors.New("authentication failed")
 
-// defaultTunnelMTU is a conservative MTU for the inner interface. ESP-in-UDP
-// over a 1500-byte path leaves room for the outer IP+UDP+ESP overhead; 1400 is
-// the customary safe value and avoids inner-path fragmentation.
-const defaultTunnelMTU = 1400
+// ErrUnknownProtocol is returned by Dial when no protocol is registered under
+// the requested name — usually a missing blank import of the protocol package.
+var ErrUnknownProtocol = errors.New("unknown protocol")
 
-// Config describes how to reach and authenticate to an IKEv2 server.
-type Config struct {
-	// Server is the VPN server host or IP (required).
-	Server string
-	// Port is the server IKE port (default 500).
-	Port int
-
-	// PSK authenticates the server, and the client too unless EAP is used
-	// (required).
-	PSK string
-	// LocalID is the identity presented to the server, e.g. "client.example.com"
-	// or an IP literal (required).
-	LocalID string
-	// ServerID, if set, is verified against the server's presented identity.
-	ServerID string
-
-	// EAPUser/EAPPassword, if set, switch client authentication to
-	// EAP-MSCHAPv2. The server still authenticates itself with the PSK.
-	EAPUser     string
-	EAPPassword string
-
-	// TUNName is the desired TUN interface name; empty lets the kernel pick.
-	TUNName string
-
-	// Logger receives progress logs; nil discards them.
-	Logger *log.Logger
-}
+// DefaultTunnelMTU is a conservative MTU for the inner interface. Tunnelling
+// over a 1500-byte path leaves room for the outer IP+UDP+encapsulation
+// overhead; 1400 is the customary safe value and avoids inner-path
+// fragmentation. Protocols may report a different MTU in Result.
+const DefaultTunnelMTU = 1400
 
 // Result is the negotiated configuration a caller must apply to the system for
 // the tunnel to carry traffic: the interface, its assigned address, the server
-// gateway (for a host route so ESP does not recurse into the tunnel), and DNS.
+// gateway (for a host route so encapsulated packets do not recurse into the
+// tunnel), and DNS.
 type Result struct {
 	// TUNName is the interface the data path is bound to (e.g. "tun0").
 	TUNName string
-	// AssignedIP is the internal address the server assigned via config mode.
+	// AssignedIP is the internal address the server assigned.
 	AssignedIP net.IP
 	// Netmask is the internal address's netmask.
 	Netmask net.IP
@@ -79,241 +67,78 @@ type Result struct {
 	MTU int
 }
 
-// Session is a running tunnel: the IKE SA, the TUN device, and the ESP pump.
-// Close tears everything down; Wait blocks until that happens.
-type Session struct {
-	ike  *ike.Client
-	tun  *dataplane.TUN
-	pump *dataplane.Pump
-	// dataConn is the IKE socket (floated to 4500), shared for the ESP data
-	// path so ESP and IKE share one source port as RFC 3948 NAT-T requires. It
-	// is owned by ike; Session.Close closes it via ike.Close().
-	dataConn *net.UDPConn
-	logger   *log.Logger
-
-	closeOnce sync.Once
-	closeErr  error
-	done      chan struct{} // closed when the inbound loop exits (i.e. on Close)
-	stopKA    chan struct{} // stops the NAT-keepalive goroutine
+// Session is a running tunnel. Close tears it down and is safe to call from any
+// goroutine; Wait blocks until that happens or ctx is cancelled.
+type Session interface {
+	Wait(ctx context.Context) error
+	Close() error
 }
 
-// Dial performs the handshake, opens the TUN, and starts the ESP data path,
-// returning a running Session and the Result the caller must apply. It installs
-// no routes or addresses. On error nothing is left running.
+// Dialer establishes one tunnel. A protocol's parsed options produce a Dialer,
+// which Dial then runs.
+type Dialer interface {
+	// Dial performs the handshake and starts the data path, returning a running
+	// Session and the Result the caller must apply. It installs no routes or
+	// addresses. On error nothing is left running.
+	Dial(ctx context.Context) (Session, Result, error)
+}
+
+// ParseFunc turns a protocol's string-keyed options into a Dialer, reporting an
+// error for missing or malformed values.
+type ParseFunc func(opts map[string]string) (Dialer, error)
+
+var (
+	mu        sync.RWMutex
+	protocols = map[string]ParseFunc{}
+)
+
+// Register makes a protocol dialable by name. It is intended to be called from
+// a protocol package's init function, and panics on a duplicate or empty name —
+// both are programming errors, detected at startup.
+func Register(protocol string, parse ParseFunc) {
+	if protocol == "" {
+		panic("client: Register with an empty protocol name")
+	}
+	if parse == nil {
+		panic("client: Register with a nil ParseFunc for " + protocol)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if _, dup := protocols[protocol]; dup {
+		panic("client: protocol registered twice: " + protocol)
+	}
+	protocols[protocol] = parse
+}
+
+// Protocols lists the registered protocol names, sorted. Useful for CLI help
+// and error messages.
+func Protocols() []string {
+	mu.RLock()
+	defer mu.RUnlock()
+	names := make([]string, 0, len(protocols))
+	for name := range protocols {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// Dial brings up a tunnel with the named protocol, parsing opts through that
+// protocol's registered ParseFunc.
 //
-// The context bounds the setup; once Dial returns, use Session.Wait/Close for
-// the tunnel lifetime.
-func Dial(ctx context.Context, cfg Config) (*Session, Result, error) {
-	if cfg.Server == "" || cfg.PSK == "" || cfg.LocalID == "" {
-		return nil, Result{}, fmt.Errorf("client: Server, PSK and LocalID are required")
+// The context bounds setup only; once Dial returns, the tunnel's lifetime is
+// the Session's.
+func Dial(ctx context.Context, protocol string, opts map[string]string) (Session, Result, error) {
+	mu.RLock()
+	parse, ok := protocols[protocol]
+	mu.RUnlock()
+	if !ok {
+		return nil, Result{}, fmt.Errorf("client: %w %q (registered: %v)",
+			ErrUnknownProtocol, protocol, Protocols())
 	}
-	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(discard{}, "", 0)
-	}
-
-	ikeCfg := ike.ClientConfig{
-		ServerHost:  cfg.Server,
-		ServerPort:  cfg.Port,
-		PSK:         []byte(cfg.PSK),
-		LocalID:     parseIdentity(cfg.LocalID),
-		EAPUsername: cfg.EAPUser,
-		EAPPassword: cfg.EAPPassword,
-		Logger:      logger,
-	}
-	if cfg.ServerID != "" {
-		id := parseIdentity(cfg.ServerID)
-		ikeCfg.RemoteID = &id
-	}
-
-	// 1. Handshake, honoring ctx cancellation. Connect has its own read
-	// deadlines, but a caller (e.g. an NM Disconnect mid-handshake) must be able
-	// to abort promptly rather than wait them out.
-	c := ike.NewClient(ikeCfg)
-	res, err := connect(ctx, c)
+	dialer, err := parse(opts)
 	if err != nil {
-		if errors.Is(err, ike.ErrAuthFailed) {
-			return nil, Result{}, fmt.Errorf("client: %w: %v", ErrAuth, err)
-		}
-		return nil, Result{}, fmt.Errorf("client: connect: %w", err)
+		return nil, Result{}, fmt.Errorf("client: %s: %w", protocol, err)
 	}
-	// From here on, any failure must close the IKE client.
-	fail := func(err error) (*Session, Result, error) {
-		c.Close()
-		return nil, Result{}, err
-	}
-
-	// 2. TUN.
-	tun, err := dataplane.OpenTUN(cfg.TUNName)
-	if err != nil {
-		return fail(fmt.Errorf("client: open TUN: %w", err))
-	}
-
-	// 3. Data-path tunnel.
-	tunnel, err := res.BuildTunnel()
-	if err != nil {
-		tun.Close()
-		return fail(fmt.Errorf("client: build tunnel: %w", err))
-	}
-
-	// 4. ESP shares the IKE socket (already floated to NAT-T port 4500), so ESP
-	// and IKE leave from one source port — the standards-compliant NAT-T layout a
-	// responder relies on to route return ESP back to us.
-	dataConn := c.DataConn()
-
-	s := &Session{
-		ike:      c,
-		tun:      tun,
-		pump:     nil,
-		dataConn: dataConn,
-		logger:   logger,
-		done:     make(chan struct{}),
-		stopKA:   make(chan struct{}),
-	}
-
-	// The socket is connected to the server, so the destination is implicit.
-	send := func(esp []byte, _ *net.UDPAddr) {
-		if _, werr := dataConn.Write(esp); werr != nil {
-			logger.Printf("client: ESP send error: %v", werr)
-		}
-	}
-	pump := dataplane.NewPump(tun, send, dataplane.SPIDemux, logger)
-	pump.AddTunnel(tunnel)
-	pump.SetDefaultRoute(tunnel)
-	s.pump = pump
-	go pump.Run()
-
-	// Inbound read loop on the shared socket. Exits when the socket is closed
-	// (on Close, via ike.Close()). A 4-zero-octet prefix marks a non-ESP datagram
-	// (NAT keepalive, or any late IKE) — skip it; everything else is ESP.
-	go func() {
-		defer close(s.done)
-		buf := make([]byte, 65535)
-		for {
-			n, rerr := dataConn.Read(buf)
-			if rerr != nil {
-				return
-			}
-			pkt := buf[:n]
-			if len(pkt) >= 4 && pkt[0] == 0 && pkt[1] == 0 && pkt[2] == 0 && pkt[3] == 0 {
-				continue
-			}
-			// Connected socket: the source is implicitly the server, so no
-			// return-address update is needed (pass nil).
-			pump.HandleInbound(append([]byte(nil), pkt...), nil)
-		}
-	}()
-
-	// NAT keepalive: a single 0xFF byte every 20s holds the NAT binding (RFC 3948).
-	go func() {
-		t := time.NewTicker(20 * time.Second)
-		defer t.Stop()
-		for {
-			select {
-			case <-s.stopKA:
-				return
-			case <-t.C:
-				_, _ = dataConn.Write([]byte{0xff})
-			}
-		}
-	}()
-
-	out := Result{
-		TUNName:    tun.Name(),
-		AssignedIP: res.AssignedIP,
-		Netmask:    res.Netmask,
-		Gateway:    serverGateway(res, cfg.Server),
-		DNS:        res.DNS,
-		MTU:        defaultTunnelMTU,
-	}
-	logger.Printf("client: tunnel up on %s, internal IP %s, DNS %v",
-		out.TUNName, out.AssignedIP, out.DNS)
-	return s, out, nil
+	return dialer.Dial(ctx)
 }
-
-// Wait blocks until the session is closed or ctx is cancelled. It returns
-// ctx.Err() if the context ended first, else nil.
-func (s *Session) Wait(ctx context.Context) error {
-	select {
-	case <-s.done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-// Close tears down the pump, ESP socket, TUN and IKE SA. It is idempotent and
-// safe to call from any goroutine.
-func (s *Session) Close() error {
-	s.closeOnce.Do(func() {
-		close(s.stopKA)
-		if s.pump != nil {
-			s.pump.Close()
-		}
-		if s.tun != nil {
-			s.tun.Close()
-		}
-		// Closing the IKE client closes the shared socket, which unblocks the
-		// inbound read loop.
-		if s.ike != nil {
-			s.closeErr = s.ike.Close()
-		}
-	})
-	return s.closeErr
-}
-
-// connect runs the IKE handshake but returns early if ctx is cancelled,
-// interrupting the in-flight Connect by closing the client's socket so the
-// caller does not have to wait out Connect's read deadlines.
-func connect(ctx context.Context, c *ike.Client) (*ike.ClientResult, error) {
-	type outcome struct {
-		res *ike.ClientResult
-		err error
-	}
-	ch := make(chan outcome, 1)
-	go func() {
-		res, err := c.Connect()
-		ch <- outcome{res, err}
-	}()
-	select {
-	case <-ctx.Done():
-		c.Close() // unblocks Connect's socket read
-		<-ch      // let the goroutine finish so nothing leaks
-		return nil, ctx.Err()
-	case o := <-ch:
-		return o.res, o.err
-	}
-}
-
-// serverGateway resolves the server's outer IPv4 address for the host route.
-// res.ServerAddr already carries the resolved server IP; fall back to parsing or
-// resolving the configured host if needed.
-func serverGateway(res *ike.ClientResult, host string) net.IP {
-	if res.ServerAddr != nil && res.ServerAddr.IP != nil {
-		return res.ServerAddr.IP
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		return ip
-	}
-	if ips, err := net.LookupIP(host); err == nil {
-		for _, ip := range ips {
-			if v4 := ip.To4(); v4 != nil {
-				return v4
-			}
-		}
-	}
-	return nil
-}
-
-// parseIdentity interprets an identity string as an IP literal or an FQDN.
-func parseIdentity(s string) ike.Identity {
-	if ip := net.ParseIP(s); ip != nil {
-		return ike.IPIdentity(ip)
-	}
-	return ike.FQDNIdentity(s)
-}
-
-// discard is an io.Writer that drops everything, for a no-op logger.
-type discard struct{}
-
-func (discard) Write(p []byte) (int, error) { return len(p), nil }

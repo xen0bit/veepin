@@ -34,7 +34,7 @@ func TestInteropVeepinClientStrongswanServer(t *testing.T) {
 }
 
 // TestInteropStrongswanClientVeepinServer is Direction B: a strongSwan
-// initiator tunnels to the veepin server (ikev2d) and pings its TUN gateway.
+// initiator tunnels to the veepin server (`veepin serve ikev2`) and pings its TUN gateway.
 func TestInteropStrongswanClientVeepinServer(t *testing.T) {
 	runInterop(t, "compose.server-ss.yml", "strongswan-client", "10.10.10.1")
 }

@@ -27,14 +27,16 @@ DIST_DIR   ?= dist
 PREFIX     ?= /usr/local
 INSTALL_BIN := $(DESTDIR)$(PREFIX)/bin
 
-# The commands this module ships (cmd/<name> -> bin/<name>).
-CMDS    := ikev2d ikev2 testclient
+# The commands this module ships (cmd/<name> -> bin/<name>). One binary with
+# connect/serve/probe subcommands, so protocols do not multiply binaries.
+CMDS    := veepin
 BINS    := $(addprefix $(BIN_DIR)/,$(CMDS))
 
-# The server and client daemons open a TUN device (and the client edits the
-# routing table), which needs CAP_NET_ADMIN. testclient is a userspace-only
-# smoke tester and needs no capability.
-CAP_BINS := ikev2d ikev2
+# `veepin connect` and `veepin serve` open a TUN device (and connect edits the
+# routing table), which needs CAP_NET_ADMIN. `veepin probe` is userspace-only and
+# needs no capability, but they are one binary now, so the capability is granted
+# once.
+CAP_BINS := veepin
 
 # Version stamping. Derived from git; overridable (`make VERSION=1.2.3 build`).
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -44,11 +46,15 @@ DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 # Inject build metadata into main.version/main.commit/main.date when those
 # variables exist. `-X` on an absent symbol is silently ignored, so this stays
 # harmless if a main package doesn't declare them.
-STAMP_PKG := $(shell $(GO) list -m 2>/dev/null)/cmd
+#
+# The linker symbol for a main package's variable is main.<name>, not
+# <importpath>.<name>; the latter matches nothing and, because -X on an unknown
+# symbol is ignored, fails silently. .goreleaser.yaml uses the same form, so
+# `make build` and released binaries stamp identically.
 define stamp
--X '$(STAMP_PKG)/$(1).version=$(VERSION)' \
--X '$(STAMP_PKG)/$(1).commit=$(COMMIT)' \
--X '$(STAMP_PKG)/$(1).date=$(DATE)'
+-X 'main.version=$(VERSION)' \
+-X 'main.commit=$(COMMIT)' \
+-X 'main.date=$(DATE)'
 endef
 
 # Release builds strip the symbol table and DWARF for smaller binaries.
@@ -83,18 +89,6 @@ $(BIN_DIR)/%: $(GO_SOURCES) go.mod
 	@mkdir -p $(BIN_DIR)
 	$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS) $(call stamp,$*)" -o $@ ./cmd/$*
 
-## build-server: compile only the server daemon (ikev2d)
-.PHONY: build-server
-build-server: $(BIN_DIR)/ikev2d
-
-## build-client: compile only the VPN client (ikev2)
-.PHONY: build-client
-build-client: $(BIN_DIR)/ikev2
-
-## build-testclient: compile only the smoke-test initiator (testclient)
-.PHONY: build-testclient
-build-testclient: $(BIN_DIR)/testclient
-
 ## release: build all binaries with stripped, optimized flags
 .PHONY: release
 release: LDFLAGS := $(RELEASE_LDFLAGS)
@@ -118,9 +112,9 @@ uninstall:
 		rm -f $(INSTALL_BIN)/$$c; \
 	done
 
-## setcap: grant CAP_NET_ADMIN to the server/client binaries (needs sudo)
+## setcap: grant CAP_NET_ADMIN to the veepin binary (needs sudo)
 .PHONY: setcap
-setcap: build-server build-client
+setcap: build
 	@for c in $(CAP_BINS); do \
 		echo "setcap cap_net_admin+ep $(BIN_DIR)/$$c"; \
 		sudo setcap cap_net_admin+ep $(BIN_DIR)/$$c; \

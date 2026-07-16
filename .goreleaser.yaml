@@ -27,43 +27,9 @@ before:
 # ldflags stamp main.version/commit/date if those vars exist (harmless if not).
 # ---------------------------------------------------------------------------
 builds:
-  - id: ikev2d
-    binary: ikev2d
-    main: ./cmd/ikev2d
-    env:
-      - CGO_ENABLED=0
-    goos: [linux]
-    goarch: [amd64, arm64, arm]
-    goarm: ["7"]
-    mod_timestamp: "{{ .CommitTimestamp }}"
-    flags:
-      - -trimpath
-    ldflags:
-      - -s -w
-      - -X main.version={{ .Version }}
-      - -X main.commit={{ .Commit }}
-      - -X main.date={{ .CommitDate }}
-
-  - id: ikev2
-    binary: ikev2
-    main: ./cmd/ikev2
-    env:
-      - CGO_ENABLED=0
-    goos: [linux]
-    goarch: [amd64, arm64, arm]
-    goarm: ["7"]
-    mod_timestamp: "{{ .CommitTimestamp }}"
-    flags:
-      - -trimpath
-    ldflags:
-      - -s -w
-      - -X main.version={{ .Version }}
-      - -X main.commit={{ .Commit }}
-      - -X main.date={{ .CommitDate }}
-
-  - id: testclient
-    binary: testclient
-    main: ./cmd/testclient
+  - id: veepin
+    binary: veepin
+    main: ./cmd/veepin
     env:
       - CGO_ENABLED=0
     goos: [linux]
@@ -79,11 +45,11 @@ builds:
       - -X main.date={{ .CommitDate }}
 
 # ---------------------------------------------------------------------------
-# Archives — one tar.gz per OS/arch containing all three binaries + docs.
+# Archives — one tar.gz per OS/arch containing the veepin binary + docs.
 # ---------------------------------------------------------------------------
 archives:
   - id: default
-    ids: [ikev2d, ikev2, testclient]
+    ids: [veepin]
     formats: [tar.gz]
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
@@ -99,20 +65,22 @@ archives:
 nfpms:
   - id: packages
     package_name: veepin
-    ids: [ikev2d, ikev2, testclient]
+    ids: [veepin]
     vendor: veepin
     homepage: https://github.com/xen0bit/veepin
     maintainer: Remy <remaclematt@gmail.com>
     description: |-
-      Pure-Go userspace IKEv2 VPN — server (responder) and client (initiator).
-      Full RFC 7296 handshake with PSK / EAP-MSCHAPv2 auth, NAT traversal,
-      configuration mode, and a userspace ESP-in-UDP data path over TUN.
+      Pure-Go userspace VPN — server (responder) and client (initiator).
+      `veepin connect` / `veepin serve` speak IKEv2: the full RFC 7296 handshake
+      with PSK / EAP-MSCHAPv2 auth, NAT traversal, configuration mode, and a
+      userspace ESP-in-UDP data path over TUN.
     license: MIT
     formats: [deb, rpm, apk]
     bindir: /usr/bin
-    # The server and client open a TUN device / edit routes and need
-    # CAP_NET_ADMIN (run as root or `setcap cap_net_admin+ep`); this is noted
-    # rather than enforced, since packaging can't grant capabilities portably.
+    # `veepin connect` and `veepin serve` open a TUN device / edit routes and
+    # need CAP_NET_ADMIN (run as root or `setcap cap_net_admin+ep`); this is
+    # noted rather than enforced, since packaging can't grant capabilities
+    # portably.
     contents:
       - src: README.md
         dst: /usr/share/doc/veepin/README.md

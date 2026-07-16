@@ -11,8 +11,8 @@
  * Go. It is built separately (see ../Makefile) and never linked into any Go
  * binary, so the core veepin binaries stay CGO-free.
  *
- * Keys must match nm/internal/nmconfig: gateway, local-id, server-id, user,
- * full-tunnel, mtu (data) and psk, password (secrets).
+ * Keys must match nm/internal/nmconfig: protocol, gateway, local-id, server-id,
+ * user, full-tunnel, mtu (data) and psk, password (secrets).
  */
 
 #include <gtk/gtk.h>
@@ -23,6 +23,7 @@
 #define VEEPIN_SERVICE "org.freedesktop.NetworkManager.veepin"
 
 /* Data / secret keys (kept in sync with nm/internal/nmconfig). */
+#define KEY_PROTOCOL    "protocol"
 #define KEY_GATEWAY     "gateway"
 #define KEY_LOCAL_ID    "local-id"
 #define KEY_SERVER_ID   "server-id"
@@ -31,6 +32,12 @@
 #define KEY_MTU         "mtu"
 #define KEY_PSK         "psk"
 #define KEY_PASSWORD    "password"
+
+/* The protocol this form configures. nmconfig defaults to ikev2 when the key is
+ * absent, but new profiles state it explicitly so they stay unambiguous once
+ * veepin speaks more than one protocol. There is no chooser in the form while
+ * IKEv2 is the only option. */
+#define PROTOCOL_IKEV2  "ikev2"
 
 /*****************************************************************************/
 /* Editor widget                                                             */
@@ -88,6 +95,7 @@ update_connection(NMVpnEditor *editor, NMConnection *connection, GError **error)
 
     vpn = NM_SETTING_VPN(nm_setting_vpn_new());
     g_object_set(vpn, NM_SETTING_VPN_SERVICE_TYPE, VEEPIN_SERVICE, NULL);
+    nm_setting_vpn_add_data_item(vpn, KEY_PROTOCOL, PROTOCOL_IKEV2);
 
     s = gtk_entry_get_text(GTK_ENTRY(self->gateway));
     if (!s || !*s) {

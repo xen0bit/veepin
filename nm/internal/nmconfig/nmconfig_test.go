@@ -22,14 +22,17 @@ func TestParsePSK(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if c.Client.Server != "vpn.example.com" || c.Client.LocalID != "client.example" {
-		t.Errorf("bad data mapping: %+v", c.Client)
+	if c.Protocol != DefaultProtocol {
+		t.Errorf("protocol = %q, want %q by default", c.Protocol, DefaultProtocol)
 	}
-	if c.Client.ServerID != "vpn.example.com" {
-		t.Errorf("server-id not mapped: %q", c.Client.ServerID)
+	if c.Options[KeyGateway] != "vpn.example.com" || c.Options[KeyLocalID] != "client.example" {
+		t.Errorf("bad data mapping: %+v", c.Options)
 	}
-	if c.Client.PSK != "s3cret" {
-		t.Errorf("psk not mapped: %q", c.Client.PSK)
+	if c.Options[KeyServerID] != "vpn.example.com" {
+		t.Errorf("server-id not mapped: %q", c.Options[KeyServerID])
+	}
+	if c.Options[KeyPSK] != "s3cret" {
+		t.Errorf("psk not mapped: %q", c.Options[KeyPSK])
 	}
 	if !c.FullTunnel {
 		t.Error("full-tunnel should default to true")
@@ -44,14 +47,61 @@ func TestParseEAPAndFullTunnelFalse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if c.Client.EAPUser != "alice" || c.Client.EAPPassword != "wonderland" {
-		t.Errorf("EAP creds not mapped: %+v", c.Client)
+	if c.Options[KeyUser] != "alice" || c.Options[KeyPassword] != "wonderland" {
+		t.Errorf("EAP creds not mapped: %+v", c.Options)
 	}
 	if c.FullTunnel {
 		t.Error("full-tunnel=no should be false")
 	}
-	if c.Client.Port != 5000 {
-		t.Errorf("port = %d, want 5000", c.Client.Port)
+	if c.Options[KeyPort] != "5000" {
+		t.Errorf("port = %q, want 5000", c.Options[KeyPort])
+	}
+}
+
+// TestParseProtocol covers the key that selects which protocol to dial.
+func TestParseProtocol(t *testing.T) {
+	// An explicit protocol is honoured...
+	c, err := Parse(settings(
+		map[string]string{KeyProtocol: "ikev2", KeyGateway: "g", KeyLocalID: "id"},
+		map[string]string{KeyPSK: "p"},
+	))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if c.Protocol != "ikev2" {
+		t.Errorf("protocol = %q, want ikev2", c.Protocol)
+	}
+	// ...and an unsupported one is rejected up front, rather than failing later
+	// inside client.Dial.
+	if _, err := Parse(settings(
+		map[string]string{KeyProtocol: "carrier-pigeon", KeyGateway: "g", KeyLocalID: "id"},
+		map[string]string{KeyPSK: "p"},
+	)); err == nil {
+		t.Error("unsupported protocol was accepted")
+	}
+}
+
+// TestParseOptionsExcludeNMOnlyKeys ensures the keys the plugin consumes itself
+// are not forwarded to the protocol as options.
+func TestParseOptionsExcludeNMOnlyKeys(t *testing.T) {
+	c, err := Parse(settings(
+		map[string]string{
+			KeyProtocol: "ikev2", KeyGateway: "g", KeyLocalID: "id",
+			KeyFullTunnel: "no", KeyMTU: "1380",
+		},
+		map[string]string{KeyPSK: "p"},
+	))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	for _, k := range []string{KeyProtocol, KeyFullTunnel, KeyMTU} {
+		if _, present := c.Options[k]; present {
+			t.Errorf("NM-only key %q leaked into protocol options", k)
+		}
+	}
+	// Secrets and data both reach the protocol.
+	if c.Options[KeyPSK] != "p" || c.Options[KeyGateway] != "g" {
+		t.Errorf("options missing data/secrets: %+v", c.Options)
 	}
 }
 

@@ -278,10 +278,14 @@ lines can be omitted (no editor yet).
 
 - Requests bus name `org.freedesktop.NetworkManager.veepin` on the **system**
   bus; exports the `VPN.Plugin` object.
-- **`Connect`**: parse the `a{sa{sv}}` connection dict via `nmconfig` →
-  `client.Config`; call `client.Dial`; on success emit `Config` + `Ip4Config`,
-  then `StateChanged(STARTED)`. On failure emit `Failure(...)` +
-  `StateChanged(STOPPED)`.
+- **`Connect`**: parse the `a{sa{sv}}` connection dict via `nmconfig` → a
+  protocol name plus an option map; call `client.Dial(ctx, protocol, opts)`; on
+  success emit `Config` + `Ip4Config`, then `StateChanged(STARTED)`. On failure
+  emit `Failure(...)` + `StateChanged(STOPPED)`.
+  The service blank-imports the protocol packages it can dial
+  (`_ "github.com/xen0bit/veepin/ikev2"`); without that import the binary still
+  links and every `Connect` fails at runtime with "unknown protocol", so
+  `TestDefaultProtocolIsRegistered` guards it.
 - **`NeedSecrets`**: return `"vpn"` if the PSK (or EAP password) is absent from the
   connection's secrets, else `""`. Drives NM's secret-agent/auth-dialog prompt.
 - **`Disconnect`**: `Session.Close()`, emit `StateChanged(STOPPED)`, quit.
@@ -295,17 +299,31 @@ STOPPING → STOPPED`, with any error routing to `Failure` then `STOPPED`.
 
 ### 5.3 Connection-dict mapping (`nm/internal/nmconfig`)
 
-Maps NM's `vpn.data` / `vpn.secrets` string maps to `client.Config`:
+Maps NM's `vpn.data` / `vpn.secrets` string maps to a protocol name plus the
+option map `client.Dial` parses. Three keys are consumed by the plugin itself;
+everything else is passed through to the protocol untouched, so a new protocol's
+options need no change here.
 
-| NM `vpn.data` key | `client.Config` field | Notes |
-|-------------------|-----------------------|-------|
-| `gateway` | `Server` | required |
-| `local-id` | `LocalID` | required |
-| `server-id` | `ServerID` | optional, verified if set |
-| `user` | `EAPUser` | presence selects EAP-MSCHAPv2 |
-| `full-tunnel` | (→ `never-default`) | `"yes"`/`"no"`, default yes |
-| **`vpn.secrets`** `psk` | `PSK` | secret |
-| **`vpn.secrets`** `password` | `EAPPassword` | secret |
+| NM `vpn.data` key | Consumed by | Notes |
+|-------------------|-------------|-------|
+| `protocol` | plugin | which protocol to dial; default `ikev2` |
+| `full-tunnel` | plugin (→ `never-default`) | `"yes"`/`"no"`, default yes |
+| `mtu` | plugin (→ `Ip4Config` mtu) | optional override |
+| `gateway` | protocol | required (IKEv2) |
+| `port` | protocol | optional |
+| `local-id` | protocol | required (IKEv2) |
+| `server-id` | protocol | optional, verified if set |
+| `user` | protocol | presence selects EAP-MSCHAPv2 |
+| **`vpn.secrets`** `psk` | protocol | secret |
+| **`vpn.secrets`** `password` | protocol | secret |
+
+The key names deliberately match the protocol packages' option constants
+(`ikev2.OptGateway` and friends), so the pass-through needs no translation table.
+
+`protocol` defaults to `ikev2`, so profiles written before veepin gained a second
+protocol keep working unchanged. An unsupported value is rejected in `Parse`
+rather than deferred to `client.Dial`, so NM gets a clear error before it spawns
+anything.
 
 This package is plain data mapping and is **unit-testable without a bus** — the
 bulk of the daemon's correctness tests live here.

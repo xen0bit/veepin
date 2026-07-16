@@ -58,7 +58,7 @@ type Plugin struct {
 
 	mu         sync.Mutex
 	state      uint32
-	session    *client.Session
+	session    client.Session
 	dialCancel context.CancelFunc // cancels an in-flight handshake
 }
 
@@ -181,7 +181,7 @@ func (p *Plugin) Disconnect() *dbus.Error {
 // --- internals ---
 
 func (p *Plugin) dial(ctx context.Context, conn nmconfig.Connection) {
-	sess, res, err := client.Dial(ctx, conn.Client)
+	sess, res, err := client.Dial(ctx, conn.Protocol, conn.Options)
 
 	p.mu.Lock()
 	p.dialCancel = nil
