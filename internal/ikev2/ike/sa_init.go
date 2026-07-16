@@ -3,8 +3,8 @@ package ike
 import (
 	"net"
 
-	"github.com/xen0bit/veepin/internal/ikev2/transform"
 	"github.com/xen0bit/veepin/internal/ikev2/payload"
+	"github.com/xen0bit/veepin/internal/ikev2/transform"
 )
 
 // handleIKESAInit processes an IKE_SA_INIT request and sends the response.

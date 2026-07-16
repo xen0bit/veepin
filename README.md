@@ -61,7 +61,7 @@ cmd/ikev2d               server daemon: flags, TUN + pool wiring, signal handlin
 cmd/ikev2                client daemon: connect, TUN, routing, data path
 client                   embeddable client: Dial -> Session + Result
 
-dataplane                TUN device, address pool, ESP pump (SPI demux + routing), routing
+dataplane                TUN device, address pool, packet pump (demux + routing), client routing
 internal/cryptoutil      DH, PRF + prf+, integrity, SK/ESP ciphers
 
 internal/ikev2/payload   wire codec: header, payloads, SA/KE/Nonce/Notify/ID/AUTH/TS/Delete/CP
@@ -72,11 +72,21 @@ internal/ikev2/ike       negotiation, SK seal/open, NAT-T, CP, exchange handlers
 ```
 
 `dataplane` and `internal/cryptoutil` are protocol-agnostic: neither imports anything
-else in this module, and neither knows IKEv2 exists. The pump is written against a
-`Tunnel` interface, and the crypto primitives are named for what they are
-(`NewAESGCMSKCipher`, `NewECDH`) rather than for IKEv2's transform-ID registry.
+else in this module, and neither knows IKEv2 exists. The crypto primitives are named
+for what they are (`NewAESGCMSKCipher`, `NewECDH`) rather than for IKEv2's transform-ID
+registry, and the pump moves packets between a TUN device and a set of `Tunnel`s,
+demuxing inbound packets with a `Demux` the protocol supplies:
+
+```go
+type Demux func(pkt []byte) (key uint32, ok bool)
+
+func SPIDemux(pkt []byte) (uint32, bool) // ESP: the SPI in the first four octets
+```
+
+IKEv2 passes `SPIDemux`; a protocol that identifies tunnels differently (WireGuard's
+receiver index lives at offset 4, and only on transport-data messages) passes its own.
 `internal/ikev2/transform` is the single place that translates IANA transform IDs into
-primitives — which is what keeps the boundary honest.
+primitives. Those two seams are what keep the boundary honest.
 
 Data flow once a client is connected:
 

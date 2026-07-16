@@ -3,13 +3,14 @@ package dataplane
 import (
 	"bytes"
 	"encoding/binary"
-	"github.com/xen0bit/veepin/internal/ikev2/esp"
-	"github.com/xen0bit/veepin/internal/ikev2/transform"
-	"github.com/xen0bit/veepin/internal/ikev2/payload"
 	"net"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/xen0bit/veepin/internal/ikev2/esp"
+	"github.com/xen0bit/veepin/internal/ikev2/payload"
+	"github.com/xen0bit/veepin/internal/ikev2/transform"
 )
 
 // fakeTUN is an in-memory TUN device: writes are captured, reads block on an
@@ -51,7 +52,7 @@ func (f *fakeTUN) lastWrite() []byte {
 	return f.written[len(f.written)-1]
 }
 
-// fakeTunnel is an ESPTunnel backed by a pair of esp.SAs for a round trip.
+// fakeTunnel is a Tunnel backed by a pair of esp.SAs for a round trip.
 type fakeTunnel struct {
 	inSPI    uint32
 	clientIP net.IP
@@ -60,10 +61,9 @@ type fakeTunnel struct {
 	dec      func([]byte) ([]byte, error)
 }
 
-func (t *fakeTunnel) InboundSPI() uint32                   { return t.inSPI }
+func (t *fakeTunnel) InboundKey() uint32                   { return t.inSPI }
 func (t *fakeTunnel) ClientIP() net.IP                     { return t.clientIP }
 func (t *fakeTunnel) PeerAddr() *net.UDPAddr               { return t.peer }
-func (t *fakeTunnel) UDPEncap() bool                       { return true }
 func (t *fakeTunnel) Encapsulate(p []byte) ([]byte, error) { return t.enc(p) }
 func (t *fakeTunnel) Decapsulate(p []byte) ([]byte, error) { return t.dec(p) }
 func (t *fakeTunnel) SetPeerAddr(a *net.UDPAddr)           { t.peer = a }
@@ -92,7 +92,7 @@ func TestPumpRoundTrip(t *testing.T) {
 	serverSA, clientSA := espPair(t)
 
 	sentCh := make(chan []byte, 4)
-	send := func(esp []byte, to *net.UDPAddr, udpEncap bool) {
+	send := func(esp []byte, to *net.UDPAddr) {
 		if !to.IP.Equal(peer.IP) {
 			t.Errorf("sent to wrong peer: %v", to)
 		}
@@ -100,7 +100,7 @@ func TestPumpRoundTrip(t *testing.T) {
 	}
 
 	tun := newFakeTUN()
-	pump := NewPump(tun, send, nil)
+	pump := NewPump(tun, send, SPIDemux, nil)
 
 	tunnel := &fakeTunnel{
 		inSPI:    serverSA.SPIIn,
@@ -147,7 +147,7 @@ func TestPumpRoundTrip(t *testing.T) {
 	// Deliver from an ESP source that differs from the IKE-derived peer, so the
 	// return address must be updated to it (the road-warrior return-path fix).
 	espSrc := &net.UDPAddr{IP: net.IPv4(203, 0, 113, 9), Port: 4500}
-	pump.HandleESP(espIn, espSrc)
+	pump.HandleInbound(espIn, espSrc)
 
 	select {
 	case <-tun.writeSig:
@@ -167,10 +167,10 @@ func TestPumpRoundTrip(t *testing.T) {
 // silently dropped (no TUN write).
 func TestPumpUnknownSPIDropped(t *testing.T) {
 	tun := newFakeTUN()
-	pump := NewPump(tun, func([]byte, *net.UDPAddr, bool) {}, nil)
+	pump := NewPump(tun, func([]byte, *net.UDPAddr) {}, SPIDemux, nil)
 	esp := make([]byte, 40)
 	binary.BigEndian.PutUint32(esp[:4], 0xdeadbeef)
-	pump.HandleESP(esp, nil)
+	pump.HandleInbound(esp, nil)
 	select {
 	case <-tun.writeSig:
 		t.Fatal("unknown SPI should not produce a TUN write")
@@ -206,4 +206,78 @@ func espPair(t *testing.T) (server, client *esp.SA) {
 		Out: mk(keyB), In: mk(keyA),
 	}
 	return server, client
+}
+
+// TestSPIDemux covers the ESP key extractor, including the short-packet reject.
+func TestSPIDemux(t *testing.T) {
+	pkt := make([]byte, 8)
+	binary.BigEndian.PutUint32(pkt[:4], 0xdeadbeef)
+	key, ok := SPIDemux(pkt)
+	if !ok || key != 0xdeadbeef {
+		t.Fatalf("SPIDemux = %#x, %v; want 0xdeadbeef, true", key, ok)
+	}
+	if _, ok := SPIDemux([]byte{1, 2, 3}); ok {
+		t.Fatal("SPIDemux accepted a 3-byte packet")
+	}
+}
+
+// TestPumpDemuxIsPluggable is the point of the Demux seam: a protocol whose
+// tunnel key is not an ESP SPI at offset 0 must route without the pump changing.
+// This models WireGuard, whose receiver index sits at offset 4 and appears only
+// on transport-data messages (type 4).
+func TestPumpDemuxIsPluggable(t *testing.T) {
+	const wgReceiverIndex = 0x11223344
+
+	wgDemux := func(pkt []byte) (uint32, bool) {
+		if len(pkt) < 8 || pkt[0] != 4 { // only transport-data messages carry it
+			return 0, false
+		}
+		return binary.BigEndian.Uint32(pkt[4:8]), true
+	}
+
+	inner := makeIPv4(net.IPv4(10, 10, 10, 1), []byte("wireguard-shaped payload"))
+	tun := newFakeTUN()
+	pump := NewPump(tun, func([]byte, *net.UDPAddr) {}, wgDemux, nil)
+	pump.AddTunnel(&fakeTunnel{
+		inSPI:    wgReceiverIndex, // the tunnel's key, wherever it lives on the wire
+		clientIP: net.IPv4(10, 10, 10, 2).To4(),
+		peer:     &net.UDPAddr{IP: net.IPv4(203, 0, 113, 1), Port: 51820},
+		dec:      func([]byte) ([]byte, error) { return inner, nil },
+		enc:      func(p []byte) ([]byte, error) { return p, nil },
+	})
+
+	// A transport-data message carrying the receiver index at offset 4 routes.
+	data := make([]byte, 16)
+	data[0] = 4
+	binary.BigEndian.PutUint32(data[4:8], wgReceiverIndex)
+	pump.HandleInbound(data, nil)
+	select {
+	case <-tun.writeSig:
+	case <-time.After(2 * time.Second):
+		t.Fatal("packet with a non-SPI demux key was not routed to TUN")
+	}
+	if got := tun.lastWrite(); !bytes.Equal(got, inner) {
+		t.Fatalf("TUN write mismatch: got %q", got)
+	}
+
+	// A handshake message (type 1) carries no receiver index: demux says no.
+	handshake := make([]byte, 16)
+	handshake[0] = 1
+	binary.BigEndian.PutUint32(handshake[4:8], wgReceiverIndex)
+	pump.HandleInbound(handshake, nil)
+	select {
+	case <-tun.writeSig:
+		t.Fatal("a packet the demux rejected still reached TUN")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// The same bytes read as an ESP SPI would be a different key entirely, so
+	// the default demux must not route this packet.
+	espPump := NewPump(newFakeTUN(), func([]byte, *net.UDPAddr) {}, SPIDemux, nil)
+	espPump.AddTunnel(&fakeTunnel{
+		inSPI:    wgReceiverIndex,
+		clientIP: net.IPv4(10, 10, 10, 2).To4(),
+		dec:      func([]byte) ([]byte, error) { t.Fatal("SPIDemux must not match here"); return nil, nil },
+	})
+	espPump.HandleInbound(data, nil) // bytes[0:4] are 04 00 00 00, not the key
 }

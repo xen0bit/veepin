@@ -77,7 +77,7 @@ func TestFullVPNFlow(t *testing.T) {
 	}
 
 	tun := newMemTUN()
-	pump := dataplane.NewPump(tun, srv.SendESP, log.New(io.Discard, "", 0))
+	pump := dataplane.NewPump(tun, srv.SendESP, dataplane.SPIDemux, log.New(io.Discard, "", 0))
 	srv.SetDataPath(NewPumpDataPath(pump))
 	go pump.Run()
 	defer pump.Close()

@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/xen0bit/veepin/internal/ikev2/transform"
 	"github.com/xen0bit/veepin/internal/ikev2/payload"
+	"github.com/xen0bit/veepin/internal/ikev2/transform"
 )
 
 // keyLen reports the encryption key length an ENCR transform expects, so the

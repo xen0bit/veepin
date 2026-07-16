@@ -157,8 +157,9 @@ func main() {
 	}
 
 	// Data path: pump between TUN and ESP-in-UDP. The pump's send function
-	// hands encapsulated ESP back to the server's NAT-T socket.
-	pump := dataplane.NewPump(tun, srv.SendESP, logger)
+	// hands encapsulated ESP back to the server's NAT-T socket, and inbound
+	// packets are demuxed on the ESP SPI.
+	pump := dataplane.NewPump(tun, srv.SendESP, dataplane.SPIDemux, logger)
 	dp := ike.NewPumpDataPath(pump)
 	srv.SetDataPath(dp)
 

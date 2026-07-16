@@ -7,31 +7,48 @@ import (
 	"sync"
 )
 
-// ESPTunnel is the data-path view of one established Child SA. The ike package
-// supplies an implementation that performs ESP encapsulation/decapsulation with
-// the negotiated keys, and reports the peer transport address to send to.
-type ESPTunnel interface {
-	// InboundSPI is our SPI: inbound ESP packets carrying it belong here.
-	InboundSPI() uint32
+// Tunnel is the data-path view of one established security association. A
+// protocol package supplies an implementation that encapsulates/decapsulates
+// with the negotiated keys and reports the peer transport address to send to.
+//
+// Nothing here is ESP-specific: for IKEv2 the inbound key is the ESP SPI, but a
+// protocol whose demux key sits elsewhere in the packet (WireGuard's receiver
+// index, say) implements the same interface and supplies a matching Demux.
+type Tunnel interface {
+	// InboundKey identifies this tunnel on the wire: inbound packets whose Demux
+	// yields this key belong here. It must agree with the pump's Demux.
+	InboundKey() uint32
 	// ClientIP is the internal tunnel address assigned to the peer; outbound
 	// TUN packets destined to it are routed through this tunnel.
 	ClientIP() net.IP
-	// PeerAddr is where encapsulated ESP is sent (the peer's UDP address, which
-	// may have floated to :4500 after NAT-T).
+	// PeerAddr is where encapsulated packets are sent (the peer's UDP address,
+	// which may have floated to :4500 after IKEv2 NAT-T).
 	PeerAddr() *net.UDPAddr
-	// UDPEncap reports whether ESP must be wrapped in UDP (NAT-T, port 4500).
-	UDPEncap() bool
 
-	// Encapsulate turns an inner IP packet into an ESP payload (SPI|Seq|...).
+	// Encapsulate turns an inner IP packet into a protected payload.
 	Encapsulate(ipPacket []byte) ([]byte, error)
-	// Decapsulate turns an ESP payload back into the inner IP packet.
-	Decapsulate(esp []byte) ([]byte, error)
+	// Decapsulate turns a protected payload back into the inner IP packet.
+	Decapsulate(pkt []byte) ([]byte, error)
 }
 
-// ESPSender writes an encapsulated ESP datagram to a peer. On NAT-T the caller
-// wraps with the non-ESP/ESP marker as required; here we pass the ESP bytes and
-// the target address, and whether UDP encap (port 4500) is in effect.
-type ESPSender func(espBytes []byte, to *net.UDPAddr, udpEncap bool)
+// Sender writes an encapsulated datagram to a peer. Any protocol-specific
+// framing (IKEv2's non-ESP marker, for instance) is the sender's business.
+type Sender func(pkt []byte, to *net.UDPAddr)
+
+// Demux extracts the tunnel-identifying key from an inbound packet, reporting
+// false if the packet carries none and should be dropped. It is the one part of
+// inbound routing that is protocol-specific: ESP puts its SPI in the first four
+// octets, whereas WireGuard's receiver index sits at offset 4 and only on
+// transport-data messages.
+type Demux func(pkt []byte) (key uint32, ok bool)
+
+// SPIDemux reads an ESP SPI from the first four octets (RFC 4303).
+func SPIDemux(pkt []byte) (uint32, bool) {
+	if len(pkt) < 4 {
+		return 0, false
+	}
+	return binary.BigEndian.Uint32(pkt[:4]), true
+}
 
 // tunIO is the minimal TUN device interface the pump needs; *TUN satisfies it.
 // It exists so the pump can be tested with an in-memory device.
@@ -40,37 +57,43 @@ type tunIO interface {
 	Write(pkt []byte) (int, error)
 }
 
-// Pump moves packets between a TUN device and a set of ESP tunnels.
+// Pump moves packets between a TUN device and a set of tunnels.
 type Pump struct {
-	tun  tunIO
-	log  *log.Logger
-	send ESPSender
+	tun   tunIO
+	log   *log.Logger
+	send  Sender
+	demux Demux
 
 	mu       sync.RWMutex
-	bySPI    map[uint32]ESPTunnel // inbound demux
-	byIP     map[uint32]ESPTunnel // outbound routing by client IP (server mode)
-	defRoute ESPTunnel            // outbound default tunnel (client mode)
+	byKey    map[uint32]Tunnel // inbound demux
+	byIP     map[uint32]Tunnel // outbound routing by client IP (server mode)
+	defRoute Tunnel            // outbound default tunnel (client mode)
 
 	closing bool
 }
 
-// NewPump creates a data-path pump over tun. send is used to transmit
-// encapsulated ESP to peers.
-func NewPump(tun tunIO, send ESPSender, logger *log.Logger) *Pump {
+// NewPump creates a data-path pump over tun. send transmits encapsulated
+// packets to peers; demux extracts the tunnel key from inbound packets, and a
+// nil demux defaults to SPIDemux (ESP).
+func NewPump(tun tunIO, send Sender, demux Demux, logger *log.Logger) *Pump {
+	if demux == nil {
+		demux = SPIDemux
+	}
 	return &Pump{
 		tun:   tun,
 		log:   logger,
 		send:  send,
-		bySPI: make(map[uint32]ESPTunnel),
-		byIP:  make(map[uint32]ESPTunnel),
+		demux: demux,
+		byKey: make(map[uint32]Tunnel),
+		byIP:  make(map[uint32]Tunnel),
 	}
 }
 
-// AddTunnel registers an established Child SA data path.
-func (p *Pump) AddTunnel(t ESPTunnel) {
+// AddTunnel registers an established tunnel's data path.
+func (p *Pump) AddTunnel(t Tunnel) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.bySPI[t.InboundSPI()] = t
+	p.byKey[t.InboundKey()] = t
 	if ip := t.ClientIP().To4(); ip != nil {
 		p.byIP[binary.BigEndian.Uint32(ip)] = t
 	}
@@ -80,47 +103,50 @@ func (p *Pump) AddTunnel(t ESPTunnel) {
 // destination address. This is used in client mode, where every packet leaving
 // the local TUN must be sent to the single VPN server SA. In server mode this
 // is left unset and outbound packets are routed per destination via AddTunnel.
-func (p *Pump) SetDefaultRoute(t ESPTunnel) {
+func (p *Pump) SetDefaultRoute(t Tunnel) {
 	p.mu.Lock()
 	p.defRoute = t
 	p.mu.Unlock()
 }
-func (p *Pump) RemoveTunnel(t ESPTunnel) {
+
+// RemoveTunnel unregisters a tunnel's data path.
+func (p *Pump) RemoveTunnel(t Tunnel) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	delete(p.bySPI, t.InboundSPI())
+	delete(p.byKey, t.InboundKey())
 	if ip := t.ClientIP().To4(); ip != nil {
 		delete(p.byIP, binary.BigEndian.Uint32(ip))
 	}
 }
 
-// HandleESP processes an inbound ESP datagram (already stripped of any UDP-encap
-// marker). It demuxes by SPI, decapsulates, and writes the inner IP packet to
-// the TUN device. from, when non-nil, is the datagram's UDP source: the tunnel's
-// return address is updated to it so replies reach the peer's actual ESP socket
-// (a road-warrior client sends ESP from a different port than IKE, so the IKE
-// peer address is not a valid ESP return address). Pass nil on a connected
-// socket where the source is implicit (client mode).
-func (p *Pump) HandleESP(esp []byte, from *net.UDPAddr) {
-	if len(esp) < 4 {
-		return
+// HandleInbound processes an inbound protected datagram (already stripped of any
+// protocol framing, such as IKEv2's UDP-encap marker). It demuxes to a tunnel,
+// decapsulates, and writes the inner IP packet to the TUN device. from, when
+// non-nil, is the datagram's UDP source: the tunnel's return address is updated
+// to it so replies reach the peer's actual data socket (a road-warrior client
+// sends ESP from a different port than IKE, so the IKE peer address is not a
+// valid ESP return address). Pass nil on a connected socket where the source is
+// implicit (client mode).
+func (p *Pump) HandleInbound(pkt []byte, from *net.UDPAddr) {
+	key, ok := p.demux(pkt)
+	if !ok {
+		return // no tunnel key in this packet
 	}
-	spi := binary.BigEndian.Uint32(esp[:4])
 	p.mu.RLock()
-	t := p.bySPI[spi]
+	t := p.byKey[key]
 	p.mu.RUnlock()
 	if t == nil {
-		return // unknown SPI
+		return // unknown key
 	}
 	if from != nil {
 		if u, ok := t.(interface{ SetPeerAddr(*net.UDPAddr) }); ok {
 			u.SetPeerAddr(from)
 		}
 	}
-	inner, err := t.Decapsulate(esp)
+	inner, err := t.Decapsulate(pkt)
 	if err != nil {
 		if p.log != nil {
-			p.log.Printf("dataplane: decap SPI %#x failed: %v", spi, err)
+			p.log.Printf("dataplane: decap key %#x failed: %v", key, err)
 		}
 		return
 	}
@@ -174,14 +200,14 @@ func (p *Pump) routeOutbound(pkt []byte) {
 	}
 	// Encapsulate copies the inner packet into its own plaintext buffer, so
 	// passing the read buffer slice directly is safe and avoids a copy.
-	esp, err := t.Encapsulate(pkt)
+	out, err := t.Encapsulate(pkt)
 	if err != nil {
 		if p.log != nil {
 			p.log.Printf("dataplane: encap failed: %v", err)
 		}
 		return
 	}
-	p.send(esp, t.PeerAddr(), t.UDPEncap())
+	p.send(out, t.PeerAddr())
 }
 
 // Close stops the pump.

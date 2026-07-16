@@ -197,10 +197,11 @@ func (s *Server) SetDataPath(dp DataPath) {
 }
 
 // SendESP transmits an encapsulated ESP datagram to a peer on the NAT-T socket.
-// It matches the dataplane.ESPSender signature so a Pump can send through the
-// server's own socket. The udpEncap flag is accepted for interface
-// compatibility; in this userspace build ESP always rides UDP port 4500.
-func (s *Server) SendESP(esp []byte, to *net.UDPAddr, udpEncap bool) {
+// It matches the dataplane.Sender signature so a Pump can send through the
+// server's own socket. In this userspace build ESP always rides UDP port 4500,
+// so whether NAT-T encapsulation was negotiated makes no difference here; the
+// Child SA still records it (ChildSA.UDPEncap) because the handshake needs it.
+func (s *Server) SendESP(esp []byte, to *net.UDPAddr) {
 	if s.tr == nil || to == nil {
 		return
 	}

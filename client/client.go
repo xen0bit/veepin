@@ -171,12 +171,13 @@ func Dial(ctx context.Context, cfg Config) (*Session, Result, error) {
 		stopKA:   make(chan struct{}),
 	}
 
-	send := func(esp []byte, _ *net.UDPAddr, _ bool) {
+	// The socket is connected to the server, so the destination is implicit.
+	send := func(esp []byte, _ *net.UDPAddr) {
 		if _, werr := dataConn.Write(esp); werr != nil {
 			logger.Printf("client: ESP send error: %v", werr)
 		}
 	}
-	pump := dataplane.NewPump(tun, send, logger)
+	pump := dataplane.NewPump(tun, send, dataplane.SPIDemux, logger)
 	pump.AddTunnel(tunnel)
 	pump.SetDefaultRoute(tunnel)
 	s.pump = pump
@@ -199,7 +200,7 @@ func Dial(ctx context.Context, cfg Config) (*Session, Result, error) {
 			}
 			// Connected socket: the source is implicitly the server, so no
 			// return-address update is needed (pass nil).
-			pump.HandleESP(append([]byte(nil), pkt...), nil)
+			pump.HandleInbound(append([]byte(nil), pkt...), nil)
 		}
 	}()
 

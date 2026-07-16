@@ -6,8 +6,8 @@ import (
 	"testing"
 
 	"github.com/xen0bit/veepin/internal/ikev2/esp"
-	"github.com/xen0bit/veepin/internal/ikev2/transform"
 	"github.com/xen0bit/veepin/internal/ikev2/payload"
+	"github.com/xen0bit/veepin/internal/ikev2/transform"
 )
 
 // discardTUN drops everything written to it and never yields reads; it isolates
@@ -29,7 +29,7 @@ func BenchmarkPumpInbound(b *testing.B) {
 		b.Run(sizeName(size), func(b *testing.B) {
 			serverSA, clientSA := benchESPPair(b)
 			tun := &discardTUN{}
-			pump := NewPump(tun, func([]byte, *net.UDPAddr, bool) {}, nil)
+			pump := NewPump(tun, func([]byte, *net.UDPAddr) {}, SPIDemux, nil)
 
 			client := net.IPv4(10, 0, 0, 2).To4()
 			pump.AddTunnel(&benchTunnel{sa: serverSA, in: serverSA.SPIIn, ip: client})
@@ -57,7 +57,7 @@ func BenchmarkPumpInbound(b *testing.B) {
 					// numbers from the batch are accepted.
 					serverSA.ResetReplayWindow()
 				}
-				pump.HandleESP(pkts[i%batch], nil)
+				pump.HandleInbound(pkts[i%batch], nil)
 			}
 		})
 	}
@@ -71,7 +71,7 @@ type benchTunnel struct {
 	peer *net.UDPAddr
 }
 
-func (t *benchTunnel) InboundSPI() uint32 { return t.in }
+func (t *benchTunnel) InboundKey() uint32 { return t.in }
 func (t *benchTunnel) ClientIP() net.IP   { return t.ip }
 
 // PeerAddr returns a stored address, mirroring the production espTunnel (which
@@ -83,7 +83,6 @@ func (t *benchTunnel) PeerAddr() *net.UDPAddr {
 	}
 	return t.peer
 }
-func (t *benchTunnel) UDPEncap() bool { return true }
 func (t *benchTunnel) Encapsulate(p []byte) ([]byte, error) {
 	return t.sa.Encapsulate(p, 4)
 }
@@ -145,7 +144,7 @@ func BenchmarkPumpOutbound(b *testing.B) {
 		b.Run(sizeName(size), func(b *testing.B) {
 			serverSA, _ := benchESPPair(b)
 			var sink int
-			pump := NewPump(&discardTUN{}, func(esp []byte, _ *net.UDPAddr, _ bool) { sink += len(esp) }, nil)
+			pump := NewPump(&discardTUN{}, func(esp []byte, _ *net.UDPAddr) { sink += len(esp) }, SPIDemux, nil)
 			client := net.IPv4(10, 0, 0, 2).To4()
 			pump.AddTunnel(&benchTunnel{sa: serverSA, in: serverSA.SPIIn, ip: client})
 

@@ -9,11 +9,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/cryptoutil"
 	"github.com/xen0bit/veepin/internal/ikev2/eap"
 	"github.com/xen0bit/veepin/internal/ikev2/esp"
-	"github.com/xen0bit/veepin/internal/ikev2/transform"
 	"github.com/xen0bit/veepin/internal/ikev2/payload"
+	"github.com/xen0bit/veepin/internal/ikev2/transform"
 )
 
 // ErrAuthFailed indicates the peer's authentication could not be verified —
@@ -648,11 +649,11 @@ func (c *Client) Close() error {
 	return nil
 }
 
-// BuildTunnel converts the negotiated client Child SA into a dataplane.ESPTunnel
+// BuildTunnel converts the negotiated client Child SA into a dataplane.Tunnel
 // ready for the pump. The client uses the initiator key directions: it encrypts
 // outbound with the initiator->responder keys and decrypts inbound with the
 // responder->initiator keys.
-func (r *ClientResult) BuildTunnel() (*espTunnel, error) {
+func (r *ClientResult) BuildTunnel() (dataplane.Tunnel, error) {
 	if r.Suite.EncrID == 0 {
 		return nil, fmt.Errorf("ike: client result has no negotiated cipher")
 	}
@@ -672,7 +673,6 @@ func (r *ClientResult) BuildTunnel() (*espTunnel, error) {
 		espSA:    sa,
 		inSPI:    r.InboundSPI,
 		clientIP: r.AssignedIP,
-		udpEncap: r.UDPEncap,
 	}
 	t.peer.Store(r.ServerAddr)
 	return t, nil

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/xen0bit/veepin/internal/ikev2/transform"
 	"github.com/xen0bit/veepin/internal/ikev2/payload"
+	"github.com/xen0bit/veepin/internal/ikev2/transform"
 )
 
 // benchSAPair builds a pair of ESP SAs sharing keys so that one can encapsulate
