@@ -6,9 +6,9 @@
 //	veepin serve   <protocol> [flags]   run a VPN server
 //	veepin probe   <protocol> [flags]   diagnostic: handshake and one data packet
 //
-// IKEv2 is currently the only protocol. Creating a TUN device and editing the
-// routing table require CAP_NET_ADMIN — run as root, or grant the binary the
-// capability once:
+// IKEv2 and WireGuard are the supported protocols. Creating a TUN device and
+// editing the routing table require CAP_NET_ADMIN — run as root, or grant the
+// binary the capability once:
 //
 //	go build -o veepin ./cmd/veepin
 //	sudo setcap cap_net_admin+ep ./veepin
@@ -22,9 +22,10 @@ import (
 
 	"github.com/xen0bit/veepin/client"
 
-	// Registers "ikev2" with the client registry. Adding a protocol here is what
-	// makes it dialable by name.
+	// Registers the protocols with the client registry. Adding a protocol here
+	// is what makes it dialable by name.
 	_ "github.com/xen0bit/veepin/ikev2"
+	_ "github.com/xen0bit/veepin/wireguard"
 )
 
 // Build metadata, stamped via -ldflags at release time (see .goreleaser.yaml).

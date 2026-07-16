@@ -145,6 +145,12 @@ func (p *Pump) HandleInbound(pkt []byte, from *net.UDPAddr) {
 		}
 		return
 	}
+	if len(inner) == 0 {
+		// An authenticated packet with no inner payload: a WireGuard keepalive.
+		// It kept the tunnel and any NAT binding alive by arriving; there is
+		// nothing to deliver to the TUN.
+		return
+	}
 	if _, err := p.tun.Write(inner); err != nil {
 		if p.log != nil {
 			p.log.Printf("dataplane: TUN write failed: %v", err)

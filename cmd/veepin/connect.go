@@ -13,6 +13,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/ikev2"
+	"github.com/xen0bit/veepin/wireguard"
 )
 
 // runConnect brings up a tunnel and applies the negotiated configuration to the
@@ -109,6 +110,40 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 			}
 			if *port != 0 {
 				opts[ikev2.OptPort] = fmt.Sprint(*port)
+			}
+			return opts
+		}, nil
+	case "wireguard":
+		var (
+			config    = fs.String("config", "", "wg-quick style config file (flags below override its values)")
+			privKey   = fs.String("private-key", "", "our static private key, base64")
+			address   = fs.String("address", "", "our tunnel address in CIDR form, e.g. 10.0.0.2/32")
+			dns       = fs.String("dns", "", "comma-separated DNS servers (optional)")
+			mtu       = fs.Int("mtu", 0, "inner MTU (default 1420)")
+			pubKey    = fs.String("public-key", "", "peer static public key, base64")
+			psk       = fs.String("preshared-key", "", "optional preshared key, base64")
+			endpoint  = fs.String("endpoint", "", "peer host:port, e.g. vpn.example.com:51820")
+			allowed   = fs.String("allowed-ips", "", "comma-separated destinations routed to the peer, e.g. 0.0.0.0/0")
+			keepalive = fs.Int("persistent-keepalive", 0, "keepalive interval in seconds (0 = off)")
+			tun       = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+		)
+		return func() map[string]string {
+			opts := map[string]string{
+				wireguard.OptConfig:       *config,
+				wireguard.OptPrivateKey:   *privKey,
+				wireguard.OptAddress:      *address,
+				wireguard.OptDNS:          *dns,
+				wireguard.OptPublicKey:    *pubKey,
+				wireguard.OptPresharedKey: *psk,
+				wireguard.OptEndpoint:     *endpoint,
+				wireguard.OptAllowedIPs:   *allowed,
+				wireguard.OptTUNName:      *tun,
+			}
+			if *mtu != 0 {
+				opts[wireguard.OptMTU] = fmt.Sprint(*mtu)
+			}
+			if *keepalive != 0 {
+				opts[wireguard.OptKeepalive] = fmt.Sprint(*keepalive)
 			}
 			return opts
 		}, nil
