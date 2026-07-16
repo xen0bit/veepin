@@ -13,6 +13,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/ikev2"
+	"github.com/xen0bit/veepin/openvpn"
 	"github.com/xen0bit/veepin/wireguard"
 )
 
@@ -148,6 +149,34 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 			}
 			if *rekey != 0 {
 				opts[wireguard.OptRekeySeconds] = fmt.Sprint(*rekey)
+			}
+			return opts
+		}, nil
+	case "openvpn":
+		var (
+			config = fs.String("config", "", ".ovpn profile (flags below override its values)")
+			remote = fs.String("remote", "", "server host or IP")
+			port   = fs.Int("port", 0, "server UDP port (default 1194)")
+			ca     = fs.String("ca", "", "path to the CA certificate PEM")
+			cert   = fs.String("cert", "", "path to the client certificate PEM")
+			key    = fs.String("key", "", "path to the client private key PEM")
+			user   = fs.String("username", "", "auth-user-pass username (optional)")
+			pass   = fs.String("password", "", "auth-user-pass password (optional)")
+			tun    = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+		)
+		return func() map[string]string {
+			opts := map[string]string{
+				openvpn.OptConfig:   *config,
+				openvpn.OptRemote:   *remote,
+				openvpn.OptCA:       *ca,
+				openvpn.OptCert:     *cert,
+				openvpn.OptKey:      *key,
+				openvpn.OptUsername: *user,
+				openvpn.OptPassword: *pass,
+				openvpn.OptTUNName:  *tun,
+			}
+			if *port != 0 {
+				opts[openvpn.OptPort] = fmt.Sprint(*port)
 			}
 			return opts
 		}, nil

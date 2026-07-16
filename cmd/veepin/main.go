@@ -25,6 +25,7 @@ import (
 	// Registers the protocols with the client registry. Adding a protocol here
 	// is what makes it dialable by name.
 	_ "github.com/xen0bit/veepin/ikev2"
+	_ "github.com/xen0bit/veepin/openvpn"
 	_ "github.com/xen0bit/veepin/wireguard"
 )
 
