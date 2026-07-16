@@ -670,9 +670,11 @@ func (r *ClientResult) BuildTunnel() (dataplane.Tunnel, error) {
 		},
 	}
 	t := &espTunnel{
-		espSA:    sa,
-		inSPI:    r.InboundSPI,
-		clientIP: r.AssignedIP,
+		espSA: sa,
+		inSPI: r.InboundSPI,
+		// Client side: everything leaving the local TUN belongs to the one server,
+		// so this tunnel carries all destinations.
+		routes: defaultRoute(),
 	}
 	t.peer.Store(r.ServerAddr)
 	return t, nil

@@ -105,8 +105,15 @@ func SPIDemux(pkt []byte) (uint32, bool) // ESP: the SPI in the first four octet
 
 IKEv2 passes `SPIDemux`; a protocol that identifies tunnels differently (WireGuard's
 receiver index lives at offset 4, and only on transport-data messages) passes its own.
+
+Outbound, a packet goes to the tunnel whose route matches its destination most
+specifically, and a packet matching no route is dropped. One mechanism covers every
+case: an IKEv2 server's tunnel carries its peer's assigned address as a `/32`, an
+IKEv2 client's carries `0.0.0.0/0` because everything on its TUN belongs to the one
+server, and a WireGuard peer carries its AllowedIPs.
+
 `internal/ikev2/transform` is the single place that translates IANA transform IDs into
-primitives. Those two seams are what keep the boundary honest.
+primitives. Those seams are what keep the boundary honest.
 
 Data flow once a client is connected:
 

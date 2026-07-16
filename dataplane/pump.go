@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"log"
 	"net"
+	"net/netip"
 	"sync"
 )
 
@@ -18,9 +19,14 @@ type Tunnel interface {
 	// InboundKey identifies this tunnel on the wire: inbound packets whose Demux
 	// yields this key belong here. It must agree with the pump's Demux.
 	InboundKey() uint32
-	// ClientIP is the internal tunnel address assigned to the peer; outbound
-	// TUN packets destined to it are routed through this tunnel.
-	ClientIP() net.IP
+	// Routes are the inner destinations this tunnel carries. An outbound TUN
+	// packet goes to the tunnel whose route matches its destination most
+	// specifically; a packet matching none is dropped.
+	//
+	// A server-side IKEv2 tunnel returns its peer's assigned address as a /32; a
+	// client returns 0.0.0.0/0, because everything leaving its TUN belongs to the
+	// one server. WireGuard returns the peer's AllowedIPs.
+	Routes() []netip.Prefix
 	// PeerAddr is where encapsulated packets are sent (the peer's UDP address,
 	// which may have floated to :4500 after IKEv2 NAT-T).
 	PeerAddr() *net.UDPAddr
@@ -64,10 +70,9 @@ type Pump struct {
 	send  Sender
 	demux Demux
 
-	mu       sync.RWMutex
-	byKey    map[uint32]Tunnel // inbound demux
-	byIP     map[uint32]Tunnel // outbound routing by client IP (server mode)
-	defRoute Tunnel            // outbound default tunnel (client mode)
+	mu     sync.RWMutex
+	byKey  map[uint32]Tunnel // inbound demux
+	routes routeTable        // outbound, by longest-prefix match
 
 	closing bool
 }
@@ -85,28 +90,18 @@ func NewPump(tun tunIO, send Sender, demux Demux, logger *log.Logger) *Pump {
 		send:  send,
 		demux: demux,
 		byKey: make(map[uint32]Tunnel),
-		byIP:  make(map[uint32]Tunnel),
 	}
 }
 
-// AddTunnel registers an established tunnel's data path.
+// AddTunnel registers an established tunnel's data path: its inbound key for
+// demux, and its routes for outbound.
 func (p *Pump) AddTunnel(t Tunnel) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.byKey[t.InboundKey()] = t
-	if ip := t.ClientIP().To4(); ip != nil {
-		p.byIP[binary.BigEndian.Uint32(ip)] = t
+	for _, r := range t.Routes() {
+		p.routes.insert(r, t)
 	}
-}
-
-// SetDefaultRoute makes t the outbound tunnel for all TUN traffic regardless of
-// destination address. This is used in client mode, where every packet leaving
-// the local TUN must be sent to the single VPN server SA. In server mode this
-// is left unset and outbound packets are routed per destination via AddTunnel.
-func (p *Pump) SetDefaultRoute(t Tunnel) {
-	p.mu.Lock()
-	p.defRoute = t
-	p.mu.Unlock()
 }
 
 // RemoveTunnel unregisters a tunnel's data path.
@@ -114,8 +109,8 @@ func (p *Pump) RemoveTunnel(t Tunnel) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	delete(p.byKey, t.InboundKey())
-	if ip := t.ClientIP().To4(); ip != nil {
-		delete(p.byIP, binary.BigEndian.Uint32(ip))
+	for _, r := range t.Routes() {
+		p.routes.remove(r)
 	}
 }
 
@@ -181,22 +176,19 @@ func (p *Pump) Run() {
 	}
 }
 
-// routeOutbound routes one inner IP packet from the TUN to the tunnel that owns
-// its destination address, encapsulates it, and sends it. Non-IPv4 packets and
-// packets with no matching tunnel are dropped.
+// routeOutbound routes one inner IP packet from the TUN to the tunnel whose
+// route matches its destination most specifically, encapsulates it, and sends
+// it. Non-IPv4 packets and packets matching no route are dropped.
 func (p *Pump) routeOutbound(pkt []byte) {
 	dst, ok := ipv4Dest(pkt)
 	if !ok {
 		return // not IPv4; this build tunnels IPv4 only
 	}
 	p.mu.RLock()
-	t := p.defRoute // client mode: single default tunnel
-	if t == nil {
-		t = p.byIP[dst] // server mode: route by destination
-	}
+	t := p.routes.lookup(dst)
 	p.mu.RUnlock()
 	if t == nil {
-		return // no tunnel for this destination
+		return // no tunnel carries this destination
 	}
 	// Encapsulate copies the inner packet into its own plaintext buffer, so
 	// passing the read buffer slice directly is safe and avoids a copy.

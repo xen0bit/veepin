@@ -3,6 +3,7 @@ package dataplane
 import (
 	"encoding/binary"
 	"net"
+	"net/netip"
 	"testing"
 
 	"github.com/xen0bit/veepin/internal/ikev2/esp"
@@ -72,7 +73,14 @@ type benchTunnel struct {
 }
 
 func (t *benchTunnel) InboundKey() uint32 { return t.in }
-func (t *benchTunnel) ClientIP() net.IP   { return t.ip }
+
+// Routes mirrors the production server-side tunnel: one assigned address as a
+// /32. Built once, since Routes is called on the pump's registration path, not
+// per packet.
+func (t *benchTunnel) Routes() []netip.Prefix {
+	addr, _ := netip.AddrFromSlice(t.ip.To4())
+	return []netip.Prefix{netip.PrefixFrom(addr, 32)}
+}
 
 // PeerAddr returns a stored address, mirroring the production espTunnel (which
 // holds a fixed *net.UDPAddr). Building it per call would allocate and make the

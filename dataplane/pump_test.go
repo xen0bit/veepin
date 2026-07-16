@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"net"
+	"net/netip"
 	"sync"
 	"testing"
 	"time"
@@ -56,13 +57,23 @@ func (f *fakeTUN) lastWrite() []byte {
 type fakeTunnel struct {
 	inSPI    uint32
 	clientIP net.IP
+	routes   []netip.Prefix // when nil, derived from clientIP as a /32
 	peer     *net.UDPAddr
 	enc      func([]byte) ([]byte, error)
 	dec      func([]byte) ([]byte, error)
 }
 
-func (t *fakeTunnel) InboundKey() uint32                   { return t.inSPI }
-func (t *fakeTunnel) ClientIP() net.IP                     { return t.clientIP }
+func (t *fakeTunnel) InboundKey() uint32 { return t.inSPI }
+func (t *fakeTunnel) Routes() []netip.Prefix {
+	if t.routes != nil {
+		return t.routes
+	}
+	addr, ok := netip.AddrFromSlice(t.clientIP.To4())
+	if !ok {
+		return nil
+	}
+	return []netip.Prefix{netip.PrefixFrom(addr, 32)}
+}
 func (t *fakeTunnel) PeerAddr() *net.UDPAddr               { return t.peer }
 func (t *fakeTunnel) Encapsulate(p []byte) ([]byte, error) { return t.enc(p) }
 func (t *fakeTunnel) Decapsulate(p []byte) ([]byte, error) { return t.dec(p) }

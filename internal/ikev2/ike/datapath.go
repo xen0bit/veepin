@@ -2,12 +2,34 @@ package ike
 
 import (
 	"net"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/ikev2/esp"
 )
+
+// hostRoute expresses one assigned address as a single-host route. It returns
+// nil for an address that is not IPv4, which leaves the tunnel unrouted rather
+// than routing it wrongly.
+func hostRoute(ip net.IP) []netip.Prefix {
+	v4 := ip.To4()
+	if v4 == nil {
+		return nil
+	}
+	addr, ok := netip.AddrFromSlice(v4)
+	if !ok {
+		return nil
+	}
+	return []netip.Prefix{netip.PrefixFrom(addr, 32)}
+}
+
+// defaultRoute is every IPv4 destination: what a client's single tunnel to its
+// server carries.
+func defaultRoute() []netip.Prefix {
+	return []netip.Prefix{netip.PrefixFrom(netip.IPv4Unspecified(), 0)}
+}
 
 // espTunnel adapts an established Child SA to the dataplane.Tunnel interface,
 // wrapping an esp.SA plus the routing metadata the pump needs. The tunnel key
@@ -18,14 +40,14 @@ import (
 // return traffic tracks the peer's real ESP source address rather than the IKE
 // address it authenticated from.
 type espTunnel struct {
-	espSA    *esp.SA
-	inSPI    uint32
-	clientIP net.IP
-	peer     atomic.Pointer[net.UDPAddr]
+	espSA  *esp.SA
+	inSPI  uint32
+	routes []netip.Prefix
+	peer   atomic.Pointer[net.UDPAddr]
 }
 
 func (t *espTunnel) InboundKey() uint32     { return t.inSPI }
-func (t *espTunnel) ClientIP() net.IP       { return t.clientIP }
+func (t *espTunnel) Routes() []netip.Prefix { return t.routes }
 func (t *espTunnel) PeerAddr() *net.UDPAddr { return t.peer.Load() }
 
 // SetPeerAddr updates the ESP return address, but only when it actually changes,
@@ -80,9 +102,11 @@ func (d *PumpDataPath) AddChild(sa *IKESA, child *ChildSA) {
 		return
 	}
 	t := &espTunnel{
-		espSA:    espSA,
-		inSPI:    child.InboundSPI,
-		clientIP: child.ClientIP,
+		espSA: espSA,
+		inSPI: child.InboundSPI,
+		// Server side: this tunnel carries exactly the one address the peer was
+		// assigned, so its route is that host's /32.
+		routes: hostRoute(child.ClientIP),
 	}
 	t.peer.Store(child.PeerAddr) // initial return address, refined per inbound ESP
 	d.mu.Lock()
