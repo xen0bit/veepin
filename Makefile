@@ -135,7 +135,7 @@ test:
 test-short:
 	$(GO) test -short $(GOFLAGS) ./...
 
-## interop: Docker-based interop tests vs strongSwan (needs Docker; not in `test`)
+## interop: Docker-based interop tests vs strongSwan + wireguard-go (needs Docker; not in `test`)
 .PHONY: interop
 interop:
 	$(GO) test -tags interop -count=1 -timeout 20m ./tests/interop/...

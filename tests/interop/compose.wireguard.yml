@@ -1,0 +1,47 @@
+# veepin WireGuard client -> reference wireguard-go responder.
+# The veepin initiator performs the Noise_IKpsk2 handshake and transport data
+# path against a real WireGuard implementation it shares no code with. Data-path
+# check: the client pings 10.10.10.1 (the server's tunnel address).
+#
+# The keys below are fixed test material generated with `wg genkey` — never real
+# secrets — so both sides agree without an exchange step. A preshared key is
+# included to exercise that path too.
+name: veepin-interop-wg
+
+# Shared test keys, defined once and merged into both services.
+x-wg-keys: &wg-keys
+  SERVER_PRIVATE: "+IRmjL6NRpthikeXn+jGUJNLe1ZJKQaqeWubiG9+GHs="
+  SERVER_PUBLIC: "srb9CBWUN+UL2CYhqHoL+rGKFPNu6nUJiNStgH0EBWM="
+  CLIENT_PRIVATE: "CHk+5XZnPhJ+UXfIx83SaePpgYrK+0/FqiPvNvTp3Hg="
+  CLIENT_PUBLIC: "gjMMAROzi5lHFapIKeaAdJ2RhGe0lW24XysGzBd1OSM="
+  PSK: "cjldFdAmi69yIFhc0Sms/5Yz6boVXkMZbMJl+RzzMZM="
+  SERVER_TUN_IP: "10.10.10.1"
+  CLIENT_TUN_IP: "10.10.10.2"
+
+services:
+  wg-server:
+    build:
+      context: wireguard
+    image: interop-wireguard
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      <<: *wg-keys
+    volumes:
+      - ./wireguard/server-entrypoint.sh:/entrypoint.sh:ro
+    command: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-wg-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [wg-server]
+    environment:
+      <<: *wg-keys
+      SERVER: "wg-server"
+    volumes:
+      - ./veepin/wg-client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

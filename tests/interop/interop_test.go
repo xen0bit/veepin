@@ -39,6 +39,16 @@ func TestInteropStrongswanClientVeepinServer(t *testing.T) {
 	runInterop(t, "compose.server-ss.yml", "strongswan-client", "10.10.10.1")
 }
 
+// TestInteropVeepinClientWireguardServer proves the WireGuard initiator against
+// the reference wireguard-go responder: the veepin client performs the
+// Noise_IKpsk2 handshake and transport data path, then pings 10.10.10.1 (the
+// responder's tunnel address) across it. A success exercises the handshake,
+// the counter-nonce transport crypto, and cryptokey routing end to end against
+// an implementation veepin shares no code with.
+func TestInteropVeepinClientWireguardServer(t *testing.T) {
+	runInterop(t, "compose.wireguard.yml", "veepin-wg-client", "10.10.10.1")
+}
+
 // runInterop brings up the given compose file, then retries a ping from pingSvc
 // to target across the tunnel until it succeeds or pingDeadline elapses. A
 // successful ping proves the full path: handshake, config-mode addressing, and
