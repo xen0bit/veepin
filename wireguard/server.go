@@ -312,18 +312,32 @@ func (s *Server) handleInitiation(pkt []byte, from *net.UDPAddr) {
 		return
 	}
 	peer.lastTS = ts
-	old := peer.tunnel
-	tunnel := newTunnel(sess, peer.allowedIPs, from, true)
-	peer.tunnel = tunnel
+	var evicted *transport.Session
+	firstHandshake := peer.tunnel == nil
+	if firstHandshake {
+		peer.tunnel = newTunnel(sess, peer.allowedIPs, from, true)
+	} else {
+		// A re-handshake (the client's rekey): rotate the new keypair in as
+		// current, keeping the old one live as previous so in-flight packets under
+		// it still decrypt, and follow the source in case the client roamed.
+		peer.tunnel.SetPeerAddr(from)
+		evicted = peer.tunnel.install(sess)
+	}
+	tunnel := peer.tunnel
 	s.mu.Unlock()
 
-	// Swap the pump's routing for this peer: drop the previous session's routes
-	// and inbound key, then add the new one. The read loop is single-threaded, so
-	// no concurrent initiation races this.
-	if old != nil {
-		s.pump.RemoveTunnel(old)
+	// Register the new session's receiver index with the pump and retire the one
+	// that fell out. The first handshake also installs the peer's routes; a rekey
+	// reuses the same tunnel, so its routes are already in place. The read loop is
+	// single-threaded, so no concurrent initiation races this.
+	if firstHandshake {
+		s.pump.AddTunnel(tunnel)
+	} else {
+		s.pump.AddInboundKey(sess.LocalIndex(), tunnel)
+		if evicted != nil {
+			s.pump.RemoveInboundKey(evicted.LocalIndex())
+		}
 	}
-	s.pump.AddTunnel(tunnel)
 
 	if _, err := s.conn.WriteToUDP(respPkt, from); err != nil {
 		s.logger.Printf("wireguard: send response to %s: %v", from, err)

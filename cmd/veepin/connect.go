@@ -125,6 +125,7 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 			endpoint  = fs.String("endpoint", "", "peer host:port, e.g. vpn.example.com:51820")
 			allowed   = fs.String("allowed-ips", "", "comma-separated destinations routed to the peer, e.g. 0.0.0.0/0")
 			keepalive = fs.Int("persistent-keepalive", 0, "keepalive interval in seconds (0 = off)")
+			rekey     = fs.Int("rekey-seconds", 0, "seconds between key refreshes (0 = protocol default, 120)")
 			tun       = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
 		)
 		return func() map[string]string {
@@ -144,6 +145,9 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 			}
 			if *keepalive != 0 {
 				opts[wireguard.OptKeepalive] = fmt.Sprint(*keepalive)
+			}
+			if *rekey != 0 {
+				opts[wireguard.OptRekeySeconds] = fmt.Sprint(*rekey)
 			}
 			return opts
 		}, nil

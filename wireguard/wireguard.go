@@ -23,17 +23,19 @@
 //
 // # Scope
 //
-// A session carries traffic under a single handshake and does not yet rekey, so
-// it is good for the handshake's lifetime (RejectAfterTime, ~180s of continuous
-// use) before it must be re-established. Neither role answers cookie replies, so
-// a peer under load will refuse the handshake. Both are deliberate boundaries,
-// not silent gaps: the first surfaces as the tunnel going quiet, the second as a
-// refused handshake.
+// A client rekeys: it re-runs the handshake every rekeyAfterTime and rotates the
+// fresh keypair in, so a tunnel stays up indefinitely rather than going quiet at
+// the key's rejection age (~180s). Rekey is client-initiated only — the server
+// answers new initiations but does not start its own — and neither role answers
+// cookie replies, so a peer under load will refuse the handshake. Both are
+// deliberate boundaries, not silent gaps: an idle peer that never rekeys and a
+// peer under load both surface as a refused or absent handshake.
 package wireguard
 
 import (
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -41,7 +43,6 @@ import (
 	"net"
 	"net/netip"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/xen0bit/veepin/client"
@@ -60,10 +61,14 @@ const defaultMTU = 1420
 
 // Handshake retransmission, from the protocol paper §6.1. An initiation is
 // resent every rekeyTimeout until a response arrives or the overall attempt
-// budget is spent.
+// budget is spent. The initial handshake uses maxAttempts as its budget; a
+// rekey, which runs against a live tunnel, retries for rekeyAttemptTime instead
+// (§6.1's REKEY_ATTEMPT_TIME) so it keeps trying for nearly the whole rejection
+// window before giving the tunnel up.
 const (
-	rekeyTimeout = 5 * time.Second
-	maxAttempts  = 5
+	rekeyTimeout     = 5 * time.Second
+	maxAttempts      = 5
+	rekeyAttemptTime = 90 * time.Second
 )
 
 // Option keys accepted by client.Dial(ctx, "wireguard", opts). OptConfig points
@@ -76,6 +81,7 @@ const (
 	OptDNS          = "dns"                  // DNS servers
 	OptMTU          = "mtu"                  // inner MTU
 	OptListenPort   = "listen-port"          // UDP port to listen on (server)
+	OptRekeySeconds = "rekey-seconds"        // client rekey interval (0 = default)
 	OptPublicKey    = "public-key"           // peer static public key, base64
 	OptPresharedKey = "preshared-key"        // optional preshared key, base64
 	OptEndpoint     = "endpoint"             // peer host:port
@@ -125,6 +131,7 @@ type resolved struct {
 	mtu        int
 	tunName    string
 	keepalive  time.Duration
+	rekey      time.Duration // how often to re-run the handshake
 }
 
 // resolve decodes and validates cfg as a client config: exactly one peer, with
@@ -176,6 +183,10 @@ func (c *Config) resolve() (*resolved, error) {
 	}
 	if peer.Keepalive > 0 {
 		r.keepalive = time.Duration(peer.Keepalive) * time.Second
+	}
+	r.rekey = rekeyAfterTime
+	if c.RekeySeconds > 0 {
+		r.rekey = time.Duration(c.RekeySeconds) * time.Second
 	}
 
 	addrs, err := prefixes(c.Address)
@@ -252,11 +263,14 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	tunnel := newTunnel(sess, r.allowedIPs, r.endpoint, false)
 
 	s := &session{
-		conn:   conn,
-		tun:    tun,
-		logger: logger,
-		done:   make(chan struct{}),
-		stopKA: make(chan struct{}),
+		conn:          conn,
+		tun:           tun,
+		tunnel:        tunnel,
+		logger:        logger,
+		noiseCfg:      r.noiseCfg,
+		rekeyInterval: r.rekey,
+		done:          make(chan struct{}),
+		stop:          make(chan struct{}),
 	}
 
 	// The socket is connected, so the destination is implicit and the pump's
@@ -273,8 +287,9 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	s.pump = pump
 	go pump.Run()
 
-	go s.readLoop(pump)
-	s.startKeepalive(tunnel, r.keepalive)
+	go s.readLoop()
+	s.startKeepalive(r.keepalive)
+	go s.rekeyLoop()
 
 	out := client.Result{
 		TUNName:    tun.Name(),
@@ -347,24 +362,47 @@ func handshake(ctx context.Context, conn *net.UDPConn, cfg noise.Config, logger 
 	}
 }
 
-// session is a running WireGuard tunnel: the UDP socket, the TUN device, and the
-// transport pump. It implements client.Session.
+// session is a running WireGuard tunnel: the UDP socket, the TUN device, the
+// transport pump, and the single peer tunnel whose keys it rotates. It
+// implements client.Session.
 type session struct {
 	conn   *net.UDPConn
 	tun    *dataplane.TUN
 	pump   *dataplane.Pump
+	tunnel *wgTunnel
 	logger *log.Logger
+
+	// noiseCfg is kept so the rekey loop can start fresh handshakes, and
+	// rekeyInterval is how often it does.
+	noiseCfg      noise.Config
+	rekeyInterval time.Duration
+
+	// hsMu guards pending, the in-flight rekey handshake awaiting its response.
+	// The initial handshake does not use it: it runs before readLoop starts, so
+	// there is no dispatch to arbitrate.
+	hsMu    sync.Mutex
+	pending *pendingHandshake
 
 	closeOnce sync.Once
 	closeErr  error
 	done      chan struct{} // closed when the inbound loop exits
-	stopKA    chan struct{} // stops the keepalive goroutine
+	stop      chan struct{} // stops the keepalive and rekey goroutines
 }
 
-// readLoop reads datagrams off the socket and hands them to the pump, which
-// demuxes transport-data packets to the tunnel and drops everything else
-// (stray handshake or cookie messages). It exits when the socket is closed.
-func (s *session) readLoop(pump *dataplane.Pump) {
+// pendingHandshake links an in-flight rekey initiation to the goroutine awaiting
+// its response. readLoop matches an inbound response's receiver index against
+// localIdx and hands the packet over on ch.
+type pendingHandshake struct {
+	localIdx uint32
+	ch       chan []byte
+}
+
+// readLoop reads datagrams off the socket and dispatches by message type:
+// transport-data packets go to the pump for the tunnel, and handshake responses
+// go to a waiting rekey (there is no other reason to receive one on an
+// established client tunnel). Everything else — stray initiations, cookie
+// replies — is dropped. It exits when the socket is closed.
+func (s *session) readLoop() {
 	defer close(s.done)
 	buf := make([]byte, 65535)
 	for {
@@ -372,8 +410,165 @@ func (s *session) readLoop(pump *dataplane.Pump) {
 		if err != nil {
 			return
 		}
-		// Copy: the pump decrypts in place and outlives this iteration's buffer.
-		pump.HandleInbound(append([]byte(nil), buf[:n]...), nil)
+		// Copy: the pump decrypts in place, and a delivered response outlives
+		// this iteration's buffer.
+		pkt := append([]byte(nil), buf[:n]...)
+		t, ok := wire.Type(pkt)
+		if !ok {
+			continue
+		}
+		switch t {
+		case wire.TypeTransportData:
+			s.pump.HandleInbound(pkt, nil)
+		case wire.TypeHandshakeResponse:
+			s.deliverResponse(pkt)
+		default:
+			// A stray initiation or a cookie reply: nothing an established
+			// client tunnel acts on.
+		}
+	}
+}
+
+// deliverResponse hands a handshake response to the rekey goroutine waiting for
+// it, matched on the receiver index the response is addressed to. A response for
+// no pending handshake — a duplicate, or one that arrived after the waiter gave
+// up — is dropped.
+func (s *session) deliverResponse(pkt []byte) {
+	if len(pkt) != wire.SizeHandshakeResponse {
+		return
+	}
+	receiver := binary.LittleEndian.Uint32(pkt[8:12])
+	s.hsMu.Lock()
+	p := s.pending
+	s.hsMu.Unlock()
+	if p == nil || p.localIdx != receiver {
+		return
+	}
+	// Buffered channel of one; a second response for the same index is dropped.
+	select {
+	case p.ch <- pkt:
+	default:
+	}
+}
+
+func (s *session) setPending(p *pendingHandshake) {
+	s.hsMu.Lock()
+	s.pending = p
+	s.hsMu.Unlock()
+}
+
+func (s *session) clearPending() {
+	s.hsMu.Lock()
+	s.pending = nil
+	s.hsMu.Unlock()
+}
+
+// rekeyLoop re-runs the handshake every rekeyInterval, rotating a fresh keypair
+// into the tunnel so traffic never reaches the key's rejection age. It is the
+// initiator half of the protocol's rekey timing (§6.1); the server responds to
+// each new initiation as it would a first one.
+func (s *session) rekeyLoop() {
+	if s.rekeyInterval <= 0 {
+		return
+	}
+	tick := time.NewTicker(s.rekeyInterval)
+	defer tick.Stop()
+	for {
+		select {
+		case <-s.stop:
+			return
+		case <-tick.C:
+			s.rekey()
+		}
+	}
+}
+
+// rekey runs one handshake and installs its keypair as the tunnel's current one,
+// registering the new receiver index with the pump and retiring the keypair that
+// fell out. A failure leaves the existing keys in place: the next tick tries
+// again, and Encapsulate refuses only once the current key passes rejectAfterTime.
+func (s *session) rekey() {
+	ctx, cancel := context.WithTimeout(context.Background(), rekeyAttemptTime)
+	defer cancel()
+	// Abandon the attempt promptly if the session is closing.
+	go func() {
+		select {
+		case <-s.stop:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
+	kp, err := s.doHandshake(ctx)
+	if err != nil {
+		s.logger.Printf("wireguard: rekey failed: %v", err)
+		return
+	}
+	sess, err := transport.NewSession(kp.Send, kp.Recv, kp.Local, kp.Remote)
+	if err != nil {
+		s.logger.Printf("wireguard: rekey transport keys: %v", err)
+		return
+	}
+	evicted := s.tunnel.install(sess)
+	s.pump.AddInboundKey(sess.LocalIndex(), s.tunnel)
+	if evicted != nil {
+		s.pump.RemoveInboundKey(evicted.LocalIndex())
+	}
+	// Prime the new key's return path: the responder holds off sending under a
+	// fresh keypair until it has received something under it.
+	s.sendKeepalive(s.tunnel)
+	s.logger.Printf("wireguard: rekeyed, session index %#x", sess.LocalIndex())
+}
+
+// doHandshake runs a rekey handshake dispatched through readLoop: it sends an
+// initiation, waits for readLoop to deliver the matching response, and
+// retransmits a fresh initiation every rekeyTimeout until one is answered or ctx
+// (bounded by rekeyAttemptTime) is spent. Each attempt is a new Initiator, since
+// an initiation and its ephemeral key are single-use.
+//
+// It is separate from the initial handshake, which reads the socket directly
+// because readLoop is not running yet; here readLoop owns the socket, so the
+// response must be handed over rather than read.
+func (s *session) doHandshake(ctx context.Context) (*noise.Keypair, error) {
+	defer s.clearPending()
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		init, err := noise.NewInitiator(s.noiseCfg)
+		if err != nil {
+			return nil, err
+		}
+		msg, err := init.Initiation()
+		if err != nil {
+			return nil, err
+		}
+		ch := make(chan []byte, 1)
+		s.setPending(&pendingHandshake{localIdx: init.LocalIndex(), ch: ch})
+		if _, err := s.conn.Write(msg); err != nil {
+			return nil, fmt.Errorf("send initiation: %w", err)
+		}
+
+		timer := time.NewTimer(rekeyTimeout)
+		select {
+		case resp := <-ch:
+			timer.Stop()
+			kp, err := init.Consume(resp)
+			if err != nil {
+				if errors.Is(err, noise.ErrDecrypt) {
+					return nil, err
+				}
+				s.logger.Printf("wireguard: rekey: discarding unexpected reply: %v", err)
+				continue
+			}
+			return kp, nil
+		case <-timer.C:
+			s.logger.Printf("wireguard: rekey attempt timed out, retrying")
+			continue
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		}
 	}
 }
 
@@ -382,8 +577,8 @@ func (s *session) readLoop(pump *dataplane.Pump) {
 // transport data on a fresh session until it has received some, so an initial
 // keepalive makes the tunnel usable in both directions immediately rather than
 // only after our first outbound packet.
-func (s *session) startKeepalive(t *wgTunnel, interval time.Duration) {
-	s.sendKeepalive(t)
+func (s *session) startKeepalive(interval time.Duration) {
+	s.sendKeepalive(s.tunnel)
 	if interval <= 0 {
 		return
 	}
@@ -392,10 +587,10 @@ func (s *session) startKeepalive(t *wgTunnel, interval time.Duration) {
 		defer tick.Stop()
 		for {
 			select {
-			case <-s.stopKA:
+			case <-s.stop:
 				return
 			case <-tick.C:
-				s.sendKeepalive(t)
+				s.sendKeepalive(s.tunnel)
 			}
 		}
 	}()
@@ -426,7 +621,7 @@ func (s *session) Wait(ctx context.Context) error {
 // from any goroutine.
 func (s *session) Close() error {
 	s.closeOnce.Do(func() {
-		close(s.stopKA)
+		close(s.stop)
 		if s.pump != nil {
 			s.pump.Close()
 		}
@@ -440,81 +635,6 @@ func (s *session) Close() error {
 	})
 	return s.closeErr
 }
-
-// wgTunnel is the data-path view of one established session: it encrypts and
-// decrypts transport packets and reports the peer's AllowedIPs as its routes. It
-// implements dataplane.Tunnel.
-//
-// The peer address is atomic because a server's peer roams: WireGuard lets a
-// client's source address change, and the pump updates it (via SetPeerAddr) from
-// the source of each inbound transport packet so replies follow. A client sets
-// it once and it never moves.
-type wgTunnel struct {
-	sess   *transport.Session
-	routes []netip.Prefix
-	peer   atomic.Pointer[net.UDPAddr]
-
-	// verifySource enables the inbound half of cryptokey routing: a decrypted
-	// packet whose source is not within this peer's AllowedIPs is dropped, so one
-	// peer cannot spoof another's address. A client trusts its single server for
-	// everything and leaves this off.
-	verifySource bool
-}
-
-// newTunnel builds a wgTunnel with its peer address set.
-func newTunnel(sess *transport.Session, routes []netip.Prefix, peer *net.UDPAddr, verifySource bool) *wgTunnel {
-	t := &wgTunnel{sess: sess, routes: routes, verifySource: verifySource}
-	t.peer.Store(peer)
-	return t
-}
-
-func (t *wgTunnel) InboundKey() uint32     { return t.sess.LocalIndex() }
-func (t *wgTunnel) Routes() []netip.Prefix { return t.routes }
-func (t *wgTunnel) PeerAddr() *net.UDPAddr { return t.peer.Load() }
-
-// SetPeerAddr updates the return address, skipping the store when it is
-// unchanged so the hot inbound path does not churn the atomic on every packet.
-func (t *wgTunnel) SetPeerAddr(a *net.UDPAddr) {
-	if cur := t.peer.Load(); cur != nil && cur.Port == a.Port && cur.IP.Equal(a.IP) {
-		return
-	}
-	t.peer.Store(a)
-}
-
-func (t *wgTunnel) Encapsulate(p []byte) ([]byte, error) { return t.sess.Seal(p) }
-
-func (t *wgTunnel) Decapsulate(p []byte) ([]byte, error) {
-	inner, err := t.sess.Open(p)
-	if err != nil || len(inner) == 0 {
-		return inner, err // error, or a keepalive the pump will drop
-	}
-	if t.verifySource && !t.sourceAllowed(inner) {
-		return nil, errSourceNotAllowed
-	}
-	return inner, nil
-}
-
-// sourceAllowed reports whether an inbound inner packet's source address falls
-// within this peer's routes — the inbound direction of cryptokey routing.
-func (t *wgTunnel) sourceAllowed(inner []byte) bool {
-	if len(inner) < 20 || inner[0]>>4 != 4 {
-		return false // IPv4 only in this build
-	}
-	src, ok := netip.AddrFromSlice(inner[12:16])
-	if !ok {
-		return false
-	}
-	for _, r := range t.routes {
-		if r.Contains(src) {
-			return true
-		}
-	}
-	return false
-}
-
-// errSourceNotAllowed is logged by the pump when a decrypted packet's source is
-// outside the peer's AllowedIPs.
-var errSourceNotAllowed = errors.New("wireguard: inner source not in peer AllowedIPs")
 
 // decodeKey decodes a 32-octet base64 WireGuard key, naming the option so a bad
 // value points at the field that carried it.

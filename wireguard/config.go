@@ -30,6 +30,12 @@ type Config struct {
 	MTU        int      // inner MTU (optional; 0 means the default)
 	ListenPort int      // UDP port to listen on (server; 0 lets the kernel pick)
 
+	// RekeySeconds is how often a client re-runs the handshake to refresh its
+	// keys, in seconds. It has no wg-quick equivalent — WireGuard's own timing is
+	// fixed at 120s — and exists so tests can shrink the interval. 0 means the
+	// protocol default (rekeyAfterTime).
+	RekeySeconds int
+
 	// Peers holds one [Peer] section each. A client has exactly one (its
 	// server); a server has one per client it accepts.
 	Peers []Peer
@@ -150,6 +156,12 @@ func (c *Config) setInterface(key, val string) error {
 			return fmt.Errorf("ListenPort %q: %w", val, err)
 		}
 		c.ListenPort = n
+	case "rekeyseconds":
+		n, err := strconv.Atoi(val)
+		if err != nil {
+			return fmt.Errorf("RekeySeconds %q: %w", val, err)
+		}
+		c.RekeySeconds = n
 	case "table", "preup", "postup", "predown", "postdown", "saveconfig", "fwmark":
 		// Accepted and ignored: these configure a kernel interface or wg-quick's
 		// own scripting, neither of which applies to a userspace tunnel.
@@ -248,6 +260,13 @@ func (c *Config) applyOverrides(opts map[string]string) error {
 			return fmt.Errorf("%s %q: %w", OptListenPort, v, err)
 		}
 		c.ListenPort = n
+	}
+	if v := opts[OptRekeySeconds]; v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("%s %q: %w", OptRekeySeconds, v, err)
+		}
+		c.RekeySeconds = n
 	}
 	if v := opts[OptPublicKey]; v != "" {
 		c.firstPeer().PublicKey = v
