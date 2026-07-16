@@ -10,7 +10,9 @@ package interop
 
 import (
 	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -63,6 +65,21 @@ func TestInteropWireguardClientVeepinServer(t *testing.T) {
 // from an interop break.
 func TestInteropWireguardSelf(t *testing.T) {
 	runInterop(t, "compose.wireguard-self.yml", "veepin-wg-client", "10.10.10.1")
+}
+
+// TestInteropVeepinClientOpenVPNServer proves the OpenVPN client against a real
+// OpenVPN server it shares no code with: the veepin client runs the TLS control
+// channel, key method 2 exchange and AES-256-GCM data path, then pings 10.8.0.1
+// (the server's tunnel address). A shared throwaway PKI is generated per run and
+// mounted into both ends, so no keys live in the repo.
+func TestInteropVeepinClientOpenVPNServer(t *testing.T) {
+	requireDocker(t)
+	pkiDir := filepath.Join("openvpn", "pki")
+	if err := generateOpenVPNPKI(pkiDir); err != nil {
+		t.Fatalf("generate PKI: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
+	runInterop(t, "compose.openvpn.yml", "veepin-ovpn-client", "10.8.0.1")
 }
 
 // TestInteropWireguardRekey proves the client rekey loop end to end: the veepin
