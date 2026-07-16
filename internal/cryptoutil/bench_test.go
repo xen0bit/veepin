@@ -114,3 +114,43 @@ func randBytes(n int) []byte {
 	_, _ = rand.Read(b)
 	return b
 }
+
+// BenchmarkAEADSeal compares the data-path AEADs at a typical MTU-sized packet.
+// WireGuard fixes ChaCha20-Poly1305; IKEv2 negotiates AES-GCM. Both ride the
+// same pump, so their relative cost is worth knowing.
+func BenchmarkAEADSeal(b *testing.B) {
+	pt := randBytes(1400)
+	aad := randBytes(16)
+	key := randBytes(ChaCha20Poly1305KeySize)
+
+	b.Run("ChaCha20-Poly1305", func(b *testing.B) {
+		aead, err := NewChaCha20Poly1305(key)
+		if err != nil {
+			b.Fatal(err)
+		}
+		nonce := make([]byte, aead.NonceSize())
+		dst := make([]byte, 0, len(pt)+aead.Overhead())
+		b.SetBytes(int64(len(pt)))
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_ = aead.Seal(dst[:0], nonce, pt, aad)
+		}
+	})
+
+	b.Run("AES256-GCM", func(b *testing.B) {
+		c, err := NewAESGCMESPCrypter(256, randBytes(36))
+		if err != nil {
+			b.Fatal(err)
+		}
+		dst := make([]byte, 0, len(pt)+c.Overhead())
+		b.SetBytes(int64(len(pt)))
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if _, err := c.Seal(dst[:0], aad, pt); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}

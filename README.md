@@ -1,8 +1,8 @@
 # veepin
 
-A **working userspace IKEv2 VPN in Go** — both a server (responder) and a client
-(initiator) — written from scratch with no external dependencies beyond the Go
-standard library. It performs the full IKEv2 key exchange with pre-shared-key or
+A **working userspace VPN in Go** — both a server (responder) and a client
+(initiator) — written from scratch, with `golang.org/x/crypto` the only
+dependency. It performs the full IKEv2 key exchange with pre-shared-key or
 EAP-MSCHAPv2 authentication, NAT traversal, and IKEv2 configuration mode (address
 assignment), then runs an ESP-in-UDP data path over a TUN device — so a
 standards-compliant OS VPN client can connect to the server, and the bundled
@@ -40,10 +40,30 @@ drives the production client against the live server and checks bidirectional ES
 | Integrity | HMAC-SHA1-96, HMAC-SHA2-256-128/384-192/512-256 |
 
 All from the standard library. (ChaCha20-Poly1305's transform ID is defined but
-not wired in, because Go ships that cipher only in `golang.org/x/crypto`. If that
-dependency is acceptable, adding it is a `cryptoutil` constructor plus a case in
-`internal/ikev2/transform` — the negotiated transform ID selects the algorithm, so
-nothing else has to change.)
+not yet wired in for IKEv2. The cipher itself now lives in `cryptoutil` — see
+below — so wiring it is one case in `internal/ikev2/transform`: the negotiated
+transform ID selects the algorithm, so nothing else has to change.)
+
+### Dependencies
+
+The module depends on `golang.org/x/crypto` (and `golang.org/x/sys`, which it
+pulls in for CPU feature detection). Nothing else.
+
+That dependency exists for exactly one reason: **WireGuard fixes its crypto and
+does not negotiate it.** It mandates ChaCha20-Poly1305 and BLAKE2s, and Go ships
+neither in the standard library, so — unlike IKEv2, which negotiates algorithms
+and happens to negotiate ones `crypto/aes` and `crypto/sha256` cover — WireGuard
+cannot be built on stdlib alone.
+
+The alternative was hand-rolling both. That was rejected: `x/crypto` is the Go
+team's own module and carries the AVX2/NEON assembly, which measures **~1.9 GB/s**
+for ChaCha20-Poly1305 on the data path against the several-times-slower pure-Go
+implementation we would have written — and an AEAD protecting every packet is a
+far larger security surface than the bundled MD4 in `internal/ikev2/eap`, which
+is a legacy hash confined to one corner of MSCHAPv2.
+
+Everything is still CGO-free, and the `nm/` plugin remains a separate module so
+the core does not inherit its D-Bus and GTK dependencies.
 
 EAP-MSCHAPv2 additionally uses MD4 (for the NT password hash) and single-DES
 (for the challenge response), as the protocol mandates. Go's standard library
@@ -272,7 +292,7 @@ against other RFC 7296 responders that accept these authentication methods.
 
 ### Embedding the client
 
-The handshake and data path are a reusable, dependency-free library. Dial
+The handshake and data path are a reusable library. Dial
 performs the handshake and brings up the ESP data path over a TUN **without**
 installing routes, returning the assigned address/DNS/gateway for the caller to
 apply; `veepin connect` is a thin wrapper over it.
@@ -314,9 +334,8 @@ TUN, address pool and data path, and leaves host routing/NAT to the caller.
 
 A NetworkManager VPN plugin lets a Linux desktop (GNOME / Pop!\_OS) bring the
 tunnel up and down from its native VPN UI, with **no** dependency on strongSwan.
-It lives in the nested `nm/` module (the only part that uses a third-party
-dependency and is kept out of the core build so the `veepin` binary stays
-CGO-free and stdlib-only):
+It lives in the nested `nm/` module, kept out of the core build so the `veepin`
+binary does not inherit its D-Bus and GTK dependencies:
 
 ```sh
 cd nm && make build && sudo make install

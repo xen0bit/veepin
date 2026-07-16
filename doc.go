@@ -1,5 +1,6 @@
 // Package veepin is a from-scratch userspace VPN implemented in pure Go, with
-// no dependencies beyond the standard library.
+// golang.org/x/crypto its only dependency (WireGuard mandates ChaCha20-Poly1305
+// and BLAKE2s, which the standard library does not ship).
 //
 // IKEv2 (RFC 7296) is the first protocol, as both a responder and an initiator,
 // with a userspace ESP data path. The tree is arranged so further protocols are
