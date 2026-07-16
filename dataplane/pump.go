@@ -104,14 +104,40 @@ func (p *Pump) AddTunnel(t Tunnel) {
 	}
 }
 
-// RemoveTunnel unregisters a tunnel's data path.
+// RemoveTunnel unregisters a tunnel's data path: all of its inbound keys and its
+// routes. Inbound keys are removed by identity rather than by t.InboundKey(),
+// because a protocol whose demux key rotates (WireGuard on rekey) may have
+// registered several keys through AddInboundKey since AddTunnel ran.
 func (p *Pump) RemoveTunnel(t Tunnel) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	delete(p.byKey, t.InboundKey())
+	for key, reg := range p.byKey {
+		if reg == t {
+			delete(p.byKey, key)
+		}
+	}
 	for _, r := range t.Routes() {
 		p.routes.remove(r)
 	}
+}
+
+// AddInboundKey routes inbound packets whose Demux yields key to t, in addition
+// to any keys t already has. It exists for protocols whose inbound demux key
+// changes over a tunnel's life — WireGuard's receiver index rotates on every
+// rekey — so the new key can be registered without disturbing the old one, which
+// must keep decrypting in-flight packets until it is removed.
+func (p *Pump) AddInboundKey(key uint32, t Tunnel) {
+	p.mu.Lock()
+	p.byKey[key] = t
+	p.mu.Unlock()
+}
+
+// RemoveInboundKey stops routing key to any tunnel. It is used to retire a
+// WireGuard keypair's receiver index once its keys are no longer live.
+func (p *Pump) RemoveInboundKey(key uint32) {
+	p.mu.Lock()
+	delete(p.byKey, key)
+	p.mu.Unlock()
 }
 
 // HandleInbound processes an inbound protected datagram (already stripped of any

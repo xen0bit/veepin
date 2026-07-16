@@ -189,6 +189,58 @@ func TestPumpUnknownSPIDropped(t *testing.T) {
 	}
 }
 
+// TestPumpMultiIndexDemux covers AddInboundKey / RemoveInboundKey and
+// RemoveTunnel's by-identity cleanup — the machinery WireGuard rekey needs. A
+// single tunnel is reachable under two demux keys at once (its rotating receiver
+// index), retiring one leaves the other live, and RemoveTunnel clears both.
+func TestPumpMultiIndexDemux(t *testing.T) {
+	tun := newFakeTUN()
+	pump := NewPump(tun, func([]byte, *net.UDPAddr) {}, SPIDemux, nil)
+
+	// A tunnel that decapsulates to a fixed one-byte inner packet, so any demux
+	// hit produces a TUN write.
+	tunnel := &fakeTunnel{
+		inSPI:  0x1000,
+		routes: []netip.Prefix{netip.MustParsePrefix("10.0.0.2/32")},
+		dec: func([]byte) ([]byte, error) {
+			return []byte{0x45}, nil // non-empty, so the pump writes it
+		},
+	}
+	pump.AddTunnel(tunnel)             // registers key 0x1000
+	pump.AddInboundKey(0x2000, tunnel) // a second live index
+
+	deliver := func(key uint32) bool {
+		pkt := make([]byte, 40)
+		binary.BigEndian.PutUint32(pkt[:4], key)
+		pump.HandleInbound(pkt, nil)
+		select {
+		case <-tun.writeSig:
+			return true
+		case <-time.After(150 * time.Millisecond):
+			return false
+		}
+	}
+
+	if !deliver(0x1000) || !deliver(0x2000) {
+		t.Fatal("tunnel not reachable under both registered keys")
+	}
+
+	// Retire the first index; the second stays live.
+	pump.RemoveInboundKey(0x1000)
+	if deliver(0x1000) {
+		t.Error("retired key still routed to the tunnel")
+	}
+	if !deliver(0x2000) {
+		t.Error("live key stopped routing after retiring the other")
+	}
+
+	// RemoveTunnel clears every remaining key by identity.
+	pump.RemoveTunnel(tunnel)
+	if deliver(0x2000) {
+		t.Error("RemoveTunnel left a key registered")
+	}
+}
+
 // espPair builds two esp.SAs that mirror each other: server.Out == client.In
 // and vice versa, so packets encrypted by one decrypt on the other.
 func espPair(t *testing.T) (server, client *esp.SA) {
