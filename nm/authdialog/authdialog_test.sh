@@ -23,7 +23,16 @@ echo "$out" | grep -qx password   || fail "no password key for EAP"
 echo "$out" | grep -qx wonderland || fail "no password value for EAP"
 echo "ok: eap"
 
-# 3. Wrong service -> refuses (non-zero).
+# 3. WireGuard, saved private key -> emits private-key, and never psk/password.
+out=$(printf 'DATA_KEY=protocol\nDATA_VAL=wireguard\nSECRET_KEY=private-key\nSECRET_VAL=mypriv\nDONE\n' \
+        | timeout 5 "$BIN" -s "$SVC")
+echo "$out" | grep -qx private-key || fail "no private-key key for wireguard"
+echo "$out" | grep -qx mypriv      || fail "no private-key value for wireguard"
+echo "$out" | grep -qx psk      && fail "psk emitted for a wireguard connection"
+echo "$out" | grep -qx password && fail "password emitted for a wireguard connection"
+echo "ok: wireguard"
+
+# 4. Wrong service -> refuses (non-zero).
 if printf 'DONE\n' | timeout 5 "$BIN" -s org.freedesktop.NetworkManager.other; then
     fail "accepted a foreign service"
 fi

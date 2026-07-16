@@ -333,11 +333,17 @@ client; each protocol's required keys are checked in `Parse` (`requireKeys`,
 `MissingSecret`). An unsupported value is rejected in `Parse` rather than deferred
 to `client.Dial`, so NM gets a clear error before it spawns anything.
 
-The WireGuard **editor** (the GTK form in `nm/editor`) is not yet built out — it
-still presents the IKEv2 fields — so a WireGuard profile is created via keyfile or
-`nmcli` today, e.g. `nmcli connection add type vpn vpn-type
-org.freedesktop.NetworkManager.veepin ... vpn.data 'protocol=wireguard, ...'
-vpn.secrets 'private-key=...'`.
+The GTK **editor** (`nm/editor`) has a protocol chooser at the top of the form
+that switches between the IKEv2 and WireGuard field sets, so either can be created
+graphically. A WireGuard profile can equally be created from the command line:
+
+```sh
+nmcli connection add type vpn vpn-type org.freedesktop.NetworkManager.veepin \
+  con-name wg-home \
+  vpn.data 'protocol=wireguard, public-key=…, endpoint=vpn.example.com:51820, address=10.0.0.2/32, allowed-ips=0.0.0.0/0' \
+  vpn.secrets 'private-key=…, preshared-key=…'
+nmcli connection up wg-home
+```
 
 This package is plain data mapping and is **unit-testable without a bus** — the
 bulk of the daemon's correctness tests live here.

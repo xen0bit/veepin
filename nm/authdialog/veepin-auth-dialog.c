@@ -23,9 +23,11 @@
 #include <unistd.h>
 
 #define VEEPIN_SERVICE "org.freedesktop.NetworkManager.veepin"
-#define KEY_PSK      "psk"
-#define KEY_PASSWORD "password"
-#define KEY_USER     "user"
+#define KEY_PROTOCOL    "protocol"
+#define KEY_PSK         "psk"
+#define KEY_PASSWORD    "password"
+#define KEY_USER        "user"
+#define KEY_PRIVATE_KEY "private-key"
 
 /* True if NM must (re-)prompt for the named secret. */
 static gboolean
@@ -110,42 +112,61 @@ main(int argc, char **argv)
         return 1;
     }
 
+    const char *protocol = g_hash_table_lookup(data, KEY_PROTOCOL);
+    gboolean is_wg = protocol && g_strcmp0(protocol, "wireguard") == 0;
     const char *user = g_hash_table_lookup(data, KEY_USER);
-    const char *psk = g_hash_table_lookup(secrets, KEY_PSK);
-    const char *pw = g_hash_table_lookup(secrets, KEY_PASSWORD);
     gboolean have_user = (user && user[0]);
 
-    gboolean need_psk = secret_needed(data, secrets, KEY_PSK, opt_reprompt);
-    gboolean need_pw = have_user && secret_needed(data, secrets, KEY_PASSWORD, opt_reprompt);
+    /* The secrets to consider, by protocol. WireGuard needs only the private key
+     * interactively (its optional preshared key is left to the saved path);
+     * IKEv2 needs the PSK, and the EAP password when a username is configured.
+     * Both protocols fit the dialog's two fields. */
+    struct field {
+        const char *key, *label, *cur;
+        gboolean need;
+    } fields[2];
+    int nfields = 0;
+    if (is_wg) {
+        const char *priv = g_hash_table_lookup(secrets, KEY_PRIVATE_KEY);
+        fields[nfields++] = (struct field){
+            KEY_PRIVATE_KEY, "Private key:", priv,
+            secret_needed(data, secrets, KEY_PRIVATE_KEY, opt_reprompt)};
+    } else {
+        const char *psk = g_hash_table_lookup(secrets, KEY_PSK);
+        const char *pw = g_hash_table_lookup(secrets, KEY_PASSWORD);
+        fields[nfields++] = (struct field){
+            KEY_PSK, "Pre-shared key:", psk,
+            secret_needed(data, secrets, KEY_PSK, opt_reprompt)};
+        fields[nfields++] = (struct field){
+            KEY_PASSWORD, "Password:", pw,
+            have_user && secret_needed(data, secrets, KEY_PASSWORD, opt_reprompt)};
+    }
+
+    gboolean any_need = FALSE;
+    for (int i = 0; i < nfields; i++)
+        any_need = any_need || fields[i].need;
 
     /* Prompt only if something is missing and NM permits interaction. */
-    if ((need_psk || need_pw) && opt_interaction && gtk_init_check(&argc, &argv)) {
+    if (any_need && opt_interaction && gtk_init_check(&argc, &argv)) {
         GtkWidget *dlg = nma_vpn_password_dialog_new(
             "Authenticate VPN", "Enter the veepin VPN credentials.", NULL);
         NMAVpnPasswordDialog *pd = NMA_VPN_PASSWORD_DIALOG(dlg);
 
         /* Assign the needed secrets to the primary/secondary fields in order. */
-        const char *primary_key = NULL, *secondary_key = NULL;
-        struct {
-            const char *key, *label, *cur;
-            gboolean need;
-        } fields[2] = {
-            {KEY_PSK, "Pre-shared key:", psk, need_psk},
-            {KEY_PASSWORD, "Password:", pw, need_pw},
-        };
+        int primary = -1, secondary = -1;
         nma_vpn_password_dialog_set_show_password(pd, FALSE);
         nma_vpn_password_dialog_set_show_password_secondary(pd, FALSE);
-        for (int i = 0; i < 2; i++) {
+        for (int i = 0; i < nfields; i++) {
             if (!fields[i].need)
                 continue;
-            if (!primary_key) {
-                primary_key = fields[i].key;
+            if (primary < 0) {
+                primary = i;
                 nma_vpn_password_dialog_set_show_password(pd, TRUE);
                 nma_vpn_password_dialog_set_password_label(pd, fields[i].label);
                 if (fields[i].cur)
                     nma_vpn_password_dialog_set_password(pd, fields[i].cur);
-            } else {
-                secondary_key = fields[i].key;
+            } else if (secondary < 0) {
+                secondary = i;
                 nma_vpn_password_dialog_set_show_password_secondary(pd, TRUE);
                 nma_vpn_password_dialog_set_password_secondary_label(pd, fields[i].label);
                 if (fields[i].cur)
@@ -157,27 +178,16 @@ main(int argc, char **argv)
             gtk_widget_destroy(dlg);
             return 1; /* user cancelled */
         }
-        if (primary_key) {
-            const char *v = nma_vpn_password_dialog_get_password(pd);
-            if (g_strcmp0(primary_key, KEY_PSK) == 0)
-                psk = g_strdup(v);
-            else
-                pw = g_strdup(v);
-        }
-        if (secondary_key) {
-            const char *v = nma_vpn_password_dialog_get_password_secondary(pd);
-            if (g_strcmp0(secondary_key, KEY_PASSWORD) == 0)
-                pw = g_strdup(v);
-            else
-                psk = g_strdup(v);
-        }
+        if (primary >= 0)
+            fields[primary].cur = g_strdup(nma_vpn_password_dialog_get_password(pd));
+        if (secondary >= 0)
+            fields[secondary].cur = g_strdup(nma_vpn_password_dialog_get_password_secondary(pd));
         gtk_widget_destroy(dlg);
     }
 
     /* Emit the secrets NM asked about, terminated by a blank line. */
-    emit_secret(KEY_PSK, psk);
-    if (have_user)
-        emit_secret(KEY_PASSWORD, pw);
+    for (int i = 0; i < nfields; i++)
+        emit_secret(fields[i].key, fields[i].cur);
     printf("\n");
     fflush(stdout);
 

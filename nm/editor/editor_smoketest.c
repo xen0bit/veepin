@@ -38,6 +38,28 @@ make_source_connection(void)
     return c;
 }
 
+static NMConnection *
+make_wireguard_connection(void)
+{
+    NMConnection *c = nm_simple_connection_new();
+    NMSetting *sc = nm_setting_connection_new();
+    g_object_set(sc, NM_SETTING_CONNECTION_ID, "test-veepin-wg",
+                 NM_SETTING_CONNECTION_TYPE, "vpn", NULL);
+    nm_connection_add_setting(c, sc);
+
+    NMSettingVpn *vpn = NM_SETTING_VPN(nm_setting_vpn_new());
+    g_object_set(vpn, NM_SETTING_VPN_SERVICE_TYPE, SERVICE, NULL);
+    nm_setting_vpn_add_data_item(vpn, "protocol", "wireguard");
+    nm_setting_vpn_add_data_item(vpn, "public-key", "cGVlcnB1YmxpY2tleQ==");
+    nm_setting_vpn_add_data_item(vpn, "endpoint", "vpn.example.com:51820");
+    nm_setting_vpn_add_data_item(vpn, "address", "10.0.0.2/32");
+    nm_setting_vpn_add_data_item(vpn, "allowed-ips", "0.0.0.0/0");
+    nm_setting_vpn_add_secret(vpn, "private-key", "bXlwcml2YXRla2V5");
+    nm_setting_vpn_add_secret(vpn, "preshared-key", "cHJlc2hhcmVka2V5");
+    nm_connection_add_setting(c, NM_SETTING(vpn));
+    return c;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -129,6 +151,55 @@ main(int argc, char **argv)
         g_printerr("FAIL: service-type = %s\n", nm_setting_vpn_get_service_type(ovpn));
         return 1;
     }
+
+    /* Protocol defaults to ikev2 when the key is absent. */
+    CHECK_DATA("protocol", "ikev2");
+
+    /* WireGuard round-trip: pre-fill a wireguard connection, read it back, and
+     * confirm the wireguard data/secrets survive and the protocol is preserved. */
+    NMConnection *wgsrc = make_wireguard_connection();
+    NMVpnEditor *wgeditor = nm_vpn_editor_plugin_get_editor(plugin, wgsrc, &err);
+    if (!wgeditor) {
+        g_printerr("FAIL: get_editor (wireguard): %s\n", err ? err->message : "?");
+        return 1;
+    }
+    NMConnection *wgout = nm_simple_connection_new();
+    if (!nm_vpn_editor_update_connection(wgeditor, wgout, &err)) {
+        g_printerr("FAIL: update_connection (wireguard): %s\n", err ? err->message : "?");
+        return 1;
+    }
+    NMSettingVpn *wgvpn = nm_connection_get_setting_vpn(wgout);
+    if (!wgvpn) {
+        g_printerr("FAIL: no vpn setting after wireguard update\n");
+        return 1;
+    }
+#define CHECK_WG_DATA(k, want)                                                            \
+    do {                                                                                 \
+        const char *got = nm_setting_vpn_get_data_item(wgvpn, k);                        \
+        if (g_strcmp0(got, want) != 0) {                                                 \
+            g_printerr("FAIL: wg data[%s] = %s, want %s\n", k, got ? got : "(null)", want); \
+            return 1;                                                                    \
+        }                                                                                \
+    } while (0)
+    CHECK_WG_DATA("protocol", "wireguard");
+    CHECK_WG_DATA("public-key", "cGVlcnB1YmxpY2tleQ==");
+    CHECK_WG_DATA("endpoint", "vpn.example.com:51820");
+    CHECK_WG_DATA("address", "10.0.0.2/32");
+    CHECK_WG_DATA("allowed-ips", "0.0.0.0/0");
+    if (g_strcmp0(nm_setting_vpn_get_secret(wgvpn, "private-key"), "bXlwcml2YXRla2V5") != 0) {
+        g_printerr("FAIL: wg private-key secret not round-tripped\n");
+        return 1;
+    }
+    if (g_strcmp0(nm_setting_vpn_get_secret(wgvpn, "preshared-key"), "cHJlc2hhcmVka2V5") != 0) {
+        g_printerr("FAIL: wg preshared-key secret not round-tripped\n");
+        return 1;
+    }
+    /* An IKEv2-only key must NOT leak into a wireguard connection. */
+    if (nm_setting_vpn_get_data_item(wgvpn, "gateway") != NULL) {
+        g_printerr("FAIL: gateway leaked into a wireguard connection\n");
+        return 1;
+    }
+    g_print("wireguard round-trip OK\n");
 
     /* Validation: an empty connection must be rejected (no gateway). */
     NMVpnEditor *empty = nm_vpn_editor_plugin_get_editor(plugin, NULL, &err);
