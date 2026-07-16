@@ -38,6 +38,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xen0bit/veepin/client"
@@ -71,6 +72,7 @@ const (
 	OptAddress      = "address"              // our tunnel address(es), CIDR
 	OptDNS          = "dns"                  // DNS servers
 	OptMTU          = "mtu"                  // inner MTU
+	OptListenPort   = "listen-port"          // UDP port to listen on (server)
 	OptPublicKey    = "public-key"           // peer static public key, base64
 	OptPresharedKey = "preshared-key"        // optional preshared key, base64
 	OptEndpoint     = "endpoint"             // peer host:port
@@ -122,24 +124,35 @@ type resolved struct {
 	keepalive  time.Duration
 }
 
-// resolve decodes and validates cfg. It is called both by parseOptions (to
-// reject bad input early) and by Dial.
+// resolve decodes and validates cfg as a client config: exactly one peer, with
+// an endpoint to dial. It is called both by parseOptions (to reject bad input
+// early) and by Dial.
 func (c *Config) resolve() (*resolved, error) {
 	priv, err := decodeKey(c.PrivateKey, OptPrivateKey)
 	if err != nil {
 		return nil, err
 	}
-	pub, err := decodeKey(c.PublicKey, OptPublicKey)
+	switch len(c.Peers) {
+	case 1:
+		// ok
+	case 0:
+		return nil, fmt.Errorf("%s is required", OptPublicKey)
+	default:
+		return nil, fmt.Errorf("a client takes one peer, got %d", len(c.Peers))
+	}
+	peer := c.Peers[0]
+
+	pub, err := decodeKey(peer.PublicKey, OptPublicKey)
 	if err != nil {
 		return nil, err
 	}
-	if c.Endpoint == "" {
+	if peer.Endpoint == "" {
 		return nil, fmt.Errorf("%s is required", OptEndpoint)
 	}
 	if len(c.Address) == 0 {
 		return nil, fmt.Errorf("%s is required", OptAddress)
 	}
-	if len(c.AllowedIPs) == 0 {
+	if len(peer.AllowedIPs) == 0 {
 		return nil, fmt.Errorf("%s is required", OptAllowedIPs)
 	}
 
@@ -148,8 +161,8 @@ func (c *Config) resolve() (*resolved, error) {
 		mtu:      c.MTU,
 		tunName:  c.TUNName,
 	}
-	if c.PresharedKey != "" {
-		psk, err := decodeKey(c.PresharedKey, OptPresharedKey)
+	if peer.PresharedKey != "" {
+		psk, err := decodeKey(peer.PresharedKey, OptPresharedKey)
 		if err != nil {
 			return nil, err
 		}
@@ -158,8 +171,8 @@ func (c *Config) resolve() (*resolved, error) {
 	if r.mtu == 0 {
 		r.mtu = defaultMTU
 	}
-	if c.Keepalive > 0 {
-		r.keepalive = time.Duration(c.Keepalive) * time.Second
+	if peer.Keepalive > 0 {
+		r.keepalive = time.Duration(peer.Keepalive) * time.Second
 	}
 
 	addrs, err := prefixes(c.Address)
@@ -168,14 +181,14 @@ func (c *Config) resolve() (*resolved, error) {
 	}
 	r.address = addrs[0]
 
-	r.allowedIPs, err = prefixes(c.AllowedIPs)
+	r.allowedIPs, err = prefixes(peer.AllowedIPs)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", OptAllowedIPs, err)
 	}
 
-	r.endpoint, err = net.ResolveUDPAddr("udp", c.Endpoint)
+	r.endpoint, err = net.ResolveUDPAddr("udp", peer.Endpoint)
 	if err != nil {
-		return nil, fmt.Errorf("%s %q: %w", OptEndpoint, c.Endpoint, err)
+		return nil, fmt.Errorf("%s %q: %w", OptEndpoint, peer.Endpoint, err)
 	}
 
 	for _, s := range c.DNS {
@@ -233,7 +246,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 		return nil, client.Result{}, fmt.Errorf("wireguard: open TUN: %w", err)
 	}
 
-	tunnel := &wgTunnel{sess: sess, routes: r.allowedIPs, peer: r.endpoint}
+	tunnel := newTunnel(sess, r.allowedIPs, r.endpoint, false)
 
 	s := &session{
 		conn:   conn,
@@ -425,20 +438,80 @@ func (s *session) Close() error {
 	return s.closeErr
 }
 
-// wgTunnel is the data-path view of the established session: it encrypts and
+// wgTunnel is the data-path view of one established session: it encrypts and
 // decrypts transport packets and reports the peer's AllowedIPs as its routes. It
 // implements dataplane.Tunnel.
+//
+// The peer address is atomic because a server's peer roams: WireGuard lets a
+// client's source address change, and the pump updates it (via SetPeerAddr) from
+// the source of each inbound transport packet so replies follow. A client sets
+// it once and it never moves.
 type wgTunnel struct {
 	sess   *transport.Session
 	routes []netip.Prefix
-	peer   *net.UDPAddr
+	peer   atomic.Pointer[net.UDPAddr]
+
+	// verifySource enables the inbound half of cryptokey routing: a decrypted
+	// packet whose source is not within this peer's AllowedIPs is dropped, so one
+	// peer cannot spoof another's address. A client trusts its single server for
+	// everything and leaves this off.
+	verifySource bool
 }
 
-func (t *wgTunnel) InboundKey() uint32                   { return t.sess.LocalIndex() }
-func (t *wgTunnel) Routes() []netip.Prefix               { return t.routes }
-func (t *wgTunnel) PeerAddr() *net.UDPAddr               { return t.peer }
+// newTunnel builds a wgTunnel with its peer address set.
+func newTunnel(sess *transport.Session, routes []netip.Prefix, peer *net.UDPAddr, verifySource bool) *wgTunnel {
+	t := &wgTunnel{sess: sess, routes: routes, verifySource: verifySource}
+	t.peer.Store(peer)
+	return t
+}
+
+func (t *wgTunnel) InboundKey() uint32     { return t.sess.LocalIndex() }
+func (t *wgTunnel) Routes() []netip.Prefix { return t.routes }
+func (t *wgTunnel) PeerAddr() *net.UDPAddr { return t.peer.Load() }
+
+// SetPeerAddr updates the return address, skipping the store when it is
+// unchanged so the hot inbound path does not churn the atomic on every packet.
+func (t *wgTunnel) SetPeerAddr(a *net.UDPAddr) {
+	if cur := t.peer.Load(); cur != nil && cur.Port == a.Port && cur.IP.Equal(a.IP) {
+		return
+	}
+	t.peer.Store(a)
+}
+
 func (t *wgTunnel) Encapsulate(p []byte) ([]byte, error) { return t.sess.Seal(p) }
-func (t *wgTunnel) Decapsulate(p []byte) ([]byte, error) { return t.sess.Open(p) }
+
+func (t *wgTunnel) Decapsulate(p []byte) ([]byte, error) {
+	inner, err := t.sess.Open(p)
+	if err != nil || len(inner) == 0 {
+		return inner, err // error, or a keepalive the pump will drop
+	}
+	if t.verifySource && !t.sourceAllowed(inner) {
+		return nil, errSourceNotAllowed
+	}
+	return inner, nil
+}
+
+// sourceAllowed reports whether an inbound inner packet's source address falls
+// within this peer's routes — the inbound direction of cryptokey routing.
+func (t *wgTunnel) sourceAllowed(inner []byte) bool {
+	if len(inner) < 20 || inner[0]>>4 != 4 {
+		return false // IPv4 only in this build
+	}
+	src, ok := netip.AddrFromSlice(inner[12:16])
+	if !ok {
+		return false
+	}
+	for _, r := range t.routes {
+		if r.Contains(src) {
+			return true
+		}
+	}
+	return false
+}
+
+// errSourceNotAllowed is logged by the pump when a decrypted packet's source is
+// outside the peer's AllowedIPs.
+var errSourceNotAllowed = errors.New("wireguard: inner source not in peer AllowedIPs")
 
 // decodeKey decodes a 32-octet base64 WireGuard key, naming the option so a bad
 // value points at the field that carried it.

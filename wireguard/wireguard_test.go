@@ -130,11 +130,14 @@ func TestParseOptionsFromFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := d.(dialer).cfg
-	if len(got.AllowedIPs) != 1 || got.AllowedIPs[0] != "10.0.0.0/24" {
-		t.Errorf("override not applied: %v", got.AllowedIPs)
+	if len(got.Peers) != 1 {
+		t.Fatalf("Peers = %d, want 1", len(got.Peers))
 	}
-	if got.Endpoint != "10.0.0.1:51820" {
-		t.Errorf("file value lost: %q", got.Endpoint)
+	if ips := got.Peers[0].AllowedIPs; len(ips) != 1 || ips[0] != "10.0.0.0/24" {
+		t.Errorf("override not applied: %v", ips)
+	}
+	if got.Peers[0].Endpoint != "10.0.0.1:51820" {
+		t.Errorf("file value lost: %q", got.Peers[0].Endpoint)
 	}
 }
 

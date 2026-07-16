@@ -1,0 +1,368 @@
+package wireguard
+
+import (
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/netip"
+	"sync"
+
+	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/veepin/internal/wireguard/noise"
+	"github.com/xen0bit/veepin/internal/wireguard/transport"
+	"github.com/xen0bit/veepin/internal/wireguard/wire"
+)
+
+// keySize is the length of a Curve25519 key, matching what decodeKey returns.
+const keySize = 32
+
+// ServerConfig configures a WireGuard responder and its userspace data path.
+type ServerConfig struct {
+	// PrivateKey is the server's static private key, base64 (required).
+	PrivateKey string
+	// ListenPort is the UDP port to accept handshakes on (required).
+	ListenPort int
+	// ListenIP is the local address to bind on; empty binds all interfaces.
+	ListenIP string
+	// Address is the server's own tunnel address in CIDR form, e.g.
+	// "10.10.0.1/24" (required). Its host is the gateway; its network is used
+	// for routing and NAT.
+	Address string
+	// MTU is the inner-interface MTU (0 uses the default).
+	MTU int
+
+	// Peers are the clients this server accepts, each keyed by its static public
+	// key (required: a server with no peers accepts no one).
+	Peers []ServerPeer
+
+	// TUNName is the desired TUN interface name; empty lets the kernel pick.
+	TUNName string
+	// Logger receives progress logs; nil discards them.
+	Logger *log.Logger
+}
+
+// ServerPeer is one client the server will accept: its static public key, the
+// inner addresses it may use, and an optional preshared key.
+type ServerPeer struct {
+	PublicKey    string   // the client's static public key, base64 (required)
+	PresharedKey string   // optional symmetric key, base64
+	AllowedIPs   []string // inner destinations routed to and accepted from this peer
+}
+
+// ServerConfigFromFile builds a ServerConfig from a parsed wg-quick file: the
+// [Interface] is the server, and each [Peer] is a client. It is how the CLI
+// turns `-config wg0.conf` into a server.
+func ServerConfigFromFile(cfg *Config) (ServerConfig, error) {
+	if len(cfg.Address) == 0 {
+		return ServerConfig{}, fmt.Errorf("%s is required", OptAddress)
+	}
+	sc := ServerConfig{
+		PrivateKey: cfg.PrivateKey,
+		ListenPort: cfg.ListenPort,
+		Address:    cfg.Address[0],
+		MTU:        cfg.MTU,
+		TUNName:    cfg.TUNName,
+		Logger:     cfg.Logger,
+	}
+	for _, p := range cfg.Peers {
+		sc.Peers = append(sc.Peers, ServerPeer{
+			PublicKey:    p.PublicKey,
+			PresharedKey: p.PresharedKey,
+			AllowedIPs:   p.AllowedIPs,
+		})
+	}
+	return sc, nil
+}
+
+// serverPeer is a configured client plus its live session state. Only the
+// server's single read loop mutates lastTS and tunnel, so they need no lock of
+// their own.
+type serverPeer struct {
+	pubKey     [keySize]byte
+	psk        [keySize]byte
+	allowedIPs []netip.Prefix
+
+	lastTS [wire.TimestampLen]byte // newest handshake timestamp, for replay rejection
+	tunnel *wgTunnel               // current session, nil until the first handshake
+}
+
+// Server is a running WireGuard responder: a UDP socket, a TUN device, the
+// transport pump, and the set of peers it accepts. It owns the TUN but does not
+// configure host networking — Gateway and Network report what a caller needs to
+// do that itself.
+type Server struct {
+	localStatic [keySize]byte
+	listenAddr  *net.UDPAddr
+	mtu         int
+	gateway     net.IP
+	network     *net.IPNet
+
+	logger *log.Logger
+	tun    *dataplane.TUN
+
+	mu    sync.Mutex
+	peers map[[keySize]byte]*serverPeer
+
+	conn *net.UDPConn
+	pump *dataplane.Pump
+
+	closeOnce sync.Once
+	closeErr  error
+	closed    chan struct{}
+}
+
+// NewServer builds a server from cfg: it decodes keys, parses the address and
+// peers, and opens the TUN device. It does not bind the socket until
+// ListenAndServe. Opening a TUN device requires CAP_NET_ADMIN.
+func NewServer(cfg ServerConfig) (*Server, error) {
+	priv, err := decodeKey(cfg.PrivateKey, OptPrivateKey)
+	if err != nil {
+		return nil, fmt.Errorf("wireguard: %w", err)
+	}
+	if cfg.ListenPort <= 0 || cfg.ListenPort > 65535 {
+		return nil, fmt.Errorf("wireguard: %s %d out of range", OptListenPort, cfg.ListenPort)
+	}
+	if cfg.Address == "" {
+		return nil, fmt.Errorf("wireguard: %s is required", OptAddress)
+	}
+	gwAddr, network, err := parseCIDR(cfg.Address)
+	if err != nil {
+		return nil, fmt.Errorf("wireguard: %s: %w", OptAddress, err)
+	}
+	if len(cfg.Peers) == 0 {
+		return nil, errors.New("wireguard: a server needs at least one peer")
+	}
+
+	logger := cfg.Logger
+	if logger == nil {
+		logger = log.New(io.Discard, "", 0)
+	}
+	mtu := cfg.MTU
+	if mtu == 0 {
+		mtu = defaultMTU
+	}
+
+	peers, err := resolvePeers(cfg.Peers)
+	if err != nil {
+		return nil, fmt.Errorf("wireguard: %w", err)
+	}
+
+	tun, err := dataplane.OpenTUN(cfg.TUNName)
+	if err != nil {
+		return nil, fmt.Errorf("wireguard: open TUN: %w", err)
+	}
+
+	return &Server{
+		localStatic: priv,
+		listenAddr:  &net.UDPAddr{IP: net.ParseIP(cfg.ListenIP), Port: cfg.ListenPort},
+		mtu:         mtu,
+		gateway:     gwAddr,
+		network:     network,
+		logger:      logger,
+		tun:         tun,
+		peers:       peers,
+		closed:      make(chan struct{}),
+	}, nil
+}
+
+// resolvePeers decodes the configured peers into the runtime map keyed by static
+// public key.
+func resolvePeers(cfgPeers []ServerPeer) (map[[keySize]byte]*serverPeer, error) {
+	peers := make(map[[keySize]byte]*serverPeer, len(cfgPeers))
+	for i, p := range cfgPeers {
+		pub, err := decodeKey(p.PublicKey, OptPublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("peer %d: %w", i, err)
+		}
+		if _, dup := peers[pub]; dup {
+			return nil, fmt.Errorf("peer %d: duplicate %s", i, OptPublicKey)
+		}
+		sp := &serverPeer{pubKey: pub}
+		if p.PresharedKey != "" {
+			psk, err := decodeKey(p.PresharedKey, OptPresharedKey)
+			if err != nil {
+				return nil, fmt.Errorf("peer %d: %w", i, err)
+			}
+			sp.psk = psk
+		}
+		if len(p.AllowedIPs) == 0 {
+			return nil, fmt.Errorf("peer %d: %s is required", i, OptAllowedIPs)
+		}
+		sp.allowedIPs, err = prefixes(p.AllowedIPs)
+		if err != nil {
+			return nil, fmt.Errorf("peer %d: %s: %w", i, OptAllowedIPs, err)
+		}
+		peers[pub] = sp
+	}
+	return peers, nil
+}
+
+// TUNName is the interface the data path is bound to.
+func (s *Server) TUNName() string { return s.tun.Name() }
+
+// Gateway is the server's own tunnel-side address.
+func (s *Server) Gateway() net.IP { return s.gateway }
+
+// Network is the tunnel subnet, for routing and NAT rules.
+func (s *Server) Network() *net.IPNet { return s.network }
+
+// MTU is the recommended inner-interface MTU.
+func (s *Server) MTU() int { return s.mtu }
+
+// ListenAndServe binds the UDP socket, starts the data path, and serves
+// handshakes and transport traffic until Close. It blocks.
+func (s *Server) ListenAndServe() error {
+	conn, err := net.ListenUDP("udp", s.listenAddr)
+	if err != nil {
+		return fmt.Errorf("wireguard: listen %s: %w", s.listenAddr, err)
+	}
+	s.conn = conn
+
+	// Unconnected socket: each send addresses a specific peer, so the pump's send
+	// uses the tunnel's current PeerAddr.
+	send := func(pkt []byte, to *net.UDPAddr) {
+		if to == nil {
+			return
+		}
+		if _, werr := conn.WriteToUDP(pkt, to); werr != nil {
+			s.logger.Printf("wireguard: send to %s: %v", to, werr)
+		}
+	}
+	s.pump = dataplane.NewPump(s.tun, send, wire.Demux, s.logger)
+	go s.pump.Run()
+
+	s.logger.Printf("wireguard: serving on %s, gateway %s, %d peer(s)",
+		conn.LocalAddr(), s.gateway, len(s.peers))
+	s.readLoop()
+	return nil
+}
+
+// readLoop dispatches inbound datagrams: initiations to the handshake, transport
+// data to the pump, everything else dropped. It runs until the socket closes.
+func (s *Server) readLoop() {
+	buf := make([]byte, 65535)
+	for {
+		n, from, err := s.conn.ReadFromUDP(buf)
+		if err != nil {
+			return // socket closed on Close
+		}
+		typ, ok := wire.Type(buf[:n])
+		if !ok {
+			continue
+		}
+		switch typ {
+		case wire.TypeHandshakeInitiation:
+			s.handleInitiation(append([]byte(nil), buf[:n]...), from)
+		case wire.TypeTransportData:
+			// The pump decrypts in place and updates the peer's return address
+			// from the source, so a roaming client's replies follow it.
+			s.pump.HandleInbound(append([]byte(nil), buf[:n]...), from)
+		default:
+			// Handshake responses and cookie replies are the initiator's to send,
+			// not to receive; drop them.
+		}
+	}
+}
+
+// handleInitiation runs the responder handshake for one initiation and, on
+// success, installs the peer's transport session in the pump.
+func (s *Server) handleInitiation(pkt []byte, from *net.UDPAddr) {
+	r, err := noise.NewResponder(s.localStatic)
+	if err != nil {
+		s.logger.Printf("wireguard: responder: %v", err)
+		return
+	}
+	peerStatic, ts, err := r.Consume(pkt)
+	if err != nil {
+		// ErrMAC1 means the packet was not addressed to us — common noise on an
+		// open port, not worth logging loudly.
+		if !errors.Is(err, noise.ErrMAC1) {
+			s.logger.Printf("wireguard: rejecting initiation from %s: %v", from, err)
+		}
+		return
+	}
+
+	s.mu.Lock()
+	peer := s.peers[peerStatic]
+	if peer == nil {
+		s.mu.Unlock()
+		s.logger.Printf("wireguard: initiation from unknown peer %s (%s)", shortKey(peerStatic), from)
+		return
+	}
+	// Reject a replayed or stale initiation: its timestamp must advance.
+	if peer.lastTS != ([wire.TimestampLen]byte{}) && !wire.After(ts, peer.lastTS) {
+		s.mu.Unlock()
+		s.logger.Printf("wireguard: replayed initiation from %s", shortKey(peerStatic))
+		return
+	}
+
+	respPkt, kp, err := r.Response(peer.psk)
+	if err != nil {
+		s.mu.Unlock()
+		s.logger.Printf("wireguard: building response for %s: %v", shortKey(peerStatic), err)
+		return
+	}
+	sess, err := transport.NewSession(kp.Send, kp.Recv, kp.Local, kp.Remote)
+	if err != nil {
+		s.mu.Unlock()
+		s.logger.Printf("wireguard: transport keys for %s: %v", shortKey(peerStatic), err)
+		return
+	}
+	peer.lastTS = ts
+	old := peer.tunnel
+	tunnel := newTunnel(sess, peer.allowedIPs, from, true)
+	peer.tunnel = tunnel
+	s.mu.Unlock()
+
+	// Swap the pump's routing for this peer: drop the previous session's routes
+	// and inbound key, then add the new one. The read loop is single-threaded, so
+	// no concurrent initiation races this.
+	if old != nil {
+		s.pump.RemoveTunnel(old)
+	}
+	s.pump.AddTunnel(tunnel)
+
+	if _, err := s.conn.WriteToUDP(respPkt, from); err != nil {
+		s.logger.Printf("wireguard: send response to %s: %v", from, err)
+		return
+	}
+	s.logger.Printf("wireguard: handshake complete with %s at %s", shortKey(peerStatic), from)
+}
+
+// Close stops the data path and releases the socket and TUN device. It is
+// idempotent.
+func (s *Server) Close() error {
+	s.closeOnce.Do(func() {
+		if s.pump != nil {
+			s.pump.Close()
+		}
+		if s.conn != nil {
+			s.closeErr = s.conn.Close() // unblocks readLoop
+		}
+		s.tun.Close()
+		close(s.closed)
+	})
+	return s.closeErr
+}
+
+// parseCIDR splits "10.10.0.1/24" into the host address and its network.
+func parseCIDR(s string) (net.IP, *net.IPNet, error) {
+	ip, network, err := net.ParseCIDR(s)
+	if err != nil {
+		return nil, nil, err
+	}
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+	return ip, network, nil
+}
+
+// shortKey is a base64 key abbreviated for logs — enough to tell peers apart
+// without filling a line.
+func shortKey(k [keySize]byte) string {
+	s := base64.StdEncoding.EncodeToString(k[:])
+	return s[:8] + "…"
+}

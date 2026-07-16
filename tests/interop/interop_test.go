@@ -49,6 +49,22 @@ func TestInteropVeepinClientWireguardServer(t *testing.T) {
 	runInterop(t, "compose.wireguard.yml", "veepin-wg-client", "10.10.10.1")
 }
 
+// TestInteropWireguardClientVeepinServer is the mirror: a real wireguard-go
+// client performs the handshake against the veepin *server* (`veepin serve
+// wireguard`) and pings its tunnel gateway. It proves the responder — mac1
+// verification, static-key lookup, the response message, and multi-peer
+// cryptokey routing — against a client veepin shares no code with.
+func TestInteropWireguardClientVeepinServer(t *testing.T) {
+	runInterop(t, "compose.wireguard-server.yml", "wg-client", "10.10.10.1")
+}
+
+// TestInteropWireguardSelf is the veepin<->veepin WireGuard sanity check: the
+// veepin client and server over real sockets and TUNs, isolating a veepin break
+// from an interop break.
+func TestInteropWireguardSelf(t *testing.T) {
+	runInterop(t, "compose.wireguard-self.yml", "veepin-wg-client", "10.10.10.1")
+}
+
 // runInterop brings up the given compose file, then retries a ping from pingSvc
 // to target across the tunnel until it succeeds or pingDeadline elapses. A
 // successful ping proves the full path: handshake, config-mode addressing, and

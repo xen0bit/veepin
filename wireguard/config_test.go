@@ -50,16 +50,20 @@ func TestParseConfig(t *testing.T) {
 	if cfg.MTU != 1420 {
 		t.Errorf("MTU = %d", cfg.MTU)
 	}
-	if cfg.Endpoint != "vpn.example.com:51820" {
-		t.Errorf("Endpoint = %q", cfg.Endpoint)
+	if len(cfg.Peers) != 1 {
+		t.Fatalf("Peers = %d, want 1", len(cfg.Peers))
 	}
-	if len(cfg.AllowedIPs) != 1 || cfg.AllowedIPs[0] != "0.0.0.0/0" {
-		t.Errorf("AllowedIPs = %v", cfg.AllowedIPs)
+	p := cfg.Peers[0]
+	if p.Endpoint != "vpn.example.com:51820" {
+		t.Errorf("Endpoint = %q", p.Endpoint)
 	}
-	if cfg.Keepalive != 25 {
-		t.Errorf("Keepalive = %d", cfg.Keepalive)
+	if len(p.AllowedIPs) != 1 || p.AllowedIPs[0] != "0.0.0.0/0" {
+		t.Errorf("AllowedIPs = %v", p.AllowedIPs)
 	}
-	if cfg.PresharedKey == "" {
+	if p.Keepalive != 25 {
+		t.Errorf("Keepalive = %d", p.Keepalive)
+	}
+	if p.PresharedKey == "" {
 		t.Error("PresharedKey not parsed")
 	}
 }
@@ -82,12 +86,16 @@ AllowedIPs = 192.168.0.0/16
 		t.Fatal(err)
 	}
 	want := []string{"10.0.0.0/24", "10.1.0.0/24", "192.168.0.0/16"}
-	if len(cfg.AllowedIPs) != len(want) {
-		t.Fatalf("AllowedIPs = %v, want %v", cfg.AllowedIPs, want)
+	if len(cfg.Peers) != 1 {
+		t.Fatalf("Peers = %d, want 1", len(cfg.Peers))
+	}
+	got := cfg.Peers[0].AllowedIPs
+	if len(got) != len(want) {
+		t.Fatalf("AllowedIPs = %v, want %v", got, want)
 	}
 	for i, w := range want {
-		if cfg.AllowedIPs[i] != w {
-			t.Errorf("AllowedIPs[%d] = %q, want %q", i, cfg.AllowedIPs[i], w)
+		if got[i] != w {
+			t.Errorf("AllowedIPs[%d] = %q, want %q", i, got[i], w)
 		}
 	}
 }
@@ -96,7 +104,6 @@ func TestParseConfigRejects(t *testing.T) {
 	for _, tc := range []struct {
 		name, conf string
 	}{
-		{"two peers", "[Peer]\nPublicKey=a\n[Peer]\nPublicKey=b\n"},
 		{"unknown section", "[Server]\nX=1\n"},
 		{"key before section", "PrivateKey = k\n"},
 		{"unknown interface key", "[Interface]\nColour = blue\n"},
@@ -126,11 +133,11 @@ func TestApplyOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Endpoint != "10.9.9.9:51820" {
-		t.Errorf("Endpoint override = %q", cfg.Endpoint)
+	if cfg.Peers[0].Endpoint != "10.9.9.9:51820" {
+		t.Errorf("Endpoint override = %q", cfg.Peers[0].Endpoint)
 	}
-	if len(cfg.AllowedIPs) != 1 || cfg.AllowedIPs[0] != "10.0.0.0/24" {
-		t.Errorf("AllowedIPs override = %v", cfg.AllowedIPs)
+	if len(cfg.Peers[0].AllowedIPs) != 1 || cfg.Peers[0].AllowedIPs[0] != "10.0.0.0/24" {
+		t.Errorf("AllowedIPs override = %v", cfg.Peers[0].AllowedIPs)
 	}
 	if cfg.TUNName != "wg0" {
 		t.Errorf("TUNName override = %q", cfg.TUNName)
@@ -139,8 +146,8 @@ func TestApplyOverrides(t *testing.T) {
 	if err := cfg.applyOverrides(map[string]string{OptEndpoint: ""}); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Endpoint != "10.9.9.9:51820" {
-		t.Errorf("empty override clobbered Endpoint: %q", cfg.Endpoint)
+	if cfg.Peers[0].Endpoint != "10.9.9.9:51820" {
+		t.Errorf("empty override clobbered Endpoint: %q", cfg.Peers[0].Endpoint)
 	}
 }
 
@@ -151,10 +158,12 @@ func TestResolveValidation(t *testing.T) {
 	base := func() *Config {
 		return &Config{
 			PrivateKey: b64Key(1),
-			PublicKey:  b64Key(2),
-			Endpoint:   "10.0.0.1:51820",
 			Address:    []string{"10.0.0.2/32"},
-			AllowedIPs: []string{"0.0.0.0/0"},
+			Peers: []Peer{{
+				PublicKey:  b64Key(2),
+				Endpoint:   "10.0.0.1:51820",
+				AllowedIPs: []string{"0.0.0.0/0"},
+			}},
 		}
 	}
 	if _, err := base().resolve(); err != nil {
@@ -167,12 +176,13 @@ func TestResolveValidation(t *testing.T) {
 		want   string
 	}{
 		{"no private key", func(c *Config) { c.PrivateKey = "" }, OptPrivateKey},
-		{"no public key", func(c *Config) { c.PublicKey = "" }, OptPublicKey},
-		{"no endpoint", func(c *Config) { c.Endpoint = "" }, OptEndpoint},
+		{"no public key", func(c *Config) { c.Peers[0].PublicKey = "" }, OptPublicKey},
+		{"no peer", func(c *Config) { c.Peers = nil }, OptPublicKey},
+		{"no endpoint", func(c *Config) { c.Peers[0].Endpoint = "" }, OptEndpoint},
 		{"no address", func(c *Config) { c.Address = nil }, OptAddress},
-		{"no allowed-ips", func(c *Config) { c.AllowedIPs = nil }, OptAllowedIPs},
+		{"no allowed-ips", func(c *Config) { c.Peers[0].AllowedIPs = nil }, OptAllowedIPs},
 		{"short key", func(c *Config) { c.PrivateKey = "dG9vc2hvcnQ=" }, OptPrivateKey},
-		{"bad allowed-ip", func(c *Config) { c.AllowedIPs = []string{"nonsense"} }, OptAllowedIPs},
+		{"bad allowed-ip", func(c *Config) { c.Peers[0].AllowedIPs = []string{"nonsense"} }, OptAllowedIPs},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := base()
@@ -193,10 +203,12 @@ func TestResolveValidation(t *testing.T) {
 func TestResolveBareAddress(t *testing.T) {
 	cfg := &Config{
 		PrivateKey: b64Key(1),
-		PublicKey:  b64Key(2),
-		Endpoint:   "10.0.0.1:51820",
 		Address:    []string{"10.0.0.2/32"},
-		AllowedIPs: []string{"10.0.0.1"}, // bare, no /32
+		Peers: []Peer{{
+			PublicKey:  b64Key(2),
+			Endpoint:   "10.0.0.1:51820",
+			AllowedIPs: []string{"10.0.0.1"}, // bare, no /32
+		}},
 	}
 	r, err := cfg.resolve()
 	if err != nil {

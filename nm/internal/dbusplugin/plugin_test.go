@@ -40,7 +40,7 @@ func newTestBus(t *testing.T) (server, caller *dbus.Conn) {
 		t.Fatalf("read bus address: %v", err)
 	}
 	addr := strings.TrimSpace(line)
-	go io.Copy(io.Discard, stdout)
+	go func() { _, _ = io.Copy(io.Discard, stdout) }()
 
 	server = dialTestBus(t, addr)
 	caller = dialTestBus(t, addr)
@@ -150,7 +150,7 @@ func TestConnectHandshakeFailureEmitsSignals(t *testing.T) {
 
 	var sawFailure, sawStopped, sawStarting bool
 	deadline := time.After(5 * time.Second)
-	for !(sawFailure && sawStopped) {
+	for !sawFailure || !sawStopped {
 		select {
 		case sig := <-sigCh:
 			switch sig.Name {
