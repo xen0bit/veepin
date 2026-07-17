@@ -11,10 +11,10 @@ nm/bin/
 *.out
 *.prof
 
-# Binaries built at the repo root (e.g. `go build -o ikev2d ./cmd/ikev2d`)
-/ikev2d
-/ikev2
-/testclient
+# Binary built at the repo root (e.g. `go build ./cmd/veepin`). Anchored to the
+# root so it never shadows the ikev2/ package directory, as the old `/ikev2`
+# binary rule did.
+/veepin
 
 # Editor / OS cruft
 *.swp
