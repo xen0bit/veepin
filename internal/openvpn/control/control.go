@@ -56,10 +56,11 @@ type Wrapper interface {
 // Channel is one OpenVPN control channel: a net.Conn for crypto/tls backed by
 // the reliability layer over UDP.
 type Channel struct {
-	send  func([]byte) error
-	wrap  Wrapper
-	keyID uint8
-	local wire.SessionID
+	send            func([]byte) error
+	wrap            Wrapper
+	keyID           uint8
+	local           wire.SessionID
+	hardResetOpcode uint8 // client- or server-role reset opcode for message 0
 
 	sender    *reliable.Sender
 	receiver  *reliable.Receiver
@@ -82,29 +83,42 @@ type Channel struct {
 	err       error
 }
 
-// New creates a control channel that transmits through send, tagging packets
-// with keyID. It picks a random local session ID, queues the client hard reset
-// as reliable message 0, and starts the pump. timeout is the reliability
+// New creates a client-role control channel that transmits through send, tagging
+// packets with keyID. It picks a random local session ID, queues the client hard
+// reset as reliable message 0, and starts the pump. timeout is the reliability
 // retransmit interval (--tls-timeout); zero uses the OpenVPN default. wrap, if
-// non-nil, applies --tls-auth/--tls-crypt protection to every control packet.
-// The returned Channel is a net.Conn ready for crypto/tls; the caller must route
+// non-nil, applies --tls-auth/--tls-crypt protection to every control packet. The
+// returned Channel is a net.Conn ready for crypto/tls; the caller must route
 // inbound control datagrams to Deliver.
 func New(send func([]byte) error, keyID uint8, timeout time.Duration, wrap Wrapper) (*Channel, error) {
+	return newChannel(send, keyID, timeout, wrap, wire.PControlHardResetClientV2)
+}
+
+// NewServer is the server-role counterpart of New: it behaves identically but
+// answers with a server hard reset (message 0), the reply to a client's
+// PControlHardResetClientV2. The caller creates one per accepted client, after
+// the client's hard reset, and runs crypto/tls in server mode over it.
+func NewServer(send func([]byte) error, keyID uint8, timeout time.Duration, wrap Wrapper) (*Channel, error) {
+	return newChannel(send, keyID, timeout, wrap, wire.PControlHardResetServerV2)
+}
+
+func newChannel(send func([]byte) error, keyID uint8, timeout time.Duration, wrap Wrapper, hardReset uint8) (*Channel, error) {
 	var sid wire.SessionID
 	if _, err := rand.Read(sid[:]); err != nil {
 		return nil, err
 	}
 	c := &Channel{
-		send:      send,
-		wrap:      wrap,
-		keyID:     keyID,
-		local:     sid,
-		sender:    reliable.NewSender(0, timeout),
-		receiver:  reliable.NewReceiver(),
-		datagrams: make(chan []byte, datagramQueue),
-		inbound:   make(chan []byte, inboundQueue),
-		outbound:  make(chan []byte),
-		closed:    make(chan struct{}),
+		send:            send,
+		wrap:            wrap,
+		keyID:           keyID,
+		local:           sid,
+		hardResetOpcode: hardReset,
+		sender:          reliable.NewSender(0, timeout),
+		receiver:        reliable.NewReceiver(),
+		datagrams:       make(chan []byte, datagramQueue),
+		inbound:         make(chan []byte, inboundQueue),
+		outbound:        make(chan []byte),
+		closed:          make(chan struct{}),
 	}
 	// The hard reset is reliable message 0 with no TLS payload.
 	c.sender.Queue(nil)
@@ -115,6 +129,11 @@ func New(send func([]byte) error, keyID uint8, timeout time.Duration, wrap Wrapp
 // LocalSessionID is the session ID this side chose; the data channel needs it,
 // and it is fixed for the connection's life.
 func (c *Channel) LocalSessionID() wire.SessionID { return c.local }
+
+// Closed returns a channel that is closed when the control channel is, so a
+// caller's background goroutine (e.g. a server's per-client keepalive) can stop
+// with it.
+func (c *Channel) Closed() <-chan struct{} { return c.closed }
 
 // RemoteSessionID is the peer's session ID, valid once the handshake has begun.
 func (c *Channel) RemoteSessionID() (wire.SessionID, bool) {
@@ -203,7 +222,7 @@ func (c *Channel) transmit(now time.Time) {
 func (c *Channel) sendMessage(m reliable.Message, acks []uint32) {
 	opcode := uint8(wire.PControlV1)
 	if m.ID == 0 {
-		opcode = wire.PControlHardResetClientV2
+		opcode = c.hardResetOpcode
 	}
 	p := &wire.ControlPacket{
 		Opcode:    opcode,

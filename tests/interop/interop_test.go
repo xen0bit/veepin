@@ -125,6 +125,34 @@ func runOpenVPNInterop(t *testing.T, composeFile string) {
 	runInterop(t, composeFile, "veepin-ovpn-client", "10.8.0.1")
 }
 
+// TestInteropOpenVPNClientVeepinServer is the reverse direction: a real OpenVPN
+// client tunnels to the veepin *server* (`veepin serve openvpn`) and pings its
+// tunnel gateway. It proves the responder — the server-role TLS control channel,
+// the key method 2 server exchange, PUSH_REPLY address assignment and the
+// server's data path — against a client veepin shares no code with.
+func TestInteropOpenVPNClientVeepinServer(t *testing.T) {
+	requireDocker(t)
+	pkiDir := filepath.Join("openvpn", "pki")
+	if err := generateOpenVPNPKI(pkiDir); err != nil {
+		t.Fatalf("generate PKI: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
+	runInterop(t, "compose.openvpn-server.yml", "openvpn-client", "10.8.0.1")
+}
+
+// TestInteropOpenVPNSelf is the veepin<->veepin OpenVPN sanity check: the veepin
+// client and server over a real socket and TUNs, isolating a veepin break from
+// an interop break.
+func TestInteropOpenVPNSelf(t *testing.T) {
+	requireDocker(t)
+	pkiDir := filepath.Join("openvpn", "pki")
+	if err := generateOpenVPNPKI(pkiDir); err != nil {
+		t.Fatalf("generate PKI: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
+	runInterop(t, "compose.openvpn-self.yml", "veepin-ovpn-client", "10.8.0.1")
+}
+
 // TestInteropWireguardRekey proves the client rekey loop end to end: the veepin
 // client re-runs the handshake every few seconds (a shrunk REKEY_SECONDS),
 // rotating a fresh keypair and receiver index into a live tunnel, while a

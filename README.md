@@ -3,7 +3,8 @@
 A **working userspace VPN in Go** — both a server (responder) and a client
 (initiator) — written from scratch, with `golang.org/x/crypto` the only
 dependency. It speaks four protocols: **IKEv2/ESP** (client and server),
-**WireGuard** (client and server), **OpenVPN** (client), and **SSTP** (client).
+**WireGuard** (client and server), **OpenVPN** (client and server), and **SSTP**
+(client).
 The SSTP side runs Microsoft's Secure Socket Tunneling Protocol over TLS — the
 `SSTP_DUPLEX_POST` HTTP handshake, the CALL_CONNECT crypto binding, MS-CHAPv2
 authentication and a PPP/IPCP data path — and interoperates with SoftEther and
@@ -63,6 +64,16 @@ drives the production client against the live server and checks bidirectional ES
   `openvpn` server in Docker across all four control/data combinations.
   Compression and the older net30 topology are not implemented, and a profile it
   cannot speak fails at dial rather than silently.
+- **OpenVPN server**: the responder side of the same profile — one UDP socket
+  serving many clients, the server-role TLS control channel with
+  `RequireAndVerifyClientCert` against the CA, the key method 2 server exchange,
+  subnet-topology `PUSH_REPLY` address assignment from a pool with server-assigned
+  peer-ids, and the AES-256-GCM data path demuxed by peer-id. It is verified in
+  Docker both against a real `openvpn` client and against the veepin client
+  itself. TLS is capped at 1.2 (OpenVPN's control channel does not carry TLS 1.3
+  post-handshake tickets cleanly), and it serves the certificate-authenticated
+  GCM profile; `--tls-auth`/`--tls-crypt` and the CBC data channel are
+  client-only for now.
 
 ## Cryptography
 
@@ -115,7 +126,7 @@ cmd/veepin               CLI: connect / serve / probe subcommands, flags, routin
 client                   protocol registry (client + server) + the Session/Result/Server contracts
 ikev2                    public IKEv2 entry point: Dial + NewServer, Config
 wireguard                public WireGuard entry point: Dial + NewServer, Config, wg-quick parser
-openvpn                  public OpenVPN entry point: Dial, Config, .ovpn parser (client only)
+openvpn                  public OpenVPN entry point: Dial + NewServer, Config, .ovpn parser
 sstp                     public SSTP entry point: Dial, Config, crypto binding (client only)
 
 dataplane                TUN device, address pool, packet pump (demux + routing), client routing
@@ -351,6 +362,25 @@ four control/data combinations are covered by the Docker interop tests; see the
 boundaries under [What it does](#what-it-does). Add `-username`/`-password` for
 servers that require `auth-user-pass`.
 
+### Running an OpenVPN server
+
+`veepin serve openvpn` is the responder: mutual-TLS against a CA, key method 2,
+and subnet-topology `PUSH_REPLY` address assignment from a pool. It serves the
+certificate-authenticated AES-256-GCM profile that a stock `openvpn --client`
+speaks:
+
+```sh
+sudo ./veepin serve openvpn \
+  -ca ca.crt -cert server.crt -key server.key \
+  -pool 10.8.0.0/24 -dns 1.1.1.1 -setup-nat -wan eth0
+```
+
+`-setup-nat` assigns the pool gateway (`10.8.0.1`) to the TUN and installs the
+masquerade rule for `-wan`; without it, the command prints the `ip`/`iptables`
+lines to run by hand. Each client is assigned the next free pool address and a
+peer-id, and inbound data packets are demuxed by that peer-id. It is verified in
+Docker against both a real `openvpn` client and the veepin client.
+
 ### Connecting as an SSTP client
 
 `veepin connect sstp` dials a Microsoft SSTP server over TLS on port 443:
@@ -564,15 +594,14 @@ cells are not yet exercised.
 |-----------|-----------------------------|-----------------------------|------------------------|
 | IKEv2     | ✓ strongSwan                | ✓ strongSwan                | ✓                      |
 | WireGuard | ✓ wireguard-go              | ✓ wireguard-go              | ✓                      |
-| OpenVPN   | ✓ `openvpn` (×4 variants)   | — (client only)             | — (client only)        |
+| OpenVPN   | ✓ `openvpn` (×4 variants)   | ✓ `openvpn`                 | ✓                      |
 | SSTP      | ✓ SoftEther                 | — (client only)             | — (client only)        |
 
 Both roles share one API: a client registers with `client.Register` and is dialed
 by `client.Dial`; a server registers with `client.RegisterServer` and is built by
 `client.NewServer`, so `veepin connect <proto>` and `veepin serve <proto>` dispatch
-generically. Adding a server for OpenVPN or SSTP is a matter of implementing the
-responder and registering it — no CLI changes — which then fills its two empty
-cells above.
+generically. An SSTP server is the remaining gap; implementing the responder and
+registering it — no CLI changes — fills its two empty cells above.
 
 ## Benchmarks
 

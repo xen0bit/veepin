@@ -1,0 +1,33 @@
+# Reference OpenVPN client -> veepin OpenVPN server.
+# The veepin responder runs the TLS control channel (server role), the key
+# method 2 exchange, PUSH_REPLY address assignment and the AES-256-GCM data path
+# against a real OpenVPN client it shares no code with. Data-path check: the
+# client pings 10.8.0.1 (the veepin server's tunnel gateway). The PKI in
+# ./openvpn/pki is generated per run by the test and mounted into both ends.
+name: veepin-interop-openvpn-server
+
+services:
+  veepin-ovpn-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    volumes:
+      - ./openvpn/pki:/pki:ro
+      - ./veepin/openvpn-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  openvpn-client:
+    build:
+      context: openvpn
+    image: interop-openvpn
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-ovpn-server]
+    volumes:
+      - ./openvpn/pki:/pki:ro
+      - ./openvpn/client.conf:/client.conf:ro
+      - ./openvpn/client-entrypoint.sh:/client-entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/client-entrypoint.sh"]

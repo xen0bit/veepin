@@ -1,0 +1,29 @@
+# veepin OpenVPN client <-> veepin OpenVPN server (self-test).
+# Both ends are veepin over a real socket and TUNs, isolating a veepin break from
+# an interop break. The client pings 10.8.0.1 (the server's tunnel gateway).
+name: veepin-interop-openvpn-self
+
+services:
+  veepin-ovpn-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    volumes:
+      - ./openvpn/pki:/pki:ro
+      - ./veepin/openvpn-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-ovpn-client:
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-ovpn-server]
+    environment:
+      SERVER: "veepin-ovpn-server"
+    volumes:
+      - ./openvpn/pki:/pki:ro
+      - ./veepin/openvpn-client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

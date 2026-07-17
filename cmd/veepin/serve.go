@@ -13,6 +13,7 @@ import (
 
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/ikev2"
+	"github.com/xen0bit/veepin/openvpn"
 	"github.com/xen0bit/veepin/wireguard"
 )
 
@@ -139,6 +140,32 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			}
 			if *mtu != 0 {
 				opts[wireguard.OptServerMTU] = fmt.Sprint(*mtu)
+			}
+			return opts
+		}, nil
+	case "openvpn":
+		var (
+			ca       = fs.String("ca", "", "path to the CA certificate PEM (required)")
+			cert     = fs.String("cert", "", "path to the server certificate PEM (required)")
+			key      = fs.String("key", "", "path to the server private key PEM (required)")
+			listenIP = fs.String("listen", "0.0.0.0", "local IP to bind the UDP socket on")
+			port     = fs.Int("port", 0, "UDP port to listen on (default 1194)")
+			pool     = fs.String("pool", "10.8.0.0/24", "internal address pool handed to clients")
+			dns      = fs.String("dns", "", "comma-separated DNS servers pushed to clients")
+			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+		)
+		return func() map[string]string {
+			opts := map[string]string{
+				openvpn.OptServerCA:       *ca,
+				openvpn.OptServerCert:     *cert,
+				openvpn.OptServerKey:      *key,
+				openvpn.OptServerListenIP: *listenIP,
+				openvpn.OptServerPool:     *pool,
+				openvpn.OptServerDNS:      *dns,
+				openvpn.OptServerTUN:      *tun,
+			}
+			if *port != 0 {
+				opts[openvpn.OptServerListenPort] = fmt.Sprint(*port)
 			}
 			return opts
 		}, nil
