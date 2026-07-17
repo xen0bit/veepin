@@ -14,6 +14,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/ikev2"
 	"github.com/xen0bit/veepin/openvpn"
+	"github.com/xen0bit/veepin/ssh"
 	"github.com/xen0bit/veepin/sstp"
 	"github.com/xen0bit/veepin/wireguard"
 )
@@ -195,6 +196,34 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			}
 			if *port != 0 {
 				opts[sstp.OptServerPort] = fmt.Sprint(*port)
+			}
+			return opts
+		}, nil
+	case "ssh":
+		var (
+			hostKey  = fs.String("host-key", "", "path to the server SSH host private key (required)")
+			listenIP = fs.String("listen", "0.0.0.0", "local IP to bind the TCP socket on")
+			port     = fs.Int("port", 0, "TCP port to listen on (default 22)")
+			pool     = fs.String("pool", "10.200.0.0/24", "tunnel subnet clients use")
+			dns      = fs.String("dns", "", "comma-separated DNS servers (informational)")
+			user     = fs.String("user", "", "username to accept (password auth)")
+			pass     = fs.String("pass", "", "the user's password")
+			authKeys = fs.String("authorized-keys", "", "path to an authorized_keys file (public-key auth)")
+			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+		)
+		return func() map[string]string {
+			opts := map[string]string{
+				ssh.OptServerHostKey:        *hostKey,
+				ssh.OptServerListenIP:       *listenIP,
+				ssh.OptServerPool:           *pool,
+				ssh.OptServerDNS:            *dns,
+				ssh.OptServerUser:           *user,
+				ssh.OptServerPassword:       *pass,
+				ssh.OptServerAuthorizedKeys: *authKeys,
+				ssh.OptServerTUN:            *tun,
+			}
+			if *port != 0 {
+				opts[ssh.OptServerPort] = fmt.Sprint(*port)
 			}
 			return opts
 		}, nil

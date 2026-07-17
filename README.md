@@ -2,8 +2,8 @@
 
 A **working userspace VPN in Go** — both a server (responder) and a client
 (initiator) — written from scratch, with `golang.org/x/crypto` the only
-dependency. It speaks four protocols, **client and server for every one**:
-**IKEv2/ESP**, **WireGuard**, **OpenVPN**, and **SSTP**.
+dependency. It speaks five protocols, **client and server for every one**:
+**IKEv2/ESP**, **WireGuard**, **OpenVPN**, **SSTP**, and **SSH**.
 The SSTP side runs Microsoft's Secure Socket Tunneling Protocol over TLS — the
 `SSTP_DUPLEX_POST` HTTP handshake, the CALL_CONNECT crypto binding, MS-CHAPv2
 authentication and a PPP/IPCP data path — as both client and server, verified
@@ -73,6 +73,17 @@ drives the production client against the live server and checks bidirectional ES
   post-handshake tickets cleanly), and it serves the certificate-authenticated
   GCM profile; `--tls-auth`/`--tls-crypt` and the CBC data channel are
   client-only for now.
+- **SSH client and server**: IP forwarding over OpenSSH's layer-3 tunnel channel
+  (`tun@openssh.com`, what `ssh -w` opens under a server's `PermitTunnel`), built
+  on `golang.org/x/crypto/ssh` — already the module's only dependency, so this
+  protocol adds none. The client opens the channel and forwards IP over a
+  userspace TUN; the server accepts tunnel channels, learns each client's inner
+  address from its traffic, and routes a shared TUN by it. Both roles are verified
+  in Docker against stock OpenSSH — the veepin client against `sshd`
+  (`PermitTunnel yes`), the veepin server against `ssh -w` — and against each
+  other. SSH forwarding carries no addressing in-band, so tunnel addresses are
+  static (from config, as the reference sshvpn script sets them); only layer-3
+  (point-to-point) tunnels are implemented, not layer-2/TAP.
 
 ## Cryptography
 
@@ -127,6 +138,7 @@ ikev2                    public IKEv2 entry point: Dial + NewServer, Config
 wireguard                public WireGuard entry point: Dial + NewServer, Config, wg-quick parser
 openvpn                  public OpenVPN entry point: Dial + NewServer, Config, .ovpn parser
 sstp                     public SSTP entry point: Dial + NewServer, Config, crypto binding
+ssh                      public SSH entry point: Dial + NewServer, Config (x/crypto/ssh)
 
 dataplane                TUN device, address pool, packet pump (demux + routing), client routing
 internal/cryptoutil      DH, PRF + prf+, integrity, SK/ESP ciphers, ChaCha20-Poly1305, BLAKE2s
@@ -151,6 +163,8 @@ internal/openvpn/data        P_DATA_V2 seal/open (AES-256-GCM and AES-256-CBC) +
 internal/sstp/wire           SSTP packet codec: control/data framing, attributes, crypto binding
 internal/ppp                 PPP client + server: LCP, MS-CHAPv2 auth, IPCP (transport-neutral)
 internal/mschap              MS-CHAPv2 primitives + MPPE/HLAK key derivation
+
+internal/sshtun              OpenSSH tun@openssh.com framing: channel-open data + AF packet frames
 ```
 
 `dataplane` and `internal/cryptoutil` are protocol-agnostic: neither imports anything
@@ -421,6 +435,43 @@ connect to (a real deployment terminates TLS here directly, not behind a proxy).
 It is verified in Docker against both the sstp-client `sstpc`/pppd reference and
 the veepin client.
 
+### Connecting as an SSH client
+
+`veepin connect ssh` forwards IP over an SSH tunnel channel — the equivalent of
+`ssh -w`, but with the data path in Go. It needs a server with `PermitTunnel yes`
+and a statically chosen tunnel address (SSH assigns none):
+
+```sh
+# Against a stock sshd (which binds a pre-created tun device — request its unit):
+sudo ./veepin connect ssh \
+  -server vpn.example.com -user alice -identity ~/.ssh/id_ed25519 \
+  -known-hosts ~/.ssh/known_hosts \
+  -address 10.200.0.2/30 -peer 10.200.0.1 -peer-unit 0
+
+# Against the veepin SSH server (it assigns the unit itself; -insecure skips
+# host-key verification for a throwaway/self-signed host key):
+sudo ./veepin connect ssh -server 10.0.0.1 -user alice \
+  -identity ~/.ssh/id_ed25519 -insecure -address 10.200.0.2/30 -peer 10.200.0.1
+```
+
+### Running an SSH server
+
+`veepin serve ssh` is an SSH server scoped to tunnel forwarding: it accepts
+`tun@openssh.com` channels (rejecting shells and other channel types),
+authenticates with an `authorized_keys` file or a username/password, and routes a
+shared TUN to each client by the inner address it uses.
+
+```sh
+sudo ./veepin serve ssh \
+  -host-key /etc/ssh/ssh_host_ed25519_key \
+  -authorized-keys ~/.ssh/authorized_keys \
+  -pool 10.200.0.0/24 -setup-nat -wan eth0
+```
+
+A stock `ssh -w 0:0 -N user@host` also connects to it. Clients pick addresses
+within `-pool` (statically); the server accepts and routes any in-range address.
+It is verified in Docker against both `ssh -w` and the veepin client.
+
 ## Connecting an OS client
 
 The server authenticates with a machine PSK plus an identity, and assigns the
@@ -604,10 +655,8 @@ Highlights:
 ### Interoperability matrix
 
 The Docker interop tests (`make interop`, build tag `interop`) prove each protocol
-against a real third-party implementation and, where veepin has both roles,
-against itself. veepin can serve IKEv2 and WireGuard; OpenVPN and SSTP are
-**client-only** today (a server for each is planned), so the reverse and self
-cells are not yet exercised.
+against a real third-party implementation and against itself. Every protocol has
+both roles, so all three cells below are exercised.
 
 | Protocol  | veepin client ↔ real server | real client ↔ veepin server | veepin ↔ veepin (self) |
 |-----------|-----------------------------|-----------------------------|------------------------|
@@ -615,6 +664,7 @@ cells are not yet exercised.
 | WireGuard | ✓ wireguard-go              | ✓ wireguard-go              | ✓                      |
 | OpenVPN   | ✓ `openvpn` (×4 variants)   | ✓ `openvpn`                 | ✓                      |
 | SSTP      | ✓ SoftEther                 | ✓ `sstpc`/pppd              | ✓                      |
+| SSH       | ✓ `sshd` (PermitTunnel)     | ✓ `ssh -w`                  | ✓                      |
 
 Both roles share one API: a client registers with `client.Register` and is dialed
 by `client.Dial`; a server registers with `client.RegisterServer` and is built by

@@ -1,0 +1,30 @@
+# veepin SSH client <-> veepin SSH server (self-test).
+# Both ends are veepin over a real SSH/TCP connection and TUNs, forwarding IP
+# through the tun@openssh.com channel. The client pings 10.200.0.1 (the server's
+# tunnel gateway). Throwaway keys are generated per run by the test.
+name: veepin-interop-ssh-self
+
+services:
+  veepin-ssh-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    volumes:
+      - ./ssh/keys:/keys:ro
+      - ./veepin/ssh-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-ssh-client:
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-ssh-server]
+    environment:
+      SERVER: "veepin-ssh-server"
+    volumes:
+      - ./ssh/keys:/keys:ro
+      - ./veepin/ssh-client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

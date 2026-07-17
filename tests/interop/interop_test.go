@@ -143,6 +143,50 @@ func TestInteropSSTPClientVeepinServer(t *testing.T) {
 	runInterop(t, "compose.sstp-server.yml", "sstp-client", "10.9.0.1")
 }
 
+// TestInteropSSHSelf is the veepin<->veepin SSH sanity check: the veepin client
+// and server over a real SSH/TCP connection and TUNs, forwarding IP through the
+// tun@openssh.com channel. It exercises the whole SSH VPN path — the SSH
+// handshake, key auth, tunnel-channel open, and the address-family packet framing
+// — isolating a veepin break from an interop break.
+func TestInteropSSHSelf(t *testing.T) {
+	requireDocker(t)
+	keyDir := filepath.Join("ssh", "keys")
+	if err := generateSSHKeys(keyDir); err != nil {
+		t.Fatalf("generate SSH keys: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(keyDir) })
+	runInterop(t, "compose.ssh-self.yml", "veepin-ssh-client", "10.200.0.1")
+}
+
+// TestInteropSSHClientVeepinServer is the reverse direction: a real OpenSSH
+// client (`ssh -w`) opens a tunnel-forwarding channel to the veepin *server* and
+// pings its tunnel gateway. It proves the responder — the SSH server handshake,
+// the tun@openssh.com channel, and the address-family packet framing — against a
+// client veepin shares no code with, and is the real check on the framing.
+func TestInteropSSHClientVeepinServer(t *testing.T) {
+	requireDocker(t)
+	keyDir := filepath.Join("ssh", "keys")
+	if err := generateSSHKeys(keyDir); err != nil {
+		t.Fatalf("generate SSH keys: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(keyDir) })
+	runInterop(t, "compose.ssh-server.yml", "ssh-client", "10.200.0.1")
+}
+
+// TestInteropVeepinClientSSHServer proves the veepin SSH client against a real
+// OpenSSH server (sshd with PermitTunnel yes): the client opens the
+// tun@openssh.com channel, requesting the remote unit sshd binds to its
+// pre-configured tun0, and pings the server's tunnel address across the tunnel.
+func TestInteropVeepinClientSSHServer(t *testing.T) {
+	requireDocker(t)
+	keyDir := filepath.Join("ssh", "keys")
+	if err := generateSSHKeys(keyDir); err != nil {
+		t.Fatalf("generate SSH keys: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(keyDir) })
+	runInterop(t, "compose.ssh-sshd.yml", "veepin-ssh-client", "10.200.0.1")
+}
+
 // runOpenVPNInterop generates the shared throwaway PKI (and static key), then
 // runs an OpenVPN client-vs-server ping across the given compose profile.
 func runOpenVPNInterop(t *testing.T, composeFile string) {

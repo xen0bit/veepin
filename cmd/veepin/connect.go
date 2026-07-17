@@ -14,6 +14,7 @@ import (
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/ikev2"
 	"github.com/xen0bit/veepin/openvpn"
+	"github.com/xen0bit/veepin/ssh"
 	"github.com/xen0bit/veepin/sstp"
 	"github.com/xen0bit/veepin/wireguard"
 )
@@ -214,6 +215,44 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 			}
 			if *insecure {
 				opts[sstp.OptInsecure] = "true"
+			}
+			return opts
+		}, nil
+	case "ssh":
+		var (
+			server   = fs.String("server", "", "SSH server host or IP (required)")
+			port     = fs.Int("port", 0, "server TCP port (default 22)")
+			user     = fs.String("user", "", "SSH username (required)")
+			identity = fs.String("identity", "", "path to a private key")
+			pass     = fs.String("pass", "", "password (if not using a key)")
+			knownH   = fs.String("known-hosts", "", "known_hosts file for host-key verification")
+			insecure = fs.Bool("insecure", false, "skip host-key verification")
+			address  = fs.String("address", "", "our tunnel address in CIDR form, e.g. 10.200.0.2/30 (required)")
+			peer     = fs.String("peer", "", "server tunnel address (point-to-point peer), e.g. 10.200.0.1")
+			peerUnit = fs.Int("peer-unit", -1, "remote tun unit to request (default: any; a stock sshd needs a specific unit)")
+			dns      = fs.String("dns", "", "comma-separated DNS servers (optional)")
+			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+		)
+		return func() map[string]string {
+			opts := map[string]string{
+				ssh.OptServer:     *server,
+				ssh.OptUser:       *user,
+				ssh.OptIdentity:   *identity,
+				ssh.OptPassword:   *pass,
+				ssh.OptKnownHosts: *knownH,
+				ssh.OptAddress:    *address,
+				ssh.OptPeer:       *peer,
+				ssh.OptDNS:        *dns,
+				ssh.OptTUNName:    *tun,
+			}
+			if *port != 0 {
+				opts[ssh.OptPort] = fmt.Sprint(*port)
+			}
+			if *peerUnit >= 0 {
+				opts[ssh.OptPeerUnit] = fmt.Sprint(*peerUnit)
+			}
+			if *insecure {
+				opts[ssh.OptInsecure] = "true"
 			}
 			return opts
 		}, nil

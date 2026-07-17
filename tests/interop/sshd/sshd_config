@@ -1,0 +1,5 @@
+PermitTunnel yes
+PermitRootLogin prohibit-password
+PasswordAuthentication no
+AuthorizedKeysFile /keys/authorized_keys
+StrictModes no

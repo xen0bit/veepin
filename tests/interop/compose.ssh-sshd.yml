@@ -1,0 +1,30 @@
+# veepin SSH client -> reference OpenSSH server (sshd, PermitTunnel yes).
+# The veepin initiator opens a tun@openssh.com forwarding channel to a real sshd
+# it shares no code with, requesting remote unit 0 so sshd binds its pre-created
+# tun0. The client pings 10.200.0.1 (sshd's tunnel address).
+name: veepin-interop-ssh-sshd
+
+services:
+  sshd:
+    build:
+      context: sshd
+    image: interop-sshd
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    volumes:
+      - ./ssh/keys:/keys:ro
+
+  veepin-ssh-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [sshd]
+    environment:
+      SERVER: "sshd"
+    volumes:
+      - ./ssh/keys:/keys:ro
+      - ./veepin/ssh-client-sshd-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

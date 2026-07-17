@@ -1,0 +1,30 @@
+# Reference OpenSSH client (ssh -w) -> veepin SSH server.
+# The veepin responder accepts the tun@openssh.com forwarding channel and its
+# address-family packet framing from a real OpenSSH client it shares no code
+# with. The client pings 10.200.0.1 (the veepin server's tunnel gateway).
+name: veepin-interop-ssh-server
+
+services:
+  veepin-ssh-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    volumes:
+      - ./ssh/keys:/keys:ro
+      - ./veepin/ssh-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  ssh-client:
+    build:
+      context: ssh-client
+    image: interop-ssh-client
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-ssh-server]
+    environment:
+      SERVER: "veepin-ssh-server"
+    volumes:
+      - ./ssh/keys:/keys:ro
