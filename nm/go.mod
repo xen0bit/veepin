@@ -1,6 +1,6 @@
 module github.com/xen0bit/veepin/nm
 
-go 1.24.0
+go 1.25.0
 
 require (
 	github.com/godbus/dbus/v5 v5.1.0
@@ -8,8 +8,8 @@ require (
 )
 
 require (
-	golang.org/x/crypto v0.48.0 // indirect
-	golang.org/x/sys v0.41.0 // indirect
+	golang.org/x/crypto v0.52.0 // indirect
+	golang.org/x/sys v0.45.0 // indirect
 )
 
 replace github.com/xen0bit/veepin => ../

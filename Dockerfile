@@ -9,7 +9,7 @@
 # into the image.
 
 # --- build stage: static, CGO-free binaries ---
-FROM golang:1.24-bookworm AS build
+FROM golang:1.25-bookworm AS build
 WORKDIR /src
 # Pre-download modules against go.mod/go.sum so the dependency layer caches
 # independently of the source, then build the command into /out.
