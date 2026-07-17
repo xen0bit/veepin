@@ -274,8 +274,13 @@ func negotiate(ctx context.Context, cfg *Config, ch *control.Channel, tlsCfg *tl
 	res := client.Result{
 		AssignedIP: pushed.localIP,
 		Netmask:    pushed.netmask,
-		Gateway:    pushed.gateway,
-		MTU:        pushed.mtu,
+		// Gateway is the server's real transport IP: the client router pins a host
+		// route to it via the physical gateway so the encapsulated packets do not
+		// loop back into the tunnel. The pushed route-gateway is the tunnel's
+		// internal address and must not be used here — it would collide with
+		// in-tunnel destinations.
+		Gateway: endpoint.IP,
+		MTU:     pushed.mtu,
 	}
 	return res, tun, nil
 }
