@@ -85,6 +85,13 @@ type Cipher struct {
 	header  [headerLen]byte // opcode|key_id and the peer-id, constant per session
 	counter atomic.Uint32   // last used send packet ID; first packet is 1
 
+	// recvNonce is a reused inbound nonce buffer (packet ID || implicit IV): its
+	// IV tail is fixed, and Open rewrites only the leading packet ID. Open is
+	// called from a single goroutine (the pump's inbound loop), so this needs no
+	// lock and saves a per-packet allocation the AEAD interface would otherwise
+	// force by escaping a stack array.
+	recvNonce [nonceLen]byte
+
 	mu     sync.Mutex
 	replay replayWindow
 }
@@ -105,6 +112,8 @@ func New(dk keys.DataKeys, peerID uint32, keyID uint8) (*Cipher, error) {
 	c.header[1] = byte(peerID >> 16)
 	c.header[2] = byte(peerID >> 8)
 	c.header[3] = byte(peerID)
+	// The recv nonce's IV tail is fixed; only its packet-ID head changes per open.
+	copy(c.recvNonce[packetIDLen:], c.recvIV[:])
 	return c, nil
 }
 
@@ -117,43 +126,60 @@ func newGCM(key []byte) (cipher.AEAD, error) {
 }
 
 // Seal encrypts one plaintext (an IP packet or the ping payload) into a wire
-// data packet.
+// data packet, in a single allocation. Seal may run concurrently with keepalive
+// pings, so it keeps no shared scratch: the nonce is built into unused tail bytes
+// of the output buffer, and the tag reordering is in place.
 func (c *Cipher) Seal(plaintext []byte) ([]byte, error) {
 	id := c.counter.Add(1)
 	if id == 0 {
 		return nil, errCounterExhausted
 	}
-	out := make([]byte, aadLen, aadLen+tagLen+len(plaintext))
+	n := len(plaintext)
+	// One allocation: the wire packet plus nonceLen scratch bytes at the tail.
+	// The scratch holds the nonce, so it needs no separate heap allocation (the
+	// AEAD's []byte nonce parameter would otherwise escape a stack array).
+	buf := make([]byte, aadLen+tagLen+n+nonceLen)
+	out := buf[:aadLen+tagLen+n]
 	copy(out[:headerLen], c.header[:])
 	binary.BigEndian.PutUint32(out[headerLen:aadLen], id)
 
-	nonce := c.nonce(id, c.sendIV)
-	// Go returns ciphertext||tag; OpenVPN wants the tag first, so split and
-	// reorder to header || packetID || tag || ciphertext.
-	sealed := c.send.Seal(nil, nonce[:], plaintext, out[:aadLen])
-	ct, tag := sealed[:len(plaintext)], sealed[len(plaintext):]
-	out = append(out, tag...)
-	out = append(out, ct...)
-	return out, nil
+	nonce := buf[aadLen+tagLen+n:]
+	binary.BigEndian.PutUint32(nonce[:packetIDLen], id)
+	copy(nonce[packetIDLen:], c.sendIV[:])
+
+	// Go's AEAD yields ciphertext||tag; OpenVPN wants the tag first. Seal appends
+	// ct||tag after the header+ID, then we rotate the 16-byte tag to the front of
+	// the ciphertext in place (a stack-only 16-byte save, no allocation).
+	sealed := c.send.Seal(out[:aadLen], nonce, plaintext, out[:aadLen])
+	var tag [tagLen]byte
+	copy(tag[:], sealed[aadLen+n:])                       // save the trailing tag
+	copy(sealed[aadLen+tagLen:], sealed[aadLen:aadLen+n]) // shift ciphertext right
+	copy(sealed[aadLen:aadLen+tagLen], tag[:])            // tag to the front
+	return sealed, nil
 }
 
-// Open decrypts and authenticates a wire data packet, returning the plaintext.
-// It rejects replays only after the tag verifies, so forged packets cannot
-// poison the window.
+// Open decrypts and authenticates a wire data packet in place, returning the
+// plaintext. It rejects replays only after the tag verifies, so forged packets
+// cannot poison the window. pkt is decrypted in place and must be caller-owned;
+// Open is called from a single goroutine (the pump's inbound loop).
 func (c *Cipher) Open(pkt []byte) ([]byte, error) {
 	if len(pkt) < aadLen+tagLen {
 		return nil, errShort
 	}
 	id := binary.BigEndian.Uint32(pkt[headerLen:aadLen])
-	tag := pkt[aadLen : aadLen+tagLen]
-	ct := pkt[aadLen+tagLen:]
+	n := len(pkt) - aadLen - tagLen // ciphertext length
 
-	nonce := c.nonce(id, c.recvIV)
-	// Reassemble ciphertext||tag for Go's AEAD.
-	sealed := make([]byte, 0, len(ct)+tagLen)
-	sealed = append(sealed, ct...)
-	sealed = append(sealed, tag...)
-	plaintext, err := c.recv.Open(nil, nonce[:], sealed, pkt[:aadLen])
+	// The wire order is tag||ciphertext; Go's AEAD wants ciphertext||tag. Rotate
+	// in place (a stack-only 16-byte save) so the packet can be decrypted without
+	// allocating a reassembly buffer.
+	var tag [tagLen]byte
+	copy(tag[:], pkt[aadLen:aadLen+tagLen])
+	copy(pkt[aadLen:aadLen+n], pkt[aadLen+tagLen:]) // shift ciphertext left
+	copy(pkt[aadLen+n:], tag[:])                    // tag to the end
+
+	binary.BigEndian.PutUint32(c.recvNonce[:packetIDLen], id)
+	// Decrypt in place: dst is the ciphertext's own storage (plaintext is shorter).
+	plaintext, err := c.recv.Open(pkt[aadLen:aadLen], c.recvNonce[:], pkt[aadLen:aadLen+n+tagLen], pkt[:aadLen])
 	if err != nil {
 		return nil, err
 	}
@@ -165,14 +191,6 @@ func (c *Cipher) Open(pkt []byte) ([]byte, error) {
 		return nil, errReplay
 	}
 	return plaintext, nil
-}
-
-// nonce builds the 12-byte GCM nonce: the packet ID followed by the implicit IV.
-func (c *Cipher) nonce(id uint32, iv [keys.ImplicitIVLen]byte) [nonceLen]byte {
-	var n [nonceLen]byte
-	binary.BigEndian.PutUint32(n[:packetIDLen], id)
-	copy(n[packetIDLen:], iv[:])
-	return n
 }
 
 // replayWindow is a 64-packet sliding window over the 32-bit packet ID (RFC 6479

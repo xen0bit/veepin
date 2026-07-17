@@ -96,17 +96,23 @@ func TestPingRoundTrips(t *testing.T) {
 	}
 }
 
+// openCopy opens a copy of pkt, since Open decrypts in place and the pump always
+// hands it a fresh buffer.
+func openCopy(c *Cipher, pkt []byte) ([]byte, error) {
+	return c.Open(append([]byte(nil), pkt...))
+}
+
 func TestOpenRejectsReplay(t *testing.T) {
 	client, server := cipherPair(t)
 	sealed, err := client.Seal([]byte("once"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := server.Open(sealed); err != nil {
+	if _, err := openCopy(server, sealed); err != nil {
 		t.Fatal(err)
 	}
 	// The exact same packet again must be rejected as a replay.
-	if _, err := server.Open(sealed); err != errReplay {
+	if _, err := openCopy(server, sealed); err != errReplay {
 		t.Errorf("replay accepted: %v, want errReplay", err)
 	}
 }
@@ -123,12 +129,12 @@ func TestOpenAcceptsReorderWithinWindow(t *testing.T) {
 	}
 	// Deliver out of order: 3, 1, 0, 2. All are within the window and fresh.
 	for _, i := range []int{3, 1, 0, 2} {
-		if _, err := server.Open(packets[i]); err != nil {
+		if _, err := openCopy(server, packets[i]); err != nil {
 			t.Errorf("reordered open of packet %d failed: %v", i, err)
 		}
 	}
 	// Re-delivering any is now a replay.
-	if _, err := server.Open(packets[1]); err != errReplay {
+	if _, err := openCopy(server, packets[1]); err != errReplay {
 		t.Errorf("reordered replay accepted: %v", err)
 	}
 }
@@ -151,6 +157,47 @@ func TestOpenRejectsTamper(t *testing.T) {
 	tampered[len(tampered)-1] ^= 0x01
 	if _, err := server.Open(tampered); err == nil {
 		t.Error("tampered ciphertext accepted")
+	}
+}
+
+// TestDataPathAllocations pins the per-packet allocation cost of the hot path:
+// one allocation to seal (the output buffer) and none to open (decrypt in
+// place). A regression here means the AEAD nonce or a reassembly buffer has
+// started escaping again.
+func TestDataPathAllocations(t *testing.T) {
+	client, server := cipherPair(t)
+	inner := ipv4(1400)
+
+	if n := testing.AllocsPerRun(100, func() {
+		if _, err := client.Seal(inner); err != nil {
+			t.Fatal(err)
+		}
+	}); n > 1 {
+		t.Errorf("Seal allocates %.0f times per packet, want 1", n)
+	}
+
+	// Pre-seal a batch with distinct counters so Open sees fresh packets, and give
+	// each run its own buffer since Open decrypts in place.
+	const batch = 2048
+	pkts := make([][]byte, batch)
+	for i := range pkts {
+		p, err := client.Seal(inner)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pkts[i] = p
+	}
+	scratch := make([]byte, 1400+Overhead)
+	i := 0
+	if n := testing.AllocsPerRun(batch-1, func() {
+		buf := scratch[:len(pkts[i])]
+		copy(buf, pkts[i])
+		i++
+		if _, err := server.Open(buf); err != nil {
+			t.Fatal(err)
+		}
+	}); n > 0 {
+		t.Errorf("Open allocates %.0f times per packet, want 0", n)
 	}
 }
 

@@ -530,8 +530,13 @@ What's measured:
   Reported in MB/s via `b.SetBytes`.
 - **WireGuard transport** (`internal/wireguard/transport`) — the type-4 seal and
   open paths (ChaCha20-Poly1305 with a counter nonce, padding, and the anti-replay
-  window) across the same packet sizes. Open decrypts in place at a single
-  allocation, ~1.9 GB/s at 1400 B — on par with the AES-GCM ESP path.
+  window) across the same packet sizes. Seal is a single allocation (the output
+  packet, with padding and the nonce folded into it) and Open decrypts in place
+  with none, ~1.9 GB/s at 1400 B — on par with the AES-GCM ESP path.
+- **OpenVPN data channel** (`internal/openvpn/data`) — AES-256-GCM P_DATA_V2 seal
+  and open (packet-ID nonce, tag-first wire order, replay window) across the same
+  sizes. Same profile: Seal one allocation, Open zero, ~1.9 GB/s seal / ~2.9 GB/s
+  open at 1400 B.
 - **Handshake** (`internal/ikev2/ike`) — SK message seal/open, and a full PSK
   handshake (IKE_SA_INIT + IKE_AUTH) over real UDP loopback against the live
   server.
@@ -590,6 +595,20 @@ replay path). `TestDataPathAllocationsGCM` asserts these counts (via
 The `ESPCrypter` is intended to be driven by one goroutine per SA direction
 (matching the pump); across multiple clients, work scales across cores, as
 `BenchmarkESPDecapParallel` exercises.
+
+The WireGuard and OpenVPN data paths were held to the same standard, guarded by
+`TestDataPathAllocations` in each package. The recurring cost the AEAD interface
+imposes is the 12-byte nonce: passing a stack array through `cipher.AEAD`'s
+`[]byte` parameter escapes it to the heap, one allocation per packet. Both seal
+paths avoid it by building the nonce in unused tail bytes of the output buffer
+they already allocate — no shared scratch, so seal stays safe to call
+concurrently with keepalives. The open paths go further to zero allocations by
+decrypting in place: WireGuard reuses the packet's own header bytes as the nonce
+(the counter already sits where the nonce needs it, and the demuxed receiver
+index is zeroed to supply the four leading zeros), while OpenVPN reuses a
+per-`Cipher` receive-nonce buffer (safe because open runs on the single inbound
+pump goroutine) and rotates the tag-first wire layout into Go's tag-last order in
+place. Seal is a single allocation (the returned packet), open none.
 
 ## Scope and limitations
 

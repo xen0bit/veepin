@@ -83,13 +83,9 @@ func (s *Session) LocalIndex() uint32 { return s.local }
 // RemoteIndex is the index the peer is addressed by.
 func (s *Session) RemoteIndex() uint32 { return s.remote }
 
-// nonce builds the 12-octet ChaCha20-Poly1305 nonce for a counter: four zero
-// octets followed by the counter little-endian (protocol paper §5.4.6).
-func nonce(counter uint64) [12]byte {
-	var n [12]byte
-	binary.LittleEndian.PutUint64(n[4:], counter)
-	return n
-}
+// nonceTail is the length of a ChaCha20-Poly1305 nonce: four zero octets
+// followed by the 64-bit counter (protocol paper §5.4.6).
+const nonceLen = 12
 
 // Seal encrypts an inner IP packet into a type-4 transport message. A nil or
 // empty inner packet produces a keepalive: a message with an empty payload,
@@ -102,17 +98,31 @@ func (s *Session) Seal(inner []byte) ([]byte, error) {
 		return nil, ErrExhausted
 	}
 
-	plaintext := pad(inner)
-	// header || AEAD(plaintext) — one allocation sized for the whole message.
-	out := make([]byte, wire.TransportHeaderLen, wire.TransportHeaderLen+len(plaintext)+wire.TagSize)
+	padded := paddedLen(len(inner))
+	msgLen := wire.TransportHeaderLen + padded + wire.TagSize
+	// One allocation for the whole packet: the header, the padded plaintext, the
+	// tag, and a 12-octet nonce scratch at the tail. The plaintext is laid down
+	// in place and sealed over itself, so padding costs no separate buffer, and
+	// building the nonce in the tail keeps it from escaping through the AEAD's
+	// []byte parameter — Seal needs no shared scratch and stays safe to call
+	// concurrently with keepalives.
+	buf := make([]byte, msgLen+nonceLen)
+	out := buf[:wire.TransportHeaderLen]
 	if err := wire.PutTransportHeader(out, s.remote, counter); err != nil {
 		return nil, err
 	}
-	n := nonce(counter)
+	// Copy the inner packet into the plaintext region; the bytes past it up to the
+	// 16-octet boundary stay zero from make — that is exactly pad's zero fill.
+	plaintext := buf[wire.TransportHeaderLen : wire.TransportHeaderLen+padded]
+	copy(plaintext, inner)
+	nonce := buf[msgLen:] // 12 octets; the leading four are already zero
+	binary.LittleEndian.PutUint64(nonce[4:], counter)
 	// Additional data is empty for transport packets; only the payload is
 	// authenticated (the header's integrity does not matter — a tampered
-	// counter simply decrypts to garbage under the wrong nonce and fails).
-	return s.send.Seal(out, n[:], plaintext, nil), nil
+	// counter simply decrypts to garbage under the wrong nonce and fails). Seal
+	// writes the ciphertext back over the plaintext it just read (exact overlap,
+	// which the AEAD permits).
+	return s.send.Seal(out, nonce, plaintext, nil), nil
 }
 
 // Open decrypts a type-4 transport message into its inner IP packet, checking
@@ -130,11 +140,16 @@ func (s *Session) Open(pkt []byte) ([]byte, error) {
 	if counter >= RejectAfterMessages {
 		return nil, ErrReplay
 	}
-	n := nonce(counter)
+	// The nonce is four zero octets followed by the counter little-endian. The
+	// counter already sits at pkt[8:16], and pkt[4:8] (the receiver index) has
+	// done its job — the pump demuxed on it to reach this Session — so zeroing it
+	// leaves pkt[4:16] as exactly that nonce, with no scratch buffer to escape.
+	clear(pkt[4:8])
+	nonce := pkt[4:wire.TransportHeaderLen]
 	body := pkt[wire.TransportHeaderLen:]
 	// Decrypt into the ciphertext's own storage: the plaintext is shorter, so it
 	// fits, and this keeps the data path allocation-free.
-	plain, err := s.recv.Open(body[:0], n[:], body, nil)
+	plain, err := s.recv.Open(body[:0], nonce, body, nil)
 	if err != nil {
 		return nil, ErrDecrypt
 	}
@@ -149,21 +164,19 @@ func (s *Session) Open(pkt []byte) ([]byte, error) {
 	return trimToIP(plain), nil
 }
 
-// pad rounds a plaintext up to a 16-octet boundary with zeros, as WireGuard
+// paddedLen rounds a plaintext length up to a 16-octet boundary, as WireGuard
 // requires so that packet lengths leak less about their contents (protocol
 // paper §5.4.6). An empty packet stays empty — a keepalive carries no padding.
-func pad(inner []byte) []byte {
+func paddedLen(n int) int {
 	const boundary = 16
-	if len(inner) == 0 {
-		return nil
+	if n == 0 {
+		return 0
 	}
-	rem := len(inner) % boundary
+	rem := n % boundary
 	if rem == 0 {
-		return inner
+		return n
 	}
-	padded := make([]byte, len(inner)+boundary-rem)
-	copy(padded, inner)
-	return padded
+	return n + boundary - rem
 }
 
 // trimToIP trims a decrypted payload to the length its own IP header declares,

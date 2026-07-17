@@ -208,3 +208,44 @@ func TestIndexAccessors(t *testing.T) {
 		t.Errorf("indices = %#x/%#x", a.LocalIndex(), a.RemoteIndex())
 	}
 }
+
+// TestDataPathAllocations pins the per-packet allocation cost of the hot path:
+// one allocation to seal (the output buffer, with the nonce built into its tail)
+// and none to open (decrypt in place, nonce reused from the packet's own header).
+// A regression means the AEAD nonce has started escaping to the heap again.
+func TestDataPathAllocations(t *testing.T) {
+	a, b := pair(t)
+	inner := ipv4(1400)
+
+	if n := testing.AllocsPerRun(100, func() {
+		if _, err := a.Seal(inner); err != nil {
+			t.Fatal(err)
+		}
+	}); n > 1 {
+		t.Errorf("Seal allocates %.0f times per packet, want 1", n)
+	}
+
+	// Pre-seal a batch with distinct counters so Open sees fresh packets, and give
+	// each run its own buffer since Open decrypts in place.
+	const batch = 2048
+	pkts := make([][]byte, batch)
+	for i := range pkts {
+		m, err := a.Seal(inner)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pkts[i] = m
+	}
+	scratch := make([]byte, len(pkts[0]))
+	i := 0
+	if n := testing.AllocsPerRun(batch-1, func() {
+		buf := scratch[:len(pkts[i])]
+		copy(buf, pkts[i])
+		i++
+		if _, err := b.Open(buf); err != nil {
+			t.Fatal(err)
+		}
+	}); n > 0 {
+		t.Errorf("Open allocates %.0f times per packet, want 0", n)
+	}
+}
