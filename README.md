@@ -2,13 +2,12 @@
 
 A **working userspace VPN in Go** — both a server (responder) and a client
 (initiator) — written from scratch, with `golang.org/x/crypto` the only
-dependency. It speaks four protocols: **IKEv2/ESP** (client and server),
-**WireGuard** (client and server), **OpenVPN** (client and server), and **SSTP**
-(client).
+dependency. It speaks four protocols, **client and server for every one**:
+**IKEv2/ESP**, **WireGuard**, **OpenVPN**, and **SSTP**.
 The SSTP side runs Microsoft's Secure Socket Tunneling Protocol over TLS — the
 `SSTP_DUPLEX_POST` HTTP handshake, the CALL_CONNECT crypto binding, MS-CHAPv2
-authentication and a PPP/IPCP data path — and interoperates with SoftEther and
-other Microsoft-compatible SSTP servers. The IKEv2 side
+authentication and a PPP/IPCP data path — as both client and server, verified
+against SoftEther and the sstp-client `sstpc`/pppd reference. The IKEv2 side
 performs the full key exchange with pre-shared-key or EAP-MSCHAPv2
 authentication, NAT traversal, and configuration mode (address assignment), then
 runs an ESP-in-UDP data path over a TUN device — so a standards-compliant OS VPN
@@ -127,7 +126,7 @@ client                   protocol registry (client + server) + the Session/Resul
 ikev2                    public IKEv2 entry point: Dial + NewServer, Config
 wireguard                public WireGuard entry point: Dial + NewServer, Config, wg-quick parser
 openvpn                  public OpenVPN entry point: Dial + NewServer, Config, .ovpn parser
-sstp                     public SSTP entry point: Dial, Config, crypto binding (client only)
+sstp                     public SSTP entry point: Dial + NewServer, Config, crypto binding
 
 dataplane                TUN device, address pool, packet pump (demux + routing), client routing
 internal/cryptoutil      DH, PRF + prf+, integrity, SK/ESP ciphers, ChaCha20-Poly1305, BLAKE2s
@@ -150,7 +149,7 @@ internal/openvpn/keys        key method 2 exchange + TLS 1.0 PRF key derivation
 internal/openvpn/data        P_DATA_V2 seal/open (AES-256-GCM and AES-256-CBC) + anti-replay window
 
 internal/sstp/wire           SSTP packet codec: control/data framing, attributes, crypto binding
-internal/ppp                 PPP client: LCP, MS-CHAPv2 auth, IPCP (transport-neutral)
+internal/ppp                 PPP client + server: LCP, MS-CHAPv2 auth, IPCP (transport-neutral)
 internal/mschap              MS-CHAPv2 primitives + MPPE/HLAK key derivation
 ```
 
@@ -402,6 +401,26 @@ and DNS. Only SHA-256 crypto binding is implemented. The client-vs-SoftEther pat
 is covered end to end by the Docker interop tests. Set `VEEPIN_SSTP_DEBUG=1` to
 trace the control and PPP exchange.
 
+### Running an SSTP server
+
+`veepin serve sstp` is the responder: it terminates TLS with the given
+certificate, answers the `SSTP_DUPLEX_POST` handshake, sends the CALL_CONNECT_ACK
+nonce, authenticates the inner PPP link as the MS-CHAPv2 authenticator, verifies
+the client's CALL_CONNECTED crypto binding against its own certificate, and
+assigns an address over IPCP. Each client rides its own TLS/TCP connection.
+
+```sh
+sudo ./veepin serve sstp \
+  -cert server.crt -key server.key \
+  -user alice -pass secret \
+  -pool 10.9.0.0/24 -dns 1.1.1.1 -setup-nat -wan eth0
+```
+
+The certificate is what the crypto binding hashes, so it must be the one clients
+connect to (a real deployment terminates TLS here directly, not behind a proxy).
+It is verified in Docker against both the sstp-client `sstpc`/pppd reference and
+the veepin client.
+
 ## Connecting an OS client
 
 The server authenticates with a machine PSK plus an identity, and assigns the
@@ -595,13 +614,13 @@ cells are not yet exercised.
 | IKEv2     | ✓ strongSwan                | ✓ strongSwan                | ✓                      |
 | WireGuard | ✓ wireguard-go              | ✓ wireguard-go              | ✓                      |
 | OpenVPN   | ✓ `openvpn` (×4 variants)   | ✓ `openvpn`                 | ✓                      |
-| SSTP      | ✓ SoftEther                 | — (client only)             | — (client only)        |
+| SSTP      | ✓ SoftEther                 | ✓ `sstpc`/pppd              | ✓                      |
 
 Both roles share one API: a client registers with `client.Register` and is dialed
 by `client.Dial`; a server registers with `client.RegisterServer` and is built by
 `client.NewServer`, so `veepin connect <proto>` and `veepin serve <proto>` dispatch
-generically. An SSTP server is the remaining gap; implementing the responder and
-registering it — no CLI changes — fills its two empty cells above.
+generically. Every protocol now has both roles, and each cell above is a Docker
+interop test.
 
 ## Benchmarks
 

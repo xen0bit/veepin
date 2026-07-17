@@ -64,7 +64,10 @@ func BuildCBValue(nonce, certHash, compoundMAC []byte) []byte {
 }
 
 // VerifyCryptoBinding verifies the crypto-binding attribute in an
-// SSTP_MSG_CALL_CONNECTED control message body.
+// SSTP_MSG_CALL_CONNECTED control message body: the certificate hash matches the
+// server's own certificate, and the compound MAC over the whole packet (the
+// 4-octet packet header prepended to body, with the MAC field zeroed) reproduces
+// under the CMK derived from the client's HLAK.
 func VerifyCryptoBinding(body []byte, hlak [mschap.HLAKLen]byte, serverCertDER []byte) error {
 	cb, mac, err := extractAndZeroMAC(body)
 	if err != nil {
@@ -78,6 +81,7 @@ func VerifyCryptoBinding(body []byte, hlak [mschap.HLAKLen]byte, serverCertDER [
 
 	cmk := DeriveCMK(hlak)
 	h := hmac.New(sha256.New, cmk)
+	h.Write(controlPacketHeader(len(body)))
 	h.Write(body)
 	expectedMAC := h.Sum(nil)
 
@@ -85,6 +89,14 @@ func VerifyCryptoBinding(body []byte, hlak [mschap.HLAKLen]byte, serverCertDER [
 		return fmt.Errorf("sstp: compound MAC mismatch")
 	}
 	return nil
+}
+
+// controlPacketHeader reconstructs the 4-octet SSTP header for a control packet
+// whose body is bodyLen bytes: version, the control flag, and the total length.
+// The compound MAC covers the packet including this header.
+func controlPacketHeader(bodyLen int) []byte {
+	total := wire.HeaderLen + bodyLen
+	return []byte{wire.Version, 0x01, byte(total >> 8), byte(total)}
 }
 
 // extractAndZeroMAC locates ATTRIB_CRYPTO_BINDING in the body, returns its value

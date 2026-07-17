@@ -14,6 +14,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/ikev2"
 	"github.com/xen0bit/veepin/openvpn"
+	"github.com/xen0bit/veepin/sstp"
 	"github.com/xen0bit/veepin/wireguard"
 )
 
@@ -166,6 +167,34 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			}
 			if *port != 0 {
 				opts[openvpn.OptServerListenPort] = fmt.Sprint(*port)
+			}
+			return opts
+		}, nil
+	case "sstp":
+		var (
+			cert     = fs.String("cert", "", "path to the server TLS certificate PEM (required)")
+			key      = fs.String("key", "", "path to the server TLS private key PEM (required)")
+			listenIP = fs.String("listen", "0.0.0.0", "local IP to bind the TCP socket on")
+			port     = fs.Int("port", 0, "TCP port to listen on (default 443)")
+			pool     = fs.String("pool", "10.9.0.0/24", "internal address pool handed to clients")
+			dns      = fs.String("dns", "", "comma-separated DNS servers assigned to clients")
+			user     = fs.String("user", "", "MS-CHAPv2 username to accept (required)")
+			pass     = fs.String("pass", "", "the user's password (required)")
+			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+		)
+		return func() map[string]string {
+			opts := map[string]string{
+				sstp.OptServerCert:     *cert,
+				sstp.OptServerKey:      *key,
+				sstp.OptServerListenIP: *listenIP,
+				sstp.OptServerPool:     *pool,
+				sstp.OptServerDNS:      *dns,
+				sstp.OptServerUser:     *user,
+				sstp.OptServerPassword: *pass,
+				sstp.OptServerTUN:      *tun,
+			}
+			if *port != 0 {
+				opts[sstp.OptServerPort] = fmt.Sprint(*port)
 			}
 			return opts
 		}, nil

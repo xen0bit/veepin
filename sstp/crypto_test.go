@@ -123,13 +123,12 @@ func TestVerifyCryptoBinding(t *testing.T) {
 	hlak := mschap.ClientHLAK(vecPassword, ntResp)
 
 	serverCert := []byte("fake-der-encoded-server-certificate-data")
-	expectedHash := sha256.Sum256(serverCert)
-
 	nonce := bytes.Repeat([]byte{0xcc}, wire.NonceLen)
-	val := BuildCBValue(nonce, expectedHash[:], make([]byte, wire.CompoundMACLen))
 
-	attrs := []wire.Attribute{{ID: wire.AttrCryptoBinding, Value: val}}
-	pkt, err := wire.EncodeControl(wire.MsgCallConnected, attrs)
+	// The client builds the CALL_CONNECTED packet (signing the whole packet); the
+	// server verifies it. A round trip proves the two agree on the HLAK, the CMK
+	// derivation and the exact bytes the compound MAC covers.
+	pkt, err := buildCallConnected(nonce, serverCert, hlak)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,24 +137,13 @@ func TestVerifyCryptoBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cmk := DeriveCMK(hlak)
-	h := hmac.New(sha256.New, cmk)
-	h.Write(body)
-	realMAC := h.Sum(nil)
-
-	val2 := BuildCBValue(nonce, expectedHash[:], realMAC)
-	attrs2 := []wire.Attribute{{ID: wire.AttrCryptoBinding, Value: val2}}
-	pkt2, err := wire.EncodeControl(wire.MsgCallConnected, attrs2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, body2, err := wire.ReadPacket(bytes.NewReader(pkt2))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if err := VerifyCryptoBinding(body2, hlak, serverCert); err != nil {
+	if err := VerifyCryptoBinding(body, hlak, serverCert); err != nil {
 		t.Fatalf("verification failed: %v", err)
+	}
+
+	// A tampered cert hash must be rejected.
+	if err := VerifyCryptoBinding(body, hlak, []byte("different-cert")); err == nil {
+		t.Error("verification accepted a wrong certificate")
 	}
 }
 

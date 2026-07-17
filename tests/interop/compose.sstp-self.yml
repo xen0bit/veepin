@@ -1,0 +1,34 @@
+# veepin SSTP client <-> veepin SSTP server (self-test).
+# Both ends are veepin over a real TLS/TCP connection and TUNs, isolating a
+# veepin break from an interop break. The client pings 10.9.0.1 (the server's
+# tunnel gateway). The self-signed server cert is generated per run by the test.
+name: veepin-interop-sstp-self
+
+services:
+  veepin-sstp-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      USER: "sstpuser"
+      PASS: "sstppass"
+    volumes:
+      - ./sstp/pki:/pki:ro
+      - ./veepin/sstp-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-sstp-client:
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-sstp-server]
+    environment:
+      SERVER: "veepin-sstp-server"
+      USER: "sstpuser"
+      PASS: "sstppass"
+    volumes:
+      - ./veepin/sstp-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

@@ -149,7 +149,9 @@ func buildCallConnected(nonce, serverCertDER []byte, hlak [mschap.HLAKLen]byte) 
 		return nil, err
 	}
 
-	mac := hmacSha256(cmk, pkt[wire.HeaderLen:])
+	// The compound MAC covers the whole packet — the 4-octet header included — with
+	// the MAC field (built as zeros above) zeroed.
+	mac := hmacSha256(cmk, pkt)
 	copy(pkt[len(pkt)-wire.CompoundMACLen:], mac)
 	return pkt, nil
 }

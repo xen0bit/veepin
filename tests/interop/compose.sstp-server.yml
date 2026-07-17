@@ -1,0 +1,37 @@
+# Reference SSTP client (sstpc/pppd) -> veepin SSTP server.
+# The veepin responder runs the SSTP_DUPLEX_POST handshake, CALL_CONNECT_ACK
+# nonce, server-role PPP with MS-CHAPv2 authentication, crypto-binding
+# verification and IPCP assignment, against a real SSTP client it shares no code
+# with. The client pings 10.9.0.1 (the veepin server's tunnel gateway).
+name: veepin-interop-sstp-server
+
+services:
+  veepin-sstp-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      USER: "sstpuser"
+      PASS: "sstppass"
+    volumes:
+      - ./sstp/pki:/pki:ro
+      - ./veepin/sstp-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  sstp-client:
+    build:
+      context: sstp-client
+    image: interop-sstp-client
+    # sstpc drives pppd, which must set the PPP line discipline on its pty — that
+    # needs privileges beyond NET_ADMIN inside a container.
+    privileged: true
+    devices:
+      - "/dev/ppp:/dev/ppp"
+    depends_on: [veepin-sstp-server]
+    environment:
+      SERVER: "veepin-sstp-server"
+      USER: "sstpuser"
+      PASS: "sstppass"

@@ -112,6 +112,37 @@ func TestInteropVeepinClientSSTPServer(t *testing.T) {
 	runInterop(t, "compose.sstp.yml", "client", "192.168.30.1")
 }
 
+// TestInteropSSTPSelf is the veepin<->veepin SSTP sanity check: the veepin client
+// and server over a real TLS/TCP connection and TUNs. It exercises the SSTP
+// responder end to end — the SSTP_DUPLEX_POST handshake, CALL_CONNECT_ACK nonce,
+// the server-role PPP/MS-CHAPv2 authentication, crypto-binding verification, and
+// IPCP address assignment — isolating a veepin break from an interop break.
+func TestInteropSSTPSelf(t *testing.T) {
+	requireDocker(t)
+	pkiDir := filepath.Join("sstp", "pki")
+	if err := generateSSTPServerCert(pkiDir); err != nil {
+		t.Fatalf("generate SSTP cert: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
+	runInterop(t, "compose.sstp-self.yml", "veepin-sstp-client", "10.9.0.1")
+}
+
+// TestInteropSSTPClientVeepinServer is the reverse direction: a real SSTP client
+// (sstp-client's sstpc driving pppd) tunnels to the veepin *server* and pings its
+// tunnel gateway. It proves the responder — the SSTP_DUPLEX_POST handshake, the
+// CALL_CONNECT_ACK nonce, the server-role PPP/MS-CHAPv2 authenticator, crypto
+// binding verification and IPCP assignment — against a client veepin shares no
+// code with.
+func TestInteropSSTPClientVeepinServer(t *testing.T) {
+	requireDocker(t)
+	pkiDir := filepath.Join("sstp", "pki")
+	if err := generateSSTPServerCert(pkiDir); err != nil {
+		t.Fatalf("generate SSTP cert: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
+	runInterop(t, "compose.sstp-server.yml", "sstp-client", "10.9.0.1")
+}
+
 // runOpenVPNInterop generates the shared throwaway PKI (and static key), then
 // runs an OpenVPN client-vs-server ping across the given compose profile.
 func runOpenVPNInterop(t *testing.T, composeFile string) {
