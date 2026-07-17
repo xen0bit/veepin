@@ -56,8 +56,9 @@ func getAsymmetricStartKey(masterKey [16]byte, keyLen int, isSend, isServer bool
 
 // ClientHLAK derives the SSTP client's higher-layer authentication key from a
 // completed MS-CHAPv2 exchange: the client's MPPE MasterSendKey concatenated
-// with its MasterReceiveKey (MS-SSTP section 3.2.5.2.2). It is the key material
-// the crypto binding proves knowledge of.
+// with its MasterReceiveKey (MS-SSTP section 3.2.5.2.2).
+//
+//	ClientHLAK = ClientSendKey || ClientReceiveKey
 func ClientHLAK(password string, ntResponse [NTResponseLen]byte) [HLAKLen]byte {
 	passwordHash := NTPasswordHash(password)
 	passwordHashHash := ntPasswordHashHash(passwordHash)
@@ -69,5 +70,24 @@ func ClientHLAK(password string, ntResponse [NTResponseLen]byte) [HLAKLen]byte {
 	var hlak [HLAKLen]byte
 	copy(hlak[:16], send)
 	copy(hlak[16:], recv)
+	return hlak
+}
+
+// ServerHLAK derives the SSTP server's higher-layer authentication key:
+// MasterReceiveKey || MasterSendKey (MS-SSTP section 3.2.5.2.2).
+// The client derives this to compute the compound MAC the server will verify.
+//
+//	ServerHLAK = ClientReceiveKey || ClientSendKey
+func ServerHLAK(password string, ntResponse [NTResponseLen]byte) [HLAKLen]byte {
+	passwordHash := NTPasswordHash(password)
+	passwordHashHash := ntPasswordHashHash(passwordHash)
+	masterKey := getMasterKey(passwordHashHash, ntResponse)
+
+	send := getAsymmetricStartKey(masterKey, 16, true, false)
+	recv := getAsymmetricStartKey(masterKey, 16, false, false)
+
+	var hlak [HLAKLen]byte
+	copy(hlak[:16], recv)
+	copy(hlak[16:], send)
 	return hlak
 }

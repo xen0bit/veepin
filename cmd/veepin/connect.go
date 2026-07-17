@@ -14,6 +14,7 @@ import (
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/ikev2"
 	"github.com/xen0bit/veepin/openvpn"
+	"github.com/xen0bit/veepin/sstp"
 	"github.com/xen0bit/veepin/wireguard"
 )
 
@@ -189,6 +190,26 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 			}
 			if *keyDir >= 0 {
 				opts[openvpn.OptKeyDirection] = fmt.Sprint(*keyDir)
+			}
+			return opts
+		}, nil
+	case "sstp":
+		var (
+			server = fs.String("server", "", "SSTP server host or IP (required)")
+			port   = fs.Int("port", 0, "server TCP port (default 443)")
+			user   = fs.String("user", "", "MS-CHAPv2 username (required)")
+			pass   = fs.String("pass", "", "MS-CHAPv2 password (required)")
+			tun    = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+		)
+		return func() map[string]string {
+			opts := map[string]string{
+				sstp.OptServer:   *server,
+				sstp.OptUser:     *user,
+				sstp.OptPassword: *pass,
+				sstp.OptTUNName:  *tun,
+			}
+			if *port != 0 {
+				opts[sstp.OptPort] = fmt.Sprint(*port)
 			}
 			return opts
 		}, nil

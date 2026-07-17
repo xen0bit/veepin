@@ -1,0 +1,30 @@
+# SSTP interop: veepin client → SoftEther SSTP server.
+# SoftEther must be configured with a user "sstpuser" / password "sstppass"
+# and an SSTP-enabled virtual hub "VPN".
+name: veepin-sstp
+
+services:
+  server:
+    image: siomiz/softethervpn:latest
+    cap_add: [NET_ADMIN]
+    environment:
+      PSK: "sstp-interop"
+      USER: "sstpuser"
+      PASS: "sstppass"
+      SPW: "sstpadmin"
+
+  client:
+    image: veepin:interop
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [server]
+    environment:
+      SERVER: "server"
+      USER: "sstpuser"
+      PASS: "sstppass"
+    volumes:
+      - ./veepin/sstp-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

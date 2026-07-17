@@ -26,6 +26,7 @@ import (
 	// is what makes it dialable by name.
 	_ "github.com/xen0bit/veepin/ikev2"
 	_ "github.com/xen0bit/veepin/openvpn"
+	_ "github.com/xen0bit/veepin/sstp"
 	_ "github.com/xen0bit/veepin/wireguard"
 )
 
