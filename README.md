@@ -112,10 +112,11 @@ protocol. IKEv2 is the first protocol; others become siblings under `internal/`.
 
 ```
 cmd/veepin               CLI: connect / serve / probe subcommands, flags, routing
-client                   protocol registry + the Session/Result contract
-ikev2                    public IKEv2 entry point: Dial, NewServer, Config
-wireguard                public WireGuard entry point: Dial, Config, wg-quick parser
-openvpn                  public OpenVPN entry point: Dial, Config, .ovpn parser
+client                   protocol registry (client + server) + the Session/Result/Server contracts
+ikev2                    public IKEv2 entry point: Dial + NewServer, Config
+wireguard                public WireGuard entry point: Dial + NewServer, Config, wg-quick parser
+openvpn                  public OpenVPN entry point: Dial, Config, .ovpn parser (client only)
+sstp                     public SSTP entry point: Dial, Config, crypto binding (client only)
 
 dataplane                TUN device, address pool, packet pump (demux + routing), client routing
 internal/cryptoutil      DH, PRF + prf+, integrity, SK/ESP ciphers, ChaCha20-Poly1305, BLAKE2s
@@ -136,6 +137,10 @@ internal/openvpn/control     TLS control channel: a net.Conn over the reliabilit
 internal/openvpn/tlswrap     tls-auth/tls-crypt: static-key HMAC and AES-256-CTR control wrapping
 internal/openvpn/keys        key method 2 exchange + TLS 1.0 PRF key derivation
 internal/openvpn/data        P_DATA_V2 seal/open (AES-256-GCM and AES-256-CBC) + anti-replay window
+
+internal/sstp/wire           SSTP packet codec: control/data framing, attributes, crypto binding
+internal/ppp                 PPP client: LCP, MS-CHAPv2 auth, IPCP (transport-neutral)
+internal/mschap              MS-CHAPv2 primitives + MPPE/HLAK key derivation
 ```
 
 `dataplane` and `internal/cryptoutil` are protocol-agnostic: neither imports anything
@@ -546,6 +551,28 @@ Highlights:
   from key length) selects the ESP algorithm.
 - `internal/ikev2/esp` — ESP round trips and anti-replay.
 - `internal/ikev2/payload` — header/payload/SA/TS/CP codec round trips.
+
+### Interoperability matrix
+
+The Docker interop tests (`make interop`, build tag `interop`) prove each protocol
+against a real third-party implementation and, where veepin has both roles,
+against itself. veepin can serve IKEv2 and WireGuard; OpenVPN and SSTP are
+**client-only** today (a server for each is planned), so the reverse and self
+cells are not yet exercised.
+
+| Protocol  | veepin client ↔ real server | real client ↔ veepin server | veepin ↔ veepin (self) |
+|-----------|-----------------------------|-----------------------------|------------------------|
+| IKEv2     | ✓ strongSwan                | ✓ strongSwan                | ✓                      |
+| WireGuard | ✓ wireguard-go              | ✓ wireguard-go              | ✓                      |
+| OpenVPN   | ✓ `openvpn` (×4 variants)   | — (client only)             | — (client only)        |
+| SSTP      | ✓ SoftEther                 | — (client only)             | — (client only)        |
+
+Both roles share one API: a client registers with `client.Register` and is dialed
+by `client.Dial`; a server registers with `client.RegisterServer` and is built by
+`client.NewServer`, so `veepin connect <proto>` and `veepin serve <proto>` dispatch
+generically. Adding a server for OpenVPN or SSTP is a matter of implementing the
+responder and registering it — no CLI changes — which then fills its two empty
+cells above.
 
 ## Benchmarks
 

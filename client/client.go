@@ -20,6 +20,12 @@
 //
 //	import _ "github.com/xen0bit/veepin/ikev2"
 //
+// The server side mirrors this exactly (see server.go): a protocol that can act
+// as a responder registers with RegisterServer and is built by NewServer, so the
+// veepin command dispatches `connect` and `serve` through the same registry
+// shape. Not every protocol registers both — some are client-only — so Protocols
+// and ServerProtocols are distinct sets.
+//
 // This package is CGO-free and depends only on the standard library, so it is
 // safe to embed in the core binaries and to import from the separate nm/ module.
 package client

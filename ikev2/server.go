@@ -5,7 +5,10 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
+	"strings"
 
+	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/ikev2/eap"
 	"github.com/xen0bit/veepin/internal/ikev2/ike"
@@ -156,4 +159,63 @@ func (s *Server) Close() error {
 	err := s.ike.Close()
 	s.tun.Close()
 	return err
+}
+
+// Server option keys for client.NewServer("ikev2", opts).
+const (
+	OptServerListen   = "listen"    // local IP to bind IKE sockets on (default 0.0.0.0)
+	OptServerPublic   = "public"    // server's public IP as clients see it (NAT detection)
+	OptServerPSK      = "psk"       // pre-shared key (required)
+	OptServerIdentity = "id"        // server identity presented to clients (required)
+	OptServerPool     = "pool"      // internal address pool, CIDR (default 10.10.10.0/24)
+	OptServerDNS      = "dns"       // comma-separated DNS servers pushed to clients
+	OptServerTUN      = "tun"       // TUN interface name (empty = kernel picks)
+	OptServerEAPUsers = "eap-users" // path to a username:password file enabling EAP-MSCHAPv2
+)
+
+func init() { client.RegisterServer("ikev2", parseServerOptions) }
+
+// parseServerOptions builds an IKEv2 responder from string options, the
+// server-side counterpart of parseOptions. It applies the same defaults the CLI
+// documents so the registry is usable standalone.
+func parseServerOptions(opts map[string]string) (client.Server, error) {
+	cfg := ServerConfig{
+		ListenIP: opts[OptServerListen],
+		PSK:      opts[OptServerPSK],
+		LocalID:  opts[OptServerIdentity],
+		Pool:     opts[OptServerPool],
+		TUNName:  opts[OptServerTUN],
+		EAPUsers: opts[OptServerEAPUsers],
+		Logger:   log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds),
+	}
+	if cfg.ListenIP == "" {
+		cfg.ListenIP = "0.0.0.0"
+	}
+	if cfg.Pool == "" {
+		cfg.Pool = "10.10.10.0/24"
+	}
+	// -public defaults to -listen when that is a concrete address.
+	if v := opts[OptServerPublic]; v != "" {
+		cfg.PublicIP = net.ParseIP(v)
+	} else if ip := net.ParseIP(cfg.ListenIP); ip != nil && !ip.IsUnspecified() {
+		cfg.PublicIP = ip
+	}
+	if v := opts[OptServerDNS]; v != "" {
+		cfg.DNS = parseIPList(v)
+	}
+	return NewServer(cfg)
+}
+
+// parseIPList parses a comma-separated list of IP addresses, skipping blanks and
+// unparseable entries.
+func parseIPList(list string) []net.IP {
+	var out []net.IP
+	for s := range strings.SplitSeq(list, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			if ip := net.ParseIP(s); ip != nil {
+				out = append(out, ip)
+			}
+		}
+	}
+	return out
 }

@@ -8,8 +8,11 @@ import (
 	"log"
 	"net"
 	"net/netip"
+	"os"
+	"strconv"
 	"sync"
 
+	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/wireguard/noise"
 	"github.com/xen0bit/veepin/internal/wireguard/transport"
@@ -50,6 +53,75 @@ type ServerPeer struct {
 	PublicKey    string   // the client's static public key, base64 (required)
 	PresharedKey string   // optional symmetric key, base64
 	AllowedIPs   []string // inner destinations routed to and accepted from this peer
+}
+
+// Server option keys for client.NewServer("wireguard", opts).
+const (
+	OptServerConfig           = "config"             // wg-quick server config file (interface + peers)
+	OptServerPrivateKey       = "private-key"        // server static private key, base64
+	OptServerListenIP         = "listen"             // local IP to bind the UDP socket on
+	OptServerListenPort       = "listen-port"        // UDP port to listen on (default 51820)
+	OptServerAddress          = "address"            // server tunnel address, CIDR
+	OptServerMTU              = "mtu"                // inner MTU
+	OptServerTUN              = "tun"                // TUN interface name (empty = kernel picks)
+	OptServerPeerPublicKey    = "peer-public-key"    // a single peer's static public key, base64
+	OptServerPeerPresharedKey = "peer-preshared-key" // that peer's preshared key, base64 (optional)
+	OptServerPeerAllowedIPs   = "peer-allowed-ips"   // that peer's allowed IPs, comma-separated CIDRs
+)
+
+func init() { client.RegisterServer("wireguard", parseServerOptions) }
+
+// parseServerOptions builds a WireGuard responder from string options, the
+// server-side counterpart of parseOptions. Peers come from a wg-quick -config
+// file; a single peer can also be supplied with the peer-* options for a quick
+// server without a file.
+func parseServerOptions(opts map[string]string) (client.Server, error) {
+	var sc ServerConfig
+	if path := opts[OptServerConfig]; path != "" {
+		parsed, err := ParseConfigFile(path)
+		if err != nil {
+			return nil, err
+		}
+		if sc, err = ServerConfigFromFile(parsed); err != nil {
+			return nil, err
+		}
+	}
+	if v := opts[OptServerPrivateKey]; v != "" {
+		sc.PrivateKey = v
+	}
+	if v := opts[OptServerAddress]; v != "" {
+		sc.Address = v
+	}
+	if v := opts[OptServerListenPort]; v != "" {
+		p, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("wireguard: invalid %s %q", OptServerListenPort, v)
+		}
+		sc.ListenPort = p
+	}
+	if sc.ListenPort == 0 {
+		sc.ListenPort = 51820
+	}
+	if v := opts[OptServerMTU]; v != "" {
+		m, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("wireguard: invalid %s %q", OptServerMTU, v)
+		}
+		sc.MTU = m
+	}
+	if v := opts[OptServerTUN]; v != "" {
+		sc.TUNName = v
+	}
+	if v := opts[OptServerPeerPublicKey]; v != "" {
+		sc.Peers = append(sc.Peers, ServerPeer{
+			PublicKey:    v,
+			PresharedKey: opts[OptServerPeerPresharedKey],
+			AllowedIPs:   splitList(opts[OptServerPeerAllowedIPs]),
+		})
+	}
+	sc.ListenIP = opts[OptServerListenIP]
+	sc.Logger = log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
+	return NewServer(sc)
 }
 
 // ServerConfigFromFile builds a ServerConfig from a parsed wg-quick file: the
