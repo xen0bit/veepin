@@ -35,9 +35,12 @@ var authMSCHAPv2 = []byte{0xc2, 0x23, 0x81}
 // inside a TLS record over a typical path.
 const defaultMRU = 1400
 
-// IPConfig is the network configuration IPCP assigns the client.
+// IPConfig is the network configuration IPCP assigns the client. PeerIP is the
+// server's own inner address (from its IPCP Configure-Request); the tunnel uses
+// it as the point-to-point gateway.
 type IPConfig struct {
 	LocalIP net.IP
+	PeerIP  net.IP
 	DNS     []net.IP
 }
 
@@ -86,6 +89,7 @@ type Session struct {
 	ipcpReqID                     byte
 	ipcpLocalOpen, ipcpRemoteOpen bool
 	reqIP, reqDNS1, reqDNS2       net.IP
+	peerIP                        net.IP
 
 	authChallenge, peerChallenge [mschap.ChallengeLen]byte
 	ntResponse                   [mschap.NTResponseLen]byte
@@ -326,8 +330,15 @@ func (s *Session) handleIPCP(payload []byte) {
 	}
 	switch pkt.Code {
 	case codeConfigureRequest:
-		// Accept the server's own IPCP options (its inner address); we route by the
-		// transport address, not this one.
+		// Accept the server's own IPCP options and record its inner address, which
+		// the tunnel uses as the point-to-point gateway.
+		if opts, ok := parseOptions(pkt.Body); ok {
+			for _, o := range opts {
+				if o.Type == optIPAddress && len(o.Value) == 4 {
+					s.peerIP = net.IP(append([]byte(nil), o.Value...))
+				}
+			}
+		}
 		s.send(ProtocolIPCP, cpPacket{Code: codeConfigureAck, ID: pkt.ID, Body: pkt.Body}.marshal())
 		s.ipcpRemoteOpen = true
 		s.maybeIPCPUp()
@@ -390,7 +401,7 @@ func (s *Session) maybeIPCPUp() {
 		return
 	}
 	s.phase = phaseUp
-	cfg := IPConfig{LocalIP: s.reqIP}
+	cfg := IPConfig{LocalIP: s.reqIP, PeerIP: s.peerIP}
 	for _, d := range []net.IP{s.reqDNS1, s.reqDNS2} {
 		if d != nil && !d.Equal(net.IPv4zero) {
 			cfg.DNS = append(cfg.DNS, d)

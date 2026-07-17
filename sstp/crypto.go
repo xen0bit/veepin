@@ -51,11 +51,12 @@ func DeriveCMK(hlak [mschap.HLAKLen]byte) []byte {
 const CBValueLen = 1 + 1 + 2 + wire.NonceLen + wire.CertHashLen + wire.CompoundMACLen
 
 // BuildCBValue constructs the crypto-binding attribute value for a
-// CallConnected message.
+// CallConnected message. The layout (MS-SSTP 2.2.2) is Reserved(3) |
+// HashProtocol(1) | Nonce(32) | CertHash(32) | CompoundMAC(32); only SHA-256 is
+// implemented, so the hash protocol byte is always CertHashSHA256.
 func BuildCBValue(nonce, certHash, compoundMAC []byte) []byte {
 	v := make([]byte, CBValueLen)
-	v[0] = 2
-	v[1] = wire.CertHashSHA256
+	v[3] = wire.CertHashSHA256
 	copy(v[4:36], nonce)
 	copy(v[36:68], certHash)
 	copy(v[68:100], compoundMAC)

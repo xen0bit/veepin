@@ -2,9 +2,7 @@ package sstp
 
 import (
 	"bufio"
-	"bytes"
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
 	"io"
@@ -40,11 +38,12 @@ func httpConnect(conn io.ReadWriter, host string) error {
 	return nil
 }
 
-// sendCallConnectRequest sends SSTP_MSG_CALL_CONNECT_REQUEST.
+// sendCallConnectRequest sends SSTP_MSG_CALL_CONNECT_REQUEST. It carries only the
+// Encapsulated Protocol ID attribute (PPP); the crypto-binding nonce is chosen by
+// the server and returned in the Call Connect Ack, not requested here.
 func sendCallConnectRequest(w io.Writer) error {
 	attrs := []wire.Attribute{
-		{ID: wire.AttrEncapsulatedProtocolID, Value: []byte{0x00, 0x01}},
-		{ID: wire.AttrCryptoBindingReq, Value: []byte{0x02, 0x02, 0x00, 0x00}},
+		{ID: wire.AttrEncapsulatedProtocolID, Value: []byte{0x00, wire.ProtocolPPP}},
 	}
 	pkt, err := wire.EncodeControl(wire.MsgCallConnectRequest, attrs)
 	if err != nil {
@@ -54,30 +53,48 @@ func sendCallConnectRequest(w io.Writer) error {
 	return err
 }
 
-// readCallConnectAck reads the CallConnectAck/Nak response.
-func readCallConnectAck(r io.Reader) error {
-	_, body, err := wire.ReadPacket(r)
+// readCallConnectAck reads the CallConnectAck response and returns the server's
+// crypto-binding nonce. The nonce (MS-SSTP 2.2.3, Reserved(3) | HashBitmap(1) |
+// Nonce(32)) is echoed back in the CallConnected message, so the client must use
+// the server's value rather than generating its own.
+func readCallConnectAck(r io.Reader) (nonce []byte, err error) {
+	control, body, err := wire.ReadPacket(r)
 	if err != nil {
-		return fmt.Errorf("read CallConnectAck: %w", err)
+		return nil, fmt.Errorf("read CallConnectAck: %w", err)
+	}
+	if !control {
+		return nil, fmt.Errorf("expected a control packet")
 	}
 	msg, err := wire.ParseControl(body)
 	if err != nil {
-		return fmt.Errorf("parse CallConnectAck: %w", err)
+		return nil, fmt.Errorf("parse CallConnectAck: %w", err)
 	}
 	switch msg.Type {
 	case wire.MsgCallConnectAck:
-		return nil
 	case wire.MsgCallConnectNak:
-		if attr, ok := msg.Attribute(wire.AttrNoError); ok && len(attr.Value) >= 4 {
-			return fmt.Errorf("server rejected: code %x", attr.Value)
-		}
-		return fmt.Errorf("CallConnectNak")
+		return nil, fmt.Errorf("server rejected the connection (CallConnectNak)")
 	default:
-		return fmt.Errorf("unexpected response %#x", msg.Type)
+		return nil, fmt.Errorf("unexpected response %#x", msg.Type)
 	}
+
+	cbr, ok := msg.Attribute(wire.AttrCryptoBindingReq)
+	if !ok {
+		return nil, fmt.Errorf("CallConnectAck missing the crypto-binding request")
+	}
+	if len(cbr.Value) < 4+wire.NonceLen {
+		return nil, fmt.Errorf("%w: short crypto-binding request", wire.ErrMalformed)
+	}
+	if cbr.Value[3]&wire.CertHashSHA256 == 0 {
+		return nil, fmt.Errorf("server does not offer SHA-256 crypto binding (bitmap %#x)", cbr.Value[3])
+	}
+	return append([]byte(nil), cbr.Value[4:4+wire.NonceLen]...), nil
 }
 
-// buildCallConnected builds a fully-formed SSTP_MSG_CALL_CONNECTED packet.
+// buildCallConnected builds a fully-formed SSTP_MSG_CALL_CONNECTED packet. The
+// compound MAC covers the whole control message with its own MAC field zeroed, so
+// the packet is built once with a zero MAC, the MAC is computed over the message
+// body (everything after the 4-octet packet header), and its trailing bytes are
+// patched in place.
 func buildCallConnected(nonce, serverCertDER []byte, hlak [mschap.HLAKLen]byte) ([]byte, error) {
 	cmk := DeriveCMK(hlak)
 	certHash := sha256Sum(serverCertDER)
@@ -89,35 +106,9 @@ func buildCallConnected(nonce, serverCertDER []byte, hlak [mschap.HLAKLen]byte) 
 		return nil, err
 	}
 
-	_, body, err := wire.ReadPacket(bytes.NewReader(pkt))
-	if err != nil {
-		return nil, err
-	}
-
-	mac := hmacSha256(cmk, body)
-
-	val2 := BuildCBValue(nonce, certHash, mac)
-	return wire.EncodeControl(wire.MsgCallConnected,
-		[]wire.Attribute{{ID: wire.AttrCryptoBinding, Value: val2}})
-}
-
-// sendCallConnected sends the crypto-bound CallConnected message.
-func sendCallConnected(w io.Writer, nonce, serverCertDER []byte, hlak [mschap.HLAKLen]byte) error {
-	pkt, err := buildCallConnected(nonce, serverCertDER, hlak)
-	if err != nil {
-		return err
-	}
-	_, err = w.Write(pkt)
-	return err
-}
-
-// generateNonce returns 32 cryptographically random bytes.
-func generateNonce() ([]byte, error) {
-	n := make([]byte, wire.NonceLen)
-	if _, err := rand.Read(n); err != nil {
-		return nil, fmt.Errorf("nonce: %w", err)
-	}
-	return n, nil
+	mac := hmacSha256(cmk, pkt[wire.HeaderLen:])
+	copy(pkt[len(pkt)-wire.CompoundMACLen:], mac)
+	return pkt, nil
 }
 
 func sha256Sum(b []byte) []byte {

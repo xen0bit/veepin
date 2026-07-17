@@ -16,6 +16,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xen0bit/veepin/client"
@@ -114,17 +115,19 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 		return nil, client.Result{}, fmt.Errorf("sstp: CallConnectRequest: %w", err)
 	}
 
-	if err := readCallConnectAck(tlsConn); err != nil {
+	serverNonce, err := readCallConnectAck(tlsConn)
+	if err != nil {
 		tlsConn.Close()
 		return nil, client.Result{}, fmt.Errorf("sstp: CallConnectAck: %w", err)
 	}
 
 	s := &session{
-		tlsConn: tlsConn,
-		logger:  logger,
-		cfg:     cfg,
-		done:    make(chan struct{}),
-		ipReady: make(chan struct{}),
+		tlsConn:     tlsConn,
+		logger:      logger,
+		cfg:         cfg,
+		serverNonce: serverNonce,
+		done:        make(chan struct{}),
+		ipReady:     make(chan struct{}),
 	}
 	s.ppp = ppp.New(cfg.Username, cfg.Password, s, s)
 	s.ppp.Start()
@@ -147,8 +150,8 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 		return nil, client.Result{}, fmt.Errorf("sstp: open TUN: %w", err)
 	}
 
-	s.tun = tun
-	go s.outboundLoop()
+	s.tun.Store(tun)
+	go s.outboundLoop(tun)
 
 	logger.Printf("sstp: tunnel up on %s, internal IP %s", tun.Name(), s.assignedIP)
 
@@ -156,7 +159,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 		TUNName:    tun.Name(),
 		AssignedIP: s.assignedIP,
 		Netmask:    net.IPv4(255, 255, 255, 255),
-		Gateway:    nil,
+		Gateway:    s.gateway,
 		DNS:        s.dns,
 		MTU:        client.DefaultTunnelMTU,
 	}
@@ -173,11 +176,17 @@ func dialTLS(ctx context.Context, addr string, tlsCfg *tls.Config) (*tls.Conn, e
 }
 
 type session struct {
-	tlsConn *tls.Conn
-	ppp     *ppp.Session
-	tun     *dataplane.TUN
-	logger  *log.Logger
-	cfg     Config
+	tlsConn     *tls.Conn
+	ppp         *ppp.Session
+	tun         atomic.Pointer[dataplane.TUN]
+	logger      *log.Logger
+	cfg         Config
+	serverNonce []byte
+
+	// writeMu serializes writes to tlsConn: a TLS connection tolerates one
+	// concurrent reader and writer, but the read loop (echo replies, the crypto
+	// binding, PPP control) and the outbound loop (data packets) are two writers.
+	writeMu sync.Mutex
 
 	mu     sync.Mutex
 	closed bool
@@ -187,8 +196,19 @@ type session struct {
 	done      chan struct{}
 
 	assignedIP net.IP
+	gateway    net.IP
 	dns        []net.IP
 	ipReady    chan struct{}
+}
+
+// writePacket sends one already-framed SSTP packet, serialized against the other
+// writer and bounded by a write deadline.
+func (s *session) writePacket(pkt []byte) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	_ = s.tlsConn.SetWriteDeadline(time.Now().Add(30 * time.Second))
+	_, err := s.tlsConn.Write(pkt)
+	return err
 }
 
 func (s *session) SendPPP(frame []byte) error {
@@ -196,39 +216,34 @@ func (s *session) SendPPP(frame []byte) error {
 	if err != nil {
 		return err
 	}
-	_ = s.tlsConn.SetWriteDeadline(time.Now().Add(30 * time.Second))
-	_, err = s.tlsConn.Write(pkt)
-	return err
+	return s.writePacket(pkt)
 }
 
 func (s *session) Authenticated(ntResponse [mschap.NTResponseLen]byte) {
 	hlak := mschap.ClientHLAK(s.cfg.Password, ntResponse)
 
-	nonce, err := generateNonce()
-	if err != nil {
-		s.logger.Printf("sstp: nonce: %v", err)
-		return
-	}
-
 	state := s.tlsConn.ConnectionState()
-	var serverCertDER []byte
-	if len(state.PeerCertificates) > 0 {
-		serverCertDER = state.PeerCertificates[0].Raw
-	} else {
+	if len(state.PeerCertificates) == 0 {
 		s.logger.Printf("sstp: no server certificate for crypto binding")
 		return
 	}
+	serverCertDER := state.PeerCertificates[0].Raw
 
-	if err := sendCallConnected(s.tlsConn, nonce, serverCertDER, hlak); err != nil {
+	pkt, err := buildCallConnected(s.serverNonce, serverCertDER, hlak)
+	if err != nil {
+		s.logger.Printf("sstp: build CallConnected: %v", err)
+		return
+	}
+	if err := s.writePacket(pkt); err != nil {
 		s.logger.Printf("sstp: send CallConnected: %v", err)
 		return
 	}
-
 	s.logger.Printf("sstp: crypto binding sent")
 }
 
 func (s *session) NetworkUp(cfg ppp.IPConfig) {
 	s.assignedIP = cfg.LocalIP
+	s.gateway = cfg.PeerIP
 	s.dns = cfg.DNS
 	close(s.ipReady)
 }
@@ -269,35 +284,44 @@ func (s *session) readLoop() {
 				return
 			case wire.MsgEchoRequest:
 				resp, _ := wire.EncodeControl(wire.MsgEchoResponse, nil)
-				_, _ = s.tlsConn.Write(resp)
+				_ = s.writePacket(resp)
 			case wire.MsgCallConnected:
 				s.logger.Printf("sstp: server crypto binding ack")
 			default:
 				s.logger.Printf("sstp: unhandled control %#x", msg.Type)
 			}
-		} else {
-			s.ppp.Receive(body)
+			continue
 		}
+
+		// Data packet. Once the link is up its payload is an IP packet bound for the
+		// TUN; before that (and for LCP echoes afterwards) it is PPP control.
+		if ipPacket, ok := ppp.IsIP(body); ok {
+			if tun := s.tun.Load(); tun != nil {
+				if _, err := tun.Write(ipPacket); err != nil {
+					s.logger.Printf("sstp: TUN write: %v", err)
+				}
+			}
+			continue
+		}
+		s.ppp.Receive(body)
 	}
 }
 
-func (s *session) outboundLoop() {
+func (s *session) outboundLoop(tun *dataplane.TUN) {
 	buf := make([]byte, 65535)
 	for {
-		n, err := s.tun.Read(buf)
+		n, err := tun.Read(buf)
 		if err != nil {
 			s.logger.Printf("sstp: TUN read: %v", err)
 			s.Close()
 			return
 		}
-		pppFrame := ppp.EncapsulateIP(buf[:n])
-		pkt, err := wire.EncodeData(pppFrame)
+		pkt, err := wire.EncodeData(ppp.EncapsulateIP(buf[:n]))
 		if err != nil {
 			s.logger.Printf("sstp: encode: %v", err)
 			continue
 		}
-		_ = s.tlsConn.SetWriteDeadline(time.Now().Add(30 * time.Second))
-		if _, err := s.tlsConn.Write(pkt); err != nil {
+		if err := s.writePacket(pkt); err != nil {
 			s.logger.Printf("sstp: write: %v", err)
 			s.Close()
 			return
@@ -317,8 +341,8 @@ func (s *session) Wait(ctx context.Context) error {
 func (s *session) Close() error {
 	s.closeOnce.Do(func() {
 		close(s.done)
-		if s.tun != nil {
-			_ = s.tun.Close()
+		if tun := s.tun.Load(); tun != nil {
+			_ = tun.Close()
 		}
 		if s.tlsConn != nil {
 			_ = s.tlsConn.Close()
