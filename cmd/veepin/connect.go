@@ -195,11 +195,12 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 		}, nil
 	case "sstp":
 		var (
-			server = fs.String("server", "", "SSTP server host or IP (required)")
-			port   = fs.Int("port", 0, "server TCP port (default 443)")
-			user   = fs.String("user", "", "MS-CHAPv2 username (required)")
-			pass   = fs.String("pass", "", "MS-CHAPv2 password (required)")
-			tun    = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+			server   = fs.String("server", "", "SSTP server host or IP (required)")
+			port     = fs.Int("port", 0, "server TCP port (default 443)")
+			user     = fs.String("user", "", "MS-CHAPv2 username (required)")
+			pass     = fs.String("pass", "", "MS-CHAPv2 password (required)")
+			insecure = fs.Bool("insecure", false, "skip TLS certificate verification (self-signed servers)")
+			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
 		)
 		return func() map[string]string {
 			opts := map[string]string{
@@ -210,6 +211,9 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 			}
 			if *port != 0 {
 				opts[sstp.OptPort] = fmt.Sprint(*port)
+			}
+			if *insecure {
+				opts[sstp.OptInsecure] = "true"
 			}
 			return opts
 		}, nil

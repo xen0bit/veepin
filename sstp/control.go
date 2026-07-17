@@ -1,8 +1,8 @@
 package sstp
 
 import (
-	"bufio"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
 	"io"
@@ -12,30 +12,73 @@ import (
 	"github.com/xen0bit/veepin/internal/sstp/wire"
 )
 
-// httpConnect performs the HTTP CONNECT handshake over a TLS connection.
-func httpConnect(conn io.ReadWriter, host string) error {
-	req := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", host, host)
-	if _, err := io.WriteString(conn, req); err != nil {
-		return fmt.Errorf("sstp: CONNECT write: %w", err)
-	}
-	br := bufio.NewReader(conn)
-	line, err := br.ReadString('\n')
+// sstpURI is the fixed SSTP endpoint every server exposes ([MS-SSTP] 2.2).
+const sstpURI = "/sra_{BA195980-CD49-458b-9E23-C84EE0ADCD75}/"
+
+// sstpHandshake performs the SSTP HTTP-layer handshake over the TLS connection:
+// an SSTP_DUPLEX_POST to the well-known URI (not an HTTP CONNECT) with a maximal
+// Content-Length that marks the body as the effectively unbounded SSTP stream.
+// The server answers 200 OK, after which the connection carries SSTP packets.
+func sstpHandshake(conn io.ReadWriter, host string) error {
+	correlationID, err := newCorrelationID()
 	if err != nil {
-		return fmt.Errorf("sstp: CONNECT response: %w", err)
+		return err
 	}
-	if !strings.Contains(line, "200") {
-		return fmt.Errorf("sstp: CONNECT rejected: %s", strings.TrimSpace(line))
+	req := "SSTP_DUPLEX_POST " + sstpURI + " HTTP/1.1\r\n" +
+		"Host: " + host + "\r\n" +
+		"SSTPCORRELATIONID: " + correlationID + "\r\n" +
+		"Content-Length: 18446744073709551615\r\n" +
+		"\r\n"
+	if _, err := io.WriteString(conn, req); err != nil {
+		return fmt.Errorf("write request: %w", err)
 	}
-	for {
-		line, err = br.ReadString('\n')
-		if err != nil {
-			return fmt.Errorf("sstp: CONNECT headers: %w", err)
-		}
-		if line == "\r\n" || line == "\n" {
-			break
-		}
+
+	status, err := readHTTPHeader(conn)
+	if err != nil {
+		return err
+	}
+	if !strings.Contains(status, " 200") {
+		return fmt.Errorf("server rejected SSTP: %s", status)
 	}
 	return nil
+}
+
+// readHTTPHeader reads the response header block one byte at a time until the
+// CRLFCRLF terminator and returns the status line. Reading unbuffered matters:
+// the SSTP binary stream begins immediately after the header, so a buffered
+// reader could swallow the first packet's bytes.
+func readHTTPHeader(conn io.Reader) (status string, err error) {
+	var buf []byte
+	b := make([]byte, 1)
+	for {
+		if _, err := io.ReadFull(conn, b); err != nil {
+			return "", fmt.Errorf("read response: %w", err)
+		}
+		buf = append(buf, b[0])
+		if len(buf) >= 4 && string(buf[len(buf)-4:]) == "\r\n\r\n" {
+			break
+		}
+		if len(buf) > 16384 {
+			return "", fmt.Errorf("response header too large")
+		}
+	}
+	if i := strings.Index(string(buf), "\r\n"); i >= 0 {
+		return string(buf[:i]), nil
+	}
+	return string(buf), nil
+}
+
+// newCorrelationID returns a random GUID in the {XXXXXXXX-...} form SSTP servers
+// expect for the SSTPCORRELATIONID header.
+func newCorrelationID() (string, error) {
+	var u [16]byte
+	if _, err := rand.Read(u[:]); err != nil {
+		return "", fmt.Errorf("correlation id: %w", err)
+	}
+	u[6] = (u[6] & 0x0f) | 0x40 // version 4
+	u[8] = (u[8] & 0x3f) | 0x80 // variant
+	return fmt.Sprintf("{%08X-%04X-%04X-%04X-%012X}",
+		u[0:4], u[4:6], u[6:8], u[8:10], u[10:16]), nil
 }
 
 // sendCallConnectRequest sends SSTP_MSG_CALL_CONNECT_REQUEST. It carries only the

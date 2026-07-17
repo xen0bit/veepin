@@ -2,8 +2,12 @@
 
 A **working userspace VPN in Go** — both a server (responder) and a client
 (initiator) — written from scratch, with `golang.org/x/crypto` the only
-dependency. It speaks three protocols: **IKEv2/ESP** (client and server),
-**WireGuard** (client and server), and **OpenVPN** (client). The IKEv2 side
+dependency. It speaks four protocols: **IKEv2/ESP** (client and server),
+**WireGuard** (client and server), **OpenVPN** (client), and **SSTP** (client).
+The SSTP side runs Microsoft's Secure Socket Tunneling Protocol over TLS — the
+`SSTP_DUPLEX_POST` HTTP handshake, the CALL_CONNECT crypto binding, MS-CHAPv2
+authentication and a PPP/IPCP data path — and interoperates with SoftEther and
+other Microsoft-compatible SSTP servers. The IKEv2 side
 performs the full key exchange with pre-shared-key or EAP-MSCHAPv2
 authentication, NAT traversal, and configuration mode (address assignment), then
 runs an ESP-in-UDP data path over a TUN device — so a standards-compliant OS VPN
@@ -183,8 +187,9 @@ veepin serve   <protocol> [flags]   run a VPN server
 veepin probe   <protocol> [flags]   diagnostic: handshake + one data packet
 ```
 
-IKEv2 (`connect`/`serve`) and WireGuard (`connect`) are the built-in protocols;
-`veepin` with no arguments lists what is registered.
+IKEv2 (`connect`/`serve`), WireGuard (`connect`/`serve`), OpenVPN (`connect`) and
+SSTP (`connect`) are the built-in protocols; `veepin` with no arguments lists
+what is registered.
 
 ## Run
 
@@ -340,6 +345,27 @@ way the other protocols do (`-full-tunnel`/`-no-route` behave identically). All
 four control/data combinations are covered by the Docker interop tests; see the
 boundaries under [What it does](#what-it-does). Add `-username`/`-password` for
 servers that require `auth-user-pass`.
+
+### Connecting as an SSTP client
+
+`veepin connect sstp` dials a Microsoft SSTP server over TLS on port 443:
+
+```sh
+sudo ./veepin connect sstp \
+  -server vpn.example.com -user alice -pass secret
+
+# For a server with a self-signed certificate (SSTP still mutually authenticates
+# via MS-CHAPv2, so the tunnel is not unauthenticated):
+sudo ./veepin connect sstp -server 10.0.0.1 -user alice -pass secret -insecure
+```
+
+The client opens the TLS carrier, performs the `SSTP_DUPLEX_POST` HTTP handshake,
+exchanges CALL_CONNECT with the server's crypto-binding nonce, authenticates the
+inner PPP link with MS-CHAPv2 (deriving the HLAK and sending the CALL_CONNECTED
+compound MAC over the server's certificate), and negotiates IPCP for its address
+and DNS. Only SHA-256 crypto binding is implemented. The client-vs-SoftEther path
+is covered end to end by the Docker interop tests. Set `VEEPIN_SSTP_DEBUG=1` to
+trace the control and PPP exchange.
 
 ## Connecting an OS client
 

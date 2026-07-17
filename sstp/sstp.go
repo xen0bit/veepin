@@ -14,6 +14,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -35,6 +36,7 @@ const (
 	OptUser     = "user"
 	OptPassword = "password"
 	OptTUNName  = "tun"
+	OptInsecure = "insecure"
 )
 
 // Config holds the parameters for a single SSTP tunnel.
@@ -44,7 +46,13 @@ type Config struct {
 	Username string
 	Password string
 	TUNName  string
-	Logger   *log.Logger
+	// SkipVerify disables TLS certificate verification. It is safe for SSTP:
+	// MS-CHAPv2 mutually authenticates the peers (the client checks the server's
+	// authenticator response), so a server that cannot prove it knows the password
+	// cannot complete the handshake even without a trusted certificate. Needed for
+	// the self-signed certificates most SSTP servers ship with.
+	SkipVerify bool
+	Logger     *log.Logger
 }
 
 func (c *Config) validate() error {
@@ -72,6 +80,7 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 	cfg.Username = opts[OptUser]
 	cfg.Password = opts[OptPassword]
 	cfg.TUNName = opts[OptTUNName]
+	cfg.SkipVerify = opts[OptInsecure] == "true"
 	if cfg.Port == 0 {
 		cfg.Port = 443
 	}
@@ -92,22 +101,27 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	}
 	logger := cfg.Logger
 	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
+		out := io.Discard
+		if os.Getenv("VEEPIN_SSTP_DEBUG") != "" {
+			out = os.Stderr
+		}
+		logger = log.New(out, "", log.LstdFlags|log.Lmicroseconds)
 	}
 
 	addr := net.JoinHostPort(cfg.Server, strconv.Itoa(cfg.Port))
 
 	tlsCfg := &tls.Config{
-		ServerName: cfg.Server,
+		ServerName:         cfg.Server,
+		InsecureSkipVerify: cfg.SkipVerify, //nolint:gosec // opt-in; MS-CHAPv2 mutually authenticates the peers.
 	}
 	tlsConn, err := dialTLS(ctx, addr, tlsCfg)
 	if err != nil {
 		return nil, client.Result{}, fmt.Errorf("sstp: TLS dial: %w", err)
 	}
 
-	if err := httpConnect(tlsConn, addr); err != nil {
+	if err := sstpHandshake(tlsConn, cfg.Server); err != nil {
 		tlsConn.Close()
-		return nil, client.Result{}, fmt.Errorf("sstp: CONNECT: %w", err)
+		return nil, client.Result{}, fmt.Errorf("sstp: HTTP handshake: %w", err)
 	}
 
 	if err := sendCallConnectRequest(tlsConn); err != nil {
@@ -126,6 +140,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 		logger:      logger,
 		cfg:         cfg,
 		serverNonce: serverNonce,
+		debug:       os.Getenv("VEEPIN_SSTP_DEBUG") != "",
 		done:        make(chan struct{}),
 		ipReady:     make(chan struct{}),
 	}
@@ -153,17 +168,29 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	s.tun.Store(tun)
 	go s.outboundLoop(tun)
 
-	logger.Printf("sstp: tunnel up on %s, internal IP %s", tun.Name(), s.assignedIP)
+	logger.Printf("sstp: tunnel up on %s, internal IP %s, peer %s", tun.Name(), s.assignedIP, s.peerIP)
 
 	res := client.Result{
 		TUNName:    tun.Name(),
 		AssignedIP: s.assignedIP,
 		Netmask:    net.IPv4(255, 255, 255, 255),
-		Gateway:    s.gateway,
-		DNS:        s.dns,
-		MTU:        client.DefaultTunnelMTU,
+		// Gateway is the server's transport IP, kept reachable off-tunnel so the
+		// TLS carrier does not recurse into the tunnel (the router pins a host
+		// route to it). It is not the PPP peer address.
+		Gateway: transportIP(tlsConn),
+		DNS:     s.dns,
+		MTU:     client.DefaultTunnelMTU,
 	}
 	return s, res, nil
+}
+
+// transportIP returns the server's IP from the established TLS connection, used
+// as the off-tunnel host route target.
+func transportIP(conn *tls.Conn) net.IP {
+	if tcp, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
+		return tcp.IP
+	}
+	return nil
 }
 
 func dialTLS(ctx context.Context, addr string, tlsCfg *tls.Config) (*tls.Conn, error) {
@@ -182,6 +209,7 @@ type session struct {
 	logger      *log.Logger
 	cfg         Config
 	serverNonce []byte
+	debug       bool
 
 	// writeMu serializes writes to tlsConn: a TLS connection tolerates one
 	// concurrent reader and writer, but the read loop (echo replies, the crypto
@@ -196,7 +224,7 @@ type session struct {
 	done      chan struct{}
 
 	assignedIP net.IP
-	gateway    net.IP
+	peerIP     net.IP
 	dns        []net.IP
 	ipReady    chan struct{}
 }
@@ -212,6 +240,9 @@ func (s *session) writePacket(pkt []byte) error {
 }
 
 func (s *session) SendPPP(frame []byte) error {
+	if s.debug {
+		s.logger.Printf("sstp: -> ppp %x", frame[:min(len(frame), 12)])
+	}
 	pkt, err := wire.EncodeData(frame)
 	if err != nil {
 		return err
@@ -243,14 +274,20 @@ func (s *session) Authenticated(ntResponse [mschap.NTResponseLen]byte) {
 
 func (s *session) NetworkUp(cfg ppp.IPConfig) {
 	s.assignedIP = cfg.LocalIP
-	s.gateway = cfg.PeerIP
+	s.peerIP = cfg.PeerIP
 	s.dns = cfg.DNS
 	close(s.ipReady)
 }
 
-func (s *session) Closed(err error) {
+func (s *session) Closed(err error) { s.fail(err) }
+
+// fail records the first close cause and tears the session down. Only the first
+// caller's error is kept, so the true failure (e.g. an auth error) is not
+// clobbered by the "use of closed connection" the read loop then observes.
+func (s *session) fail(err error) {
 	s.mu.Lock()
 	if !s.closed {
+		s.closed = true
 		s.closeErr = err
 	}
 	s.mu.Unlock()
@@ -261,12 +298,7 @@ func (s *session) readLoop() {
 	for {
 		control, body, err := wire.ReadPacket(s.tlsConn)
 		if err != nil {
-			s.mu.Lock()
-			if !s.closed {
-				s.closeErr = fmt.Errorf("read: %w", err)
-			}
-			s.mu.Unlock()
-			s.Close()
+			s.fail(fmt.Errorf("read: %w", err))
 			return
 		}
 		if control {
@@ -275,12 +307,12 @@ func (s *session) readLoop() {
 				s.logger.Printf("sstp: malformed control: %v", err)
 				continue
 			}
+			if s.debug {
+				s.logger.Printf("sstp: <- control %#x", msg.Type)
+			}
 			switch msg.Type {
 			case wire.MsgCallDisconnect:
-				s.mu.Lock()
-				s.closeErr = fmt.Errorf("server disconnected")
-				s.mu.Unlock()
-				s.Close()
+				s.fail(fmt.Errorf("server disconnected"))
 				return
 			case wire.MsgEchoRequest:
 				resp, _ := wire.EncodeControl(wire.MsgEchoResponse, nil)
@@ -293,6 +325,9 @@ func (s *session) readLoop() {
 			continue
 		}
 
+		if s.debug {
+			s.logger.Printf("sstp: <- ppp %x", body[:min(len(body), 12)])
+		}
 		// Data packet. Once the link is up its payload is an IP packet bound for the
 		// TUN; before that (and for LCP echoes afterwards) it is PPP control.
 		if ipPacket, ok := ppp.IsIP(body); ok {

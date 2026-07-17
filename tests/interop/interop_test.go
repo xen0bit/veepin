@@ -100,6 +100,18 @@ func TestInteropOpenVPNCBC(t *testing.T) {
 	runOpenVPNInterop(t, "compose.openvpn-cbc.yml")
 }
 
+// TestInteropVeepinClientSSTPServer proves the SSTP client against a real
+// SoftEther SSTP server it shares no code with. An `init` sidecar provisions the
+// server (enables SSTP, creates the MS-CHAPv2 user, turns on SecureNAT), then the
+// veepin client runs the TLS carrier, the SSTP_DUPLEX_POST handshake, the
+// CALL_CONNECT crypto binding, MS-CHAPv2 authentication and the PPP/IPCP data
+// path, and pings 192.168.30.1 (the SecureNAT virtual gateway) across the tunnel.
+// A success exercises the whole SSTP stack end to end against Microsoft's wire
+// format.
+func TestInteropVeepinClientSSTPServer(t *testing.T) {
+	runInterop(t, "compose.sstp.yml", "client", "192.168.30.1")
+}
+
 // runOpenVPNInterop generates the shared throwaway PKI (and static key), then
 // runs an OpenVPN client-vs-server ping across the given compose profile.
 func runOpenVPNInterop(t *testing.T, composeFile string) {

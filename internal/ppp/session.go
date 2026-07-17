@@ -85,6 +85,9 @@ type Session struct {
 
 	lcpReqID                    byte
 	lcpLocalOpen, lcpRemoteOpen bool
+	lcpAuthNaks                 int
+	lcpUseMRU, lcpUseMagic      bool
+	lcpMRU                      uint16
 
 	ipcpReqID                     byte
 	ipcpLocalOpen, ipcpRemoteOpen bool
@@ -101,11 +104,14 @@ func New(username, password string, tr Transport, h Handler) *Session {
 	var magic [4]byte
 	_, _ = rand.Read(magic[:])
 	return &Session{
-		username: username,
-		password: password,
-		tr:       tr,
-		h:        h,
-		magic:    binary.BigEndian.Uint32(magic[:]),
+		username:    username,
+		password:    password,
+		tr:          tr,
+		h:           h,
+		magic:       binary.BigEndian.Uint32(magic[:]),
+		lcpUseMRU:   true,
+		lcpUseMagic: true,
+		lcpMRU:      defaultMRU,
 	}
 }
 
@@ -177,16 +183,57 @@ func (s *Session) failLocked(err error) {
 // --- LCP ---
 
 func (s *Session) sendLCPConfigReq() {
-	var magic [4]byte
-	binary.BigEndian.PutUint32(magic[:], s.magic)
-	var mru [2]byte
-	binary.BigEndian.PutUint16(mru[:], defaultMRU)
-	opts := []option{
-		{Type: optMRU, Value: mru[:]},
-		{Type: optMagic, Value: magic[:]},
+	var opts []option
+	if s.lcpUseMRU {
+		var mru [2]byte
+		binary.BigEndian.PutUint16(mru[:], s.lcpMRU)
+		opts = append(opts, option{Type: optMRU, Value: mru[:]})
+	}
+	if s.lcpUseMagic {
+		var magic [4]byte
+		binary.BigEndian.PutUint32(magic[:], s.magic)
+		opts = append(opts, option{Type: optMagic, Value: magic[:]})
 	}
 	s.lcpReqID = s.nextID()
 	s.send(ProtocolLCP, cpPacket{Code: codeConfigureRequest, ID: s.lcpReqID, Body: marshalOptions(opts)}.marshal())
+}
+
+// applyLCPNak adopts the values the peer suggested for our request (e.g. a
+// smaller MRU) so the next request converges.
+func (s *Session) applyLCPNak(body []byte) {
+	opts, ok := parseOptions(body)
+	if !ok {
+		return
+	}
+	for _, o := range opts {
+		switch o.Type {
+		case optMRU:
+			if len(o.Value) == 2 {
+				s.lcpMRU = binary.BigEndian.Uint16(o.Value)
+			}
+		case optMagic:
+			if len(o.Value) == 4 {
+				s.magic = binary.BigEndian.Uint32(o.Value)
+			}
+		}
+	}
+}
+
+// applyLCPReject drops options the peer refused to understand (SoftEther rejects
+// Magic-Number, for one) so the next request omits them.
+func (s *Session) applyLCPReject(body []byte) {
+	opts, ok := parseOptions(body)
+	if !ok {
+		return
+	}
+	for _, o := range opts {
+		switch o.Type {
+		case optMRU:
+			s.lcpUseMRU = false
+		case optMagic:
+			s.lcpUseMagic = false
+		}
+	}
 }
 
 func (s *Session) handleLCP(payload []byte) {
@@ -202,10 +249,16 @@ func (s *Session) handleLCP(payload []byte) {
 			s.lcpLocalOpen = true
 			s.maybeLCPUp()
 		}
-	case codeConfigureNak, codeConfigureReject:
-		// Our request is only MRU + Magic; drop nothing essential and resend so
-		// the peer sees a request it can accept.
-		s.sendLCPConfigReq()
+	case codeConfigureNak:
+		if pkt.ID == s.lcpReqID {
+			s.applyLCPNak(pkt.Body)
+			s.sendLCPConfigReq()
+		}
+	case codeConfigureReject:
+		if pkt.ID == s.lcpReqID {
+			s.applyLCPReject(pkt.Body)
+			s.sendLCPConfigReq()
+		}
 	case codeTerminateRequest:
 		s.send(ProtocolLCP, cpPacket{Code: codeTerminateAck, ID: pkt.ID}.marshal())
 		s.failLocked(fmt.Errorf("ppp: peer closed the link"))
@@ -214,40 +267,51 @@ func (s *Session) handleLCP(payload []byte) {
 	}
 }
 
+// maxAuthNaks bounds how many times we will Configure-Nak the peer's auth
+// protocol before giving up, so a server that only ever offers something we
+// cannot do (e.g. PAP) fails cleanly instead of looping forever.
+const maxAuthNaks = 5
+
 func (s *Session) handleLCPConfigReq(pkt cpPacket) {
 	opts, ok := parseOptions(pkt.Body)
 	if !ok {
 		return
 	}
-	var rejected []option
-	authOK := false
+	var rejected, naked []option
 	for _, o := range opts {
 		switch o.Type {
 		case optMRU, optMagic, optQuality, optPFC, optACFC:
 			// Acceptable: we send full frames regardless, so compression options
 			// only permit, never require, and cost us nothing to accept.
 		case optAuthProto:
-			if string(o.Value) == string(authMSCHAPv2) {
-				authOK = true
-			} else {
-				rejected = append(rejected, o)
+			if string(o.Value) != string(authMSCHAPv2) {
+				// We only implement MS-CHAPv2. The option is understood but its value
+				// is unacceptable, so Nak it proposing MS-CHAPv2 rather than Reject —
+				// servers such as SoftEther offer PAP first and re-offer MS-CHAPv2
+				// when Nak'd.
+				naked = append(naked, option{Type: optAuthProto, Value: authMSCHAPv2})
 			}
 		default:
 			rejected = append(rejected, o)
 		}
 	}
-	if len(rejected) > 0 {
+	switch {
+	case len(rejected) > 0:
+		// Reject takes priority over Nak (RFC 1661 6): drop options we do not
+		// recognise; the peer re-requests without them and we then settle auth.
 		s.send(ProtocolLCP, cpPacket{Code: codeConfigureReject, ID: pkt.ID, Body: marshalOptions(rejected)}.marshal())
-		if !authOK {
-			// The peer demanded an auth protocol we do not implement; rejecting it
-			// will not converge.
-			s.failLocked(fmt.Errorf("ppp: server requires an unsupported auth protocol"))
+	case len(naked) > 0:
+		s.lcpAuthNaks++
+		if s.lcpAuthNaks > maxAuthNaks {
+			s.failLocked(fmt.Errorf("ppp: server offers no auth protocol we support (need MS-CHAPv2)"))
+			return
 		}
-		return
+		s.send(ProtocolLCP, cpPacket{Code: codeConfigureNak, ID: pkt.ID, Body: marshalOptions(naked)}.marshal())
+	default:
+		s.send(ProtocolLCP, cpPacket{Code: codeConfigureAck, ID: pkt.ID, Body: pkt.Body}.marshal())
+		s.lcpRemoteOpen = true
+		s.maybeLCPUp()
 	}
-	s.send(ProtocolLCP, cpPacket{Code: codeConfigureAck, ID: pkt.ID, Body: pkt.Body}.marshal())
-	s.lcpRemoteOpen = true
-	s.maybeLCPUp()
 }
 
 func (s *Session) sendEchoReply(req cpPacket) {

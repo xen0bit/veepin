@@ -180,6 +180,66 @@ func TestAuthFailure(t *testing.T) {
 	}
 }
 
+// TestLCPAuthNakToMSCHAPv2 checks that when the server offers an auth protocol we
+// do not implement (PAP here), the client Configure-Naks it proposing MS-CHAPv2
+// rather than rejecting and failing — the negotiation SoftEther requires.
+func TestLCPAuthNakToMSCHAPv2(t *testing.T) {
+	tr := &captureTransport{}
+	h := &recordHandler{}
+	s := New("User", "pass", tr, h)
+	s.Start()
+
+	pap := marshalOptions([]option{{Type: optAuthProto, Value: []byte{0xc0, 0x23}}})
+	deliver(s, ProtocolLCP, codeConfigureRequest, 1, pap)
+
+	nak := tr.lastCP(t, ProtocolLCP)
+	if nak.Code != codeConfigureNak {
+		t.Fatalf("expected Configure-Nak, got code %d", nak.Code)
+	}
+	opts, ok := parseOptions(nak.Body)
+	if !ok || len(opts) != 1 || opts[0].Type != optAuthProto || string(opts[0].Value) != string(authMSCHAPv2) {
+		t.Fatalf("Nak should propose MS-CHAPv2, got body %x", nak.Body)
+	}
+	if h.err != nil {
+		t.Errorf("unexpected Closed(%v) — must keep negotiating", h.err)
+	}
+}
+
+// TestLCPRejectDropsMagic checks that a Configure-Reject of our Magic-Number
+// option (SoftEther does this) makes the client resend without it, instead of
+// looping on the same rejected request forever.
+func TestLCPRejectDropsMagic(t *testing.T) {
+	tr := &captureTransport{}
+	h := &recordHandler{}
+	s := New("User", "pass", tr, h)
+	s.Start()
+
+	first := tr.lastCP(t, ProtocolLCP)
+	opts, _ := parseOptions(first.Body)
+	var magicOpt option
+	for _, o := range opts {
+		if o.Type == optMagic {
+			magicOpt = o
+		}
+	}
+	if magicOpt.Type != optMagic {
+		t.Fatal("first LCP request carried no Magic-Number option")
+	}
+
+	deliver(s, ProtocolLCP, codeConfigureReject, first.ID, marshalOptions([]option{magicOpt}))
+
+	resent := tr.lastCP(t, ProtocolLCP)
+	if resent.Code != codeConfigureRequest {
+		t.Fatalf("expected a resent Configure-Request, got code %d", resent.Code)
+	}
+	ropts, _ := parseOptions(resent.Body)
+	for _, o := range ropts {
+		if o.Type == optMagic {
+			t.Error("resent request still contains Magic-Number after a Reject")
+		}
+	}
+}
+
 // TestIPFrameHelpers checks the IP encapsulation round-trips.
 func TestIPFrameHelpers(t *testing.T) {
 	pkt := []byte{0x45, 0, 0, 20, 1, 2, 3, 4}

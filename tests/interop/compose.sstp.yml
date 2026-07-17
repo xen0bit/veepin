@@ -1,6 +1,9 @@
-# SSTP interop: veepin client → SoftEther SSTP server.
-# SoftEther must be configured with a user "sstpuser" / password "sstppass"
-# and an SSTP-enabled virtual hub "VPN".
+# SSTP interop: veepin client -> SoftEther SSTP server.
+#
+# The siomiz/softethervpn image ships an SSTP-capable server but auto-generates a
+# random user and leaves SSTP disabled, so an `init` sidecar drives vpncmd to a
+# deterministic state (SSTP on, a known MS-CHAPv2 user, SecureNAT with a pingable
+# 192.168.30.1 gateway) before the client is allowed to start.
 name: veepin-sstp
 
 services:
@@ -8,10 +11,20 @@ services:
     image: siomiz/softethervpn:latest
     cap_add: [NET_ADMIN]
     environment:
-      PSK: "sstp-interop"
-      USER: "sstpuser"
-      PASS: "sstppass"
+      SPW: "sstpadmin" # server management password (vpncmd)
+
+  init:
+    image: siomiz/softethervpn:latest
+    depends_on: [server]
+    environment:
+      SERVER: "server"
       SPW: "sstpadmin"
+      SSTP_USER: "sstpuser"
+      SSTP_PASS: "sstppass"
+    volumes:
+      - ./softether/sstp-init.sh:/sstp-init.sh:ro
+    entrypoint: ["/bin/sh", "/sstp-init.sh"]
+    restart: "no"
 
   client:
     image: veepin:interop
@@ -20,7 +33,9 @@ services:
       dockerfile: Dockerfile
     cap_add: [NET_ADMIN]
     devices: ["/dev/net/tun:/dev/net/tun"]
-    depends_on: [server]
+    depends_on:
+      init:
+        condition: service_completed_successfully
     environment:
       SERVER: "server"
       USER: "sstpuser"
