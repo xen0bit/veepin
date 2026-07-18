@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -82,8 +83,17 @@ func runConnect(args []string) error {
 	// 3. Wait for a signal or for the session to end on its own.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	_ = sess.Wait(ctx)
-	logger.Printf("disconnecting")
+	// Report why the session ended. A tunnel that dies on its own — a dropped
+	// carrier, a peer teardown, a protocol error — is otherwise indistinguishable
+	// from a clean Ctrl-C, which makes a failure in the field or in CI nearly
+	// impossible to diagnose from the logs.
+	err = sess.Wait(ctx)
+	switch {
+	case err == nil || errors.Is(err, context.Canceled):
+		logger.Printf("disconnecting")
+	default:
+		logger.Printf("disconnecting: %v", err)
+	}
 	return nil
 }
 
