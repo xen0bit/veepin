@@ -6,6 +6,10 @@ name: interop
 # to the code that affects a data path or handshake so it does not run on
 # unrelated changes.
 on:
+  # Manual trigger, so a suspected flake can be re-run on demand without pushing
+  # a commit. The interop suite talks to real peers over Docker, so an
+  # intermittent failure is best characterised by running it repeatedly.
+  workflow_dispatch:
   push:
     branches: [main]
     paths:
