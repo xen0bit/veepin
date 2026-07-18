@@ -276,6 +276,17 @@ func TestInteropWireguardRekey(t *testing.T) {
 	}
 }
 
+// TestInteropVeepinClientL2TPServer proves the L2TP/IPsec client against the
+// reference stack it exists to speak to: strongSwan terminating the IKEv1-keyed
+// ESP transport SA and xl2tpd terminating L2TP inside it, driving pppd for the
+// PPP session. The veepin client runs Main Mode with a PSK, Quick Mode for the
+// transport SA, the L2TP control channel and MS-CHAPv2/IPCP, then pings
+// 10.30.0.1 — pppd's LNS-side address — across the tunnel. Every layer here
+// faces an implementation veepin shares no code with.
+func TestInteropVeepinClientL2TPServer(t *testing.T) {
+	runInterop(t, "compose.l2tp.yml", "veepin-l2tp-client", "10.30.0.1")
+}
+
 // TestInteropL2TPSelf is the veepin<->veepin L2TP/IPsec sanity check, and the
 // broadest single test here: one ping crosses IKEv1 (Main + Quick mode), an ESP
 // transport SA, the L2TP control and data channels, and a PPP/MS-CHAPv2/IPCP

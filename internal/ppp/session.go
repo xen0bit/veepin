@@ -70,9 +70,10 @@ const (
 )
 
 // Session is a PPP client link: it negotiates LCP, authenticates with
-// MS-CHAPv2, and negotiates IPCP, then carries IP. It assumes a reliable,
-// in-order transport (SSTP over TLS/TCP), so it drives its state machine purely
-// from received packets without retransmission timers.
+// MS-CHAPv2, and negotiates IPCP, then carries IP. It is driven by received
+// packets, with one timer: the RFC 1661 Restart timer covering an outstanding
+// Configure-Request, which only fires on a lossy carrier such as L2TP's
+// unreliable data channel (see restart.go).
 type Session struct {
 	username, password string
 	tr                 Transport
@@ -83,13 +84,17 @@ type Session struct {
 	magic uint32
 	reqID byte
 
+	lcpRestart, ipcpRestart restartTimer
+
 	lcpReqID                    byte
+	lcpConfigReq                []byte // the outstanding request, for retransmission
 	lcpLocalOpen, lcpRemoteOpen bool
 	lcpAuthNaks                 int
 	lcpUseMRU, lcpUseMagic      bool
 	lcpMRU                      uint16
 
 	ipcpReqID                     byte
+	ipcpConfigReq                 []byte // the outstanding request, for retransmission
 	ipcpLocalOpen, ipcpRemoteOpen bool
 	reqIP, reqDNS1, reqDNS2       net.IP
 	peerIP                        net.IP
@@ -177,6 +182,8 @@ func (s *Session) failLocked(err error) {
 		return
 	}
 	s.phase = phaseClosed
+	s.lcpRestart.stop()
+	s.ipcpRestart.stop()
 	s.h.Closed(err)
 }
 
@@ -195,7 +202,27 @@ func (s *Session) sendLCPConfigReq() {
 		opts = append(opts, option{Type: optMagic, Value: magic[:]})
 	}
 	s.lcpReqID = s.nextID()
-	s.send(ProtocolLCP, cpPacket{Code: codeConfigureRequest, ID: s.lcpReqID, Body: marshalOptions(opts)}.marshal())
+	s.lcpConfigReq = cpPacket{Code: codeConfigureRequest, ID: s.lcpReqID, Body: marshalOptions(opts)}.marshal()
+	s.resendLCPConfigReq()
+}
+
+// resendLCPConfigReq (re)transmits the outstanding LCP Configure-Request and
+// re-arms the Restart timer, reusing the original identifier.
+func (s *Session) resendLCPConfigReq() {
+	s.send(ProtocolLCP, s.lcpConfigReq)
+	s.lcpRestart.arm(s.withLock, s.resendLCPConfigReq, func() {
+		s.failLocked(fmt.Errorf("ppp: no reply to the LCP Configure-Request"))
+	})
+}
+
+// withLock runs fn with the session locked, for the Restart timer's callback.
+func (s *Session) withLock(fn func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.phase == phaseClosed {
+		return
+	}
+	fn()
 }
 
 // applyLCPNak adopts the values the peer suggested for our request (e.g. a
@@ -241,11 +268,15 @@ func (s *Session) handleLCP(payload []byte) {
 	if !ok {
 		return
 	}
+	// Any LCP reply proves the peer is alive, so the Restart budget for the next
+	// request starts fresh.
+	s.lcpRestart.alive()
 	switch pkt.Code {
 	case codeConfigureRequest:
 		s.handleLCPConfigReq(pkt)
 	case codeConfigureAck:
 		if pkt.ID == s.lcpReqID {
+			s.lcpRestart.stop()
 			s.lcpLocalOpen = true
 			s.maybeLCPUp()
 		}
@@ -384,7 +415,17 @@ func (s *Session) sendIPCPConfigReq() {
 		opts = append(opts, option{Type: optSecondaryDNS, Value: s.reqDNS2})
 	}
 	s.ipcpReqID = s.nextID()
-	s.send(ProtocolIPCP, cpPacket{Code: codeConfigureRequest, ID: s.ipcpReqID, Body: marshalOptions(opts)}.marshal())
+	s.ipcpConfigReq = cpPacket{Code: codeConfigureRequest, ID: s.ipcpReqID, Body: marshalOptions(opts)}.marshal()
+	s.resendIPCPConfigReq()
+}
+
+// resendIPCPConfigReq (re)transmits the outstanding IPCP Configure-Request and
+// re-arms the Restart timer, reusing the original identifier.
+func (s *Session) resendIPCPConfigReq() {
+	s.send(ProtocolIPCP, s.ipcpConfigReq)
+	s.ipcpRestart.arm(s.withLock, s.resendIPCPConfigReq, func() {
+		s.failLocked(fmt.Errorf("ppp: no reply to the IPCP Configure-Request"))
+	})
 }
 
 func (s *Session) handleIPCP(payload []byte) {
@@ -392,6 +433,7 @@ func (s *Session) handleIPCP(payload []byte) {
 	if !ok {
 		return
 	}
+	s.ipcpRestart.alive()
 	switch pkt.Code {
 	case codeConfigureRequest:
 		// Accept the server's own IPCP options and record its inner address, which
@@ -408,6 +450,7 @@ func (s *Session) handleIPCP(payload []byte) {
 		s.maybeIPCPUp()
 	case codeConfigureAck:
 		if pkt.ID == s.ipcpReqID {
+			s.ipcpRestart.stop()
 			s.ipcpLocalOpen = true
 			s.maybeIPCPUp()
 		}

@@ -1,0 +1,20 @@
+# pppd options for the xl2tpd LNS. MS-CHAPv2 only, matching what veepin's PPP
+# client offers — every weaker method is refused so a passing test cannot be one
+# that quietly fell back to PAP.
+require-mschap-v2
+refuse-pap
+refuse-chap
+refuse-mschap
+refuse-eap
+ms-dns 8.8.8.8
+asyncmap 0
+auth
+hide-password
+name veepin-lns
+nodefaultroute
+noccp
+# veepin's PPP carries IPv4 only, so IPV6CP would just retry until it gave up.
+noipv6
+proxyarp
+debug
+logfile /dev/stderr

@@ -1,0 +1,42 @@
+# veepin L2TP/IPsec client -> reference L2TP/IPsec server (strongSwan + xl2tpd).
+# The classic stack: strongSwan terminates the IKEv1-keyed ESP transport SA and
+# xl2tpd terminates L2TP inside it, driving pppd for the PPP session. The veepin
+# client runs its own IKEv1 Main + Quick mode, ESP, L2TP and PPP against code it
+# shares nothing with, then pings 10.30.0.1 — pppd's LNS-side address — across
+# the tunnel.
+name: veepin-interop-l2tp
+
+services:
+  l2tp-server:
+    build:
+      context: l2tp-server
+    image: interop-l2tp-server
+    # pppd sets the PPP line discipline on its pty, which needs privileges beyond
+    # NET_ADMIN inside a container — the same requirement the SSTP interop has.
+    privileged: true
+    devices:
+      - "/dev/ppp:/dev/ppp"
+    environment:
+      USER: "l2tpuser"
+      PASS: "l2tppass"
+    volumes:
+      - ./l2tp-server/entrypoint.sh:/entrypoint.sh:ro
+      - ./l2tp-server:/conf:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-l2tp-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [l2tp-server]
+    environment:
+      SERVER: "l2tp-server"
+      PSK: "l2tpsecret"
+      USER: "l2tpuser"
+      PASS: "l2tppass"
+    volumes:
+      - ./veepin/l2tp-client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

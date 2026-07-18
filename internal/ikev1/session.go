@@ -193,12 +193,52 @@ func (s *Session) HandleInbound(pkt []byte) {
 }
 
 func (s *Session) dispatch(h header, first uint8, rest []byte) error {
+	// Route on the exchange type, not just on what the state machine expects
+	// next. A peer may interleave an Informational exchange (a notify such as
+	// INITIAL_CONTACT, or a delete) at any point; feeding one to the Main Mode
+	// handlers would fail the session over a message that was never part of it.
+	switch h.exchange {
+	case exchangeMain, exchangeQuick:
+	default:
+		s.logger.Printf("ikev1: ignoring exchange type %d", h.exchange)
+		return nil
+	}
+	if want := s.expectedExchange(); want != 0 && h.exchange != want {
+		s.logger.Printf("ikev1: ignoring exchange type %d while awaiting %d", h.exchange, want)
+		return nil
+	}
+	// Notifications ride the same exchange type as Main Mode, so a plaintext
+	// message must be screened for them before the handlers see it. Encrypted
+	// ones are screened by the handler that decrypts them.
+	if h.flags&flagEncryption == 0 {
+		if payloads, _, err := parsePayloads(first, rest); err == nil {
+			informational, nerr := s.handleNotifies(payloads)
+			if nerr != nil {
+				return nerr
+			}
+			if informational {
+				return nil
+			}
+		}
+	}
 	switch s.cfg.Role {
 	case Initiator:
 		return s.dispatchInitiator(h, first, rest)
 	default:
 		return s.dispatchResponder(h, first, rest)
 	}
+}
+
+// expectedExchange is the exchange type the current state is waiting for, or 0
+// if the state accepts either.
+func (s *Session) expectedExchange() uint8 {
+	switch s.state {
+	case stInit, stWaitMM2, stWaitMM3, stWaitMM4, stWaitMM5, stWaitMM6:
+		return exchangeMain
+	case stWaitQM1, stWaitQM2, stWaitQM3:
+		return exchangeQuick
+	}
+	return 0
 }
 
 // --- transmit / retransmit ---
