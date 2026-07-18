@@ -276,6 +276,51 @@ func TestInteropWireguardRekey(t *testing.T) {
 	}
 }
 
+// TestInteropVeepinClientAnyConnectServer proves the AnyConnect client against
+// ocserv — the open-source implementation of this protocol, written by the
+// author of its specification, and therefore the authoritative peer to test
+// against. The veepin client runs the XML credential exchange, the CONNECT that
+// assigns addressing, and the CSTP data path, then pings 10.12.0.1 (ocserv's own
+// tunnel-side address) across the tunnel.
+func TestInteropVeepinClientAnyConnectServer(t *testing.T) {
+	requireDocker(t)
+	pkiDir := filepath.Join("anyconnect", "pki")
+	if err := generateAnyConnectServerCert(pkiDir); err != nil {
+		t.Fatalf("generate AnyConnect cert: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
+	runInterop(t, "compose.anyconnect.yml", "veepin-anyconnect-client", "10.12.0.1")
+}
+
+// TestInteropAnyConnectClientVeepinServer is the reverse direction: the real
+// openconnect client against the veepin *server*. It proves the responder — the
+// server-role XML credential exchange, the CONNECT reply whose headers carry the
+// assigned address, netmask, DNS and MTU, and the server's CSTP data path —
+// against a client veepin shares no code with. openconnect pings 10.11.0.1, the
+// veepin server's tunnel gateway.
+func TestInteropAnyConnectClientVeepinServer(t *testing.T) {
+	requireDocker(t)
+	pkiDir := filepath.Join("anyconnect", "pki")
+	if err := generateAnyConnectServerCert(pkiDir); err != nil {
+		t.Fatalf("generate AnyConnect cert: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
+	runInterop(t, "compose.anyconnect-server.yml", "openconnect", "10.11.0.1")
+}
+
+// TestInteropAnyConnectSelf is the veepin<->veepin AnyConnect sanity check: both
+// ends over a real TLS connection and TUNs, isolating a veepin break from an
+// interop break.
+func TestInteropAnyConnectSelf(t *testing.T) {
+	requireDocker(t)
+	pkiDir := filepath.Join("anyconnect", "pki")
+	if err := generateAnyConnectServerCert(pkiDir); err != nil {
+		t.Fatalf("generate AnyConnect cert: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
+	runInterop(t, "compose.anyconnect-self.yml", "veepin-anyconnect-client", "10.11.0.1")
+}
+
 // TestInteropVeepinClientL2TPServer proves the L2TP/IPsec client against the
 // reference stack it exists to speak to: strongSwan terminating the IKEv1-keyed
 // ESP transport SA and xl2tpd terminating L2TP inside it, driving pppd for the

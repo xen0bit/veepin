@@ -10,6 +10,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/xen0bit/veepin/anyconnect"
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/ikev2"
@@ -240,6 +241,30 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 			}
 			if *port != 0 {
 				opts[l2tp.OptPort] = fmt.Sprint(*port)
+			}
+			return opts
+		}, nil
+	case "anyconnect":
+		var (
+			server   = fs.String("server", "", "AnyConnect server host or IP (required)")
+			port     = fs.Int("port", 0, "server HTTPS port (default 443)")
+			user     = fs.String("user", "", "username (required)")
+			pass     = fs.String("pass", "", "password (required)")
+			insecure = fs.Bool("insecure", false, "skip TLS certificate verification (self-signed servers)")
+			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+		)
+		return func() map[string]string {
+			opts := map[string]string{
+				anyconnect.OptServer:   *server,
+				anyconnect.OptUser:     *user,
+				anyconnect.OptPassword: *pass,
+				anyconnect.OptTUNName:  *tun,
+			}
+			if *port != 0 {
+				opts[anyconnect.OptPort] = fmt.Sprint(*port)
+			}
+			if *insecure {
+				opts[anyconnect.OptInsecure] = "true"
 			}
 			return opts
 		}, nil

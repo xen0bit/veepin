@@ -1,0 +1,39 @@
+# veepin AnyConnect client -> reference AnyConnect server (ocserv).
+# ocserv is the open-source implementation of this protocol, written by the
+# author of its specification, so it is the authoritative peer to test against.
+# The veepin client runs the XML credential exchange, the CONNECT that assigns
+# addressing, and the CSTP data path, then pings 10.12.0.1 — ocserv's own
+# tunnel-side address — across the tunnel.
+name: veepin-interop-anyconnect
+
+services:
+  ocserv:
+    build:
+      context: ocserv
+    image: interop-ocserv
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      USER: "ocuser"
+      PASS: "ocpass"
+    volumes:
+      - ./anyconnect/pki:/pki:ro
+      - ./ocserv/entrypoint.sh:/entrypoint.sh:ro
+      - ./ocserv:/conf:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-anyconnect-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [ocserv]
+    environment:
+      SERVER: "ocserv"
+      USER: "ocuser"
+      PASS: "ocpass"
+    volumes:
+      - ./veepin/anyconnect-client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

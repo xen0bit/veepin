@@ -1,0 +1,38 @@
+# Reference AnyConnect client (openconnect) -> veepin AnyConnect server.
+# The mirror of compose.anyconnect.yml: here veepin is the responder, so this
+# exercises the server-role XML credential exchange, the CONNECT reply carrying
+# the assigned addressing, and the server's CSTP data path — against a client
+# veepin shares no code with. openconnect pings 10.11.0.1, the veepin server's
+# tunnel gateway.
+name: veepin-interop-anyconnect-server
+
+services:
+  veepin-anyconnect-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      USER: "ocuser"
+      PASS: "ocpass"
+    volumes:
+      - ./anyconnect/pki:/pki:ro
+      - ./veepin/anyconnect-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  openconnect:
+    build:
+      context: openconnect
+    image: interop-openconnect
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-anyconnect-server]
+    environment:
+      SERVER: "veepin-anyconnect-server"
+      USER: "ocuser"
+      PASS: "ocpass"
+    volumes:
+      - ./anyconnect/pki:/pki:ro
+      - ./openconnect/entrypoint.sh:/entrypoint.sh:ro

@@ -31,6 +31,9 @@ dependency. Tests skip cleanly if Docker is unavailable.
 | `TestInteropVeepinClientL2TPServer` | `veepin connect l2tp` | strongSwan + xl2tpd | `10.30.0.1` |
 | `TestInteropL2TPClientVeepinServer` | strongSwan + xl2tpd | `veepin serve l2tp` | `10.20.0.1` |
 | `TestInteropL2TPSelf` | `veepin connect l2tp` | `veepin serve l2tp` | `10.20.0.1` |
+| `TestInteropVeepinClientAnyConnectServer` | `veepin connect anyconnect` | ocserv | `10.12.0.1` |
+| `TestInteropAnyConnectClientVeepinServer` | openconnect | `veepin serve anyconnect` | `10.11.0.1` |
+| `TestInteropAnyConnectSelf` | `veepin connect anyconnect` | `veepin serve anyconnect` | `10.11.0.1` |
 
 ## Layout
 
@@ -43,6 +46,8 @@ dependency. Tests skip cleanly if Docker is unavailable.
   mode) plus xl2tpd/pppd as the LNS.
 - `l2tp-client/` — reference L2TP/IPsec client image: the same pair in initiator /
   LAC roles, as a Linux desktop dials an L2TP VPN.
+- `ocserv/` — reference AnyConnect server (ocserv) image + config.
+- `openconnect/` — reference AnyConnect client (openconnect) image.
 - `veepin/` — entrypoints for `veepin serve` / `veepin connect`.
 - `compose.*.yml` — one per scenario.
 - `interop_test.go` — the `//go:build interop` harness (compose up → retry ping → down).
@@ -68,6 +73,12 @@ dependency. Tests skip cleanly if Docker is unavailable.
   pppd containers are `privileged` and mount `/dev/ppp`, as the SSTP one is,
   because pppd sets the PPP line discipline on its pty. pppd is configured to
   refuse everything but MS-CHAPv2, so a pass cannot be a silent fallback to PAP.
+- The AnyConnect scenarios share one throwaway self-signed certificate per run,
+  generated into `anyconnect/pki/` (gitignored). The veepin client passes
+  `-insecure`; openconnect has no such flag, so its entrypoint pins the
+  certificate by computing `pin-sha256:base64(sha256(SubjectPublicKeyInfo))` —
+  note this is an SPKI pin, not a digest of the whole certificate. openconnect
+  runs with `--no-dtls`, since veepin implements the CSTP (TLS) data channel.
 - The OpenVPN scenarios share one throwaway EC PKI and a 2048-bit static key,
   generated per run into `openvpn/pki/` (gitignored) and mounted into both ends.
   The four profiles reuse one server image and one client entrypoint; the server

@@ -1,0 +1,34 @@
+# veepin AnyConnect client <-> veepin AnyConnect server (self-test).
+# Both ends are veepin over a real TLS connection and TUNs, isolating a veepin
+# break from an interop break. The client pings 10.11.0.1 (the server's tunnel
+# gateway). The self-signed server cert is generated per run by the test.
+name: veepin-interop-anyconnect-self
+
+services:
+  veepin-anyconnect-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      USER: "ocuser"
+      PASS: "ocpass"
+    volumes:
+      - ./anyconnect/pki:/pki:ro
+      - ./veepin/anyconnect-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-anyconnect-client:
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-anyconnect-server]
+    environment:
+      SERVER: "veepin-anyconnect-server"
+      USER: "ocuser"
+      PASS: "ocpass"
+    volumes:
+      - ./veepin/anyconnect-client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

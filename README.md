@@ -2,8 +2,9 @@
 
 A **working userspace VPN in Go** — both a server (responder) and a client
 (initiator) — written from scratch, with `golang.org/x/crypto` the only
-dependency. It speaks six protocols, **client and server for every one**:
-**IKEv2/ESP**, **WireGuard**, **OpenVPN**, **SSTP**, **SSH**, and **L2TP/IPsec**.
+dependency. It speaks seven protocols, **client and server for every one**:
+**IKEv2/ESP**, **WireGuard**, **OpenVPN**, **SSTP**, **SSH**, **L2TP/IPsec**, and
+**AnyConnect**.
 The SSTP side runs Microsoft's Secure Socket Tunneling Protocol over TLS — the
 `SSTP_DUPLEX_POST` HTTP handshake, the CALL_CONNECT crypto binding, MS-CHAPv2
 authentication and a PPP/IPCP data path — as both client and server, verified
@@ -97,6 +98,18 @@ drives the production client against the live server and checks bidirectional ES
   IPCP assigns it. Both roles are verified in Docker against the reference stack —
   the veepin client against strongSwan + xl2tpd, the veepin server against
   strongSwan and xl2tpd dialling in — and against each other.
+- **AnyConnect client and server**: the Cisco SSL VPN protocol, as specified in
+  draft-mavrogiannopoulos-openconnect and implemented by OpenConnect and ocserv.
+  The tunnel runs entirely over HTTPS — an XML credential exchange, then a
+  `CONNECT /CSCOSSLC/tunnel` whose response headers carry the client's address,
+  netmask, DNS, MTU and split routes — after which the same TLS connection
+  carries IP under an 8-octet framing (CSTP), with dead-peer detection and
+  keepalives. Unlike SSTP it involves no PPP at all: addressing is negotiated in
+  HTTP headers, so the whole protocol is the handshake plus a length-prefixed
+  packet stream. Both roles are verified in Docker against ocserv and
+  openconnect, and against each other. The optional DTLS data channel is not
+  implemented — the TLS channel is a complete tunnel, and is what the protocol
+  itself falls back to whenever UDP is unavailable.
 
 ## Cryptography
 
@@ -153,6 +166,7 @@ openvpn                  public OpenVPN entry point: Dial + NewServer, Config, .
 sstp                     public SSTP entry point: Dial + NewServer, Config, crypto binding
 ssh                      public SSH entry point: Dial + NewServer, Config (x/crypto/ssh)
 l2tp                     public L2TP/IPsec entry point: Dial + NewServer, Config
+anyconnect               public AnyConnect entry point: Dial + NewServer, Config
 
 dataplane                TUN device, address pool, packet pump (demux + routing), client routing
 internal/cryptoutil      DH, PRF + prf+, integrity, SK/ESP ciphers, ChaCha20-Poly1305, BLAKE2s
@@ -179,6 +193,8 @@ internal/ppp                 PPP client + server: LCP, MS-CHAPv2 auth, IPCP (tra
 internal/mschap              MS-CHAPv2 primitives + MPPE/HLAK key derivation
 
 internal/sshtun              OpenSSH tun@openssh.com framing: channel-open data + AF packet frames
+
+internal/anyconnect          CSTP framing, the config-auth XML exchange, and the client/server engines
 
 internal/ikev1               ISAKMP/IKEv1: payload codec, Main + Quick mode, SKEYID/KEYMAT, CBC IV chaining
 internal/l2tp                RFC 2661 header/AVP codec, reliable control channel, PPP data channel,
@@ -524,6 +540,36 @@ advertises NAT-T is therefore rejected during Main Mode rather than left to fail
 silently later. Both directions are verified in Docker against strongSwan +
 xl2tpd.
 
+### Connecting as an AnyConnect client
+
+`veepin connect anyconnect` speaks the Cisco SSL VPN protocol to any AnyConnect
+or ocserv server. Everything rides HTTPS, so only credentials are configured; the
+address, DNS and MTU come back in the CONNECT response:
+
+```sh
+sudo ./veepin connect anyconnect \
+  -server vpn.example.com -user alice -pass hunter2
+```
+
+`-insecure` skips certificate verification for a self-signed test server.
+
+### Running an AnyConnect server
+
+`veepin serve anyconnect` is the responder for the same protocol, and a stock
+`openconnect` client connects to it unmodified:
+
+```sh
+sudo ./veepin serve anyconnect \
+  -cert /etc/veepin/server.crt -key /etc/veepin/server.key \
+  -user alice -pass hunter2 \
+  -pool 10.11.0.0/24 -dns 1.1.1.1 -setup-nat -wan eth0
+```
+
+Clients are authenticated by password against the configured user, issued a
+session cookie, and assigned an address from the pool. veepin implements the CSTP
+(TLS) data channel; a client that would prefer DTLS falls back to it
+automatically, and `openconnect --no-dtls` asks for it explicitly.
+
 ## Connecting an OS client
 
 The server authenticates with a machine PSK plus an identity, and assigns the
@@ -718,6 +764,7 @@ both roles, so all three cells below are exercised.
 | SSTP      | ✓ SoftEther                 | ✓ `sstpc`/pppd              | ✓                      |
 | SSH       | ✓ `sshd` (PermitTunnel)     | ✓ `ssh -w`                  | ✓                      |
 | L2TP/IPsec| ✓ strongSwan + xl2tpd       | ✓ strongSwan + xl2tpd       | ✓                      |
+| AnyConnect| ✓ ocserv                    | ✓ openconnect               | ✓                      |
 
 Both roles share one API: a client registers with `client.Register` and is dialed
 by `client.Dial`; a server registers with `client.RegisterServer` and is built by
@@ -850,6 +897,11 @@ place. Seal is a single allocation (the returned packet), open none.
   forwarded.
 - **Single IKE SA per Child.** Sufficient for road-warrior clients; not a
   site-to-site multi-SA gateway.
+- **AnyConnect has no DTLS data channel.** veepin implements the CSTP channel
+  over TLS, which the protocol treats as the fallback whenever UDP is blocked, so
+  tunnels work but do not get DTLS's lower latency. Authentication is
+  username/password only — no client certificates, and none of the
+  vendor-specific single-sign-on flows.
 - **L2TP/IPsec requires UDP-encapsulated ESP.** veepin has no raw IP-protocol-50
   path, so it always forces the NAT-T float to UDP/4500 and rejects a peer that
   cannot do the same. IKEv1 is Main Mode with a PSK only (no Aggressive Mode, no

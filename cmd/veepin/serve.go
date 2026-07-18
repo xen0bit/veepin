@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/xen0bit/veepin/anyconnect"
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/ikev2"
 	"github.com/xen0bit/veepin/l2tp"
@@ -225,6 +226,34 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			}
 			if *port != 0 {
 				opts[l2tp.OptServerPort] = fmt.Sprint(*port)
+			}
+			return opts
+		}, nil
+	case "anyconnect":
+		var (
+			cert     = fs.String("cert", "", "path to the server TLS certificate PEM (required)")
+			key      = fs.String("key", "", "path to the server TLS private key PEM (required)")
+			listenIP = fs.String("listen", "0.0.0.0", "local IP to bind the TCP socket on")
+			port     = fs.Int("port", 0, "TCP port to listen on (default 443)")
+			pool     = fs.String("pool", "10.11.0.0/24", "internal address pool handed to clients")
+			dns      = fs.String("dns", "", "comma-separated DNS servers assigned to clients")
+			user     = fs.String("user", "", "username to accept (required)")
+			pass     = fs.String("pass", "", "the user's password (required)")
+			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+		)
+		return func() map[string]string {
+			opts := map[string]string{
+				anyconnect.OptServerCert:     *cert,
+				anyconnect.OptServerKey:      *key,
+				anyconnect.OptServerListen:   *listenIP,
+				anyconnect.OptServerPool:     *pool,
+				anyconnect.OptServerDNS:      *dns,
+				anyconnect.OptServerUser:     *user,
+				anyconnect.OptServerPassword: *pass,
+				anyconnect.OptServerTUN:      *tun,
+			}
+			if *port != 0 {
+				opts[anyconnect.OptServerPort] = fmt.Sprint(*port)
 			}
 			return opts
 		}, nil
