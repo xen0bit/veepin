@@ -78,6 +78,9 @@ type Tunnel struct {
 	// handshake, then read lock-free by the data path.
 	peerTunnelID  atomic.Uint32
 	peerSessionID atomic.Uint32
+	// closedFlag lets the lock-free data path (SendPPP) short-circuit without
+	// racing the control channel's state field.
+	closedFlag atomic.Bool
 
 	mu             sync.Mutex
 	state          state
@@ -126,7 +129,7 @@ func (t *Tunnel) Start() {
 // with the control channel: data messages are unsequenced and read only the
 // peer IDs, which are fixed by the time the session is up.
 func (t *Tunnel) SendPPP(frame []byte) error {
-	if t.state == stateClosed {
+	if t.closedFlag.Load() {
 		return fmt.Errorf("l2tp: tunnel closed")
 	}
 	tid := uint16(t.peerTunnelID.Load())
@@ -428,6 +431,7 @@ func (t *Tunnel) finishClose(err error) {
 		return
 	}
 	t.state = stateClosed
+	t.closedFlag.Store(true)
 	t.closeErr = err
 	if t.timer != nil {
 		t.timer.Stop()
