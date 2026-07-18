@@ -88,17 +88,26 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if listenIP == nil {
 		listenIP = net.IPv4zero
 	}
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: listenIP, Port: port})
+	// Two sockets: Main Mode arrives on the IKE port, and everything after the
+	// NAT-T float — IKE behind the non-ESP marker, and UDP-encapsulated ESP —
+	// arrives on 4500.
+	ikeConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: listenIP, Port: port})
 	if err != nil {
 		return nil, fmt.Errorf("l2tp: bind %s:%d: %w", cfg.ListenIP, port, err)
 	}
+	nattConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: listenIP, Port: nattPort})
+	if err != nil {
+		ikeConn.Close()
+		return nil, fmt.Errorf("l2tp: bind %s:%d: %w", cfg.ListenIP, nattPort, err)
+	}
 	tun, err := dataplane.OpenTUN(cfg.TUNName)
 	if err != nil {
-		conn.Close()
+		ikeConn.Close()
+		nattConn.Close()
 		return nil, fmt.Errorf("l2tp: open TUN: %w", err)
 	}
 
-	eng := engine.NewServer(conn, tun, engine.ServerConfig{
+	eng := engine.NewServer(ikeConn, nattConn, tun, engine.ServerConfig{
 		PSK:     []byte(cfg.PSK),
 		Users:   cfg.Users,
 		Pool:    pool,

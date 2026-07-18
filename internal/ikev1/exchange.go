@@ -17,7 +17,10 @@ func integKeyLen(integID uint16) int {
 
 func (s *Session) sendMM1() error {
 	s.saBodyI = buildPhase1SA(defaultIKEProposals())
-	msg := marshalMessage(s.mmHeader(exchangeMain, 0, 0), []payload{{typ: payloadSA, body: s.saBodyI}})
+	// The SA payload is what HASH_I/HASH_R authenticate; the Vendor IDs that
+	// follow it announce NAT-T support and are outside that hash.
+	payloads := append([]payload{{typ: payloadSA, body: s.saBodyI}}, natTVendorPayloads()...)
+	msg := marshalMessage(s.mmHeader(exchangeMain, 0, 0), payloads)
 	return s.transmit(msg)
 }
 
@@ -57,6 +60,10 @@ func (s *Session) initHandleMM2(h header, first uint8, rest []byte) error {
 		return fmt.Errorf("ikev1: responder chose an unsupported IKE proposal")
 	}
 	s.prop = prop
+	s.peerNATT = peerSupportsNATT(payloads)
+	if !s.peerNATT {
+		return errNoNATT
+	}
 	s.advance()
 
 	dh, err := dhGroup(prop.group)
@@ -69,10 +76,14 @@ func (s *Session) initHandleMM2(h header, first uint8, rest []byte) error {
 		return err
 	}
 	s.ni = nonce()
-	msg := marshalMessage(s.mmHeader(exchangeMain, 0, 0), []payload{
+	mm3 := []payload{
 		{typ: payloadKE, body: s.localPub},
 		{typ: payloadNonce, body: s.ni},
-	})
+	}
+	if s.peerNATT {
+		mm3 = append(mm3, s.natdPayloads()...)
+	}
+	msg := marshalMessage(s.mmHeader(exchangeMain, 0, 0), mm3)
 	s.state = stWaitMM4
 	return s.transmit(msg)
 }
@@ -95,6 +106,11 @@ func (s *Session) initHandleMM4(first uint8, rest []byte) error {
 	// Initiator: g^xi is our public, g^xr the peer's.
 	s.keys.setInitialIV(s.localPub, s.peerPub)
 	s.advance()
+
+	// Float before MM5: from here on both ends are on the NAT-T port.
+	if s.peerNATT {
+		s.float(payloads)
+	}
 
 	idBody := buildID(ipv4ID(s.cfg.LocalIP))
 	hashI := s.keys.hashI(s.localPub, s.peerPub, s.initCookie, s.respCookie, s.saBodyI, idBody)
@@ -232,9 +248,19 @@ func (s *Session) respHandleMM1(h header, first uint8, rest []byte) error {
 	}
 	s.prop = prop
 	s.propNum = num
+	s.peerNATT = peerSupportsNATT(payloads)
+	if !s.peerNATT {
+		return errNoNATT
+	}
 
 	chosen := buildPhase1SAChosen(num, prop)
-	msg := marshalMessage(s.mmHeader(exchangeMain, 0, 0), []payload{{typ: payloadSA, body: chosen}})
+	mm2 := []payload{{typ: payloadSA, body: chosen}}
+	if s.peerNATT {
+		// Echo NAT-T support only if the initiator offered it, so a peer that
+		// cannot float is not told we expect it to.
+		mm2 = append(mm2, natTVendorPayloads()...)
+	}
+	msg := marshalMessage(s.mmHeader(exchangeMain, 0, 0), mm2)
 	s.state = stWaitMM3
 	return s.transmit(msg)
 }
@@ -269,12 +295,24 @@ func (s *Session) respHandleMM3(first uint8, rest []byte) error {
 	s.keys.setInitialIV(s.peerPub, s.localPub)
 	s.advance()
 
-	msg := marshalMessage(s.mmHeader(exchangeMain, 0, 0), []payload{
+	mm4 := []payload{
 		{typ: payloadKE, body: s.localPub},
 		{typ: payloadNonce, body: s.nr},
-	})
+	}
+	if s.peerNATT {
+		mm4 = append(mm4, s.natdPayloads()...)
+	}
+	msg := marshalMessage(s.mmHeader(exchangeMain, 0, 0), mm4)
 	s.state = stWaitMM5
-	return s.transmit(msg)
+	if err := s.transmit(msg); err != nil {
+		return err
+	}
+	// MM4 goes out on the old port; everything after it — starting with the MM5
+	// we now expect — is on the NAT-T port.
+	if s.peerNATT {
+		s.float(payloads)
+	}
+	return nil
 }
 
 func (s *Session) respHandleMM5(first uint8, rest []byte) error {

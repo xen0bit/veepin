@@ -45,6 +45,10 @@ type Result struct {
 	OutSPI, InSPI          uint32
 	OutEncKey, OutIntegKey []byte
 	InEncKey, InIntegKey   []byte
+
+	// NATT reports that the exchange floated to the NAT-T port, so ESP is
+	// UDP-encapsulated there. veepin always negotiates this.
+	NATT bool
 }
 
 // Handler receives the exchange outcome.
@@ -59,7 +63,14 @@ type Config struct {
 	PSK     []byte
 	LocalIP net.IP
 	PeerIP  net.IP
-	Send    func([]byte) error
+	// LocalPort and PeerPort are the source and destination ports of the initial
+	// (pre-float) IKE datagrams. They are hashed into the NAT-D payloads, so they
+	// must be what the wire actually carries, not the well-known 500.
+	LocalPort, PeerPort uint16
+	// Send transmits one IKE datagram. natt reports whether the session has
+	// floated: the transport then sends from the NAT-T port with the non-ESP
+	// marker rather than the plain IKE port.
+	Send    func(msg []byte, natt bool) error
 	Handler Handler
 	Logger  *log.Logger
 }
@@ -107,6 +118,10 @@ type Session struct {
 	saBodyI           []byte // initiator's SA payload body, for HASH_I/HASH_R
 	keys              *phase1
 
+	// NAT traversal.
+	peerNATT bool // the peer advertised a NAT-T vendor ID
+	floated  bool // IKE (and ESP) have moved to the NAT-T port
+
 	// Quick Mode.
 	esp        espProposal
 	qmMsgID    uint32
@@ -115,10 +130,25 @@ type Session struct {
 	inSPI      uint32 // our inbound ESP SPI
 	outSPI     uint32 // peer's inbound ESP SPI (stamped on our outbound ESP)
 
-	// Retransmission of the last message we sent.
-	lastSent []byte
-	timer    *time.Timer
-	retries  int
+	// Retransmission of the last message we sent. lastSentNATT pins it to the
+	// port it originally went out on: the responder floats immediately after
+	// sending MM4, and a retransmit of MM4 must still use the pre-float port.
+	lastSent     []byte
+	lastSentNATT bool
+	timer        *time.Timer
+	retries      int
+}
+
+// InitiatorCookie extracts the initiator cookie that opens every ISAKMP header.
+// A server demultiplexes inbound IKE by it rather than by source address, since
+// the NAT-T float moves a session to a different port mid-exchange.
+func InitiatorCookie(msg []byte) ([8]byte, bool) {
+	var c [8]byte
+	if len(msg) < isakmpHeaderLen {
+		return c, false
+	}
+	copy(c[:], msg[:8])
+	return c, true
 }
 
 // NewSession builds an IKE session. The initiator must call Start; the responder
@@ -175,9 +205,10 @@ func (s *Session) dispatch(h header, first uint8, rest []byte) error {
 
 func (s *Session) transmit(msg []byte) error {
 	s.lastSent = msg
+	s.lastSentNATT = s.floated
 	s.retries = 0
 	s.armTimer()
-	return s.cfg.Send(msg)
+	return s.cfg.Send(msg, s.floated)
 }
 
 func (s *Session) armTimer() {
@@ -198,7 +229,7 @@ func (s *Session) onRetransmit() {
 		s.failLocked(fmt.Errorf("ikev1: exchange timed out"))
 		return
 	}
-	_ = s.cfg.Send(s.lastSent)
+	_ = s.cfg.Send(s.lastSent, s.lastSentNATT)
 	s.timer = time.AfterFunc(ikeRetransmitInterval, s.onRetransmit)
 }
 

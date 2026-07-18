@@ -32,19 +32,21 @@ const (
 
 // Payload types (RFC 2408 section 3.1, plus NAT-T from RFC 3947).
 const (
-	payloadNone      = 0
-	payloadSA        = 1
-	payloadProposal  = 2
-	payloadTransform = 3
-	payloadKE        = 4
-	payloadID        = 5
-	payloadHash      = 8
-	payloadNonce     = 10
-	payloadNotify    = 11
-	payloadDelete    = 12
-	payloadVendorID  = 13
-	payloadNATD      = 20 // NAT-Discovery (RFC 3947); draft used 130
-	payloadNATOA     = 21 // NAT-Original-Address; draft used 131
+	payloadNone       = 0
+	payloadSA         = 1
+	payloadProposal   = 2
+	payloadTransform  = 3
+	payloadKE         = 4
+	payloadID         = 5
+	payloadHash       = 8
+	payloadNonce      = 10
+	payloadNotify     = 11
+	payloadDelete     = 12
+	payloadVendorID   = 13
+	payloadNATD       = 20 // NAT-Discovery (RFC 3947)
+	payloadNATOA      = 21 // NAT-Original-Address (RFC 3947)
+	payloadNATDDraft  = 130
+	payloadNATOADraft = 131
 )
 
 // IPsec DOI (RFC 2407).
@@ -109,8 +111,8 @@ const (
 	encapTransport         = 2
 	encapUDPTunnel         = 3
 	encapUDPTransport      = 4
-	encapUDPTransportDraft = 61443
-	encapUDPTunnelDraft    = 61444
+	encapUDPTunnelDraft    = 61443
+	encapUDPTransportDraft = 61444
 )
 
 // Phase-2 authentication algorithms (RFC 2407 section 4.5).
@@ -132,4 +134,11 @@ const (
 const (
 	ipProtoUDP = 17
 	l2tpPort   = 1701
+)
+
+// ikePort carries IKE before NAT traversal; nattPort carries IKE (behind the
+// non-ESP marker) and UDP-encapsulated ESP after the float.
+const (
+	ikePort  = 500
+	nattPort = 4500
 )

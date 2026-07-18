@@ -26,6 +26,10 @@ const (
 	// nonESPMarkerLen is the 4-octet zero prefix distinguishing an IKE message
 	// from an ESP packet on the shared NAT-T port (RFC 3948 section 2.2).
 	nonESPMarkerLen = 4
+	// defaultIKEPort carries Main Mode; nattPort carries IKE and ESP after the
+	// NAT-T float (RFC 3947).
+	defaultIKEPort = 500
+	nattPort       = 4500
 )
 
 // newESPSA builds a transport-mode ESP SA from a completed IKEv1 exchange. The

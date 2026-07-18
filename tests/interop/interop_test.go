@@ -276,6 +276,15 @@ func TestInteropWireguardRekey(t *testing.T) {
 	}
 }
 
+// TestInteropL2TPSelf is the veepin<->veepin L2TP/IPsec sanity check, and the
+// broadest single test here: one ping crosses IKEv1 (Main + Quick mode), an ESP
+// transport SA, the L2TP control and data channels, and a PPP/MS-CHAPv2/IPCP
+// session before it reaches the server's tunnel gateway. Because the stack is so
+// layered, this isolates a break in any one layer from an interop break.
+func TestInteropL2TPSelf(t *testing.T) {
+	runInterop(t, "compose.l2tp-self.yml", "veepin-l2tp-client", "10.20.0.1")
+}
+
 // waitPing retries a short ping from pingSvc to target until one reports no loss
 // or pingDeadline elapses, reporting whether the tunnel came up.
 func waitPing(t *testing.T, composeFile, pingSvc, target string) bool {

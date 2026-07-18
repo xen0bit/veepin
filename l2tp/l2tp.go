@@ -43,10 +43,13 @@ const (
 	OptTUNName  = "tun"
 )
 
-// defaultPort is the port veepin binds for the combined IKE/ESP socket. Real
-// L2TP/IPsec splits IKE (500) and NAT-T ESP (4500); veepin carries both on one
-// port distinguished by the non-ESP marker, so a single value configures it.
-const defaultPort = 500
+// defaultPort is the IKE port Main Mode starts on. After the NAT-T float both
+// IKE and UDP-encapsulated ESP move to nattPort, which RFC 3948 fixes — so only
+// the IKE port is configurable.
+const (
+	defaultPort = 500
+	nattPort    = 4500
+)
 
 const dialTimeout = 30 * time.Second
 
@@ -120,9 +123,16 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	if err != nil {
 		return nil, client.Result{}, fmt.Errorf("l2tp: resolve %s: %w", cfg.Server, err)
 	}
-	conn, err := net.DialUDP("udp", nil, raddr)
+	// One unconnected socket carries Main Mode to the IKE port and, after the
+	// NAT-T float, both IKE and ESP to the NAT-T port. localIP is discovered
+	// before binding it, since the socket itself is wildcard-bound.
+	localIP, err := outboundIP(raddr)
 	if err != nil {
-		return nil, client.Result{}, fmt.Errorf("l2tp: dial %s: %w", raddr, err)
+		return nil, client.Result{}, err
+	}
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: localIP})
+	if err != nil {
+		return nil, client.Result{}, fmt.Errorf("l2tp: bind: %w", err)
 	}
 	tun, err := dataplane.OpenTUN(cfg.TUNName)
 	if err != nil {
@@ -132,6 +142,9 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 
 	c := engine.NewClient(conn, tun, engine.ClientConfig{
 		ServerIP: raddr.IP,
+		IKEPort:  port,
+		NATTPort: nattPort,
+		LocalIP:  localIP,
 		PSK:      []byte(cfg.PSK),
 		Username: cfg.Username,
 		Password: cfg.Password,
@@ -183,6 +196,24 @@ func (s *session) Close() error {
 	err := s.engine.Close()
 	s.tun.Close()
 	return err
+}
+
+// outboundIP reports the local address the kernel would source traffic to raddr
+// from. IKE puts it in the ID payload and the phase-2 traffic selectors, so it
+// has to be the real interface address rather than the wildcard the socket binds.
+// The dial is connectionless — it consults the routing table without any packet
+// leaving the host.
+func outboundIP(raddr *net.UDPAddr) (net.IP, error) {
+	probe, err := net.DialUDP("udp", nil, raddr)
+	if err != nil {
+		return nil, fmt.Errorf("l2tp: route to %s: %w", raddr.IP, err)
+	}
+	defer probe.Close()
+	la, ok := probe.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		return nil, fmt.Errorf("l2tp: cannot determine the local address for %s", raddr.IP)
+	}
+	return la.IP, nil
 }
 
 // parseIPList parses a comma/space-separated list of IPs, dropping anything

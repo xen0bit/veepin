@@ -25,6 +25,9 @@ type tunIO interface {
 // ClientConfig configures the L2TP/IPsec client engine.
 type ClientConfig struct {
 	ServerIP net.IP // the server's outer address (IKE peer, phase-2 selector)
+	IKEPort  int    // the server's Main Mode port (default 500)
+	NATTPort int    // the server's NAT-T port for floated IKE and ESP (default 4500)
+	LocalIP  net.IP // our outer address, as the ID payload and phase-2 selector
 	PSK      []byte
 	Username string
 	Password string
@@ -43,13 +46,21 @@ type NetConfig struct {
 
 // Client is a running L2TP/IPsec client: an IKEv1 initiator whose completed
 // exchange keys an ESP transport SA, inside which an L2TP LAC tunnel carries a
-// PPP session over a TUN. It owns one connected UDP socket carrying both IKE
-// (non-ESP marker) and ESP.
+// PPP session over a TUN.
+//
+// It owns one unconnected UDP socket rather than a dialed one, because NAT-T
+// spans two remote ports: Main Mode starts on the peer's IKE port and floats to
+// the NAT-T port, where IKE (behind the non-ESP marker) and ESP then share the
+// socket. One local port serves both, which also keeps the source port stable
+// across the float.
 type Client struct {
 	cfg    ClientConfig
 	conn   *net.UDPConn
 	tun    tunIO
 	logger *log.Logger
+
+	ikeAddr  *net.UDPAddr // peer's IKE port, used until the float
+	nattAddr *net.UDPAddr // peer's NAT-T port: IKE after the float, and all ESP
 
 	localIP net.IP
 	ike     *ikev1.Session
@@ -65,34 +76,60 @@ type Client struct {
 	closeErr error
 }
 
-// NewClient builds a client over a connected UDP socket (dialed to the server's
-// IKE/NAT-T port) and a TUN.
+// NewClient builds a client over an unconnected UDP socket and a TUN. cfg.IKEPort
+// is the peer's Main Mode port; the NAT-T port is fixed by RFC 3948.
 func NewClient(conn *net.UDPConn, tun tunIO, cfg ClientConfig) *Client {
 	logger := cfg.Logger
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)
 	}
-	c := &Client{
-		cfg:    cfg,
-		conn:   conn,
-		tun:    tun,
-		logger: logger,
-		upCh:   make(chan NetConfig, 1),
-		done:   make(chan struct{}),
+	ikePort := cfg.IKEPort
+	if ikePort == 0 {
+		ikePort = defaultIKEPort
 	}
+	natt := cfg.NATTPort
+	if natt == 0 {
+		natt = nattPort
+	}
+	c := &Client{
+		cfg:      cfg,
+		conn:     conn,
+		tun:      tun,
+		logger:   logger,
+		ikeAddr:  &net.UDPAddr{IP: cfg.ServerIP, Port: ikePort},
+		nattAddr: &net.UDPAddr{IP: cfg.ServerIP, Port: natt},
+		localIP:  cfg.LocalIP,
+		upCh:     make(chan NetConfig, 1),
+		done:     make(chan struct{}),
+	}
+	var localPort uint16
 	if la, ok := conn.LocalAddr().(*net.UDPAddr); ok {
-		c.localIP = la.IP
+		localPort = uint16(la.Port)
 	}
 	c.ike = ikev1.NewSession(ikev1.Config{
-		Role:    ikev1.Initiator,
-		PSK:     cfg.PSK,
-		LocalIP: c.localIP,
-		PeerIP:  cfg.ServerIP,
-		Send:    func(m []byte) error { _, err := c.conn.Write(markIKE(m)); return err },
-		Handler: c,
-		Logger:  logger,
+		Role:      ikev1.Initiator,
+		PSK:       cfg.PSK,
+		LocalIP:   c.localIP,
+		PeerIP:    cfg.ServerIP,
+		LocalPort: localPort,
+		PeerPort:  uint16(ikePort),
+		Send:      c.sendIKE,
+		Handler:   c,
+		Logger:    logger,
 	})
 	return c
+}
+
+// sendIKE transmits an IKE message on whichever port the exchange is currently
+// using: bare on the IKE port before the float, marked as non-ESP on the NAT-T
+// port after it.
+func (c *Client) sendIKE(msg []byte, natt bool) error {
+	if natt {
+		_, err := c.conn.WriteToUDP(markIKE(msg), c.nattAddr)
+		return err
+	}
+	_, err := c.conn.WriteToUDP(msg, c.ikeAddr)
+	return err
 }
 
 // Handshake runs IKE, brings up the ESP SA, L2TP session and PPP link, and
@@ -145,15 +182,24 @@ func (c *Client) fail(err error) {
 	}
 }
 
+// recvLoop demultiplexes the socket. On the IKE port every datagram is a bare
+// IKE message; on the NAT-T port the non-ESP marker tells IKE and ESP apart.
 func (c *Client) recvLoop() {
 	buf := make([]byte, 65535)
 	for {
-		n, err := c.conn.Read(buf)
+		n, from, err := c.conn.ReadFromUDP(buf)
 		if err != nil {
 			c.fail(fmt.Errorf("l2tp: socket read: %w", err))
 			return
 		}
+		if !from.IP.Equal(c.cfg.ServerIP) {
+			continue
+		}
 		pkt := append([]byte(nil), buf[:n]...)
+		if from.Port == c.ikeAddr.Port {
+			c.ike.HandleInbound(pkt)
+			continue
+		}
 		if msg, ok := isIKE(pkt); ok {
 			c.ike.HandleInbound(msg)
 			continue
@@ -204,7 +250,7 @@ func (c *Client) espSend(l2tp []byte) error {
 	if err != nil {
 		return err
 	}
-	_, err = c.conn.Write(pkt)
+	_, err = c.conn.WriteToUDP(pkt, c.nattAddr)
 	return err
 }
 

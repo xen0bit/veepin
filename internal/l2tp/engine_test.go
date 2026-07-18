@@ -51,13 +51,20 @@ func TestClientServerLoopback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Server socket on loopback.
-	srvConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	// The server binds two sockets, as it does in production: Main Mode on one
+	// and floated IKE plus ESP on the other. Both are ephemeral here, since the
+	// real 500/4500 need privileges — hence the ports on ClientConfig.
+	loopback := net.IPv4(127, 0, 0, 1)
+	ikeConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: loopback})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nattConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: loopback})
 	if err != nil {
 		t.Fatal(err)
 	}
 	serverTUN := newFakeTUN()
-	server := NewServer(srvConn, serverTUN, ServerConfig{
+	server := NewServer(ikeConn, nattConn, serverTUN, ServerConfig{
 		PSK:     []byte("secret"),
 		Users:   map[string]string{"alice": "password"},
 		Pool:    pool,
@@ -66,14 +73,17 @@ func TestClientServerLoopback(t *testing.T) {
 	go func() { _ = server.Serve() }()
 	defer server.Close()
 
-	// Client socket dialed to the server.
-	cliConn, err := net.DialUDP("udp", nil, srvConn.LocalAddr().(*net.UDPAddr))
+	// The client's single unconnected socket addresses both server ports.
+	cliConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: loopback})
 	if err != nil {
 		t.Fatal(err)
 	}
 	clientTUN := newFakeTUN()
 	client := NewClient(cliConn, clientTUN, ClientConfig{
-		ServerIP: net.IPv4(127, 0, 0, 1),
+		ServerIP: loopback,
+		LocalIP:  loopback,
+		IKEPort:  ikeConn.LocalAddr().(*net.UDPAddr).Port,
+		NATTPort: nattConn.LocalAddr().(*net.UDPAddr).Port,
 		PSK:      []byte("secret"),
 		Username: "alice",
 		Password: "password",

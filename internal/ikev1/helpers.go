@@ -81,7 +81,7 @@ func (s *Session) finish() {
 
 	r := Result{
 		EncrID: encrID, EncrKeyLn: keyLn, IntegID: integID,
-		OutSPI: s.outSPI, InSPI: s.inSPI,
+		OutSPI: s.outSPI, InSPI: s.inSPI, NATT: s.floated,
 		OutEncKey: outKM[:encKeyLen], OutIntegKey: outKM[encKeyLen:],
 		InEncKey: inKM[:encKeyLen], InIntegKey: inKM[encKeyLen:],
 	}

@@ -25,49 +25,60 @@ type ServerConfig struct {
 	Logger  *log.Logger
 }
 
-// Server is a running L2TP/IPsec responder. Every client rides one shared UDP
-// socket, demultiplexed by source address into a per-peer IKEv1 responder, ESP
-// transport SA, L2TP LNS tunnel and PPP session. A single TUN is shared, with
-// inbound IP routed to the owning peer by inner destination address.
+// Server is a running L2TP/IPsec responder. It binds two sockets — the IKE port
+// for Main Mode and the NAT-T port for everything after the float — and gives
+// each client a per-peer IKEv1 responder, ESP transport SA, L2TP LNS tunnel and
+// PPP session. A single TUN is shared, with inbound IP routed to the owning peer
+// by inner destination address.
+//
+// Peers are keyed by initiator cookie for IKE and by inbound SPI for ESP, not by
+// remote address: NAT-T moves a session to a different port mid-exchange, and a
+// NAT rebinding can move it again afterwards, so the address is tracked as
+// mutable state rather than used as identity.
 type Server struct {
-	cfg     ServerConfig
-	conn    *net.UDPConn
-	tun     tunIO
-	pool    *dataplane.AddrPool
-	gateway net.IP
-	logger  *log.Logger
+	cfg      ServerConfig
+	ikeConn  *net.UDPConn // port 500: Main Mode
+	nattConn *net.UDPConn // port 4500: floated IKE + UDP-encapsulated ESP
+	tun      tunIO
+	pool     *dataplane.AddrPool
+	gateway  net.IP
+	logger   *log.Logger
 
-	mu    sync.Mutex
-	peers map[string]*serverPeer // keyed by remote address
-	byIP  map[uint32]*serverPeer // inner IP -> peer, for TUN egress
+	mu       sync.Mutex
+	byCookie map[[8]byte]*serverPeer // initiator cookie -> peer, for IKE
+	bySPI    map[uint32]*serverPeer  // our inbound ESP SPI -> peer
+	byIP     map[uint32]*serverPeer  // inner IP -> peer, for TUN egress
 
 	done      chan struct{}
 	closeOnce sync.Once
 }
 
-// NewServer builds a server over a bound UDP socket and a TUN.
-func NewServer(conn *net.UDPConn, tun tunIO, cfg ServerConfig) *Server {
+// NewServer builds a server over the two bound UDP sockets and a TUN.
+func NewServer(ikeConn, nattConn *net.UDPConn, tun tunIO, cfg ServerConfig) *Server {
 	logger := cfg.Logger
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)
 	}
 	return &Server{
-		cfg:     cfg,
-		conn:    conn,
-		tun:     tun,
-		pool:    cfg.Pool,
-		gateway: cfg.Gateway,
-		logger:  logger,
-		peers:   map[string]*serverPeer{},
-		byIP:    map[uint32]*serverPeer{},
-		done:    make(chan struct{}),
+		cfg:      cfg,
+		ikeConn:  ikeConn,
+		nattConn: nattConn,
+		tun:      tun,
+		pool:     cfg.Pool,
+		gateway:  cfg.Gateway,
+		logger:   logger,
+		byCookie: map[[8]byte]*serverPeer{},
+		bySPI:    map[uint32]*serverPeer{},
+		byIP:     map[uint32]*serverPeer{},
+		done:     make(chan struct{}),
 	}
 }
 
 // Serve runs the data path until Close. It blocks.
 func (s *Server) Serve() error {
 	go s.tunLoop()
-	s.recvLoop()
+	go s.recvIKE()
+	s.recvNATT()
 	return nil
 }
 
@@ -75,57 +86,114 @@ func (s *Server) Serve() error {
 func (s *Server) Close() error {
 	s.closeOnce.Do(func() {
 		close(s.done)
-		s.conn.Close()
+		s.ikeConn.Close()
+		s.nattConn.Close()
 	})
 	return nil
 }
 
-func (s *Server) recvLoop() {
+// recvIKE reads the plain IKE port. Every datagram here is a bare Main Mode
+// message — the float moves a session off this socket for good.
+func (s *Server) recvIKE() {
 	buf := make([]byte, 65535)
 	for {
-		n, addr, err := s.conn.ReadFromUDP(buf)
+		n, addr, err := s.ikeConn.ReadFromUDP(buf)
+		if err != nil {
+			return
+		}
+		s.dispatchIKE(append([]byte(nil), buf[:n]...), addr, false)
+	}
+}
+
+// recvNATT reads the NAT-T port, where IKE and ESP share a socket and the
+// non-ESP marker tells them apart.
+func (s *Server) recvNATT() {
+	buf := make([]byte, 65535)
+	for {
+		n, addr, err := s.nattConn.ReadFromUDP(buf)
 		if err != nil {
 			return
 		}
 		pkt := append([]byte(nil), buf[:n]...)
 		if msg, ok := isIKE(pkt); ok {
-			s.peerFor(addr).ike.HandleInbound(msg)
+			s.dispatchIKE(msg, addr, true)
 			continue
 		}
-		if p := s.peerByAddr(addr); p != nil {
+		if p := s.peerBySPI(pkt); p != nil {
+			p.noteAddr(addr)
 			p.handleESP(pkt)
 		}
 	}
 }
 
-// peerFor returns the peer for a remote address, creating an IKE responder for a
-// newly seen one.
-func (s *Server) peerFor(addr *net.UDPAddr) *serverPeer {
-	key := addr.String()
+// dispatchIKE routes an IKE message to the peer owning its initiator cookie,
+// creating a responder for a cookie not seen before.
+func (s *Server) dispatchIKE(msg []byte, addr *net.UDPAddr, natt bool) {
+	cookie, ok := ikev1.InitiatorCookie(msg)
+	if !ok {
+		return
+	}
+	p := s.peerFor(cookie, addr)
+	p.noteIKEAddr(addr, natt)
+	p.ike.HandleInbound(msg)
+}
+
+// peerFor returns the peer owning an initiator cookie, creating an IKE responder
+// for a newly seen one.
+func (s *Server) peerFor(cookie [8]byte, addr *net.UDPAddr) *serverPeer {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if p, ok := s.peers[key]; ok {
+	if p, ok := s.byCookie[cookie]; ok {
 		return p
 	}
-	p := &serverPeer{srv: s, addr: addr}
+	p := &serverPeer{
+		srv:    s,
+		cookie: cookie,
+		addr:   addr,
+		// Until the client's floated source port is observed, assume it binds the
+		// NAT-T port itself, which an un-NATed peer does.
+		nattAddr: &net.UDPAddr{IP: addr.IP, Port: nattPort},
+	}
 	p.ike = ikev1.NewSession(ikev1.Config{
-		Role:    ikev1.Responder,
-		PSK:     s.cfg.PSK,
-		LocalIP: s.gateway,
-		PeerIP:  addr.IP,
-		Send:    func(m []byte) error { _, err := s.conn.WriteToUDP(markIKE(m), addr); return err },
-		Handler: p,
-		Logger:  s.logger,
+		Role:      ikev1.Responder,
+		PSK:       s.cfg.PSK,
+		LocalIP:   s.publicIP(),
+		PeerIP:    addr.IP,
+		LocalPort: defaultIKEPort,
+		PeerPort:  uint16(addr.Port),
+		Send:      p.sendIKE,
+		Handler:   p,
+		Logger:    s.logger,
 	})
-	s.peers[key] = p
-	s.logger.Printf("l2tp: new peer %s", key)
+	s.byCookie[cookie] = p
+	s.logger.Printf("l2tp: new peer %s (cookie %x)", addr, cookie)
 	return p
 }
 
-func (s *Server) peerByAddr(addr *net.UDPAddr) *serverPeer {
+// publicIP is the address the server presents as its IKE identity and phase-2
+// selector: the IKE socket's bound address, or nil if it listens on the
+// wildcard, in which case the peer matches on %any.
+func (s *Server) publicIP() net.IP {
+	if la, ok := s.ikeConn.LocalAddr().(*net.UDPAddr); ok && !la.IP.IsUnspecified() {
+		return la.IP
+	}
+	return nil
+}
+
+// peerBySPI finds the peer an inbound ESP packet belongs to by its SPI.
+func (s *Server) peerBySPI(pkt []byte) *serverPeer {
+	if len(pkt) < 4 {
+		return nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.peers[addr.String()]
+	return s.bySPI[binary.BigEndian.Uint32(pkt[:4])]
+}
+
+func (s *Server) mapSPI(spi uint32, p *serverPeer) {
+	s.mu.Lock()
+	s.bySPI[spi] = p
+	s.mu.Unlock()
 }
 
 func (s *Server) peerByIP(ip net.IP) *serverPeer {
@@ -146,13 +214,19 @@ func (s *Server) mapIP(ip net.IP, p *serverPeer) {
 	}
 }
 
+// removePeer drops a peer from every index and releases its resources. It is
+// idempotent: the tunnel's Closed callback re-enters it during teardown, and the
+// map-presence check makes the second call a no-op.
 func (s *Server) removePeer(p *serverPeer, err error) {
 	s.mu.Lock()
-	if _, ok := s.peers[p.addr.String()]; !ok {
+	if _, ok := s.byCookie[p.cookie]; !ok {
 		s.mu.Unlock()
 		return
 	}
-	delete(s.peers, p.addr.String())
+	delete(s.byCookie, p.cookie)
+	if p.inSPI != 0 {
+		delete(s.bySPI, p.inSPI)
+	}
 	if v4 := p.innerIP.To4(); v4 != nil {
 		delete(s.byIP, binary.BigEndian.Uint32(v4))
 	}
@@ -202,15 +276,53 @@ func (s *Server) tunLoop() {
 
 // serverPeer is one client's state on the server.
 type serverPeer struct {
-	srv  *Server
-	addr *net.UDPAddr
-	ike  *ikev1.Session
+	srv    *Server
+	cookie [8]byte
+	ike    *ikev1.Session
 
-	mu      sync.Mutex
-	sa      *esp.SA
-	tunnel  *Tunnel
-	ppp     *ppp.ServerSession
-	innerIP net.IP
+	mu       sync.Mutex
+	addr     *net.UDPAddr // where Main Mode came from
+	nattAddr *net.UDPAddr // where floated IKE and ESP go
+	sa       *esp.SA
+	inSPI    uint32
+	tunnel   *Tunnel
+	ppp      *ppp.ServerSession
+	innerIP  net.IP
+}
+
+// noteIKEAddr records where a peer's IKE now comes from. After the float that is
+// a new source port, and a NAT rebinding can change it again, so replies follow
+// the address the last message actually arrived from.
+func (p *serverPeer) noteIKEAddr(addr *net.UDPAddr, natt bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if natt {
+		p.nattAddr = addr
+	} else {
+		p.addr = addr
+	}
+}
+
+// noteAddr tracks the source of inbound ESP, so outbound ESP follows a peer
+// whose NAT binding moves.
+func (p *serverPeer) noteAddr(addr *net.UDPAddr) {
+	p.mu.Lock()
+	if p.nattAddr.Port != addr.Port || !p.nattAddr.IP.Equal(addr.IP) {
+		p.nattAddr = addr
+	}
+	p.mu.Unlock()
+}
+
+func (p *serverPeer) sendIKE(msg []byte, natt bool) error {
+	p.mu.Lock()
+	ike, nat := p.addr, p.nattAddr
+	p.mu.Unlock()
+	if natt {
+		_, err := p.srv.nattConn.WriteToUDP(markIKE(msg), nat)
+		return err
+	}
+	_, err := p.srv.ikeConn.WriteToUDP(msg, ike)
+	return err
 }
 
 func (p *serverPeer) handleESP(pkt []byte) {
@@ -234,16 +346,18 @@ func (p *serverPeer) handleESP(pkt []byte) {
 func (p *serverPeer) Established(r ikev1.Result) {
 	p.mu.Lock()
 	p.sa = newESPSA(r)
+	p.inSPI = r.InSPI
 	p.tunnel = NewTunnel(RoleLNS, p.espSend, p) // LNS starts passively on SCCRQ
 	p.mu.Unlock()
-	p.srv.logger.Printf("l2tp: IPsec SA established with %s", p.addr)
+	p.srv.mapSPI(r.InSPI, p)
+	p.srv.logger.Printf("l2tp: IPsec SA established with %s (spi in=%#x out=%#x)", p.addr, r.InSPI, r.OutSPI)
 }
 
 func (p *serverPeer) Failed(err error) { p.srv.removePeer(p, err) }
 
 func (p *serverPeer) espSend(l2tp []byte) error {
 	p.mu.Lock()
-	sa := p.sa
+	sa, to := p.sa, p.nattAddr
 	p.mu.Unlock()
 	if sa == nil {
 		return errors.New("l2tp: ESP SA not ready")
@@ -252,7 +366,7 @@ func (p *serverPeer) espSend(l2tp []byte) error {
 	if err != nil {
 		return err
 	}
-	_, err = p.srv.conn.WriteToUDP(pkt, p.addr)
+	_, err = p.srv.nattConn.WriteToUDP(pkt, to)
 	return err
 }
 

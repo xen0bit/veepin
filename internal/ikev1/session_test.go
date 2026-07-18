@@ -2,6 +2,7 @@ package ikev1
 
 import (
 	"bytes"
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -28,20 +29,24 @@ func TestMainAndQuickModeSelfInterop(t *testing.T) {
 	toInit := make(chan []byte, 32)
 
 	initiator := NewSession(Config{
-		Role:    Initiator,
-		PSK:     []byte("shared-secret"),
-		LocalIP: net.IPv4(10, 0, 0, 2),
-		PeerIP:  net.IPv4(10, 0, 0, 1),
-		Send:    func(b []byte) error { toResp <- b; return nil },
-		Handler: initCap,
+		Role:      Initiator,
+		PSK:       []byte("shared-secret"),
+		LocalIP:   net.IPv4(10, 0, 0, 2),
+		PeerIP:    net.IPv4(10, 0, 0, 1),
+		LocalPort: 12345,
+		PeerPort:  ikePort,
+		Send:      func(b []byte, _ bool) error { toResp <- b; return nil },
+		Handler:   initCap,
 	})
 	responder := NewSession(Config{
-		Role:    Responder,
-		PSK:     []byte("shared-secret"),
-		LocalIP: net.IPv4(10, 0, 0, 1),
-		PeerIP:  net.IPv4(10, 0, 0, 2),
-		Send:    func(b []byte) error { toInit <- b; return nil },
-		Handler: respCap,
+		Role:      Responder,
+		PSK:       []byte("shared-secret"),
+		LocalIP:   net.IPv4(10, 0, 0, 1),
+		PeerIP:    net.IPv4(10, 0, 0, 2),
+		LocalPort: ikePort,
+		PeerPort:  12345,
+		Send:      func(b []byte, _ bool) error { toInit <- b; return nil },
+		Handler:   respCap,
 	})
 
 	done := make(chan struct{})
@@ -71,6 +76,50 @@ func TestMainAndQuickModeSelfInterop(t *testing.T) {
 	}
 	if len(initRes.OutEncKey) != 32 || len(initRes.OutIntegKey) != 32 {
 		t.Errorf("key lengths = (enc %d, integ %d), want 32/32", len(initRes.OutEncKey), len(initRes.OutIntegKey))
+	}
+
+	// Both ends must have floated: veepin has no raw-ESP path, so an exchange
+	// that did not negotiate UDP encapsulation would produce an SA nothing can
+	// carry.
+	if !initRes.NATT || !respRes.NATT {
+		t.Errorf("NAT-T not negotiated: init=%v resp=%v", initRes.NATT, respRes.NATT)
+	}
+}
+
+// TestPeerWithoutNATTIsRejected: a peer that never advertises the NAT-T vendor
+// ID cannot UDP-encapsulate ESP, so Main Mode must fail loudly rather than
+// completing an exchange whose SA veepin could never carry traffic on.
+func TestPeerWithoutNATTIsRejected(t *testing.T) {
+	respCap := newCapture()
+	responder := NewSession(Config{
+		Role:      Responder,
+		PSK:       []byte("shared-secret"),
+		LocalIP:   net.IPv4(10, 0, 0, 1),
+		PeerIP:    net.IPv4(10, 0, 0, 2),
+		LocalPort: ikePort,
+		PeerPort:  12345,
+		Send:      func([]byte, bool) error { return nil },
+		Handler:   respCap,
+	})
+
+	// An MM1 carrying only the SA payload — no NAT-T vendor IDs.
+	var cookie [8]byte
+	cookie[0] = 1
+	mm1 := marshalMessage(
+		header{initCookie: cookie, exchange: exchangeMain},
+		[]payload{{typ: payloadSA, body: buildPhase1SA(defaultIKEProposals())}},
+	)
+	responder.HandleInbound(mm1)
+
+	select {
+	case err := <-respCap.fail:
+		if !errors.Is(err, errNoNATT) {
+			t.Errorf("failed with %v, want errNoNATT", err)
+		}
+	case <-respCap.res:
+		t.Fatal("exchange completed with a peer that cannot UDP-encapsulate ESP")
+	case <-time.After(time.Second):
+		t.Fatal("responder neither failed nor completed")
 	}
 }
 
