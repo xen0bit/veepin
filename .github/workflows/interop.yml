@@ -1,9 +1,10 @@
 name: interop
 
-# Docker-based interoperability tests (veepin vs strongSwan). Kept in its own
-# workflow — like nm.yml — so the toolchain-light core jobs never pull in Docker
-# or a strongSwan image. Path-filtered to the code that affects the data path /
-# handshake so it does not run on unrelated changes.
+# Docker-based interoperability tests: every protocol against a real third-party
+# peer and against itself. Kept in its own workflow — like nm.yml — so the
+# toolchain-light core jobs never pull in Docker or the peer images. Path-filtered
+# to the code that affects a data path or handshake so it does not run on
+# unrelated changes.
 on:
   push:
     branches: [main]
@@ -12,8 +13,13 @@ on:
       - "dataplane/**"
       - "client/**"
       - "cmd/veepin/**"
+      # One entry per public protocol package: a change confined to any of them
+      # can break that protocol's interop cells and nothing else would catch it.
       - "ikev2/**"
       - "wireguard/**"
+      - "openvpn/**"
+      - "sstp/**"
+      - "ssh/**"
       - "l2tp/**"
       - "anyconnect/**"
       - "Dockerfile"
@@ -26,8 +32,13 @@ on:
       - "dataplane/**"
       - "client/**"
       - "cmd/veepin/**"
+      # One entry per public protocol package: a change confined to any of them
+      # can break that protocol's interop cells and nothing else would catch it.
       - "ikev2/**"
       - "wireguard/**"
+      - "openvpn/**"
+      - "sstp/**"
+      - "ssh/**"
       - "l2tp/**"
       - "anyconnect/**"
       - "Dockerfile"
