@@ -13,6 +13,7 @@ import (
 
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/ikev2"
+	"github.com/xen0bit/veepin/l2tp"
 	"github.com/xen0bit/veepin/openvpn"
 	"github.com/xen0bit/veepin/ssh"
 	"github.com/xen0bit/veepin/sstp"
@@ -196,6 +197,34 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			}
 			if *port != 0 {
 				opts[sstp.OptServerPort] = fmt.Sprint(*port)
+			}
+			return opts
+		}, nil
+	case "l2tp":
+		var (
+			listenIP = fs.String("listen", "0.0.0.0", "local IP to bind the IKE/ESP sockets on")
+			public   = fs.String("public", "", "server's public IP as clients reach it (IKE identity and traffic selector); required when -listen is the wildcard")
+			port     = fs.Int("port", 0, "UDP port to listen on (default 500)")
+			psk      = fs.String("psk", "", "IPsec pre-shared key (required)")
+			pool     = fs.String("pool", "10.20.0.0/24", "internal address pool handed to clients")
+			dns      = fs.String("dns", "", "comma-separated DNS servers assigned to clients")
+			user     = fs.String("user", "", "MS-CHAPv2 username to accept (required)")
+			pass     = fs.String("pass", "", "the user's password (required)")
+			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+		)
+		return func() map[string]string {
+			opts := map[string]string{
+				l2tp.OptServerListen:   *listenIP,
+				l2tp.OptServerPublic:   *public,
+				l2tp.OptServerPSK:      *psk,
+				l2tp.OptServerPool:     *pool,
+				l2tp.OptServerDNS:      *dns,
+				l2tp.OptServerUser:     *user,
+				l2tp.OptServerPassword: *pass,
+				l2tp.OptServerTUN:      *tun,
+			}
+			if *port != 0 {
+				opts[l2tp.OptServerPort] = fmt.Sprint(*port)
 			}
 			return opts
 		}, nil

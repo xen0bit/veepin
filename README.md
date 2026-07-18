@@ -2,8 +2,8 @@
 
 A **working userspace VPN in Go** — both a server (responder) and a client
 (initiator) — written from scratch, with `golang.org/x/crypto` the only
-dependency. It speaks five protocols, **client and server for every one**:
-**IKEv2/ESP**, **WireGuard**, **OpenVPN**, **SSTP**, and **SSH**.
+dependency. It speaks six protocols, **client and server for every one**:
+**IKEv2/ESP**, **WireGuard**, **OpenVPN**, **SSTP**, **SSH**, and **L2TP/IPsec**.
 The SSTP side runs Microsoft's Secure Socket Tunneling Protocol over TLS — the
 `SSTP_DUPLEX_POST` HTTP handshake, the CALL_CONNECT crypto binding, MS-CHAPv2
 authentication and a PPP/IPCP data path — as both client and server, verified
@@ -84,6 +84,19 @@ drives the production client against the live server and checks bidirectional ES
   other. SSH forwarding carries no addressing in-band, so tunnel addresses are
   static (from config, as the reference sshvpn script sets them); only layer-3
   (point-to-point) tunnels are implemented, not layer-2/TAP.
+- **L2TP/IPsec client and server**: the classic native-OS remote-access VPN, and
+  the most layered protocol here — an **IKEv1** exchange (RFC 2409 Main Mode with
+  PSK, then Quick Mode) keys an **ESP transport-mode SA**, inside which an
+  **L2TP** tunnel (RFC 2661) carries a **PPP** session, which carries IP over a
+  TUN. The IKEv1 stack is new and written from scratch (ISAKMP codec, SKEYID
+  derivation, phase-1 CBC IV chaining, HASH_I/HASH_R, the three Quick Mode
+  hashes, KEYMAT expansion); everything below it is reused — `internal/ikev2/esp`
+  already encapsulates transport mode, and `internal/ppp` already speaks
+  LCP/MS-CHAPv2/IPCP in both roles. The server assigns inner addresses from a
+  pool and routes one shared TUN by inner destination; the client applies what
+  IPCP assigns it. Both roles are verified in Docker against the reference stack —
+  the veepin client against strongSwan + xl2tpd, the veepin server against
+  strongSwan and xl2tpd dialling in — and against each other.
 
 ## Cryptography
 
@@ -139,6 +152,7 @@ wireguard                public WireGuard entry point: Dial + NewServer, Config,
 openvpn                  public OpenVPN entry point: Dial + NewServer, Config, .ovpn parser
 sstp                     public SSTP entry point: Dial + NewServer, Config, crypto binding
 ssh                      public SSH entry point: Dial + NewServer, Config (x/crypto/ssh)
+l2tp                     public L2TP/IPsec entry point: Dial + NewServer, Config
 
 dataplane                TUN device, address pool, packet pump (demux + routing), client routing
 internal/cryptoutil      DH, PRF + prf+, integrity, SK/ESP ciphers, ChaCha20-Poly1305, BLAKE2s
@@ -165,6 +179,10 @@ internal/ppp                 PPP client + server: LCP, MS-CHAPv2 auth, IPCP (tra
 internal/mschap              MS-CHAPv2 primitives + MPPE/HLAK key derivation
 
 internal/sshtun              OpenSSH tun@openssh.com framing: channel-open data + AF packet frames
+
+internal/ikev1               ISAKMP/IKEv1: payload codec, Main + Quick mode, SKEYID/KEYMAT, CBC IV chaining
+internal/l2tp                RFC 2661 header/AVP codec, reliable control channel, PPP data channel,
+                             plus the client/server engines binding IKEv1 + ESP + L2TP + PPP to a TUN
 ```
 
 `dataplane` and `internal/cryptoutil` are protocol-agnostic: neither imports anything
@@ -472,6 +490,40 @@ A stock `ssh -w 0:0 -N user@host` also connects to it. Clients pick addresses
 within `-pool` (statically); the server accepts and routes any in-range address.
 It is verified in Docker against both `ssh -w` and the veepin client.
 
+### Connecting as an L2TP/IPsec client
+
+`veepin connect l2tp` runs the whole stack in userspace: IKEv1 Main Mode with the
+pre-shared key, Quick Mode for the ESP transport SA, then L2TP and PPP inside it.
+The address, netmask and DNS all come from IPCP, so only credentials are
+configured:
+
+```sh
+sudo ./veepin connect l2tp \
+  -server vpn.example.com -psk secret -user alice -pass hunter2
+```
+
+### Running an L2TP/IPsec server
+
+`veepin serve l2tp` is the responder for the same stack. One UDP socket serves
+every client, demultiplexed by source address into a per-peer IKEv1 responder,
+ESP SA, L2TP tunnel and PPP session; a shared TUN is routed by inner destination
+address.
+
+```sh
+sudo ./veepin serve l2tp \
+  -psk secret -user alice -pass hunter2 \
+  -pool 10.20.0.0/24 -dns 1.1.1.1 -setup-nat -wan eth0
+```
+
+Both sides speak NAT traversal (RFC 3947/3948): Main Mode starts on UDP/500 and
+floats to UDP/4500, where IKE rides behind the non-ESP marker alongside
+UDP-encapsulated ESP. veepin always forces that float — it advertises itself as
+being behind a NAT, exactly as strongSwan's `encap = yes` does — because its data
+path is a userspace UDP socket with no raw-ESP fallback. A peer that never
+advertises NAT-T is therefore rejected during Main Mode rather than left to fail
+silently later. Both directions are verified in Docker against strongSwan +
+xl2tpd.
+
 ## Connecting an OS client
 
 The server authenticates with a machine PSK plus an identity, and assigns the
@@ -665,6 +717,7 @@ both roles, so all three cells below are exercised.
 | OpenVPN   | ✓ `openvpn` (×4 variants)   | ✓ `openvpn`                 | ✓                      |
 | SSTP      | ✓ SoftEther                 | ✓ `sstpc`/pppd              | ✓                      |
 | SSH       | ✓ `sshd` (PermitTunnel)     | ✓ `ssh -w`                  | ✓                      |
+| L2TP/IPsec| ✓ strongSwan + xl2tpd       | ✓ strongSwan + xl2tpd       | ✓                      |
 
 Both roles share one API: a client registers with `client.Register` and is dialed
 by `client.Dial`; a server registers with `client.RegisterServer` and is built by
@@ -797,6 +850,11 @@ place. Seal is a single allocation (the returned packet), open none.
   forwarded.
 - **Single IKE SA per Child.** Sufficient for road-warrior clients; not a
   site-to-site multi-SA gateway.
+- **L2TP/IPsec requires UDP-encapsulated ESP.** veepin has no raw IP-protocol-50
+  path, so it always forces the NAT-T float to UDP/4500 and rejects a peer that
+  cannot do the same. IKEv1 is Main Mode with a PSK only (no Aggressive Mode, no
+  certificates, no PFS in Quick Mode), one child SA per IKE SA with no phase-2
+  rekey, and PPP authenticates with MS-CHAPv2 only (no PAP/CHAP).
 
 These are deliberate boundaries for a readable, self-contained implementation,
 not accidental gaps — each is a localized extension point rather than a

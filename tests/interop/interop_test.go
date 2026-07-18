@@ -276,6 +276,37 @@ func TestInteropWireguardRekey(t *testing.T) {
 	}
 }
 
+// TestInteropVeepinClientL2TPServer proves the L2TP/IPsec client against the
+// reference stack it exists to speak to: strongSwan terminating the IKEv1-keyed
+// ESP transport SA and xl2tpd terminating L2TP inside it, driving pppd for the
+// PPP session. The veepin client runs Main Mode with a PSK, Quick Mode for the
+// transport SA, the L2TP control channel and MS-CHAPv2/IPCP, then pings
+// 10.30.0.1 — pppd's LNS-side address — across the tunnel. Every layer here
+// faces an implementation veepin shares no code with.
+func TestInteropVeepinClientL2TPServer(t *testing.T) {
+	runInterop(t, "compose.l2tp.yml", "veepin-l2tp-client", "10.30.0.1")
+}
+
+// TestInteropL2TPClientVeepinServer is the reverse direction: strongSwan as the
+// IKEv1 initiator and xl2tpd as the LAC — the pair a Linux desktop dials an
+// L2TP/IPsec VPN with — against the veepin *server*. It proves the responder
+// side of every layer: Main Mode proposal selection and HASH_I verification,
+// Quick Mode, the LNS role of the L2TP control channel, and the server-role PPP
+// with MS-CHAPv2 and pool-based IPCP assignment. The client pings 10.20.0.1, the
+// veepin server's tunnel gateway.
+func TestInteropL2TPClientVeepinServer(t *testing.T) {
+	runInterop(t, "compose.l2tp-server.yml", "l2tp-client", "10.20.0.1")
+}
+
+// TestInteropL2TPSelf is the veepin<->veepin L2TP/IPsec sanity check, and the
+// broadest single test here: one ping crosses IKEv1 (Main + Quick mode), an ESP
+// transport SA, the L2TP control and data channels, and a PPP/MS-CHAPv2/IPCP
+// session before it reaches the server's tunnel gateway. Because the stack is so
+// layered, this isolates a break in any one layer from an interop break.
+func TestInteropL2TPSelf(t *testing.T) {
+	runInterop(t, "compose.l2tp-self.yml", "veepin-l2tp-client", "10.20.0.1")
+}
+
 // waitPing retries a short ping from pingSvc to target until one reports no loss
 // or pingDeadline elapses, reporting whether the tunnel came up.
 func waitPing(t *testing.T, composeFile, pingSvc, target string) bool {

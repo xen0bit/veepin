@@ -1,0 +1,42 @@
+# Reference L2TP/IPsec client (strongSwan + xl2tpd + pppd) -> veepin L2TP server.
+# The mirror of compose.l2tp.yml: here veepin is the responder, so this exercises
+# the IKEv1 responder (Main Mode proposal selection, HASH_I verification, Quick
+# Mode), the LNS role of the L2TP control channel, and the server-role PPP with
+# MS-CHAPv2 authentication and pool-based IPCP assignment — all against an
+# initiator veepin shares no code with. The client pings 10.20.0.1, the veepin
+# server's tunnel gateway.
+name: veepin-interop-l2tp-server
+
+services:
+  veepin-l2tp-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      PSK: "l2tpsecret"
+      USER: "l2tpuser"
+      PASS: "l2tppass"
+    volumes:
+      - ./veepin/l2tp-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  l2tp-client:
+    build:
+      context: l2tp-client
+    image: interop-l2tp-client
+    # pppd sets the PPP line discipline on its pty, which needs privileges beyond
+    # NET_ADMIN inside a container — the same requirement the SSTP interop has.
+    privileged: true
+    devices:
+      - "/dev/ppp:/dev/ppp"
+    depends_on: [veepin-l2tp-server]
+    environment:
+      USER: "l2tpuser"
+      PASS: "l2tppass"
+    volumes:
+      - ./l2tp-client/entrypoint.sh:/entrypoint.sh:ro
+      - ./l2tp-client:/conf:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

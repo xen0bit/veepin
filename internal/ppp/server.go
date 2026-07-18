@@ -46,6 +46,7 @@ type ServerSession struct {
 	reqID byte
 
 	lcpReqID                    byte
+	lcpConfigReq                []byte // the outstanding request, for retransmission
 	lcpLocalOpen, lcpRemoteOpen bool
 
 	authChallenge [mschap.ChallengeLen]byte
@@ -54,7 +55,10 @@ type ServerSession struct {
 	ntResponse    [mschap.NTResponseLen]byte
 
 	ipcpReqID                     byte
+	ipcpConfigReq                 []byte // the outstanding request, for retransmission
 	ipcpLocalOpen, ipcpRemoteOpen bool
+
+	lcpRestart, ipcpRestart restartTimer
 }
 
 // NewServer builds a PPP server session that authenticates clients via cfg.Auth,
@@ -115,7 +119,19 @@ func (s *ServerSession) failLocked(err error) {
 		return
 	}
 	s.phase = phaseClosed
+	s.lcpRestart.stop()
+	s.ipcpRestart.stop()
 	s.h.Closed(err)
+}
+
+// withLock runs fn with the session locked, for the Restart timer's callback.
+func (s *ServerSession) withLock(fn func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.phase == phaseClosed {
+		return
+	}
+	fn()
 }
 
 // --- LCP ---
@@ -128,7 +144,17 @@ func (s *ServerSession) sendLCPConfigReq() {
 		{Type: optMagic, Value: magic[:]},
 	}
 	s.lcpReqID = s.nextID()
-	s.send(ProtocolLCP, cpPacket{Code: codeConfigureRequest, ID: s.lcpReqID, Body: marshalOptions(opts)}.marshal())
+	s.lcpConfigReq = cpPacket{Code: codeConfigureRequest, ID: s.lcpReqID, Body: marshalOptions(opts)}.marshal()
+	s.resendLCPConfigReq()
+}
+
+// resendLCPConfigReq (re)transmits the outstanding LCP Configure-Request and
+// re-arms the Restart timer, reusing the original identifier.
+func (s *ServerSession) resendLCPConfigReq() {
+	s.send(ProtocolLCP, s.lcpConfigReq)
+	s.lcpRestart.arm(s.withLock, s.resendLCPConfigReq, func() {
+		s.failLocked(fmt.Errorf("ppp: no reply to the LCP Configure-Request"))
+	})
 }
 
 func (s *ServerSession) handleLCP(payload []byte) {
@@ -136,11 +162,15 @@ func (s *ServerSession) handleLCP(payload []byte) {
 	if !ok {
 		return
 	}
+	// Any LCP reply proves the peer is alive, so the Restart budget for the next
+	// request starts fresh.
+	s.lcpRestart.alive()
 	switch pkt.Code {
 	case codeConfigureRequest:
 		s.handleLCPConfigReq(pkt)
 	case codeConfigureAck:
 		if pkt.ID == s.lcpReqID {
+			s.lcpRestart.stop()
 			s.lcpLocalOpen = true
 			s.maybeLCPUp()
 		}
@@ -237,7 +267,17 @@ func (s *ServerSession) handleCHAP(payload []byte) {
 func (s *ServerSession) sendIPCPConfigReq() {
 	opts := []option{{Type: optIPAddress, Value: s.cfg.ServerIP.To4()}}
 	s.ipcpReqID = s.nextID()
-	s.send(ProtocolIPCP, cpPacket{Code: codeConfigureRequest, ID: s.ipcpReqID, Body: marshalOptions(opts)}.marshal())
+	s.ipcpConfigReq = cpPacket{Code: codeConfigureRequest, ID: s.ipcpReqID, Body: marshalOptions(opts)}.marshal()
+	s.resendIPCPConfigReq()
+}
+
+// resendIPCPConfigReq (re)transmits the outstanding IPCP Configure-Request and
+// re-arms the Restart timer, reusing the original identifier.
+func (s *ServerSession) resendIPCPConfigReq() {
+	s.send(ProtocolIPCP, s.ipcpConfigReq)
+	s.ipcpRestart.arm(s.withLock, s.resendIPCPConfigReq, func() {
+		s.failLocked(fmt.Errorf("ppp: no reply to the IPCP Configure-Request"))
+	})
 }
 
 func (s *ServerSession) handleIPCP(payload []byte) {
@@ -245,11 +285,13 @@ func (s *ServerSession) handleIPCP(payload []byte) {
 	if !ok {
 		return
 	}
+	s.ipcpRestart.alive()
 	switch pkt.Code {
 	case codeConfigureRequest:
 		s.handleIPCPConfigReq(pkt)
 	case codeConfigureAck:
 		if pkt.ID == s.ipcpReqID {
+			s.ipcpRestart.stop()
 			s.ipcpLocalOpen = true
 			s.maybeIPCPUp()
 		}

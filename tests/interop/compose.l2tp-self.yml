@@ -1,0 +1,37 @@
+# veepin L2TP/IPsec client <-> veepin L2TP/IPsec server (self-test).
+# Both ends are veepin over a real UDP socket and TUNs, running the whole layered
+# stack — IKEv1 Main + Quick mode, an ESP transport SA, the L2TP control/data
+# channel and PPP — so a break in any layer surfaces here rather than being
+# blamed on a third-party implementation. The client pings 10.20.0.1 (the
+# server's tunnel gateway).
+name: veepin-interop-l2tp-self
+
+services:
+  veepin-l2tp-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      PSK: "l2tpsecret"
+      USER: "l2tpuser"
+      PASS: "l2tppass"
+    volumes:
+      - ./veepin/l2tp-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-l2tp-client:
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-l2tp-server]
+    environment:
+      SERVER: "veepin-l2tp-server"
+      PSK: "l2tpsecret"
+      USER: "l2tpuser"
+      PASS: "l2tppass"
+    volumes:
+      - ./veepin/l2tp-client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
