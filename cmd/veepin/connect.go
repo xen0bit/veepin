@@ -261,6 +261,7 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 			user     = fs.String("user", "", "username (required)")
 			pass     = fs.String("pass", "", "password (required)")
 			insecure = fs.Bool("insecure", false, "skip TLS certificate verification (self-signed servers)")
+			noDTLS   = fs.Bool("no-dtls", false, "keep the data channel on TLS instead of DTLS/UDP")
 			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
 		)
 		return func() map[string]string {
@@ -275,6 +276,9 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 			}
 			if *insecure {
 				opts[anyconnect.OptInsecure] = "true"
+			}
+			if *noDTLS {
+				opts[anyconnect.OptNoDTLS] = "true"
 			}
 			return opts
 		}, nil

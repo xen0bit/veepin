@@ -22,6 +22,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -40,6 +41,7 @@ const (
 	OptUser     = "user"
 	OptPassword = "password"
 	OptInsecure = "insecure" // skip TLS certificate verification
+	OptNoDTLS   = "no-dtls"  // stay on the TLS data channel
 	OptTUNName  = "tun"
 )
 
@@ -59,8 +61,10 @@ type Config struct {
 	Password string // (required)
 	// Insecure skips TLS certificate verification, for self-signed test servers.
 	Insecure bool
-	TUNName  string
-	Logger   *log.Logger
+	// NoDTLS keeps the tunnel on TLS even when the server offers a UDP channel.
+	NoDTLS  bool
+	TUNName string
+	Logger  *log.Logger
 }
 
 func (c *Config) validate() error {
@@ -77,10 +81,16 @@ func (c *Config) validate() error {
 
 func parseOptions(opts map[string]string) (client.Dialer, error) {
 	cfg := &Config{
+		// Whether the data channel ended up on UDP or fell back to TCP is
+		// operationally significant — it is the difference between a tunnel that
+		// performs and one that does not — so the engine's log is surfaced rather
+		// than discarded. The other client protocols predate this and stay quiet.
+		Logger:   log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds),
 		Server:   opts[OptServer],
 		Username: opts[OptUser],
 		Password: opts[OptPassword],
 		Insecure: opts[OptInsecure] == "true",
+		NoDTLS:   opts[OptNoDTLS] == "true",
 		TUNName:  opts[OptTUNName],
 	}
 	if v := opts[OptPort]; v != "" {
@@ -142,6 +152,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 		Hostname: cfg.TUNName,
 		Username: cfg.Username,
 		Password: cfg.Password,
+		NoDTLS:   cfg.NoDTLS,
 		Logger:   logger,
 	})
 
@@ -167,6 +178,13 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 		return nil, client.Result{}, err
 	}
 	logger.Printf("anyconnect: tunnel up on %s, address %s", tun.Name(), tcfg.Address)
+
+	// Bring up the UDP data channel if the server offered one. This is best
+	// effort by design: the tunnel already works over TLS, and the protocol
+	// treats that as the fallback whenever UDP is unavailable.
+	if !cfg.NoDTLS {
+		c.StartDTLS()
+	}
 
 	sess := &session{engine: c, tun: tun, errc: make(chan error, 1)}
 	go func() { sess.errc <- c.Run(keepaliveInterval) }()

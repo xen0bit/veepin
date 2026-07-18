@@ -39,7 +39,9 @@ type ClientConfig struct {
 	Password string
 	// BaseMTU is the path MTU the client reports; the server's reply may lower it.
 	BaseMTU int
-	Logger  *log.Logger
+	// NoDTLS keeps the tunnel on TLS even when the server offers a UDP channel.
+	NoDTLS bool
+	Logger *log.Logger
 }
 
 // Client is a running AnyConnect tunnel over one TLS connection: it
@@ -59,6 +61,13 @@ type Client struct {
 	// drops counts inbound packets the TUN refused, which is normal before the
 	// caller has configured the interface.
 	drops atomic.Uint64
+
+	// dtls is the optional UDP data channel. When it is up, data packets go over
+	// it and the TLS connection carries only control traffic; when it fails, the
+	// tunnel falls back to TLS without interruption.
+	dtls atomic.Pointer[dtlsChannel]
+
+	dtlsParams DTLSParams
 
 	mu       sync.Mutex
 	closed   bool
@@ -93,6 +102,58 @@ func (c *Client) Handshake() (TunnelConfig, error) {
 	}
 	c.logger.Printf("anyconnect: authenticated as %s", c.cfg.Username)
 	return c.connect(cookie)
+}
+
+// StartDTLS brings up the UDP data channel if the server offered one. It is
+// separate from Handshake because the tunnel is already usable without it: a
+// failure here downgrades to TLS rather than failing the connection, and is
+// reported only in the log.
+func (c *Client) StartDTLS() {
+	if !c.dtlsParams.Enabled || c.cfg.NoDTLS {
+		return
+	}
+	ch, err := dialDTLS(c.conn, c.dtlsParams, dtlsHandshakeTimeout)
+	if err != nil {
+		c.logger.Printf("anyconnect: DTLS unavailable, staying on TLS: %v", err)
+		return
+	}
+	c.dtls.Store(ch)
+	c.logger.Printf("anyconnect: DTLS data channel up on udp/%d", c.dtlsParams.Port)
+	go c.dtlsReadLoop(ch)
+}
+
+// dtlsHandshakeTimeout bounds bringing up the UDP channel. It is short: the
+// tunnel already works over TLS, so a slow or filtered UDP path should be
+// abandoned quickly rather than delaying a working connection.
+const dtlsHandshakeTimeout = 5 * time.Second
+
+// dtlsReadLoop delivers packets arriving on the UDP channel. Its failure is not
+// the tunnel's: the channel is torn down and traffic returns to TLS.
+func (c *Client) dtlsReadLoop(ch *dtlsChannel) {
+	buf := make([]byte, maxPayload)
+	for {
+		n, err := ch.conn.Read(buf)
+		if err != nil {
+			if ch.up.Swap(false) {
+				c.logger.Printf("anyconnect: DTLS channel lost, falling back to TLS: %v", err)
+				c.dtls.CompareAndSwap(ch, nil)
+				ch.close()
+			}
+			return
+		}
+		typ, payload, ok := parseDTLS(buf[:n])
+		if !ok {
+			continue
+		}
+		switch typ {
+		case typeData:
+			if _, err := c.tun.Write(payload); err != nil {
+				c.noteDrop(err)
+			}
+		case typeDPDReq:
+			_ = ch.send(typeDPDResp, payload)
+		}
+	}
 }
 
 // authenticate runs the XML credential exchange and returns the session cookie.
@@ -186,14 +247,12 @@ func (c *Client) connect(cookie string) (TunnelConfig, error) {
 	if hostname == "" {
 		hostname = "veepin"
 	}
-	req, err := buildConnectRequest(c.cfg.Host, cookie, hostname, baseMTU)
-	if err != nil {
-		return TunnelConfig{}, err
-	}
-	if err := req.Write(c.conn); err != nil {
+	if _, err := c.conn.Write(buildConnectRequest(c.cfg.Host, cookie, hostname, baseMTU)); err != nil {
 		return TunnelConfig{}, fmt.Errorf("anyconnect: send CONNECT: %w", err)
 	}
-	resp, err := http.ReadResponse(c.br, req)
+	// The request is handed to ReadResponse only so it knows this was a CONNECT,
+	// which is what stops net/http treating the tunnel as a response body.
+	resp, err := http.ReadResponse(c.br, &http.Request{Method: http.MethodConnect})
 	if err != nil {
 		return TunnelConfig{}, fmt.Errorf("anyconnect: read CONNECT reply: %w", err)
 	}
@@ -206,6 +265,13 @@ func (c *Client) connect(cookie string) (TunnelConfig, error) {
 	cfg, err := parseTunnelConfig(resp.Header)
 	if err != nil {
 		return TunnelConfig{}, err
+	}
+	// A malformed or unsupported DTLS offer only costs the UDP channel; the
+	// tunnel itself is already established over TLS.
+	if p, derr := parseDTLSParams(resp.Header, cfg.MTU); derr != nil {
+		c.logger.Printf("anyconnect: ignoring the DTLS offer: %v", derr)
+	} else {
+		c.dtlsParams = p
 	}
 	c.logger.Printf("anyconnect: tunnel up, address %s netmask %s mtu %d", cfg.Address, cfg.Netmask, cfg.MTU)
 	return cfg, nil
@@ -279,6 +345,18 @@ func (c *Client) tunLoop() {
 		// dies the instant routing is applied.
 		if !isIPv4(buf[:n]) {
 			continue
+		}
+		// Prefer the UDP channel when it is up. A send failure on it demotes the
+		// channel rather than the tunnel, and this packet goes out over TLS.
+		if ch := c.dtls.Load(); ch != nil && ch.up.Load() {
+			if err := ch.send(typeData, buf[:n]); err == nil {
+				continue
+			}
+			if ch.up.Swap(false) {
+				c.logger.Printf("anyconnect: DTLS send failed, falling back to TLS")
+				c.dtls.CompareAndSwap(ch, nil)
+				ch.close()
+			}
 		}
 		if err := c.send(typeData, buf[:n]); err != nil {
 			c.fail(err)
@@ -358,5 +436,8 @@ func (c *Client) fail(err error) {
 	c.mu.Unlock()
 
 	close(c.done)
+	if ch := c.dtls.Swap(nil); ch != nil {
+		ch.close()
+	}
 	c.conn.Close()
 }
