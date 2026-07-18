@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -54,6 +55,10 @@ type Client struct {
 	// writeMu serializes writes: the TUN pump, the keepalive timer and DPD
 	// replies all send on the same connection.
 	writeMu sync.Mutex
+
+	// drops counts inbound packets the TUN refused, which is normal before the
+	// caller has configured the interface.
+	drops atomic.Uint64
 
 	mu       sync.Mutex
 	closed   bool
@@ -227,9 +232,16 @@ func (c *Client) readLoop() {
 		}
 		switch typ {
 		case typeData:
+			// A packet the TUN will not take is a dropped packet, not a dead
+			// tunnel. Dial deliberately installs no host configuration — that is
+			// the caller's job once it has the Result — so there is a window after
+			// the handshake in which the interface exists but is still down, and
+			// Linux answers a write to a down TUN with EIO. Treating that as fatal
+			// tore the whole session down over one early inbound packet, which is
+			// how a slower machine turned a routine race into a dead VPN.
 			if _, err := c.tun.Write(payload); err != nil {
-				c.fail(fmt.Errorf("anyconnect: TUN write: %w", err))
-				return
+				c.noteDrop(err)
+				continue
 			}
 		case typeDPDReq:
 			// A DPD probe must be echoed with its payload intact, which is also how
@@ -258,11 +270,41 @@ func (c *Client) tunLoop() {
 			c.fail(fmt.Errorf("anyconnect: TUN read: %w", err))
 			return
 		}
+		// Forward IPv4 only. The session negotiated X-CSTP-Address-Type: IPv4 and
+		// holds no IPv6 address, but Linux brings IPv6 up on a TUN the moment the
+		// interface does and immediately emits MLD reports and router
+		// solicitations to link-local multicast. Putting those on an IPv4-only
+		// session is a protocol violation, and a server is entitled to answer it
+		// by tearing the session down — which looks exactly like a tunnel that
+		// dies the instant routing is applied.
+		if !isIPv4(buf[:n]) {
+			continue
+		}
 		if err := c.send(typeData, buf[:n]); err != nil {
 			c.fail(err)
 			return
 		}
 	}
+}
+
+// noteDrop records an inbound packet the TUN would not accept. The first is
+// logged with its reason, since a persistent fault (a closed device, a
+// misconfigured MTU) should be visible; the rest are only counted, so a steady
+// trickle cannot flood the log.
+func (c *Client) noteDrop(err error) {
+	if c.drops.Add(1) == 1 {
+		c.logger.Printf("anyconnect: dropping inbound packet: %v "+
+			"(expected until the interface is configured)", err)
+	}
+}
+
+// Drops reports how many inbound packets the TUN refused.
+func (c *Client) Drops() uint64 { return c.drops.Load() }
+
+// isIPv4 reports whether a packet read from the TUN is IPv4. A TUN carries bare
+// IP with no link header, so the version nibble is the first thing in the frame.
+func isIPv4(pkt []byte) bool {
+	return len(pkt) >= 20 && pkt[0]>>4 == 4
 }
 
 // keepaliveLoop holds the connection open through idle NAT timeouts.
