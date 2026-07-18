@@ -11,10 +11,13 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/veepin/internal/dtls"
 )
 
 // handshakeTimeout bounds the HTTP authentication and CONNECT exchange. Once the
@@ -35,7 +38,11 @@ type ServerConfig struct {
 	Gateway net.IP // the server's inner address (the pool's first host)
 	DNS     []net.IP
 	MTU     int
-	Logger  *log.Logger
+	// DTLSConn is the UDP socket offering the DTLS data channel. Nil serves TLS
+	// only, which is a complete tunnel — the protocol treats TLS as the fallback
+	// whenever UDP is unavailable.
+	DTLSConn *net.UDPConn
+	Logger   *log.Logger
 }
 
 // Server is a running AnyConnect responder. Like SSTP it is connection-oriented:
@@ -53,6 +60,8 @@ type Server struct {
 	lock    sync.Mutex
 	clients map[uint32]*serverClient // keyed by assigned inner address
 
+	dtls *dtlsListener
+
 	done      chan struct{}
 	closeOnce sync.Once
 }
@@ -64,7 +73,7 @@ func NewServer(tun tunIO, cfg ServerConfig) *Server {
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)
 	}
-	return &Server{
+	s := &Server{
 		cfg:     cfg,
 		tun:     tun,
 		pool:    cfg.Pool,
@@ -73,15 +82,28 @@ func NewServer(tun tunIO, cfg ServerConfig) *Server {
 		clients: map[uint32]*serverClient{},
 		done:    make(chan struct{}),
 	}
+	if cfg.DTLSConn != nil {
+		s.dtls = newDTLSListener(cfg.DTLSConn, logger)
+	}
+	return s
 }
 
-// Start begins routing TUN egress to connected clients.
-func (s *Server) Start() { go s.tunLoop() }
+// Start begins routing TUN egress to connected clients, and accepting DTLS flows
+// if a UDP socket was provided.
+func (s *Server) Start() {
+	go s.tunLoop()
+	if s.dtls != nil {
+		go s.dtls.serve()
+	}
+}
 
 // Close stops the server and drops every client.
 func (s *Server) Close() error {
 	s.closeOnce.Do(func() {
 		close(s.done)
+		if s.dtls != nil {
+			_ = s.dtls.close()
+		}
 		s.lock.Lock()
 		for _, c := range s.clients {
 			c.conn.Close()
@@ -216,10 +238,6 @@ func (s *Server) serveConnect(conn net.Conn, br *bufio.Reader, cookie string) (*
 	}
 	var hdr headerList
 	writeTunnelConfig(&hdr, cfg, serverDPD, serverKeepalive)
-	if err := writeConnectOK(conn, hdr); err != nil {
-		s.pool.Release(ip)
-		return nil, err
-	}
 
 	c := &serverClient{
 		srv:      s,
@@ -227,6 +245,19 @@ func (s *Server) serveConnect(conn net.Conn, br *bufio.Reader, cookie string) (*
 		br:       br,
 		username: user,
 		innerIP:  ip,
+	}
+	// Offer the UDP data channel if this server has a socket for it and the
+	// client asked. A client that did not, or a TLS session whose exporter is
+	// unavailable, simply gets no DTLS headers and stays on TLS.
+	if s.dtls != nil && strings.Contains(strings.ToUpper(req.Header.Get(hdrDTLSCipherSuite)), "PSK") {
+		if err := s.offerDTLS(conn, &hdr, c, mtu); err != nil {
+			s.logger.Printf("anyconnect: not offering DTLS to %s: %v", conn.RemoteAddr(), err)
+		}
+	}
+
+	if err := writeConnectOK(conn, hdr); err != nil {
+		s.pool.Release(ip)
+		return nil, err
 	}
 	s.addClient(c)
 	return c, nil
@@ -264,6 +295,12 @@ func (s *Server) removeClient(c *serverClient) {
 		delete(s.clients, binary.BigEndian.Uint32(v4))
 		s.lock.Unlock()
 	}
+	if c.appID != "" && s.dtls != nil {
+		s.dtls.forget(c.appID)
+	}
+	if ch := c.dtls.Swap(nil); ch != nil {
+		ch.close()
+	}
 	s.pool.Release(c.innerIP)
 	s.logger.Printf("anyconnect: %s disconnected, released %s", c.username, c.innerIP)
 }
@@ -290,9 +327,22 @@ func (s *Server) tunLoop() {
 		if dst == nil {
 			continue
 		}
-		if c := s.clientByIP(dst); c != nil {
-			_ = c.send(typeData, buf[:n])
+		c := s.clientByIP(dst)
+		if c == nil {
+			continue
 		}
+		// Prefer the UDP channel. A send failure on it demotes the channel, not
+		// the client, and the packet goes out over TLS instead.
+		if ch := c.dtls.Load(); ch != nil && ch.up.Load() {
+			if err := ch.send(typeData, buf[:n]); err == nil {
+				continue
+			}
+			if ch.up.Swap(false) {
+				c.dtls.CompareAndSwap(ch, nil)
+				ch.close()
+			}
+		}
+		_ = c.send(typeData, buf[:n])
 	}
 }
 
@@ -303,6 +353,10 @@ type serverClient struct {
 	br       *bufio.Reader
 	username string
 	innerIP  net.IP
+	appID    string
+
+	// dtls is this client's UDP data channel once it comes up.
+	dtls atomic.Pointer[dtlsChannel]
 
 	writeMu sync.Mutex
 }
@@ -411,4 +465,86 @@ func ipv4Src(pkt []byte) net.IP {
 		return nil
 	}
 	return net.IPv4(pkt[12], pkt[13], pkt[14], pkt[15])
+}
+
+// offerDTLS mints an App-ID for this client, arms the listener to expect a UDP
+// flow presenting it, and adds the DTLS headers to the CONNECT reply.
+//
+// The key is derived from this TLS session with an RFC 5705 exporter, so the UDP
+// channel inherits the authentication the client has already completed and no
+// second credential exchange is needed. When the exporter is unavailable — a TLS
+// 1.2 session without Extended Master Secret, which Go rightly refuses to export
+// from — DTLS is simply not offered.
+func (s *Server) offerDTLS(conn net.Conn, hdr *headerList, c *serverClient, mtu int) error {
+	psk, err := dtlsPSK(conn)
+	if err != nil {
+		return err
+	}
+	appID := make([]byte, dtlsAppIDLen)
+	if _, err := rand.Read(appID); err != nil {
+		return fmt.Errorf("anyconnect: App-ID: %w", err)
+	}
+	c.appID = string(appID)
+
+	s.dtls.expect(c.appID, &pendingSession{
+		psk:    psk,
+		mtu:    mtu,
+		accept: func(dc *dtls.Conn) { c.attachDTLS(dc) },
+	})
+
+	port := s.cfg.DTLSConn.LocalAddr().(*net.UDPAddr).Port
+	hdr.set(hdrDTLSCipherSuite, pskNegotiate)
+	hdr.set(hdrDTLSAppID, hex.EncodeToString(appID))
+	hdr.setInt(hdrDTLSPort, port)
+	hdr.setInt(hdrDTLSMTU, mtu)
+	hdr.setInt(hdrDTLSDPD, serverDPD)
+	hdr.setInt(hdrDTLSKeepalive, serverKeepalive)
+	return nil
+}
+
+// dtlsAppIDLen is the length of the identifier tying a UDP flow to the HTTPS
+// session that authorised it. It is random and single-use, so it only has to be
+// unguessable, not structured.
+const dtlsAppIDLen = 32
+
+// attachDTLS adopts a completed DTLS channel for this client and begins reading
+// it. Data then leaves over UDP; the TLS connection stays open for control.
+func (c *serverClient) attachDTLS(dc *dtls.Conn) {
+	ch := &dtlsChannel{conn: dc}
+	ch.up.Store(true)
+	c.dtls.Store(ch)
+	c.srv.logger.Printf("anyconnect: DTLS channel up for %s (%s)", c.username, dc.RemoteAddr())
+	go c.dtlsReadLoop(ch)
+}
+
+// dtlsReadLoop delivers this client's UDP traffic. Losing the channel demotes it
+// to TLS rather than ending the session.
+func (c *serverClient) dtlsReadLoop(ch *dtlsChannel) {
+	buf := make([]byte, maxPayload)
+	for {
+		n, err := ch.conn.Read(buf)
+		if err != nil {
+			if ch.up.Swap(false) {
+				c.srv.logger.Printf("anyconnect: DTLS channel for %s lost, falling back to TLS: %v", c.username, err)
+				c.dtls.CompareAndSwap(ch, nil)
+				ch.close()
+			}
+			return
+		}
+		typ, payload, ok := parseDTLS(buf[:n])
+		if !ok {
+			continue
+		}
+		switch typ {
+		case typeData:
+			// Same source check as the TLS path: a client may only inject traffic
+			// from the address it was assigned.
+			if src := ipv4Src(payload); src == nil || !src.Equal(c.innerIP) {
+				continue
+			}
+			_, _ = c.srv.tun.Write(payload)
+		case typeDPDReq:
+			_ = ch.send(typeDPDResp, payload)
+		}
+	}
 }

@@ -17,8 +17,9 @@ PIN=$(openssl x509 -in /pki/server.crt -pubkey -noout \
     | openssl base64)
 echo "openconnect: pinning server certificate pin-sha256:$PIN"
 
-# --no-dtls keeps the data channel on TLS: veepin implements the CSTP channel,
-# which is what the protocol falls back to whenever UDP is unavailable.
+# DTLS is left enabled so this exercises the veepin server's UDP data channel.
+# openconnect falls back to TLS on its own if that does not come up, so the test
+# still proves the tunnel either way — the logs say which was used.
 i=1
 while [ "$i" -le 40 ]; do
     echo "openconnect: connecting to ${SERVER}:${PORT:-443} (attempt $i)"
@@ -27,7 +28,6 @@ while [ "$i" -le 40 ]; do
         --user="$USER" \
         --passwd-on-stdin \
         --servercert "pin-sha256:$PIN" \
-        --no-dtls \
         --script /usr/share/vpnc-scripts/vpnc-script \
         --interface tun0 \
         --non-inter \
