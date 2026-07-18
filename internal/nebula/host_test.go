@@ -449,6 +449,78 @@ func TestRehandshakeRetiresTheOldTunnel(t *testing.T) {
 	}
 }
 
+// Simultaneous initiation is routine in a mesh -- a lighthouse answering a
+// query also tells the target to punch, so both sides start a handshake at once
+// and both complete. The two sides do not see the resulting tunnels in the same
+// order, so "keep the newest" would let each keep a different one, and every
+// packet would then arrive on an index the other had retired. Both sides must
+// therefore reach the same verdict.
+func TestCollisionResolvesToTheSameTunnelOnBothSides(t *testing.T) {
+	lower := netip.MustParseAddr("10.42.0.1")
+	higher := netip.MustParseAddr("10.42.0.2")
+
+	// Build the two views of one collision. On each host, "ours" is the tunnel
+	// it initiated and "theirs" the one it answered.
+	lowerHost := &Host{addr: lower}
+	higherHost := &Host{addr: higher}
+
+	lowerOurs := &tunnel{weInitiated: true, peerAddr: higher, localIndex: 1}
+	lowerTheirs := &tunnel{weInitiated: false, peerAddr: higher, localIndex: 2}
+	higherOurs := &tunnel{weInitiated: true, peerAddr: lower, localIndex: 3}
+	higherTheirs := &tunnel{weInitiated: false, peerAddr: lower, localIndex: 4}
+
+	// The rule names the tunnel initiated by the lower address. For the lower
+	// host that is the one it initiated; for the higher host, the one it
+	// answered. Check both arrival orders, since that is the whole point.
+	for _, tc := range []struct {
+		name       string
+		host       *Host
+		old, fresh *tunnel
+		want       *tunnel
+	}{
+		{"lower host, own tunnel first", lowerHost, lowerOurs, lowerTheirs, lowerOurs},
+		{"lower host, peer tunnel first", lowerHost, lowerTheirs, lowerOurs, lowerOurs},
+		{"higher host, own tunnel first", higherHost, higherOurs, higherTheirs, higherTheirs},
+		{"higher host, peer tunnel first", higherHost, higherTheirs, higherOurs, higherTheirs},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.host.resolveCollision(tc.old, tc.fresh); got != tc.want {
+				t.Errorf("kept the wrong tunnel: got localIndex %d, want %d",
+					got.localIndex, tc.want.localIndex)
+			}
+		})
+	}
+
+	// The two survivors must be the two ends of one tunnel: the lower host kept
+	// the one it initiated, so the higher host must have kept the one it
+	// answered. If both kept the tunnel they initiated, they would be talking
+	// past each other.
+	lowerKept := lowerHost.resolveCollision(lowerTheirs, lowerOurs)
+	higherKept := higherHost.resolveCollision(higherTheirs, higherOurs)
+	if lowerKept.weInitiated == higherKept.weInitiated {
+		t.Error("both hosts kept a tunnel with the same initiator; they are not the same tunnel")
+	}
+}
+
+// An ordinary rehandshake is not a collision -- both tunnels have the same
+// initiator, and the newer one simply wins.
+func TestRehandshakeKeepsTheNewerTunnel(t *testing.T) {
+	h := &Host{addr: netip.MustParseAddr("10.42.0.1")}
+	peer := netip.MustParseAddr("10.42.0.2")
+
+	old := &tunnel{weInitiated: true, peerAddr: peer, localIndex: 1}
+	fresh := &tunnel{weInitiated: true, peerAddr: peer, localIndex: 2}
+	if got := h.resolveCollision(old, fresh); got != fresh {
+		t.Errorf("rehandshake kept localIndex %d, want the newer %d", got.localIndex, fresh.localIndex)
+	}
+
+	oldR := &tunnel{weInitiated: false, peerAddr: peer, localIndex: 3}
+	freshR := &tunnel{weInitiated: false, peerAddr: peer, localIndex: 4}
+	if got := h.resolveCollision(oldR, freshR); got != freshR {
+		t.Errorf("rehandshake kept localIndex %d, want the newer %d", got.localIndex, freshR.localIndex)
+	}
+}
+
 func TestSendPacketWithoutRouteFails(t *testing.T) {
 	f := newFabric()
 	hostA := startHost(t, f, "host-a.crt", "host-a.key", mustAddrPort("192.0.2.1:4242"), nil)

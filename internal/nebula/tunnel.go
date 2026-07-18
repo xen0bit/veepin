@@ -42,6 +42,11 @@ type tunnel struct {
 	// remoteIndex is the peer's identifier, which this host echoes.
 	remoteIndex uint32
 
+	// weInitiated records which side started the handshake. Two hosts can key a
+	// tunnel to each other at the same time, and resolving that collision needs
+	// a rule both sides can evaluate identically -- see Host.install.
+	weInitiated bool
+
 	cipher   noiseCipher
 	send     cipher.AEAD
 	recv     cipher.AEAD
@@ -56,7 +61,7 @@ type tunnel struct {
 }
 
 // newTunnel builds a tunnel from a completed handshake.
-func newTunnel(c noiseCipher, localIndex, remoteIndex uint32, sendKey, recvKey [keySize]byte, peer *Certificate) (*tunnel, error) {
+func newTunnel(c noiseCipher, weInitiated bool, localIndex, remoteIndex uint32, sendKey, recvKey [keySize]byte, peer *Certificate) (*tunnel, error) {
 	sendAEAD, err := c.aead(sendKey[:])
 	if err != nil {
 		return nil, err
@@ -74,6 +79,7 @@ func newTunnel(c noiseCipher, localIndex, remoteIndex uint32, sendKey, recvKey [
 	t := &tunnel{
 		localIndex:  localIndex,
 		remoteIndex: remoteIndex,
+		weInitiated: weInitiated,
 		cipher:      c,
 		send:        sendAEAD,
 		recv:        recvAEAD,

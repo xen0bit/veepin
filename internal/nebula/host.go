@@ -512,18 +512,56 @@ func (h *Host) install(t *tunnel, from netip.AddrPort) {
 
 	p.mu.Lock()
 	old := p.tun
-	p.tun = t
+	keep := t
+	if old != nil {
+		keep = h.resolveCollision(old, t)
+	}
+	p.tun = keep
 	// The address the handshake actually arrived from is authoritative: it is
 	// where the peer can be reached right now, whatever configuration said.
 	p.underlay = append([]netip.AddrPort{from}, filterOut(p.underlay, from)...)
 	p.mu.Unlock()
 
-	h.mu.Lock()
-	if old != nil && old != t {
-		delete(h.byIndex, old.localIndex)
+	loser := t
+	if keep == t {
+		loser = old
 	}
-	h.byIndex[t.localIndex] = t
+
+	h.mu.Lock()
+	if loser != nil && loser != keep {
+		delete(h.byIndex, loser.localIndex)
+	}
+	h.byIndex[keep.localIndex] = keep
 	h.mu.Unlock()
+}
+
+// resolveCollision picks which of two tunnels to the same peer survives.
+//
+// Two hosts routinely key a tunnel to each other simultaneously here: a
+// lighthouse answering a query also tells the target to punch, and the target
+// starts its own handshake while the asker is starting one. Both complete, and
+// each side ends up holding two.
+//
+// Simply keeping the newer one is not enough, because the two sides do not see
+// them in the same order -- each could keep a different tunnel, and then every
+// packet one sends arrives on an index the other has retired. So the winner has
+// to be chosen by a rule both sides evaluate to the same answer using only what
+// they both know: the tunnel initiated by the numerically lower overlay address
+// wins. Whichever host is asking, that names the same tunnel.
+//
+// When both tunnels were initiated by the same side there is no collision to
+// resolve -- it is an ordinary rehandshake -- and the newer one wins.
+func (h *Host) resolveCollision(old, fresh *tunnel) *tunnel {
+	if old.weInitiated == fresh.weInitiated {
+		return fresh
+	}
+	// True when this host is the one whose initiations win.
+	// True when this host is the one whose initiations win.
+	oursWins := h.addr.Compare(fresh.PeerAddr()) < 0
+	if fresh.weInitiated == oursWins {
+		return fresh
+	}
+	return old
 }
 
 func filterOut(addrs []netip.AddrPort, drop netip.AddrPort) []netip.AddrPort {

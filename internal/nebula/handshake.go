@@ -306,7 +306,7 @@ func (c *handshakeConfig) respond(pkt []byte) ([]byte, *tunnel, error) {
 	}
 
 	send, recv := noiseHS.Split()
-	t, err := newTunnel(c.cipher, localIndex, payload.InitiatorIndex, send, recv, peer)
+	t, err := newTunnel(c.cipher, false, localIndex, payload.InitiatorIndex, send, recv, peer)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -349,5 +349,5 @@ func (hs *initiatorHandshake) complete(pkt []byte) (*tunnel, error) {
 	}
 
 	send, recv := hs.noise.Split()
-	return newTunnel(hs.cfg.cipher, hs.localIndex, payload.ResponderIndex, send, recv, peer)
+	return newTunnel(hs.cfg.cipher, true, hs.localIndex, payload.ResponderIndex, send, recv, peer)
 }
