@@ -28,6 +28,7 @@ const (
 	OptServerPool     = "pool"
 	OptServerDNS      = "dns"
 	OptServerTUN      = "tun"
+	OptServerNoDTLS   = "no-dtls"
 )
 
 const defaultPool = "10.11.0.0/24"
@@ -51,7 +52,9 @@ type ServerConfig struct {
 	DNS []net.IP
 	// TUNName is the desired TUN interface name; empty lets the kernel pick.
 	TUNName string
-	Logger  *log.Logger
+	// NoDTLS serves the TLS data channel only, without binding a UDP socket.
+	NoDTLS bool
+	Logger *log.Logger
 }
 
 func (c *ServerConfig) validate() error {
@@ -111,18 +114,33 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("anyconnect: listen: %w", err)
 	}
+	// The DTLS data channel shares the TLS port, on UDP. Failing to bind it is
+	// not fatal: the tunnel works over TLS, which is what the protocol falls back
+	// to whenever UDP is unavailable.
+	var udpConn *net.UDPConn
+	if !cfg.NoDTLS {
+		udpConn, err = net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP(cfg.ListenIP), Port: port})
+		if err != nil {
+			logger.Printf("anyconnect: no DTLS data channel (bind udp/%d: %v)", port, err)
+			udpConn = nil
+		}
+	}
 	tun, err := dataplane.OpenTUN(cfg.TUNName)
 	if err != nil {
 		ln.Close()
+		if udpConn != nil {
+			udpConn.Close()
+		}
 		return nil, fmt.Errorf("anyconnect: open TUN: %w", err)
 	}
 
 	eng := engine.NewServer(tun, engine.ServerConfig{
-		Users:   cfg.Users,
-		Pool:    pool,
-		Gateway: gateway,
-		DNS:     cfg.DNS,
-		Logger:  logger,
+		Users:    cfg.Users,
+		Pool:     pool,
+		Gateway:  gateway,
+		DNS:      cfg.DNS,
+		DTLSConn: udpConn,
+		Logger:   logger,
 	})
 	return &Server{
 		eng: eng, tun: tun, pool: pool, gateway: gateway,
@@ -168,6 +186,7 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 		Pool:     opts[OptServerPool],
 		DNS:      parseIPList(opts[OptServerDNS]),
 		TUNName:  opts[OptServerTUN],
+		NoDTLS:   opts[OptServerNoDTLS] == "true",
 		Logger:   log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds),
 	}
 	if path := opts[OptServerCert]; path != "" {

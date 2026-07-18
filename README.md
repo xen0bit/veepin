@@ -107,9 +107,13 @@ drives the production client against the live server and checks bidirectional ES
   keepalives. Unlike SSTP it involves no PPP at all: addressing is negotiated in
   HTTP headers, so the whole protocol is the handshake plus a length-prefixed
   packet stream. Both roles are verified in Docker against ocserv and
-  openconnect, and against each other. The optional DTLS data channel is not
-  implemented — the TLS channel is a complete tunnel, and is what the protocol
-  itself falls back to whenever UDP is unavailable.
+  openconnect, and against each other. The **DTLS data channel** is implemented
+  in both roles on a from-scratch DTLS 1.2 PSK stack (`internal/dtls`), keyed by
+  an RFC 5705 exporter on the TLS session so no second credential is exchanged;
+  it interoperates with GnuTLS's DTLS in both directions
+  (`(DTLS1.2)-(PSK)-(AES-256-GCM)`). Every failure path downgrades rather than
+  fails — no offer, a slow handshake, a channel that later drops — so a tunnel
+  always works, on TLS if not on UDP.
 
 ## Cryptography
 
@@ -194,7 +198,8 @@ internal/mschap              MS-CHAPv2 primitives + MPPE/HLAK key derivation
 
 internal/sshtun              OpenSSH tun@openssh.com framing: channel-open data + AF packet frames
 
-internal/anyconnect          CSTP framing, the config-auth XML exchange, and the client/server engines
+internal/anyconnect          CSTP framing, the config-auth XML exchange, the DTLS channel, and the client/server engines
+internal/dtls                DTLS 1.2 PSK: record layer, handshake flights, fragmentation, anti-replay
 
 internal/ikev1               ISAKMP/IKEv1: payload codec, Main + Quick mode, SKEYID/KEYMAT, CBC IV chaining
 internal/l2tp                RFC 2661 header/AVP codec, reliable control channel, PPP data channel,
@@ -897,11 +902,15 @@ place. Seal is a single allocation (the returned packet), open none.
   forwarded.
 - **Single IKE SA per Child.** Sufficient for road-warrior clients; not a
   site-to-site multi-SA gateway.
-- **AnyConnect has no DTLS data channel.** veepin implements the CSTP channel
-  over TLS, which the protocol treats as the fallback whenever UDP is blocked, so
-  tunnels work but do not get DTLS's lower latency. Authentication is
-  username/password only — no client certificates, and none of the
-  vendor-specific single-sign-on flows.
+- **AnyConnect's DTLS needs TLS 1.3 or Extended Master Secret.** The channel's
+  key comes from an RFC 5705 exporter on the TLS session, which Go's `crypto/tls`
+  will not run on a TLS 1.2 session without EMS (RFC 7627) — correctly, since
+  without it the exporter is exposed to the triple-handshake attack. Against such
+  a peer the client declines DTLS and the tunnel stays on TLS. Only the
+  PSK-NEGOTIATE mode is implemented; the legacy Cisco scheme requires injecting a
+  master secret into a DTLS session, which no ordinary DTLS implementation can
+  do. Authentication is username/password only — no client certificates, and none
+  of the vendor-specific single-sign-on flows.
 - **L2TP/IPsec requires UDP-encapsulated ESP.** veepin has no raw IP-protocol-50
   path, so it always forces the NAT-T float to UDP/4500 and rejects a peer that
   cannot do the same. IKEv1 is Main Mode with a PSK only (no Aggressive Mode, no

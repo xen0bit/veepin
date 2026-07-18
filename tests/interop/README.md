@@ -78,7 +78,10 @@ dependency. Tests skip cleanly if Docker is unavailable.
   `-insecure`; openconnect has no such flag, so its entrypoint pins the
   certificate by computing `pin-sha256:base64(sha256(SubjectPublicKeyInfo))` —
   note this is an SPKI pin, not a digest of the whole certificate. openconnect
-  runs with `--no-dtls`, since veepin implements the CSTP (TLS) data channel.
+  runs with DTLS enabled, so it exercises the veepin server's UDP data channel;
+  its log reports `Established DTLS connection ... (DTLS1.2)-(PSK)-(AES-256-GCM)`
+  when that succeeds. ocserv is pinned to TLS 1.2+ because the DTLS key comes
+  from an RFC 5705 exporter, which needs TLS 1.3 or Extended Master Secret.
 - The OpenVPN scenarios share one throwaway EC PKI and a 2048-bit static key,
   generated per run into `openvpn/pki/` (gitignored) and mounted into both ends.
   The four profiles reuse one server image and one client entrypoint; the server
