@@ -18,6 +18,7 @@ func init() { client.RegisterServer("l2tp", parseServerOptions) }
 // Server option keys for client.NewServer("l2tp", opts).
 const (
 	OptServerListen   = "listen"
+	OptServerPublic   = "public"
 	OptServerPort     = "port"
 	OptServerPSK      = "psk"
 	OptServerUser     = "user"
@@ -31,8 +32,12 @@ const defaultPool = "10.20.0.0/24"
 
 // ServerConfig configures an L2TP/IPsec responder and its userspace data path.
 type ServerConfig struct {
-	// ListenIP is the local IP to bind the IKE/ESP socket on (default 0.0.0.0).
+	// ListenIP is the local IP to bind the IKE/ESP sockets on (default 0.0.0.0).
 	ListenIP string
+	// PublicIP is the server's address as clients reach it, used as the IKE
+	// identity and phase-2 traffic selector. It defaults to ListenIP when that is
+	// concrete, and must be set when listening on the wildcard.
+	PublicIP string
 	// Port is the combined IKE/ESP port (default 500).
 	Port int
 	// PSK authenticates the IPsec SA (required).
@@ -108,12 +113,13 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 
 	eng := engine.NewServer(ikeConn, nattConn, tun, engine.ServerConfig{
-		PSK:     []byte(cfg.PSK),
-		Users:   cfg.Users,
-		Pool:    pool,
-		Gateway: gateway,
-		DNS:     cfg.DNS,
-		Logger:  logger,
+		PSK:      []byte(cfg.PSK),
+		Users:    cfg.Users,
+		PublicIP: net.ParseIP(cfg.PublicIP),
+		Pool:     pool,
+		Gateway:  gateway,
+		DNS:      cfg.DNS,
+		Logger:   logger,
 	})
 	return &Server{eng: eng, tun: tun, pool: pool, gateway: gateway}, nil
 }
@@ -140,6 +146,7 @@ func (s *Server) Network() *net.IPNet { return s.pool.Network() }
 func parseServerOptions(opts map[string]string) (client.Server, error) {
 	cfg := ServerConfig{
 		ListenIP: opts[OptServerListen],
+		PublicIP: opts[OptServerPublic],
 		PSK:      opts[OptServerPSK],
 		Pool:     opts[OptServerPool],
 		DNS:      parseIPList(opts[OptServerDNS]),

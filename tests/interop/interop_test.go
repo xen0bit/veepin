@@ -287,6 +287,17 @@ func TestInteropVeepinClientL2TPServer(t *testing.T) {
 	runInterop(t, "compose.l2tp.yml", "veepin-l2tp-client", "10.30.0.1")
 }
 
+// TestInteropL2TPClientVeepinServer is the reverse direction: strongSwan as the
+// IKEv1 initiator and xl2tpd as the LAC — the pair a Linux desktop dials an
+// L2TP/IPsec VPN with — against the veepin *server*. It proves the responder
+// side of every layer: Main Mode proposal selection and HASH_I verification,
+// Quick Mode, the LNS role of the L2TP control channel, and the server-role PPP
+// with MS-CHAPv2 and pool-based IPCP assignment. The client pings 10.20.0.1, the
+// veepin server's tunnel gateway.
+func TestInteropL2TPClientVeepinServer(t *testing.T) {
+	runInterop(t, "compose.l2tp-server.yml", "l2tp-client", "10.20.0.1")
+}
+
 // TestInteropL2TPSelf is the veepin<->veepin L2TP/IPsec sanity check, and the
 // broadest single test here: one ping crosses IKEv1 (Main + Quick mode), an ESP
 // transport SA, the L2TP control and data channels, and a PPP/MS-CHAPv2/IPCP

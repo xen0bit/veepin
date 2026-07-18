@@ -1,0 +1,20 @@
+# pppd options for the xl2tpd LAC. MS-CHAPv2 only, matching what veepin's PPP
+# server demands; every weaker method is refused so a passing test cannot be one
+# that quietly fell back to PAP.
+require-mschap-v2
+refuse-pap
+refuse-chap
+refuse-mschap
+refuse-eap
+noauth
+noccp
+noipv6
+noipdefault
+ipcp-accept-local
+ipcp-accept-remote
+usepeerdns
+nodefaultroute
+mtu 1400
+mru 1400
+debug
+logfile /dev/stderr

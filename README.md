@@ -94,7 +94,9 @@ drives the production client against the live server and checks bidirectional ES
   already encapsulates transport mode, and `internal/ppp` already speaks
   LCP/MS-CHAPv2/IPCP in both roles. The server assigns inner addresses from a
   pool and routes one shared TUN by inner destination; the client applies what
-  IPCP assigns it.
+  IPCP assigns it. Both roles are verified in Docker against the reference stack —
+  the veepin client against strongSwan + xl2tpd, the veepin server against
+  strongSwan and xl2tpd dialling in — and against each other.
 
 ## Cryptography
 
@@ -513,12 +515,14 @@ sudo ./veepin serve l2tp \
   -pool 10.20.0.0/24 -dns 1.1.1.1 -setup-nat -wan eth0
 ```
 
-Both sides currently carry IKE and ESP on a single UDP port (default 500),
-distinguished by the RFC 3948 non-ESP marker, and always UDP-encapsulate ESP so
-the data path stays an ordinary userspace socket. Full NAT-T — the vendor IDs,
-NAT-D payloads and the float from 500 to 4500 that stock clients and
-strongSwan/xl2tpd expect — is not implemented yet, so interop today is
-veepin↔veepin.
+Both sides speak NAT traversal (RFC 3947/3948): Main Mode starts on UDP/500 and
+floats to UDP/4500, where IKE rides behind the non-ESP marker alongside
+UDP-encapsulated ESP. veepin always forces that float — it advertises itself as
+being behind a NAT, exactly as strongSwan's `encap = yes` does — because its data
+path is a userspace UDP socket with no raw-ESP fallback. A peer that never
+advertises NAT-T is therefore rejected during Main Mode rather than left to fail
+silently later. Both directions are verified in Docker against strongSwan +
+xl2tpd.
 
 ## Connecting an OS client
 
@@ -713,18 +717,13 @@ both roles, so all three cells below are exercised.
 | OpenVPN   | ✓ `openvpn` (×4 variants)   | ✓ `openvpn`                 | ✓                      |
 | SSTP      | ✓ SoftEther                 | ✓ `sstpc`/pppd              | ✓                      |
 | SSH       | ✓ `sshd` (PermitTunnel)     | ✓ `ssh -w`                  | ✓                      |
-| L2TP/IPsec| — strongSwan+xl2tpd (WIP)   | — strongSwan+xl2tpd (WIP)   | ✓ (in-process)         |
-
-L2TP/IPsec is the exception to "all three cells": both roles work end to end
-against each other, but that self-test is the in-process loopback test in
-`internal/l2tp`, not a Docker one, and the third-party cells wait on NAT-T (see
-above).
+| L2TP/IPsec| ✓ strongSwan + xl2tpd       | ✓ strongSwan + xl2tpd       | ✓                      |
 
 Both roles share one API: a client registers with `client.Register` and is dialed
 by `client.Dial`; a server registers with `client.RegisterServer` and is built by
 `client.NewServer`, so `veepin connect <proto>` and `veepin serve <proto>` dispatch
-generically. Every protocol has both roles, and every cell above marked ✓ (except
-the L2TP self-test) is a Docker interop test.
+generically. Every protocol now has both roles, and each cell above is a Docker
+interop test.
 
 ## Benchmarks
 
@@ -851,11 +850,11 @@ place. Seal is a single allocation (the returned packet), open none.
   forwarded.
 - **Single IKE SA per Child.** Sufficient for road-warrior clients; not a
   site-to-site multi-SA gateway.
-- **L2TP/IPsec has no NAT-T yet.** IKE and ESP share one port with the non-ESP
-  marker rather than floating 500 → 4500 with NAT-D payloads, so stock OS clients
-  and strongSwan/xl2tpd do not connect yet; veepin↔veepin does. IKEv1 is Main
-  Mode with a PSK only (no Aggressive Mode, no certificates, no PFS in Quick
-  Mode), and PPP authenticates with MS-CHAPv2 only (no PAP/CHAP).
+- **L2TP/IPsec requires UDP-encapsulated ESP.** veepin has no raw IP-protocol-50
+  path, so it always forces the NAT-T float to UDP/4500 and rejects a peer that
+  cannot do the same. IKEv1 is Main Mode with a PSK only (no Aggressive Mode, no
+  certificates, no PFS in Quick Mode), one child SA per IKE SA with no phase-2
+  rekey, and PPP authenticates with MS-CHAPv2 only (no PAP/CHAP).
 
 These are deliberate boundaries for a readable, self-contained implementation,
 not accidental gaps — each is a localized extension point rather than a

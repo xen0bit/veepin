@@ -17,12 +17,16 @@ import (
 
 // ServerConfig configures the L2TP/IPsec server engine.
 type ServerConfig struct {
-	PSK     []byte
-	Users   map[string]string   // username -> password for MS-CHAPv2
-	Pool    *dataplane.AddrPool // inner address pool
-	Gateway net.IP              // server's inner address (pool's first host)
-	DNS     []net.IP
-	Logger  *log.Logger
+	PSK   []byte
+	Users map[string]string // username -> password for MS-CHAPv2
+	// PublicIP is the server's outer address as clients reach it. It becomes the
+	// IKE identity and the phase-2 traffic selector, so a server listening on the
+	// wildcard — where the socket cannot name it — must be told.
+	PublicIP net.IP
+	Pool     *dataplane.AddrPool // inner address pool
+	Gateway  net.IP              // server's inner address (pool's first host)
+	DNS      []net.IP
+	Logger   *log.Logger
 }
 
 // Server is a running L2TP/IPsec responder. It binds two sockets — the IKE port
@@ -171,9 +175,13 @@ func (s *Server) peerFor(cookie [8]byte, addr *net.UDPAddr) *serverPeer {
 }
 
 // publicIP is the address the server presents as its IKE identity and phase-2
-// selector: the IKE socket's bound address, or nil if it listens on the
-// wildcard, in which case the peer matches on %any.
+// traffic selector: the configured one, else the IKE socket's bound address when
+// it is concrete. Listening on the wildcard without configuring one leaves it
+// nil, which yields an empty ID — workable only with a peer matching on %any.
 func (s *Server) publicIP() net.IP {
+	if s.cfg.PublicIP != nil {
+		return s.cfg.PublicIP
+	}
 	if la, ok := s.ikeConn.LocalAddr().(*net.UDPAddr); ok && !la.IP.IsUnspecified() {
 		return la.IP
 	}

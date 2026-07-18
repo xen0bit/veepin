@@ -28,6 +28,9 @@ dependency. Tests skip cleanly if Docker is unavailable.
 | `TestInteropOpenVPNTLSAuth` | `veepin connect openvpn -tls-auth` | openvpn (GCM, `--tls-auth`) | `10.8.0.1` |
 | `TestInteropOpenVPNTLSCrypt` | `veepin connect openvpn -tls-crypt` | openvpn (GCM, `--tls-crypt`) | `10.8.0.1` |
 | `TestInteropOpenVPNCBC` | `veepin connect openvpn -cipher AES-256-CBC` | openvpn (AES-256-CBC) | `10.8.0.1` |
+| `TestInteropVeepinClientL2TPServer` | `veepin connect l2tp` | strongSwan + xl2tpd | `10.30.0.1` |
+| `TestInteropL2TPClientVeepinServer` | strongSwan + xl2tpd | `veepin serve l2tp` | `10.20.0.1` |
+| `TestInteropL2TPSelf` | `veepin connect l2tp` | `veepin serve l2tp` | `10.20.0.1` |
 
 ## Layout
 
@@ -36,6 +39,10 @@ dependency. Tests skip cleanly if Docker is unavailable.
 - `wireguard/` — reference wireguard-go image + wg-quick responder entrypoint.
 - `openvpn/` — reference openvpn server image + one `server*.conf` per profile
   (plain GCM, tls-auth, tls-crypt, CBC), selected by `SERVER_CONF`.
+- `l2tp-server/` — reference L2TP/IPsec server image: strongSwan (IKEv1, transport
+  mode) plus xl2tpd/pppd as the LNS.
+- `l2tp-client/` — reference L2TP/IPsec client image: the same pair in initiator /
+  LAC roles, as a Linux desktop dials an L2TP VPN.
 - `veepin/` — entrypoints for `veepin serve` / `veepin connect`.
 - `compose.*.yml` — one per scenario.
 - `interop_test.go` — the `//go:build interop` harness (compose up → retry ping → down).
@@ -54,6 +61,13 @@ dependency. Tests skip cleanly if Docker is unavailable.
   `WG_QUICK_USERSPACE_IMPLEMENTATION`), so it needs only `CAP_NET_ADMIN` and
   `/dev/net/tun` — no host WireGuard kernel module. Its keys are fixed test
   material baked into `compose.wireguard.yml`, a preshared key among them.
+- The L2TP/IPsec scenarios negotiate IKE `aes256-sha256-modp2048` and ESP
+  `aes256-sha256` with a PSK, and both ends set `encap = yes` / force NAT-T:
+  veepin's ESP data path is a userspace UDP socket, so ESP must be
+  UDP-encapsulated on 4500 even though the container network has no NAT. Their
+  pppd containers are `privileged` and mount `/dev/ppp`, as the SSTP one is,
+  because pppd sets the PPP line discipline on its pty. pppd is configured to
+  refuse everything but MS-CHAPv2, so a pass cannot be a silent fallback to PAP.
 - The OpenVPN scenarios share one throwaway EC PKI and a 2048-bit static key,
   generated per run into `openvpn/pki/` (gitignored) and mounted into both ends.
   The four profiles reuse one server image and one client entrypoint; the server
