@@ -1,6 +1,7 @@
 package anyconnect
 
 import (
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/http"
@@ -55,6 +56,82 @@ const (
 	hdrLease         = "X-CSTP-Lease-Duration"
 )
 
+// Headers negotiating the optional DTLS data channel (RFC 5705 keying, see
+// dtls.go). The client offers PSK-NEGOTIATE; a server that supports it answers
+// with the port to use and an application identifier that ties the UDP flow back
+// to this HTTPS session.
+const (
+	hdrDTLSCipherSuite = "X-DTLS-CipherSuite"
+	hdrDTLSAppID       = "X-DTLS-App-ID"
+	hdrDTLSPort        = "X-DTLS-Port"
+	hdrDTLSDPD         = "X-DTLS-DPD"
+	hdrDTLSKeepalive   = "X-DTLS-Keepalive"
+	hdrDTLSMTU         = "X-DTLS-MTU"
+)
+
+// pskNegotiate is the cipher-suite token selecting the modern DTLS mode, in
+// which the pre-shared key comes from an exporter on the TLS session rather than
+// from a master secret the client ships in a header. veepin implements only this
+// mode: the legacy Cisco scheme requires injecting a master secret into a DTLS
+// session, which no ordinary DTLS implementation can do.
+const pskNegotiate = "PSK-NEGOTIATE"
+
+// dtlsExporterLabel and dtlsPSKLen are the RFC 5705 exporter parameters both
+// ends use to derive the DTLS pre-shared key from the CSTP/TLS session
+// (draft-mavrogiannopoulos-openconnect section 6). Deriving it means the UDP
+// channel inherits the authentication of the HTTPS one, with nothing extra sent.
+const (
+	dtlsExporterLabel = "EXPORTER-openconnect-psk"
+	dtlsPSKLen        = 32
+)
+
+// httpsPort is the port AnyConnect servers listen on, and the default the DTLS
+// channel falls back to when the server names none of its own.
+const httpsPort = 443
+
+// DTLSParams is what a CONNECT response says about the UDP data channel. Enabled
+// is false when the server did not offer one, in which case the tunnel simply
+// stays on TLS.
+type DTLSParams struct {
+	Enabled bool
+	Port    int
+	AppID   []byte // hex-decoded; goes in the DTLS ClientHello's session-id
+	MTU     int
+}
+
+// parseDTLSParams reads the DTLS offer from a CONNECT response. Anything other
+// than PSK-NEGOTIATE is declined rather than half-supported.
+func parseDTLSParams(h http.Header, tlsMTU int) (DTLSParams, error) {
+	suite := h.Get(hdrDTLSCipherSuite)
+	if suite == "" {
+		return DTLSParams{}, nil
+	}
+	if !strings.Contains(strings.ToUpper(suite), "PSK") {
+		return DTLSParams{}, fmt.Errorf("anyconnect: server offered DTLS suite %q, which is not %s", suite, pskNegotiate)
+	}
+	p := DTLSParams{Enabled: true, Port: httpsPort, MTU: tlsMTU}
+	if v := h.Get(hdrDTLSPort); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 || n > 65535 {
+			return DTLSParams{}, fmt.Errorf("anyconnect: server sent an unusable %s %q", hdrDTLSPort, v)
+		}
+		p.Port = n
+	}
+	if v := h.Get(hdrDTLSMTU); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			p.MTU = n
+		}
+	}
+	if v := h.Get(hdrDTLSAppID); v != "" {
+		id, err := hex.DecodeString(v)
+		if err != nil {
+			return DTLSParams{}, fmt.Errorf("anyconnect: server sent a non-hex %s", hdrDTLSAppID)
+		}
+		p.AppID = id
+	}
+	return p, nil
+}
+
 // defaultMTU is the inner MTU veepin assigns when acting as the server. It
 // leaves room for the CSTP header, the TLS record overhead and the IP/TCP
 // carrier inside a 1500-octet path.
@@ -77,6 +154,9 @@ func buildConnectRequest(host, cookie, hostname string, baseMTU int) (*http.Requ
 	// IPv4 only: the data path forwards IPv4, so asking for an IPv6 address would
 	// mean accepting one veepin cannot route.
 	req.Header.Set(hdrAddressType, "IPv4")
+	// Offer the UDP data channel. A server that does not support it simply omits
+	// the DTLS headers from its reply and the tunnel stays on TLS.
+	req.Header.Set(hdrDTLSCipherSuite, pskNegotiate)
 	return req, nil
 }
 
