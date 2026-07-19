@@ -54,10 +54,15 @@ import (
 
 func init() { client.Register("wireguard", parseOptions) }
 
-// Default inner MTU. WireGuard's own default is 1420: a 1500-octet outer path
-// less the 80 octets of the largest (IPv6) outer header, UDP header and
-// transport framing. Config.MTU overrides it.
-const defaultMTU = 1420
+// Default inner MTU, derived rather than asserted. WireGuard's conventional
+// 1420 is exactly a 1500-octet path less the *IPv6* outer header, the UDP
+// header, and WireGuard's own transport framing — the larger of the two IP
+// families, so one MTU is safe over either. That is why every WireGuard
+// implementation ships the same slightly-conservative number, and computing it
+// here says so rather than leaving 1420 to look arbitrary.
+//
+// Config.MTU overrides it.
+const defaultMTU = dataplane.DefaultPathMTU - dataplane.OuterUDP6 - wire.Overhead
 
 // Handshake retransmission, from the protocol paper §6.1. An initiation is
 // resent every rekeyTimeout until a response arrives or the overall attempt
@@ -283,6 +288,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	// Outbound TUN traffic is routed to the peer by longest-prefix match over its
 	// AllowedIPs; inbound transport packets demux on our receiver index.
 	pump := dataplane.NewPump(tun, send, wire.Demux, logger)
+	pump.SetInnerMTU(r.mtu)
 	pump.AddTunnel(tunnel)
 	s.pump = pump
 	go pump.Run()

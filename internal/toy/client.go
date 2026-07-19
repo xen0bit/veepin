@@ -12,6 +12,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/netip"
@@ -66,7 +67,7 @@ type Client struct {
 func Handshake(ctx context.Context, conn *net.UDPConn, cfg ClientConfig) (*Session, Welcome, error) {
 	logger := cfg.Logger
 	if logger == nil {
-		logger = log.New(discard{}, "", 0)
+		logger = log.New(io.Discard, "", 0)
 	}
 	if len(cfg.User) > 255 {
 		return nil, Welcome{}, errors.New("toy: username longer than 255 octets")
@@ -191,7 +192,7 @@ func StartClient(ctx context.Context, conn *net.UDPConn, tun *dataplane.TUN, cfg
 
 	logger := cfg.Logger
 	if logger == nil {
-		logger = log.New(discard{}, "", 0)
+		logger = log.New(io.Discard, "", 0)
 	}
 
 	send := func(pkt []byte, to *net.UDPAddr) {
@@ -200,6 +201,7 @@ func StartClient(ctx context.Context, conn *net.UDPConn, tun *dataplane.TUN, cfg
 		}
 	}
 	pump := dataplane.NewPump(tun, send, SessionOf, logger)
+	pump.SetInnerMTU(int(welcome.MTU))
 	pump.AddTunnel(session)
 
 	c := &Client{
@@ -302,7 +304,3 @@ func (c *Client) Close() error {
 
 // Done is closed when the client stops.
 func (c *Client) Done() <-chan struct{} { return c.done }
-
-type discard struct{}
-
-func (discard) Write(p []byte) (int, error) { return len(p), nil }

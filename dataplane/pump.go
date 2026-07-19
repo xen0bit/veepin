@@ -73,6 +73,9 @@ type Pump struct {
 	mu     sync.RWMutex
 	byKey  map[uint32]Tunnel // inbound demux
 	routes routeTable        // outbound, by longest-prefix match
+	// mtu is the largest inner packet this path can carry; zero disables the
+	// check entirely.
+	mtu int
 
 	closing bool
 }
@@ -222,6 +225,22 @@ func (p *Pump) routeOutbound(pkt []byte) {
 	if t == nil {
 		return // no tunnel carries this destination
 	}
+
+	// Tell the host when a packet cannot fit, instead of dropping it silently.
+	//
+	// This is what stops MTU black-holing: the sending stack has set DF, so it
+	// is waiting to be told the path MTU, and an ICMP fragmentation-needed
+	// written back to the TUN is how it learns. Without it the tunnel comes up,
+	// small packets work, and anything large hangs forever with no diagnostic.
+	if mtu := p.innerMTU(); mtu > 0 && NeedsFragmentation(pkt, mtu) {
+		if reply := FragNeeded(pkt, mtu); reply != nil {
+			if _, err := p.tun.Write(reply); err != nil && p.log != nil {
+				p.log.Printf("dataplane: writing ICMP frag-needed: %v", err)
+			}
+		}
+		return
+	}
+
 	// Encapsulate copies the inner packet into its own plaintext buffer, so
 	// passing the read buffer slice directly is safe and avoids a copy.
 	out, err := t.Encapsulate(pkt)
@@ -232,6 +251,25 @@ func (p *Pump) routeOutbound(pkt []byte) {
 		return
 	}
 	p.send(out, t.PeerAddr())
+}
+
+// SetInnerMTU sets the largest inner packet this data path can carry. Zero
+// disables the check, which is the behaviour from before it existed.
+//
+// It is a setter rather than a constructor argument because the value can change
+// after the pump is running: an ICMP fragmentation-needed arriving from the
+// underlay lowers it, which is the outbound half of path MTU discovery.
+func (p *Pump) SetInnerMTU(mtu int) {
+	p.mu.Lock()
+	p.mtu = mtu
+	p.mu.Unlock()
+}
+
+// innerMTU reads the current inner MTU.
+func (p *Pump) innerMTU() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.mtu
 }
 
 // Close stops the pump.

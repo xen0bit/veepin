@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/xen0bit/veepin/internal/cryptoutil"
 	"github.com/xen0bit/veepin/internal/mschap"
 )
 
@@ -103,9 +104,16 @@ func parseResponse(body []byte) (peerChallenge [mschap.ChallengeLen]byte, ntResp
 
 // verifyResponse checks a client's NT response by recomputing it from the
 // password the server holds; a match proves the client knew the password.
+//
+// The comparison is constant-time. Array equality in Go compiles to a
+// short-circuiting memequal, which leaks through timing how many leading octets
+// matched -- and this is the server's password check, so an attacker can retry
+// it. The EAP server has always used a constant-time compare for exactly this
+// value; this path had not, which is the kind of divergence a shared helper
+// exists to prevent.
 func verifyResponse(authChallenge, peerChallenge [mschap.ChallengeLen]byte, username, password string, ntResponse [mschap.NTResponseLen]byte) bool {
 	want := mschap.GenerateNTResponse(authChallenge, peerChallenge, username, password)
-	return want == ntResponse
+	return cryptoutil.SecretEqual(want[:], ntResponse[:])
 }
 
 // buildSuccess builds the authenticator's MS-CHAPv2 Success body ("S=<40 hex>"),

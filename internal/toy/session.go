@@ -16,6 +16,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/xen0bit/veepin/internal/replay"
 )
 
 // replayWindowSize is how far behind the highest counter a late packet is still
@@ -64,14 +66,19 @@ type Session struct {
 	// peer is where to send. It is mutable because a client behind NAT can
 	// change address, and the session survives that.
 	peer *net.UDPAddr
-	// highest and seen implement the replay window.
-	highest uint32
-	seen    [replayWindowSize]bool
+	// window is the anti-replay check. It lives in internal/replay because this
+	// and nebula had byte-for-byte the same one, written twice.
+	window *replay.Window
 }
 
 // NewSession builds a session around a derived key.
 func NewSession(id uint16, key Key, peer *net.UDPAddr, routes []netip.Prefix) *Session {
-	return &Session{ID: id, Key: key, peer: peer, routes: routes, established: time.Now()}
+	return &Session{
+		ID: id, Key: key, peer: peer, routes: routes,
+		established: time.Now(),
+		// A toy protocol does not need ESP-sized reordering tolerance.
+		window: replay.NewSize(replayWindowSize),
+	}
 }
 
 // InboundKey is the demux key: the session ID, widened. Implements
@@ -167,7 +174,7 @@ func (s *Session) open(header []byte, h Header, body []byte) ([]byte, error) {
 	}
 
 	s.mu.Lock()
-	ok := s.accept(h.Counter)
+	ok := s.window.Accept(uint64(h.Counter))
 	s.mu.Unlock()
 	if !ok {
 		return nil, ErrReplay
@@ -204,35 +211,4 @@ func (s *Session) OpenAny(pkt []byte) (MsgType, []byte, error) {
 	}
 	inner, err := s.open(pkt[:HeaderLen], h, body)
 	return h.Type, inner, err
-}
-
-// accept records a counter, reporting false for a replay or one too old to
-// judge. The caller must hold s.mu.
-func (s *Session) accept(counter uint32) bool {
-	switch {
-	case counter > s.highest:
-		// Clear the slots the window slides past, so a counter that never
-		// arrived is not mistaken for one that did once the space wraps.
-		gap := counter - s.highest
-		if gap >= replayWindowSize {
-			s.seen = [replayWindowSize]bool{}
-		} else {
-			for i := s.highest + 1; i <= counter; i++ {
-				s.seen[i%replayWindowSize] = false
-			}
-		}
-		s.seen[counter%replayWindowSize] = true
-		s.highest = counter
-		return true
-
-	case s.highest-counter >= replayWindowSize:
-		return false
-
-	default:
-		if s.seen[counter%replayWindowSize] {
-			return false
-		}
-		s.seen[counter%replayWindowSize] = true
-		return true
-	}
 }

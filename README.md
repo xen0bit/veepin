@@ -175,10 +175,38 @@ has DES but not MD4, so a compact RFC 1320 MD4 is included in `internal/ikev2/ea
 these legacy primitives are used only where MSCHAPv2 requires them, never for
 transport security.
 
+### What veepin does not protect against
+
+Two boundaries are worth stating outright, because both are the kind of thing a
+reader may otherwise assume is handled.
+
+**Key material is not zeroed after use.** Session keys, derived secrets and
+private keys are left for the garbage collector. This is deliberate rather than
+overlooked. Go's collector moves and copies objects, so a `[]byte` holding a key
+may have been duplicated to somewhere the code holding it cannot name, and
+overwriting the copy that is still reachable would clear one of several. Doing
+that would produce code that *looks* like it wipes keys while leaving them in
+memory anyway — worse than not doing it, because the appearance invites
+confidence the implementation has not earned.
+
+The honest consequence: **veepin does not claim protection against an attacker
+who can read process memory.** An adversary with a core dump, a debugger, swap
+access, or code execution in the process recovers live session keys. Defend that
+boundary at the layer that can actually hold it — process isolation, disabled
+core dumps, encrypted swap — not by hoping the language cooperated.
+
+**Per-tunnel throughput is bounded by one core.** `dataplane.Pump` reads the TUN
+from a single goroutine. This is a scaling ceiling, not a correctness problem;
+raising it means taking on packet-reordering risk and lock contention that
+nothing here is currently asking for.
+
 ## Architecture
 
 The tree separates machinery any VPN protocol needs from what is specific to one
-protocol. IKEv2 is the first protocol; others become siblings under `internal/`.
+protocol. Each protocol is a sibling under `internal/`, with a thin public
+package exposing `Dial` and `NewServer`; the shared machinery — TUN handling,
+address pools, the packet pump, admission control, MTU derivation — lives in
+`dataplane` and `internal/cryptoutil` and is written once.
 
 ```
 cmd/veepin               CLI: connect / serve / probe subcommands, flags, routing
@@ -194,7 +222,9 @@ nebula                   public Nebula entry point: Dial + NewServer (lighthouse
 toy                      public TOY entry point: Dial + NewServer — an INSECURE teaching example
 
 dataplane                TUN device, address pool, packet pump (demux + routing), client routing
+                         admission control, ICMP/PMTU, MTU derivation, source-preserving PacketConn
 internal/cryptoutil      DH, PRF + prf+, integrity, SK/ESP ciphers, ChaCha20-Poly1305, BLAKE2s
+internal/replay          the anti-replay window shared by nebula and toy
 
 internal/ikev2/payload   wire codec: header, payloads, SA/KE/Nonce/Notify/ID/AUTH/TS/Delete/CP
 internal/ikev2/transform IANA transform ID -> cryptoutil primitive
@@ -1002,9 +1032,18 @@ place. Seal is a single allocation (the returned packet), open none.
   methods (TLS, PEAP, GTC) are out of scope. MSCHAPv2 is cryptographically dated
   and requires recoverable passwords server-side, but it is the interoperable
   username/password choice.
-- **No DoS cookies, no IKE fragmentation, no MOBIKE.** `CREATE_CHILD_SA` treats
-  rekey as a fresh child; the message-ID window accepts only the next expected
-  request (retransmits are dropped, not replayed from cache).
+- **No IKE fragmentation, no MOBIKE.** `CREATE_CHILD_SA` treats rekey as a fresh
+  child; the message-ID window accepts only the next expected request
+  (retransmits are dropped, not replayed from cache). IKEv2 *does* implement the
+  RFC 7296 §2.6 cookie exchange, demanded above a half-open threshold, and every
+  server bounds unauthenticated work through `dataplane.Gate`.
+- **Key material is not zeroed.** Keys, nonces and derived secrets are ordinary
+  Go values and are left for the garbage collector. Go's memory model makes
+  reliable zeroization impractical — values are copied by the collector and by
+  the runtime, so wiping one reference does not wipe the others — and a partial
+  job would invite more confidence than it earns. veepin therefore does not claim
+  any protection against an attacker who can read process memory or recover it
+  from swap or a core dump. This is a stated boundary, not an oversight.
 - **Client liveness is basic.** The client sends NAT keepalives to hold the NAT
   binding, but does not yet initiate DPD liveness checks or rekey the IKE/Child
   SA before their lifetimes expire, so very long-lived client sessions will

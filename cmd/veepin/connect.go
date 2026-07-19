@@ -58,6 +58,14 @@ func runConnect(args []string) error {
 	logger.Printf("connected on %s, internal IP %s, netmask %s, DNS %v",
 		res.TUNName, res.AssignedIP, res.Netmask, res.DNS)
 
+	// Advisory only. A protocol may have a reason for something unusual, and
+	// refusing to bring up a working tunnel over a heuristic would be worse than
+	// the mistake being caught -- but a Result that cannot be right should say
+	// so here rather than manifest as traffic that silently goes nowhere.
+	if err := res.Validate(); err != nil {
+		logger.Printf("warning: %v", err)
+	}
+
 	// 2. Routing.
 	if !*noRoute {
 		router := dataplane.NewClientRouter(dataplane.ClientNetConfig{

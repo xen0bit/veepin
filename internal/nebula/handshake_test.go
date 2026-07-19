@@ -327,30 +327,8 @@ func TestHeaderRoundTrip(t *testing.T) {
 	}
 }
 
-func TestReplayWindowUnit(t *testing.T) {
-	w := newReplayWindow()
-
-	if !w.accept(1) {
-		t.Fatal("rejected the first counter")
-	}
-	if w.accept(1) {
-		t.Error("accepted an immediate duplicate")
-	}
-
-	// A large jump forward must not leave stale bits behind that would make
-	// unseen counters look already received.
-	if !w.accept(replayWindowSize * 4) {
-		t.Fatal("rejected a counter far ahead of the window")
-	}
-	if w.accept(2) {
-		t.Error("accepted a counter that has fallen out of the window")
-	}
-
-	base := uint64(replayWindowSize * 4)
-	if !w.accept(base - 10) {
-		t.Error("rejected an in-window counter that had not been seen")
-	}
-	if w.accept(base - 10) {
-		t.Error("accepted a duplicate in-window counter")
-	}
-}
+// The replay window itself is tested in internal/replay, which nebula and toy
+// now share -- they had byte-for-byte the same implementation. The behaviour it
+// guarantees is exercised end-to-end here by TestReplayRejected and
+// TestOutOfOrderWithinWindowAccepted, which is the level that matters for this
+// package.

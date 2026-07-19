@@ -25,6 +25,8 @@ import (
 	"net/netip"
 	"sync"
 	"time"
+
+	"github.com/xen0bit/veepin/dataplane"
 )
 
 const (
@@ -38,6 +40,12 @@ const (
 	// handshakeTimeout bounds how long a peer stays in handshaking state before
 	// the attempt is abandoned.
 	handshakeTimeout = 30 * time.Second
+
+	// tunnelIdleTimeout is how long a tunnel survives carrying nothing. It
+	// matches nebula's default, and it is what bounds a tunnel's key lifetime:
+	// neither implementation rotates keys on a timer or a counter, so a tunnel
+	// is re-keyed by going quiet and being rebuilt on the next packet.
+	tunnelIdleTimeout = 10 * time.Minute
 )
 
 // ErrNoRoute reports a packet for an overlay address with no known peer.
@@ -48,9 +56,16 @@ var errNotIPv4 = errors.New("nebula: outbound packet is not IPv4")
 
 // packetConn is the UDP socket the host owns, narrowed so tests can substitute
 // an in-memory pair.
+//
+// The method names are net's own rather than the shorter ReadFrom/WriteTo,
+// because that is what makes both *net.UDPConn and dataplane.PacketConn satisfy
+// this directly. The short names forced an adapter in the facade, and that
+// adapter is how nebula ended up being the one UDP server in the tree not
+// replying from the address a datagram arrived on -- the wrapper was available,
+// but nothing here could accept it.
 type packetConn interface {
-	ReadFrom(b []byte) (int, netip.AddrPort, error)
-	WriteTo(b []byte, addr netip.AddrPort) (int, error)
+	ReadFromUDPAddrPort(b []byte) (int, netip.AddrPort, error)
+	WriteToUDPAddrPort(b []byte, addr netip.AddrPort) (int, error)
 	Close() error
 	LocalAddr() net.Addr
 }
@@ -82,6 +97,9 @@ type Config struct {
 	AmLighthouse bool
 	// Logger receives operational messages.
 	Logger Logger
+	// Gate bounds how much unauthenticated work this host accepts. Nil installs
+	// one with the package defaults.
+	Gate *dataplane.Gate
 }
 
 func (c *Config) cipher() noiseCipher {
@@ -125,6 +143,8 @@ type Host struct {
 	log  Logger
 	addr netip.Addr // this host's overlay address
 
+	gate *dataplane.Gate
+
 	mu      sync.RWMutex
 	byAddr  map[netip.Addr]*peer
 	byIndex map[uint32]*tunnel
@@ -150,6 +170,11 @@ func NewHost(cfg *Config, conn packetConn, tun io.ReadWriteCloser) (*Host, error
 		return nil, errors.New("nebula: certificate carries no overlay address")
 	}
 
+	gate := cfg.Gate
+	if gate == nil {
+		gate = dataplane.NewGate(dataplane.AdmissionConfig{})
+	}
+
 	h := &Host{
 		cfg: cfg,
 		hs: &handshakeConfig{
@@ -161,6 +186,7 @@ func NewHost(cfg *Config, conn packetConn, tun io.ReadWriteCloser) (*Host, error
 		tun:         tun,
 		log:         cfg.logger(),
 		addr:        addr,
+		gate:        gate,
 		byAddr:      map[netip.Addr]*peer{},
 		byIndex:     map[uint32]*tunnel{},
 		lighthouses: append([]netip.Addr(nil), cfg.Lighthouses...),
@@ -209,8 +235,20 @@ func (h *Host) Run() {
 // a host that changes address becomes unreachable until it happens to initiate
 // something itself, which in a mesh may never occur.
 func (h *Host) maintain() {
+	// Tunnel expiry runs whether or not lighthouses are configured: a mesh with
+	// only static peers still accumulates tunnels.
+	expiry := time.NewTicker(tunnelIdleTimeout / 4)
+	defer expiry.Stop()
+
 	if len(h.lighthouses) == 0 {
-		return
+		for {
+			select {
+			case <-h.done:
+				return
+			case <-expiry.C:
+				h.expireTunnels()
+			}
+		}
 	}
 	// Report immediately so a freshly started host is reachable straight away
 	// rather than after the first full interval.
@@ -222,9 +260,52 @@ func (h *Host) maintain() {
 		select {
 		case <-h.done:
 			return
+		case <-expiry.C:
+			h.expireTunnels()
 		case <-ticker.C:
 			h.reportToLighthouses()
 		}
+	}
+}
+
+// expireTunnels drops tunnels that have carried nothing for a while.
+//
+// Nebula does the same, with a ten-minute inactivity timeout, and it is the only
+// thing that bounds a tunnel's key lifetime in either implementation: neither
+// rotates keys on a schedule or a counter. Its tryRehandshake re-keys only when
+// the host's own certificate changes, so a continuously busy tunnel keeps one
+// key until it goes quiet. Matching that behaviour is what keeps the two
+// interoperable -- and without it veepin held every tunnel it ever built,
+// forever, which is a leak as well as an unbounded key lifetime.
+//
+// A dropped tunnel costs nothing: the next packet for that peer starts a fresh
+// handshake, which is exactly what happens on first contact.
+func (h *Host) expireTunnels() {
+	cutoff := time.Now().Add(-tunnelIdleTimeout)
+
+	h.mu.Lock()
+	var dead []*tunnel
+	for idx, t := range h.byIndex {
+		seen := t.LastSeen()
+		if seen.IsZero() {
+			seen = t.established
+		}
+		if seen.Before(cutoff) {
+			dead = append(dead, t)
+			delete(h.byIndex, idx)
+		}
+	}
+	h.mu.Unlock()
+
+	for _, t := range dead {
+		if p, ok := h.lookupPeer(t.PeerAddr()); ok {
+			p.mu.Lock()
+			if p.tun == t {
+				p.tun = nil
+			}
+			p.mu.Unlock()
+		}
+		h.log.Printf("nebula: tunnel with %v idle for %v; dropped", t.PeerAddr(), tunnelIdleTimeout)
 	}
 }
 
@@ -344,7 +425,7 @@ func (h *Host) sendToPeer(p *peer, datagram []byte) error {
 	}
 	// Only the first candidate is used for data; the others exist so a
 	// handshake can probe them.
-	_, err := h.conn.WriteTo(datagram, addrs[0])
+	_, err := h.conn.WriteToUDPAddrPort(datagram, addrs[0])
 	return err
 }
 
@@ -389,7 +470,7 @@ func (h *Host) beginHandshake(p *peer) {
 	// Probe every candidate: with hole punching, only one may work, and which
 	// one is not knowable in advance.
 	for _, a := range addrs {
-		if _, err := h.conn.WriteTo(msg, a); err != nil {
+		if _, err := h.conn.WriteToUDPAddrPort(msg, a); err != nil {
 			h.log.Printf("nebula: sending handshake to %v: %v", a, err)
 		}
 	}
@@ -399,7 +480,7 @@ func (h *Host) beginHandshake(p *peer) {
 func (h *Host) readUDP() {
 	buf := make([]byte, maxPacket)
 	for {
-		n, from, err := h.conn.ReadFrom(buf)
+		n, from, err := h.conn.ReadFromUDPAddrPort(buf)
 		if err != nil {
 			if !h.isClosed() {
 				h.log.Printf("nebula: UDP read: %v", err)
@@ -440,12 +521,23 @@ func (h *Host) handleDatagram(pkt []byte, from netip.AddrPort) {
 func (h *Host) handleHandshake(pkt []byte, hdr header, from netip.AddrPort) {
 	if hdr.RemoteIndex == 0 {
 		// No remote index means this is a first message and we are responding.
+		//
+		// Everything below -- the Noise handshake and certificate verification --
+		// is asymmetric work performed for a peer that has proved nothing, which
+		// is exactly what admission control exists to bound. The reservation is
+		// released as soon as respond returns, since by then the work is either
+		// done or abandoned; a mesh has no multi-message pending state to hold.
+		if r := h.gate.Admit(net.UDPAddrFromAddrPort(from)); r != dataplane.Admitted {
+			h.log.Printf("nebula: refusing handshake from %v: %v", from, r)
+			return
+		}
 		reply, t, err := h.hs.respond(pkt)
+		h.gate.Done()
 		if err != nil {
 			h.log.Printf("nebula: handshake from %v rejected: %v", from, err)
 			return
 		}
-		if _, err := h.conn.WriteTo(reply, from); err != nil {
+		if _, err := h.conn.WriteToUDPAddrPort(reply, from); err != nil {
 			h.log.Printf("nebula: replying to handshake from %v: %v", from, err)
 			return
 		}

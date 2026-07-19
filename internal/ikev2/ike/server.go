@@ -6,6 +6,7 @@ import (
 	"net"
 	"sync"
 
+	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/ikev2/eap"
 	"github.com/xen0bit/veepin/internal/ikev2/payload"
 )
@@ -76,6 +77,11 @@ type Server struct {
 
 	tr *transport
 
+	// gate bounds unauthenticated work, and cookies is the protocol's own
+	// stronger answer to the same problem -- see cookie.go.
+	gate    *dataplane.Gate
+	cookies *cookieJar
+
 	mu       sync.RWMutex
 	byRSPI   map[uint64]*IKESA
 	byRemote map[string]*IKESA
@@ -130,10 +136,12 @@ func NewServer(cfg Config) (*Server, error) {
 	s := &Server{
 		cfg:      cfg,
 		log:      cfg.Logger,
+		gate:     dataplane.NewGate(dataplane.AdmissionConfig{}),
+		cookies:  newCookieJar(),
 		byRSPI:   make(map[uint64]*IKESA),
 		byRemote: make(map[string]*IKESA),
 	}
-	s.tr = &transport{conn500: c500, conn4500: c4500, onESP: s.handleESP}
+	s.tr = &transport{conn500: dataplane.NewPacketConn(c500), conn4500: dataplane.NewPacketConn(c4500), onESP: s.handleESP}
 	s.log.Printf("ikev2: listening on %s (IKE :%d, NAT-T/ESP :%d)",
 		cfg.ListenIP, cfg.Port500, cfg.Port4500)
 	return s, nil

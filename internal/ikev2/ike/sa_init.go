@@ -3,6 +3,7 @@ package ike
 import (
 	"net"
 
+	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/ikev2/payload"
 	"github.com/xen0bit/veepin/internal/ikev2/transform"
 )
@@ -30,6 +31,28 @@ func (s *Server) handleIKESAInit(pkt []byte, hdr payload.Header, remote *net.UDP
 		s.sendUnauthNotify(hdr, remote, on4500, payload.InvalidSyntax)
 		return
 	}
+
+	// Anti-DoS, before any asymmetric work.
+	//
+	// Everything below this point -- selecting a suite, the Diffie-Hellman
+	// computation, deriving key material, and the SA state held afterwards --
+	// is performed for a peer that has proved nothing, at an address that is
+	// trivially spoofable over UDP.
+	//
+	// Under pressure the responder demands a cookie first (RFC 7296 2.6).
+	// That costs it nothing: the cookie is derived, not stored, and an attacker
+	// forging a source address never receives the reply and so can never return
+	// it. A real initiator retries with the cookie and proceeds. The admission
+	// gate is the floor beneath that, covering the case where an attacker can
+	// see the replies.
+	if !s.checkCookie(msg, hdr, noncePay.Body, remote, on4500) {
+		return
+	}
+	if r := s.gate.Admit(remote); r != dataplane.Admitted {
+		s.log.Printf("ikev2: refusing SA_INIT from %s: %v", remote, r)
+		return
+	}
+	defer s.gate.Done()
 
 	sa, err := payload.ParseSA(saPay.Body)
 	if err != nil {
@@ -211,6 +234,45 @@ func equalBytes(a, b []byte) bool {
 }
 
 // sendUnauthNotify sends an unencrypted Notify response (IKE_SA_INIT errors).
+// checkCookie applies RFC 7296 2.6. It reports whether the exchange may proceed.
+//
+// A cookie is only demanded when the responder is under enough half-open
+// pressure to justify it. Demanding one unconditionally would add a round trip
+// to every handshake for no benefit when nothing is attacking; demanding one
+// never would leave the responder doing asymmetric work for spoofed traffic.
+func (s *Server) checkCookie(msg *payload.Message, hdr payload.Header, nonce []byte, remote *net.UDPAddr, on4500 bool) bool {
+	if s.gate.HalfOpen() < cookieThreshold {
+		return true
+	}
+
+	// The initiator echoes the cookie as the first notify of its retry.
+	for _, p := range msg.Payloads {
+		if p.Type != payload.TypeNotify {
+			continue
+		}
+		n, err := payload.ParseNotify(p.Body)
+		if err != nil || n.Type != payload.Cookie {
+			continue
+		}
+		if s.cookies.valid(n.Data, hdr.InitiatorSPI, nonce, remote) {
+			return true
+		}
+		// A wrong cookie is answered with a fresh one rather than dropped: it
+		// is most likely one issued under a secret that has since rotated
+		// twice, and a legitimate initiator should be able to recover.
+		break
+	}
+
+	cookie := s.cookies.issue(hdr.InitiatorSPI, nonce, remote)
+	if len(cookie) == 0 {
+		// The jar could not produce one. Falling through to the gate is better
+		// than refusing every handshake.
+		return true
+	}
+	s.sendUnauthNotifyData(hdr, remote, on4500, payload.Cookie, cookie)
+	return false
+}
+
 func (s *Server) sendUnauthNotify(reqHdr payload.Header, remote *net.UDPAddr, on4500 bool, nt payload.NotifyType) {
 	s.sendUnauthNotifyData(reqHdr, remote, on4500, nt, nil)
 }

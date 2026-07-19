@@ -61,16 +61,74 @@ const DefaultTunnelMTU = 1400
 type Result struct {
 	// TUNName is the interface the data path is bound to (e.g. "tun0").
 	TUNName string
-	// AssignedIP is the internal address the server assigned.
+	// AssignedIP is the internal address the server assigned. The caller adds
+	// it to TUNName, which also creates the connected route for the tunnel
+	// subnet -- so an address inside the tunnel needs no route of its own.
 	AssignedIP net.IP
-	// Netmask is the internal address's netmask.
+	// Netmask is the internal address's netmask, and with AssignedIP determines
+	// the connected route above.
 	Netmask net.IP
-	// Gateway is the server's outer (public) IP.
+
+	// Gateway is the server's OUTER address -- the one the client dialled, on
+	// the underlying network. It is not an address inside the tunnel.
+	//
+	// The caller pins a host route to it through the physical interface, so
+	// that encapsulated packets are not themselves routed into the tunnel. That
+	// is the only thing it is used for, and it is why the outer address is the
+	// only correct value: a host route to an inner address would send the very
+	// traffic the tunnel carries out the wrong interface.
+	//
+	// Nil is legitimate and means "install no host route". A mesh protocol
+	// wants this -- peers are reached directly at many different underlay
+	// addresses, so there is no single one to pin (see the nebula package).
+	//
+	// Getting this wrong is silent: the handshake succeeds, the interface comes
+	// up, and every packet leaves by the wrong door. Validate catches the
+	// common mistake of filling in an inner address.
 	Gateway net.IP
 	// DNS holds the internal DNS servers, if the server offered any.
 	DNS []net.IP
 	// MTU is the recommended inner-interface MTU.
 	MTU int
+}
+
+// Validate reports configurations that cannot be right, so a protocol that
+// fills in Result incorrectly is told rather than silently misrouting traffic.
+//
+// It is advisory. Callers are expected to log what it returns and continue: a
+// protocol may have a reason for something unusual, and refusing to bring up a
+// working tunnel over a heuristic would be worse than the mistake it catches.
+//
+// The check that earns its place is the Gateway one. That field is the server's
+// outer address, and filling in an address from inside the tunnel instead
+// produces a host route that sends the tunnel's own traffic out the physical
+// interface -- a failure with no symptom except that nothing crosses. It is a
+// mistake made twice while this tree was being written, in two protocols, and
+// it is mechanically detectable.
+func (r Result) Validate() error {
+	if r.TUNName == "" {
+		return errors.New("client: result names no interface")
+	}
+	if r.AssignedIP == nil {
+		return errors.New("client: result assigns no address")
+	}
+	if r.MTU < 0 {
+		return fmt.Errorf("client: result MTU is negative (%d)", r.MTU)
+	}
+
+	// Gateway is optional; nil means "no host route", which a mesh wants.
+	if r.Gateway != nil && r.Netmask != nil {
+		if v4, mask := r.AssignedIP.To4(), net.IP(r.Netmask).To4(); v4 != nil && mask != nil {
+			subnet := net.IPNet{IP: v4.Mask(net.IPMask(mask)), Mask: net.IPMask(mask)}
+			if subnet.Contains(r.Gateway) {
+				return fmt.Errorf(
+					"client: Gateway %s is inside the tunnel subnet %s; it must be the server's outer address, "+
+						"or nil for a protocol with no single peer to route to",
+					r.Gateway, subnet.String())
+			}
+		}
+	}
+	return nil
 }
 
 // Session is a running tunnel. Close tears it down and is safe to call from any

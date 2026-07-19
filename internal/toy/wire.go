@@ -47,6 +47,11 @@ const (
 	KeyLen = 32
 )
 
+// Overhead is what TOY adds to an inner packet on the wire: the header the tag
+// covers, and the tag itself. The facade sizes the interface MTU from this
+// rather than from a literal, so a header change cannot leave the MTU stale.
+const Overhead = HeaderLen + TagLen
+
 // magic is the first three octets of every datagram.
 var magic = [3]byte{'T', 'O', 'Y'}
 

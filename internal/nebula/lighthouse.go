@@ -403,7 +403,7 @@ func (h *Host) punch(m metaMessage) {
 	for _, ap := range m.AddrPorts {
 		// An empty datagram is enough: it is never parsed as a nebula packet
 		// by the far side, and its only job is to create the binding.
-		if _, err := h.conn.WriteTo([]byte{}, ap); err != nil {
+		if _, err := h.conn.WriteToUDPAddrPort([]byte{}, ap); err != nil {
 			h.log.Printf("nebula: punching towards %v: %v", ap, err)
 		}
 	}

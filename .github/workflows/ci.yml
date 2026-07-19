@@ -99,3 +99,90 @@ jobs:
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
+
+  fuzz:
+    name: fuzz (smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      # Every protocol parser here reads attacker-controlled bytes before
+      # anything is authenticated, so a panic in one is a remote crash. This job
+      # runs a short budget per target on every push: enough to catch a
+      # regression that a seed or a recent change makes reachable immediately,
+      # not enough to find something deep. Long campaigns are run out of band
+      # with a larger -fuzztime, and any crash found there is committed to
+      # testdata/fuzz as a seed so it is caught here forever after.
+      - name: Fuzz each target briefly
+        run: |
+          set -euo pipefail
+          fail=0
+          ran=0
+          # One target at a time: `go test -fuzz` accepts a single pattern, and
+          # naming them explicitly means a new target must be added here too --
+          # which is the point, since a target nothing runs is not a test.
+          # The list is read on fd 3, not stdin. `go test` inherits the loop's
+          # stdin, and a subprocess that reads it consumes the rest of the
+          # heredoc -- which silently truncates the run after the first target
+          # while still reporting success. A green job testing 1 of 32 parsers
+          # is worse than no job, so the count is asserted at the end.
+          while read -r pkg target <&3; do
+            [ -z "$pkg" ] && continue
+            ran=$((ran + 1))
+            echo "::group::$pkg $target"
+            if ! go test "$pkg" -run XXX -fuzz "^${target}\$" -fuzztime 20s; then
+              echo "::error::fuzz target $target in $pkg failed"
+              fail=1
+            fi
+            echo "::endgroup::"
+          done 3<<'TARGETS'
+          ./internal/nebula FuzzUnmarshalCertificate
+          ./internal/nebula FuzzCertificateMarshalIsStable
+          ./internal/nebula FuzzParseHeader
+          ./internal/nebula FuzzParseHandshakePayload
+          ./internal/nebula FuzzParseMetaMessage
+          ./internal/nebula FuzzProtoPrimitives
+          ./internal/dtls FuzzParseRecord
+          ./internal/dtls FuzzClientHelloSessionID
+          ./internal/dtls FuzzParseFragment
+          ./internal/dtls FuzzReassembler
+          ./internal/dtls FuzzParseHandshakeMessages
+          ./internal/ikev2/payload FuzzParseMessage
+          ./internal/ikev2/payload FuzzParseHeader
+          ./internal/ikev2/payload FuzzParseBodies
+          ./internal/ikev1 FuzzParseHeader
+          ./internal/ikev1 FuzzParsePayloads
+          ./internal/ikev1 FuzzParseAttrs
+          ./internal/ikev1 FuzzParseSA
+          ./internal/l2tp FuzzParseHeader
+          ./internal/l2tp FuzzParseAVPs
+          ./internal/ppp FuzzParseCP
+          ./internal/ppp FuzzParseOptions
+          ./internal/ppp FuzzParseCHAP
+          ./internal/openvpn/wire FuzzParseControl
+          ./internal/wireguard/wire FuzzParseMessages
+          ./internal/sstp/wire FuzzParseControl
+          ./internal/anyconnect FuzzParseHeader
+          ./internal/anyconnect FuzzParseDTLS
+          ./internal/anyconnect FuzzParseConfigAuth
+          ./internal/toy FuzzParseHeader
+          ./internal/toy FuzzParseBodies
+          ./internal/toy FuzzSessionOpen
+          TARGETS
+
+          # Guard against the truncation described above, and against a target
+          # being added to the list without the loop reaching it.
+          expected=32
+          if [ "$ran" -ne "$expected" ]; then
+            echo "::error::ran $ran fuzz targets, expected $expected -- the target list was truncated"
+            exit 1
+          fi
+          echo "ran $ran fuzz targets"
+          exit "$fail"
