@@ -22,6 +22,7 @@ import (
 	"net/netip"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // handshakeMessageCount is the number of messages the IX pattern exchanges, and
@@ -56,6 +57,13 @@ type tunnel struct {
 
 	counter atomic.Uint64
 
+	// lastSeen is when a packet last authenticated on this tunnel, as Unix
+	// nanoseconds, and established is when the handshake completed. Idle expiry
+	// uses them; lastSeen is set by decrypt, which is the only place that can
+	// vouch for a tunnel still being live.
+	lastSeen    atomic.Int64
+	established time.Time
+
 	mu     sync.Mutex
 	window *replayWindow
 }
@@ -85,6 +93,7 @@ func newTunnel(c noiseCipher, weInitiated bool, localIndex, remoteIndex uint32, 
 		recv:        recvAEAD,
 		peerCert:    peer,
 		peerAddr:    addr,
+		established: time.Now(),
 		window:      newReplayWindow(),
 	}
 	t.counter.Store(handshakeMessageCount)
@@ -136,7 +145,19 @@ func (t *tunnel) decrypt(pkt []byte) (header, []byte, error) {
 	if !ok {
 		return header{}, nil, errReplayed
 	}
+
+	t.lastSeen.Store(time.Now().UnixNano())
 	return h, pt, nil
+}
+
+// LastSeen is when a packet last authenticated on this tunnel; the zero time
+// means nothing has.
+func (t *tunnel) LastSeen() time.Time {
+	ns := t.lastSeen.Load()
+	if ns == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ns)
 }
 
 // newLocalIndex picks the identifier this host will be addressed by. It has to

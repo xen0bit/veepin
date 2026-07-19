@@ -40,6 +40,12 @@ const (
 	// handshakeTimeout bounds how long a peer stays in handshaking state before
 	// the attempt is abandoned.
 	handshakeTimeout = 30 * time.Second
+
+	// tunnelIdleTimeout is how long a tunnel survives carrying nothing. It
+	// matches nebula's default, and it is what bounds a tunnel's key lifetime:
+	// neither implementation rotates keys on a timer or a counter, so a tunnel
+	// is re-keyed by going quiet and being rebuilt on the next packet.
+	tunnelIdleTimeout = 10 * time.Minute
 )
 
 // ErrNoRoute reports a packet for an overlay address with no known peer.
@@ -222,8 +228,20 @@ func (h *Host) Run() {
 // a host that changes address becomes unreachable until it happens to initiate
 // something itself, which in a mesh may never occur.
 func (h *Host) maintain() {
+	// Tunnel expiry runs whether or not lighthouses are configured: a mesh with
+	// only static peers still accumulates tunnels.
+	expiry := time.NewTicker(tunnelIdleTimeout / 4)
+	defer expiry.Stop()
+
 	if len(h.lighthouses) == 0 {
-		return
+		for {
+			select {
+			case <-h.done:
+				return
+			case <-expiry.C:
+				h.expireTunnels()
+			}
+		}
 	}
 	// Report immediately so a freshly started host is reachable straight away
 	// rather than after the first full interval.
@@ -235,9 +253,52 @@ func (h *Host) maintain() {
 		select {
 		case <-h.done:
 			return
+		case <-expiry.C:
+			h.expireTunnels()
 		case <-ticker.C:
 			h.reportToLighthouses()
 		}
+	}
+}
+
+// expireTunnels drops tunnels that have carried nothing for a while.
+//
+// Nebula does the same, with a ten-minute inactivity timeout, and it is the only
+// thing that bounds a tunnel's key lifetime in either implementation: neither
+// rotates keys on a schedule or a counter. Its tryRehandshake re-keys only when
+// the host's own certificate changes, so a continuously busy tunnel keeps one
+// key until it goes quiet. Matching that behaviour is what keeps the two
+// interoperable -- and without it veepin held every tunnel it ever built,
+// forever, which is a leak as well as an unbounded key lifetime.
+//
+// A dropped tunnel costs nothing: the next packet for that peer starts a fresh
+// handshake, which is exactly what happens on first contact.
+func (h *Host) expireTunnels() {
+	cutoff := time.Now().Add(-tunnelIdleTimeout)
+
+	h.mu.Lock()
+	var dead []*tunnel
+	for idx, t := range h.byIndex {
+		seen := t.LastSeen()
+		if seen.IsZero() {
+			seen = t.established
+		}
+		if seen.Before(cutoff) {
+			dead = append(dead, t)
+			delete(h.byIndex, idx)
+		}
+	}
+	h.mu.Unlock()
+
+	for _, t := range dead {
+		if p, ok := h.lookupPeer(t.PeerAddr()); ok {
+			p.mu.Lock()
+			if p.tun == t {
+				p.tun = nil
+			}
+			p.mu.Unlock()
+		}
+		h.log.Printf("nebula: tunnel with %v idle for %v; dropped", t.PeerAddr(), tunnelIdleTimeout)
 	}
 }
 

@@ -584,3 +584,85 @@ func TestMetaMessageRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// Tunnels that carry nothing are dropped, which is what bounds both the host
+// map and a tunnel's key lifetime.
+//
+// Neither veepin nor nebula rotates keys on a timer or a counter -- nebula's
+// tryRehandshake re-keys only when the host's own certificate changes -- so a
+// tunnel is re-keyed by going idle and being rebuilt on the next packet. Without
+// expiry, veepin held every tunnel it ever built, forever.
+func TestIdleTunnelsAreDropped(t *testing.T) {
+	f := newFabric()
+	addrA, addrB := mustAddrPort("192.0.2.1:4242"), mustAddrPort("192.0.2.2:4242")
+	overlayA, overlayB := netip.MustParseAddr("10.42.0.1"), netip.MustParseAddr("10.42.0.2")
+
+	hostA := startHost(t, f, "host-a.crt", "host-a.key", addrA, func(c *Config) {
+		c.StaticHosts[overlayB] = []netip.AddrPort{addrB}
+	})
+	hostB := startHost(t, f, "host-b.crt", "host-b.key", addrB, func(c *Config) {
+		c.StaticHosts[overlayA] = []netip.AddrPort{addrA}
+	})
+
+	sendUntilDelivered(t, hostA, hostB, overlayA, overlayB, "establish")
+
+	hostB.mu.RLock()
+	before := len(hostB.byIndex)
+	hostB.mu.RUnlock()
+	if before == 0 {
+		t.Fatal("no tunnel was established")
+	}
+
+	// Age the tunnel past the timeout rather than waiting ten minutes for it.
+	hostB.mu.RLock()
+	for _, tun := range hostB.byIndex {
+		tun.lastSeen.Store(time.Now().Add(-2 * tunnelIdleTimeout).UnixNano())
+		tun.established = time.Now().Add(-2 * tunnelIdleTimeout)
+	}
+	hostB.mu.RUnlock()
+
+	hostB.expireTunnels()
+
+	hostB.mu.RLock()
+	after := len(hostB.byIndex)
+	hostB.mu.RUnlock()
+	if after != 0 {
+		t.Errorf("%d idle tunnels survived expiry, want 0", after)
+	}
+
+	// The peer record must forget the dropped tunnel too, or an outbound packet
+	// would be sealed with keys the far side has thrown away.
+	if p, ok := hostB.lookupPeer(overlayA); ok {
+		p.mu.Lock()
+		stale := p.tun != nil
+		p.mu.Unlock()
+		if stale {
+			t.Error("the peer still points at a tunnel that was expired")
+		}
+	}
+}
+
+// A busy tunnel must not be expired: liveness comes from packets that
+// authenticated, so ordinary traffic keeps it alive.
+func TestBusyTunnelsSurviveExpiry(t *testing.T) {
+	f := newFabric()
+	addrA, addrB := mustAddrPort("192.0.2.1:4242"), mustAddrPort("192.0.2.2:4242")
+	overlayA, overlayB := netip.MustParseAddr("10.42.0.1"), netip.MustParseAddr("10.42.0.2")
+
+	hostA := startHost(t, f, "host-a.crt", "host-a.key", addrA, func(c *Config) {
+		c.StaticHosts[overlayB] = []netip.AddrPort{addrB}
+	})
+	hostB := startHost(t, f, "host-b.crt", "host-b.key", addrB, func(c *Config) {
+		c.StaticHosts[overlayA] = []netip.AddrPort{addrA}
+	})
+
+	sendUntilDelivered(t, hostA, hostB, overlayA, overlayB, "establish")
+	hostB.expireTunnels()
+
+	hostB.mu.RLock()
+	after := len(hostB.byIndex)
+	hostB.mu.RUnlock()
+	if after == 0 {
+		t.Error("a tunnel carrying traffic was expired")
+	}
+}

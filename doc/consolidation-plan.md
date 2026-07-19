@@ -31,7 +31,7 @@ of those findings outrank everything in the table above.
 |---|------|-------|------|---------|
 | 8 | No fuzzing of any protocol parser | **Very high** | Low | **Do before anything else** |
 | 9 | Every server accepts unbounded half-open state | **Very high** | Medium | **Do** |
-| 10 | Rekeying inconsistent; Nebula has none | High | Medium | Do (Nebula first) |
+| 10 | ~~Nebula has no rekeying~~ — claim was wrong; real gap is idle expiry | Medium | Low | Done, premise corrected |
 | 11 | Credential comparison timing is inconsistent | Medium | Very low | Do |
 | 12 | Keys are never zeroed | Low | — | Document, don't chase |
 | 13 | Single-threaded data path | Low | — | Not a flaw |
@@ -281,7 +281,7 @@ answer and interoperates with real peers under load.
 clients on a busy server, so the defaults need to be generous and the rejection
 path needs to be visible in logs rather than silent.
 
-## 10. Rekeying is inconsistent, and Nebula has none
+## 10. Rekeying is inconsistent — but the Nebula claim here was wrong
 
 Present: IKEv2 (CHILD_SA rekey), WireGuard (`rekeyAfterTime`, verified by a
 dedicated interop cell), OpenVPN (key renegotiation).
@@ -289,19 +289,35 @@ dedicated interop cell), OpenVPN (key renegotiation).
 Absent: **Nebula**, AnyConnect's DTLS channel, L2TP, SSTP, SSH, TOY.
 
 For most of that list it is defensible — SSH and SSTP inherit their transport's
-rekeying, and TOY is an example. **Nebula is a genuine gap in a shipped
-protocol**: I implemented the handshake and data path and never added rekeying,
-so a veepin nebula tunnel uses one AES-GCM key for its entire life. Real nebula
-rotates. The consequences are bounded but real — no forward secrecy within a
-long-lived tunnel, and an ever-growing volume of traffic under a single key.
+rekeying, and TOY is an example.
 
-Nebula's counter is 64-bit, so this is not a nonce-reuse hazard; it is a key
-lifetime and forward-secrecy issue, which is the less alarming of the two but
-still a divergence from the protocol as specified.
+**The claim originally made here about Nebula was wrong, and checking it before
+implementing is what caught it.** This section asserted that "real nebula
+rotates" and that veepin's lack of rekeying was a divergence from the protocol
+as specified. It is not. Nebula v1.9.7's `tryRehandshake` re-keys in exactly one
+circumstance:
 
-**Proposed:** rekeying for Nebula, matching the reference implementation's
-trigger conditions, with an interop cell that watches a tunnel survive a rotation
-— the shape `TestInteropWireguardRekey` already established.
+```go
+if bytes.Equal(hostinfo.ConnectionState.myCert.Signature, certState.Certificate.Signature) {
+    return
+}
+// "local certificate is not current" -> re-handshake
+```
+
+There is no time-based or counter-based rotation, and the message counter is
+64-bit with an explicit TODO where a duplicate-counter check would go. A
+continuously busy nebula tunnel keeps one key.
+
+What actually bounds a tunnel's key lifetime in nebula is a **ten-minute
+inactivity timeout**: an idle tunnel is dropped and the next packet builds a
+fresh one. veepin had no such timeout, so it held every tunnel it ever
+established, forever — which is both an unbounded key lifetime *and* a leak in
+the host map.
+
+**Done:** an inactivity timeout matching nebula's, so key lifetime is bounded the
+same way and the host map stops growing. Implementing periodic rotation instead
+would have made veepin *diverge* from the reference rather than converge with it,
+which is the outcome the original wording would have produced.
 
 ## 11. Credential comparison timing is inconsistent
 
