@@ -75,6 +75,7 @@ type Server struct {
 	dns           []net.IP
 	users         map[string]string
 	logger        *log.Logger
+	gate          *dataplane.Gate
 
 	listenAddr *net.TCPAddr
 	tun        *dataplane.TUN
@@ -137,6 +138,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 
 	return &Server{
 		tlsCfg:        tlsCfg,
+		gate:          dataplane.NewGate(dataplane.AdmissionConfig{}),
 		serverCertDER: cert.Certificate[0],
 		pool:          pool,
 		gateway:       gateway,
@@ -181,7 +183,18 @@ func (s *Server) ListenAndServe() error {
 				return fmt.Errorf("sstp: accept: %w", err)
 			}
 		}
-		go s.handleConn(conn.(*tls.Conn))
+		// A TLS handshake plus the PPP negotiation behind it is real work done
+		// for a peer that has not authenticated. Bounding it here, at accept,
+		// covers the whole cost rather than only the part after TLS completes.
+		if r := s.gate.Admit(conn.RemoteAddr()); r != dataplane.Admitted {
+			s.logger.Printf("sstp: refusing connection from %s: %v", conn.RemoteAddr(), r)
+			_ = conn.Close()
+			continue
+		}
+		go func(c *tls.Conn) {
+			defer s.gate.Done()
+			s.handleConn(c)
+		}(conn.(*tls.Conn))
 	}
 }
 

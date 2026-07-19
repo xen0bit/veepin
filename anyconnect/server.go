@@ -77,6 +77,7 @@ type Server struct {
 	gateway  net.IP
 	listener net.Listener
 	logger   *log.Logger
+	gate     *dataplane.Gate
 
 	closeOnce sync.Once
 }
@@ -145,6 +146,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	return &Server{
 		eng: eng, tun: tun, pool: pool, gateway: gateway,
 		listener: ln, logger: logger,
+		gate: dataplane.NewGate(dataplane.AdmissionConfig{}),
 	}, nil
 }
 
@@ -157,7 +159,17 @@ func (s *Server) ListenAndServe() error {
 			// A closed listener is the ordinary shutdown path, not a failure.
 			return nil
 		}
-		go s.eng.ServeConn(conn)
+		// The XML credential exchange and CONNECT that follow are performed for
+		// an unauthenticated peer, so the bound belongs at accept.
+		if r := s.gate.Admit(conn.RemoteAddr()); r != dataplane.Admitted {
+			s.logger.Printf("anyconnect: refusing connection from %s: %v", conn.RemoteAddr(), r)
+			_ = conn.Close()
+			continue
+		}
+		go func(c net.Conn) {
+			defer s.gate.Done()
+			s.eng.ServeConn(c)
+		}(conn)
 	}
 }
 

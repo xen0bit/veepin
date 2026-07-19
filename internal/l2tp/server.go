@@ -47,6 +47,7 @@ type Server struct {
 	pool     *dataplane.AddrPool
 	gateway  net.IP
 	logger   *log.Logger
+	gate     *dataplane.Gate
 
 	mu       sync.Mutex
 	byCookie map[[8]byte]*serverPeer // initiator cookie -> peer, for IKE
@@ -71,6 +72,7 @@ func NewServer(ikeConn, nattConn *net.UDPConn, tun tunIO, cfg ServerConfig) *Ser
 		pool:     cfg.Pool,
 		gateway:  cfg.Gateway,
 		logger:   logger,
+		gate:     dataplane.NewGate(dataplane.AdmissionConfig{}),
 		byCookie: map[[8]byte]*serverPeer{},
 		bySPI:    map[uint32]*serverPeer{},
 		byIP:     map[uint32]*serverPeer{},
@@ -138,18 +140,32 @@ func (s *Server) dispatchIKE(msg []byte, addr *net.UDPAddr, natt bool) {
 		return
 	}
 	p := s.peerFor(cookie, addr)
+	if p == nil {
+		// Refused by admission control; already logged.
+		return
+	}
 	p.noteIKEAddr(addr, natt)
 	p.ike.HandleInbound(msg)
 }
 
 // peerFor returns the peer owning an initiator cookie, creating an IKE responder
-// for a newly seen one.
+// for a newly seen one. It returns nil when admission control refuses.
+//
+// This is where an unauthenticated peer makes the server allocate: the cookie is
+// chosen by the initiator, so without a bound, traffic with a varying cookie
+// creates one IKE responder -- with its Diffie-Hellman state -- per message.
 func (s *Server) peerFor(cookie [8]byte, addr *net.UDPAddr) *serverPeer {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if p, ok := s.byCookie[cookie]; ok {
 		return p
 	}
+
+	if r := s.gate.Admit(addr); r != dataplane.Admitted {
+		s.logger.Printf("l2tp: refusing new peer %s: %v", addr, r)
+		return nil
+	}
+
 	p := &serverPeer{
 		srv:    s,
 		cookie: cookie,

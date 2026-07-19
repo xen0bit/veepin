@@ -38,6 +38,11 @@ type ServerConfig struct {
 	MTU uint16
 	// Logger receives progress messages; nil discards them.
 	Logger *log.Logger
+	// Gate bounds how much unauthenticated work this server accepts. Nil
+	// installs one with the package defaults, which is what a caller wanting
+	// sane behaviour should do -- an unbounded server is not a supported
+	// configuration, so there is deliberately no way to switch it off.
+	Gate *dataplane.Gate
 }
 
 // pending is a handshake between CHALLENGE and AUTH.
@@ -54,6 +59,7 @@ type Server struct {
 	conn *net.UDPConn
 	tun  *dataplane.TUN
 	pump *dataplane.Pump
+	gate *dataplane.Gate
 	cfg  ServerConfig
 	log  *log.Logger
 
@@ -80,7 +86,13 @@ func NewServer(conn *net.UDPConn, tun *dataplane.TUN, cfg ServerConfig) (*Server
 		logger = log.New(discard{}, "", 0)
 	}
 
+	gate := cfg.Gate
+	if gate == nil {
+		gate = dataplane.NewGate(dataplane.AdmissionConfig{})
+	}
+
 	s := &Server{
+		gate:     gate,
 		conn:     conn,
 		tun:      tun,
 		cfg:      cfg,
@@ -188,13 +200,26 @@ func (s *Server) handleHello(body []byte, from *net.UDPAddr) {
 		}
 	}
 
+	// This is a new handshake rather than a retransmission, so it is where the
+	// server commits resources to an unauthenticated peer -- and therefore where
+	// admission control belongs. Retransmissions returned above already hold a
+	// reservation, so re-admitting them would double-count and let a lossy link
+	// exhaust the cap.
+	if r := s.gate.Admit(from); r != dataplane.Admitted {
+		s.reject(from, 0, "server busy")
+		s.log.Printf("toy: refusing handshake from %v: %v", from, r)
+		return
+	}
+
 	id, err := s.newSessionID()
 	if err != nil {
+		s.gate.Done()
 		s.reject(from, 0, "no session available")
 		return
 	}
 	assigned, err := s.cfg.Pool.Allocate()
 	if err != nil {
+		s.gate.Done()
 		s.reject(from, 0, "address pool exhausted")
 		s.log.Printf("toy: pool exhausted for %v", from)
 		return
@@ -203,6 +228,7 @@ func (s *Server) handleHello(body []byte, from *net.UDPAddr) {
 	p := &pending{user: hello.User, assigned: assigned, created: time.Now()}
 	p.clientNonce = hello.Nonce
 	if _, err := rand.Read(p.serverNonce[:]); err != nil {
+		s.gate.Done()
 		s.cfg.Pool.Release(assigned)
 		s.log.Printf("toy: generating nonce: %v", err)
 		return
@@ -266,6 +292,10 @@ func (s *Server) handleAuth(h Header, body []byte, from *net.UDPAddr) {
 	sess := NewSession(h.Session, key, from, routes)
 	sess.User = p.user
 	sess.counter.Store(2) // counters 1 and 2 belonged to the handshake
+
+	// The handshake is no longer half-open: it is an authenticated session, and
+	// its cost is now bounded by the session timeout rather than by the gate.
+	s.gate.Done()
 
 	s.mu.Lock()
 	delete(s.pending, h.Session)
@@ -437,6 +467,9 @@ func (s *Server) expire() {
 	for _, id := range stale {
 		drop = append(drop, doomed{nil, s.pending[id].assigned})
 		delete(s.pending, id)
+		// Abandoned handshakes must release their reservation too, or the cap
+		// becomes a slow leak indistinguishable from a sustained attack.
+		s.gate.Done()
 	}
 	s.mu.Unlock()
 

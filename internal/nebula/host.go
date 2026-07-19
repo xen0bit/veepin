@@ -25,6 +25,8 @@ import (
 	"net/netip"
 	"sync"
 	"time"
+
+	"github.com/xen0bit/veepin/dataplane"
 )
 
 const (
@@ -82,6 +84,9 @@ type Config struct {
 	AmLighthouse bool
 	// Logger receives operational messages.
 	Logger Logger
+	// Gate bounds how much unauthenticated work this host accepts. Nil installs
+	// one with the package defaults.
+	Gate *dataplane.Gate
 }
 
 func (c *Config) cipher() noiseCipher {
@@ -125,6 +130,8 @@ type Host struct {
 	log  Logger
 	addr netip.Addr // this host's overlay address
 
+	gate *dataplane.Gate
+
 	mu      sync.RWMutex
 	byAddr  map[netip.Addr]*peer
 	byIndex map[uint32]*tunnel
@@ -150,6 +157,11 @@ func NewHost(cfg *Config, conn packetConn, tun io.ReadWriteCloser) (*Host, error
 		return nil, errors.New("nebula: certificate carries no overlay address")
 	}
 
+	gate := cfg.Gate
+	if gate == nil {
+		gate = dataplane.NewGate(dataplane.AdmissionConfig{})
+	}
+
 	h := &Host{
 		cfg: cfg,
 		hs: &handshakeConfig{
@@ -161,6 +173,7 @@ func NewHost(cfg *Config, conn packetConn, tun io.ReadWriteCloser) (*Host, error
 		tun:         tun,
 		log:         cfg.logger(),
 		addr:        addr,
+		gate:        gate,
 		byAddr:      map[netip.Addr]*peer{},
 		byIndex:     map[uint32]*tunnel{},
 		lighthouses: append([]netip.Addr(nil), cfg.Lighthouses...),
@@ -440,7 +453,18 @@ func (h *Host) handleDatagram(pkt []byte, from netip.AddrPort) {
 func (h *Host) handleHandshake(pkt []byte, hdr header, from netip.AddrPort) {
 	if hdr.RemoteIndex == 0 {
 		// No remote index means this is a first message and we are responding.
+		//
+		// Everything below -- the Noise handshake and certificate verification --
+		// is asymmetric work performed for a peer that has proved nothing, which
+		// is exactly what admission control exists to bound. The reservation is
+		// released as soon as respond returns, since by then the work is either
+		// done or abandoned; a mesh has no multi-message pending state to hold.
+		if r := h.gate.Admit(net.UDPAddrFromAddrPort(from)); r != dataplane.Admitted {
+			h.log.Printf("nebula: refusing handshake from %v: %v", from, r)
+			return
+		}
 		reply, t, err := h.hs.respond(pkt)
+		h.gate.Done()
 		if err != nil {
 			h.log.Printf("nebula: handshake from %v rejected: %v", from, err)
 			return

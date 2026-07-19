@@ -174,6 +174,8 @@ type Server struct {
 
 	logger *log.Logger
 	tun    *dataplane.TUN
+	// gate bounds unauthenticated handshake work; see internal admission notes.
+	gate *dataplane.Gate
 
 	mu    sync.Mutex
 	peers map[[keySize]byte]*serverPeer
@@ -235,6 +237,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		network:     network,
 		logger:      logger,
 		tun:         tun,
+		gate:        dataplane.NewGate(dataplane.AdmissionConfig{}),
 		peers:       peers,
 		closed:      make(chan struct{}),
 	}, nil
@@ -342,6 +345,21 @@ func (s *Server) readLoop() {
 // handleInitiation runs the responder handshake for one initiation and, on
 // success, installs the peer's transport session in the pump.
 func (s *Server) handleInitiation(pkt []byte, from *net.UDPAddr) {
+	// A handshake initiation costs the responder two DH operations and the
+	// keypair state that follows, all for a peer that has proved nothing at an
+	// address that is spoofable. WireGuard's own answer is the cookie reply
+	// under load (which veepin does not implement, so a peer under pressure
+	// sees a refused handshake rather than a cookie); this bounds the cost in
+	// the meantime.
+	//
+	// The reservation covers only the initiation: by the time this returns the
+	// work is done and the session, if any, is authenticated.
+	if r := s.gate.Admit(from); r != dataplane.Admitted {
+		s.logger.Printf("wireguard: refusing initiation from %s: %v", from, r)
+		return
+	}
+	defer s.gate.Done()
+
 	r, err := noise.NewResponder(s.localStatic)
 	if err != nil {
 		s.logger.Printf("wireguard: responder: %v", err)

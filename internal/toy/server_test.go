@@ -212,3 +212,103 @@ func TestSessionIDIsNeverZero(t *testing.T) {
 		}
 	}
 }
+
+// A server must not allocate without bound for unauthenticated peers. Before
+// admission control, a host sending handshakes at line rate would consume
+// session IDs and pool addresses until something ran out; expiry bounded how
+// long that state was held, not how much accumulated in the window.
+func TestServerCapsHalfOpenHandshakes(t *testing.T) {
+	srv, _ := newTestServer(t, "10.9.0.0/16")
+	srv.gate = dataplane.NewGate(dataplane.AdmissionConfig{
+		MaxHalfOpen: 4,
+		// High enough that the global cap is what is being measured here.
+		PerSourceRate: 100_000, PerSourceBurst: 100_000,
+	})
+
+	for i := range 40 {
+		var nonce [NonceLen]byte
+		nonce[0], nonce[1] = byte(i), byte(i>>8)
+		_, body, err := ParseHeader(helloFor(nonce, "alice"))
+		if err != nil {
+			t.Fatalf("ParseHeader: %v", err)
+		}
+		srv.handleHello(body, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000 + i})
+	}
+
+	srv.mu.Lock()
+	pending := len(srv.pending)
+	srv.mu.Unlock()
+
+	if pending != 4 {
+		t.Errorf("forty handshakes produced %d half-open, want the cap of 4", pending)
+	}
+}
+
+// Completing a handshake must return its reservation, or a busy server slowly
+// wedges itself even with no attacker present.
+func TestServerReleasesReservationOnCompletion(t *testing.T) {
+	srv, _ := newTestServer(t, "10.9.0.0/24")
+	srv.gate = dataplane.NewGate(dataplane.AdmissionConfig{
+		MaxHalfOpen: 2, PerSourceRate: 100_000, PerSourceBurst: 100_000,
+	})
+	from := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}
+
+	for i := range 5 {
+		var nonce [NonceLen]byte
+		nonce[0] = byte(i)
+		_, body, err := ParseHeader(helloFor(nonce, "alice"))
+		if err != nil {
+			t.Fatalf("ParseHeader: %v", err)
+		}
+		srv.handleHello(body, from)
+
+		// Complete it properly, which should hand the slot back.
+		srv.mu.Lock()
+		var id uint16
+		var sn [NonceLen]byte
+		for sid, p := range srv.pending {
+			id, sn = sid, p.serverNonce
+		}
+		srv.mu.Unlock()
+		if id == 0 {
+			t.Fatalf("attempt %d: no handshake was admitted; the cap leaked", i)
+		}
+		proof := Proof("s3cret", nonce[:], sn[:])
+		srv.handleAuth(Header{Type: MsgAuth, Session: id, Counter: 2}, proof[:], from)
+	}
+
+	if got := srv.gate.HalfOpen(); got != 0 {
+		t.Errorf("after five completed handshakes, %d reservations are still held", got)
+	}
+}
+
+// Abandoned handshakes release their reservation via expiry, which is what makes
+// the cap safe to hold state behind.
+func TestServerReleasesReservationOnExpiry(t *testing.T) {
+	srv, _ := newTestServer(t, "10.9.0.0/24")
+	srv.gate = dataplane.NewGate(dataplane.AdmissionConfig{
+		MaxHalfOpen: 3, PerSourceRate: 100_000, PerSourceBurst: 100_000,
+	})
+	from := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}
+
+	for i := range 3 {
+		var nonce [NonceLen]byte
+		nonce[0] = byte(i)
+		_, body, _ := ParseHeader(helloFor(nonce, "alice"))
+		srv.handleHello(body, from)
+	}
+	if got := srv.gate.HalfOpen(); got != 3 {
+		t.Fatalf("HalfOpen = %d, want 3", got)
+	}
+
+	srv.mu.Lock()
+	for _, p := range srv.pending {
+		p.created = p.created.Add(-2 * SessionTimeout)
+	}
+	srv.mu.Unlock()
+	srv.expire()
+
+	if got := srv.gate.HalfOpen(); got != 0 {
+		t.Errorf("after expiry, %d reservations are still held", got)
+	}
+}

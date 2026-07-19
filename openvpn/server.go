@@ -74,6 +74,7 @@ type Server struct {
 	dns     []net.IP
 	mtu     int
 	logger  *log.Logger
+	gate    *dataplane.Gate
 
 	listenAddr *net.UDPAddr
 	tun        *dataplane.TUN
@@ -138,6 +139,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 
 	return &Server{
 		tlsCfg:     tlsCfg,
+		gate:       dataplane.NewGate(dataplane.AdmissionConfig{}),
 		pool:       pool,
 		gateway:    gateway,
 		dns:        cfg.DNS,
@@ -222,8 +224,16 @@ func (s *Server) handleControl(op, keyID uint8, pkt []byte, from *net.UDPAddr) {
 			s.mu.Unlock()
 			return // not a known session and not a new-connection opener
 		}
+		// A new session means a TLS handshake and the key exchange behind it,
+		// all for an unauthenticated peer on a spoofable UDP source.
+		if r := s.gate.Admit(from); r != dataplane.Admitted {
+			s.mu.Unlock()
+			s.logger.Printf("openvpn: refusing new client %s: %v", from, r)
+			return
+		}
 		cl, err := s.newClient(from, keyID)
 		if err != nil {
+			s.gate.Done()
 			s.mu.Unlock()
 			s.logger.Printf("openvpn: client %s: %v", from, err)
 			return
@@ -231,7 +241,13 @@ func (s *Server) handleControl(op, keyID uint8, pkt []byte, from *net.UDPAddr) {
 		s.clients[key] = cl
 		s.mu.Unlock()
 		cl.ch.Deliver(pkt)
-		go s.handshake(cl)
+		go func() {
+			// The reservation is held for the whole handshake, which is the
+			// expensive part; once it returns the client is either established
+			// or gone.
+			defer s.gate.Done()
+			s.handshake(cl)
+		}()
 		return
 	}
 	s.mu.Unlock()
