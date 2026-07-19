@@ -322,6 +322,15 @@ def run_server(args):
                 sock.sendto(pack_header(MSG_REJECT, 0, 1) + bytes([len(reason)]) + reason, addr)
                 log(f"HELLO from {addr} for unknown user {user!r}")
                 return
+
+            # A repeated HELLO must not start a second handshake (SPEC.md,
+            # "Handling retransmission and forgery"): the client nonce
+            # identifies the attempt, so a repeat replays the same CHALLENGE.
+            for existing_sid, (cn, sn, _a, _ip) in pending.items():
+                if cn == client_nonce:
+                    sock.sendto(pack_header(MSG_CHALLENGE, existing_sid, 1) + sn, addr)
+                    return
+
             sid = secrets.randbelow(65535) + 1
             server_nonce = secrets.token_bytes(NONCE_LEN)
             assigned = f"{args.pool_base}.{next_host}"
@@ -334,12 +343,17 @@ def run_server(args):
         if msg_type == MSG_AUTH:
             if session_id not in pending or len(body) < TAG_LEN:
                 return
-            client_nonce, server_nonce, _addr, assigned = pending.pop(session_id)
+            client_nonce, server_nonce, _addr, assigned = pending[session_id]
             if body[:TAG_LEN] != make_proof(args.secret, client_nonce, server_nonce):
+                # The pending handshake is deliberately left in place: session
+                # IDs are public, so discarding it here would let one forged
+                # AUTH cancel a legitimate client (SPEC.md, "Handling
+                # retransmission and forgery").
                 reason = b"authentication failed"
                 sock.sendto(pack_header(MSG_REJECT, session_id, 1) + bytes([len(reason)]) + reason, addr)
                 log(f"session {session_id}: authentication failed")
                 return
+            del pending[session_id]
 
             key = derive_key(args.secret, client_nonce, server_nonce)
             sessions[session_id] = Session(session_id, key, addr)

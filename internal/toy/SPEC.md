@@ -115,7 +115,34 @@ Both sides derive the key after `AUTH`/`CHALLENGE`, from the two nonces and the
 shared secret. The client retransmits `HELLO` and `AUTH` on a timer until the
 next message arrives; there is no reliability layer.
 
-A server that cannot verify the proof sends `REJECT` and forgets the session.
+### Handling retransmission and forgery
+
+Because the client retransmits, and because anything on the wire can be forged,
+two rules govern how a server treats handshake messages. Both are requirements,
+not optimisations — an implementation that skips them is exploitable rather than
+merely inefficient.
+
+**A repeated `HELLO` must not start a second handshake.** The client nonce
+identifies the attempt: a `HELLO` carrying a nonce already in progress replays
+the same `CHALLENGE` for the same session. A server that allocated afresh each
+time would consume one session and one address per retransmission, so a lossy
+link — or a peer that simply repeated the message — could exhaust the address
+pool without ever authenticating.
+
+**A failed `AUTH` must not discard the pending handshake.** The server sends
+`REJECT`, and otherwise leaves the session alone. Session IDs travel in the
+clear, so anyone who saw the `CHALLENGE` knows one, and sending a wrong proof for
+it requires no secret; discarding state on that basis would let a single forged
+datagram cancel a legitimate client's handshake. The legitimate client can still
+complete, and the pending timeout below reclaims the address if nobody does.
+
+Both are instances of one rule, which the data path follows too: **unauthenticated
+input must never destroy state.** See "Anti-replay" for the same principle
+applied to the message counter.
+
+A handshake that is never completed is discarded after the session timeout, along
+with the address it reserved. That bound is what makes it safe to keep state that
+an attacker can cause to be created.
 
 ## The digest
 
@@ -192,11 +219,24 @@ send a datagram could advance it and lock the peer out.
 
 ## Keepalive and teardown
 
-A peer with nothing to send transmits `KEEPALIVE` every 15 seconds, which also
-keeps a NAT binding open. A peer that has heard nothing for 60 seconds considers
-the session dead. `BYE` ends a session immediately; it is unauthenticated and
-therefore advisory — a receiver may ignore it, and veepin does, treating it as a
-hint rather than a command.
+A client transmits `KEEPALIVE` every 15 seconds for the life of the session,
+whether or not it has data to send. Sending unconditionally rather than only when
+idle costs one datagram every 15 seconds and removes a whole class of question
+about what counts as idle; it also keeps a NAT binding open on a link carrying
+only inbound traffic.
+
+A server discards a session it has heard nothing on for 60 seconds, releasing the
+address. The interval and the timeout are chosen so a live peer has four chances
+to be heard before being reaped.
+
+Liveness is counted only from packets that **authenticate**, so a forged datagram
+can neither keep a dead session alive nor, by itself, prove one is. Clients do
+not enforce a timeout in either direction: a client that stops hearing from a
+server simply stops receiving, which the application above it will notice.
+
+`BYE` ends a session immediately, but it is unauthenticated and therefore
+advisory — anyone able to send one datagram could otherwise tear down any
+session. veepin logs it and ignores it.
 
 ## Why this is not secure
 
