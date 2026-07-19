@@ -24,7 +24,7 @@ import (
 // still disagrees with protobuf-go by one byte produces certificates nebula
 // rejects, and the symptom would not show up until interop.
 
-func readFixture(t *testing.T, name string) []byte {
+func readFixture(t testing.TB, name string) []byte {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join("testdata", name))
 	if err != nil {
@@ -33,7 +33,7 @@ func readFixture(t *testing.T, name string) []byte {
 	return b
 }
 
-func loadFixtureCert(t *testing.T, name string) *Certificate {
+func loadFixtureCert(t testing.TB, name string) *Certificate {
 	t.Helper()
 	c, _, err := UnmarshalCertificatePEM(readFixture(t, name))
 	if err != nil {
