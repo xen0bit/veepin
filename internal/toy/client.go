@@ -200,6 +200,7 @@ func StartClient(ctx context.Context, conn *net.UDPConn, tun *dataplane.TUN, cfg
 		}
 	}
 	pump := dataplane.NewPump(tun, send, SessionOf, logger)
+	pump.SetInnerMTU(int(welcome.MTU))
 	pump.AddTunnel(session)
 
 	c := &Client{

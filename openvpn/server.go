@@ -182,6 +182,7 @@ func (s *Server) ListenAndServe() error {
 		}
 	}
 	s.pump = dataplane.NewPump(s.tun, send, serverDataDemux, s.logger)
+	s.pump.SetInnerMTU(s.mtu)
 	go s.pump.Run()
 
 	s.logger.Printf("openvpn: listening on %s, gateway %s", s.listenAddr, s.gateway)

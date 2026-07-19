@@ -110,6 +110,7 @@ func NewServer(rawConn *net.UDPConn, tun *dataplane.TUN, cfg ServerConfig) (*Ser
 		}
 	}
 	s.pump = dataplane.NewPump(tun, send, SessionOf, logger)
+	s.pump.SetInnerMTU(int(cfg.MTU))
 	return s, nil
 }
 

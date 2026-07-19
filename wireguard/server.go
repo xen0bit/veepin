@@ -307,6 +307,9 @@ func (s *Server) ListenAndServe() error {
 		}
 	}
 	s.pump = dataplane.NewPump(s.tun, send, wire.Demux, s.logger)
+	// Oversized inner packets are answered with ICMP rather than dropped, so a
+	// client learns the tunnel MTU instead of black-holing.
+	s.pump.SetInnerMTU(s.mtu)
 	go s.pump.Run()
 
 	s.logger.Printf("wireguard: serving on %s, gateway %s, %d peer(s)",

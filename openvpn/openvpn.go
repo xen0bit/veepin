@@ -172,6 +172,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 		}
 	}
 	pump := dataplane.NewPump(tun, send, dataDemux, logger)
+	pump.SetInnerMTU(result.MTU)
 	pump.AddTunnel(tunnel)
 	m.setPump(pump)
 	go pump.Run()

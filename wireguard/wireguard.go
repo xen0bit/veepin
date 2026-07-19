@@ -283,6 +283,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	// Outbound TUN traffic is routed to the peer by longest-prefix match over its
 	// AllowedIPs; inbound transport packets demux on our receiver index.
 	pump := dataplane.NewPump(tun, send, wire.Demux, logger)
+	pump.SetInnerMTU(r.mtu)
 	pump.AddTunnel(tunnel)
 	s.pump = pump
 	go pump.Run()
