@@ -15,6 +15,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/ikev2"
 	"github.com/xen0bit/veepin/l2tp"
+	"github.com/xen0bit/veepin/masque"
 	"github.com/xen0bit/veepin/nebula"
 	"github.com/xen0bit/veepin/openvpn"
 	"github.com/xen0bit/veepin/ssh"
@@ -200,6 +201,32 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			}
 			if *port != 0 {
 				opts[sstp.OptServerPort] = fmt.Sprint(*port)
+			}
+			return opts
+		}, nil
+	case "masque":
+		var (
+			cert     = fs.String("cert", "", "path to the server TLS certificate PEM (required)")
+			key      = fs.String("key", "", "path to the server TLS private key PEM (required)")
+			listenIP = fs.String("listen", "0.0.0.0", "local IP to bind the UDP socket on")
+			port     = fs.Int("port", 0, "UDP port to listen on (default 443)")
+			pool     = fs.String("pool", "10.30.0.0/24", "internal address pool handed to clients")
+			mtu      = fs.Int("mtu", 0, "inner MTU offered to clients (default 1350)")
+			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+		)
+		return func() map[string]string {
+			opts := map[string]string{
+				masque.OptServerCert:   *cert,
+				masque.OptServerKey:    *key,
+				masque.OptServerListen: *listenIP,
+				masque.OptServerPool:   *pool,
+				masque.OptServerTUN:    *tun,
+			}
+			if *port != 0 {
+				opts[masque.OptServerPort] = fmt.Sprint(*port)
+			}
+			if *mtu != 0 {
+				opts[masque.OptServerMTU] = fmt.Sprint(*mtu)
 			}
 			return opts
 		}, nil

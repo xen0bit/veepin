@@ -16,6 +16,7 @@ import (
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/ikev2"
 	"github.com/xen0bit/veepin/l2tp"
+	"github.com/xen0bit/veepin/masque"
 	"github.com/xen0bit/veepin/nebula"
 	"github.com/xen0bit/veepin/openvpn"
 	"github.com/xen0bit/veepin/ssh"
@@ -289,6 +290,30 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 			}
 			if *noDTLS {
 				opts[anyconnect.OptNoDTLS] = "true"
+			}
+			return opts
+		}, nil
+	case "masque":
+		var (
+			server    = fs.String("server", "", "MASQUE proxy host or IP (required)")
+			port      = fs.Int("port", 0, "proxy UDP port (default 443)")
+			authority = fs.String("authority", "", "HTTP :authority to present (default: server host)")
+			ca        = fs.String("ca", "", "PEM bundle to verify the proxy against")
+			insecure  = fs.Bool("insecure", false, "skip proxy certificate verification (self-signed proxies)")
+			tun       = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+		)
+		return func() map[string]string {
+			opts := map[string]string{
+				masque.OptServer:    *server,
+				masque.OptAuthority: *authority,
+				masque.OptServerCA:  *ca,
+				masque.OptTUN:       *tun,
+			}
+			if *port != 0 {
+				opts[masque.OptPort] = fmt.Sprint(*port)
+			}
+			if *insecure {
+				opts[masque.OptInsecure] = "true"
 			}
 			return opts
 		}, nil

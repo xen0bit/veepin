@@ -197,7 +197,12 @@ func (s *Server) handleConn(qc *quic.Conn) {
 		_ = h3conn.Close()
 		return
 	}
-	assign := EncodeAddresses([]AddressEntry{{RequestID: 0, Prefix: netip.PrefixFrom(addr, 32)}})
+	// The address is assigned with the pool's prefix length rather than as a
+	// bare /32, so the inner gateway lands on the client's connected subnet and
+	// is reachable without a separate route -- the same shape every other
+	// protocol here hands back.
+	ones, _ := s.cfg.Pool.Network().Mask.Size()
+	assign := EncodeAddresses([]AddressEntry{{RequestID: 0, Prefix: netip.PrefixFrom(addr, ones)}})
 	if err := WriteCapsule(rs, CapsuleAddressAssign, assign); err != nil {
 		s.cfg.Pool.Release(assigned)
 		_ = h3conn.Close()

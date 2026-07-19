@@ -1,10 +1,11 @@
 # veepin
 
 A **working userspace VPN in Go** — both a server (responder) and a client
-(initiator) — written from scratch, with `golang.org/x/crypto` the only
-dependency. It speaks eight protocols, **client and server for every one**:
-**IKEv2/ESP**, **WireGuard**, **OpenVPN**, **SSTP**, **SSH**, **L2TP/IPsec**,
-**AnyConnect**, and **Nebula**.
+(initiator) — written from scratch, depending only on the pure-Go
+`golang.org/x` modules (`x/crypto`, and `x/net` for QUIC). It speaks nine
+protocols, **client and server for every one**: **IKEv2/ESP**, **WireGuard**,
+**OpenVPN**, **SSTP**, **SSH**, **L2TP/IPsec**, **AnyConnect**, **Nebula**, and
+**MASQUE** (CONNECT-IP over HTTP/3).
 The SSTP side runs Microsoft's Secure Socket Tunneling Protocol over TLS — the
 `SSTP_DUPLEX_POST` HTTP handshake, the CALL_CONNECT crypto binding, MS-CHAPv2
 authentication and a PPP/IPCP data path — as both client and server, verified
@@ -133,6 +134,21 @@ drives the production client against the live server and checks bidirectional ES
   `nebula-cert` — so veepin parses and verifies certificates it did not produce.
   Version 1 certificates (protobuf, IPv4) and Curve25519; the ACL engine,
   relays and version 2 certificates are not implemented.
+- **MASQUE CONNECT-IP client and server**: IP-over-HTTP/3 (RFC 9484), the first
+  *modern* tunnel here and the only one that reaches outside `x/crypto` — it
+  needs QUIC, which the standard library does not provide, so it is built on
+  `golang.org/x/net/quic`. The HTTP/3 layer is from scratch on top of that:
+  QUIC varints, a QPACK codec restricted to a zero-capacity dynamic table, the
+  SETTINGS/control-stream handshake with `ENABLE_CONNECT_PROTOCOL`, and an
+  Extended CONNECT to `/.well-known/masque/ip/*/*/`. Once the request is
+  accepted the proxy assigns an address (ADDRESS_ASSIGN), advertises a route
+  (ROUTE_ADVERTISEMENT), and inner packets flow as HTTP Datagrams. Because
+  `x/net/quic` has no QUIC DATAGRAM frames, veepin runs in **capsule mode**: the
+  datagrams travel as DATAGRAM capsules on the request stream (RFC 9297), which
+  is spec-compliant and interoperable but reliable-and-ordered — a documented
+  performance boundary, not a correctness one (see *What veepin does not protect
+  against*). Both roles are verified in Docker against an independent aioquic
+  CONNECT-IP peer in both directions, and against each other.
 
 ## Cryptography
 
@@ -150,14 +166,24 @@ transform ID selects the algorithm, so nothing else has to change.)
 
 ### Dependencies
 
-The module depends on `golang.org/x/crypto` (and `golang.org/x/sys`, which it
-pulls in for CPU feature detection). Nothing else.
+The module depends only on the pure-Go `golang.org/x` modules: `x/crypto`,
+`x/net` (for QUIC), and `x/sys` and `x/text` that those pull in. Nothing outside
+the `golang.org/x` namespace, and no cgo.
 
-That dependency exists for exactly one reason: **WireGuard fixes its crypto and
-does not negotiate it.** It mandates ChaCha20-Poly1305 and BLAKE2s, and Go ships
-neither in the standard library, so — unlike IKEv2, which negotiates algorithms
-and happens to negotiate ones `crypto/aes` and `crypto/sha256` cover — WireGuard
+`x/crypto` exists for one reason: **WireGuard fixes its crypto and does not
+negotiate it.** It mandates ChaCha20-Poly1305 and BLAKE2s, and Go ships neither
+in the standard library, so — unlike IKEv2, which negotiates algorithms and
+happens to negotiate ones `crypto/aes` and `crypto/sha256` cover — WireGuard
 cannot be built on stdlib alone.
+
+`x/net` exists for a second: **MASQUE runs over HTTP/3, and Go ships no QUIC.**
+`x/net/quic` is the Go team's own pure-Go implementation, so the alternative —
+hand-rolling a QUIC stack or vendoring a third-party one — is avoided the same
+way `x/crypto` avoids hand-rolling ChaCha20. (`x/net/http3` is *not* used: its
+public surface exports nothing and it has no CONNECT/datagram/capsule support,
+so the HTTP/3 layer MASQUE needs is built from scratch on the `quic` package —
+see `internal/masque/http3`.) Only MASQUE imports it; the other eight protocols
+still reach no further than `x/crypto`.
 
 The alternative was hand-rolling both. That was rejected: `x/crypto` is the Go
 team's own module and carries the AVX2/NEON assembly, which measures **~1.9 GB/s**
@@ -200,6 +226,16 @@ from a single goroutine. This is a scaling ceiling, not a correctness problem;
 raising it means taking on packet-reordering risk and lock contention that
 nothing here is currently asking for.
 
+**MASQUE carries every inner packet on one reliable QUIC stream.** Because
+`x/net/quic` has no QUIC DATAGRAM frames, CONNECT-IP runs in capsule mode, so
+inner packets are delivered reliably and in order rather than as unreliable
+datagrams. On a lossy path this reintroduces head-of-line blocking — the
+classic "TCP over a reliable tunnel" pathology — and it is why MASQUE is the one
+protocol here whose data path is not the profile the protocol is designed for.
+It is a performance boundary, not a security or correctness one, and it is
+confined to MASQUE; the moment `x/net/quic` gains datagram support the transport
+swaps under an unchanged data path.
+
 ## Architecture
 
 The tree separates machinery any VPN protocol needs from what is specific to one
@@ -219,6 +255,7 @@ ssh                      public SSH entry point: Dial + NewServer, Config (x/cry
 l2tp                     public L2TP/IPsec entry point: Dial + NewServer, Config
 anyconnect               public AnyConnect entry point: Dial + NewServer, Config
 nebula                   public Nebula entry point: Dial + NewServer (lighthouse), Config
+masque                   public MASQUE entry point: Dial + NewServer (CONNECT-IP proxy), Config
 toy                      public TOY entry point: Dial + NewServer — an INSECURE teaching example
 
 dataplane                TUN device, address pool, packet pump (demux + routing), client routing
@@ -254,6 +291,11 @@ internal/dtls                DTLS 1.2 PSK: record layer, handshake flights, frag
 
 internal/nebula              minimal protobuf codec, v1 certificates + CA pool, Noise IX, 16-octet header,
                              AEAD data path with anti-replay, the mesh host engine and the lighthouse protocol
+
+internal/masque              CONNECT-IP capsules (DATAGRAM/ADDRESS_ASSIGN/ROUTE_ADVERTISEMENT), the
+                             HTTP-Datagram payload, and the client/server engines binding it to a TUN
+internal/masque/http3        from-scratch HTTP/3 on x/net/quic: varints, minimal QPACK (zero dynamic table),
+                             SETTINGS/control streams, Extended CONNECT, capsules over DATA frames
 
 internal/toy                 the TOY example protocol + SPEC.md — NO SECURITY; the smallest complete
                              illustration of a veepin protocol (handshake, Tunnel, pump, both roles)
@@ -675,9 +717,46 @@ There is no address pool and no user list: a host's address and identity are
 whatever its certificate says, so the CA is the only thing that grants access.
 Revocation is by certificate expiry — veepin does not implement blocklists.
 
+### Connecting as a MASQUE client
+
+`veepin connect masque` opens a CONNECT-IP tunnel to a MASQUE proxy over
+HTTP/3. There is nothing to authenticate beyond the proxy's TLS certificate and
+whatever the proxy itself requires; the address is assigned by the proxy:
+
+```sh
+# Against a proxy with a certificate your system trusts:
+sudo ./veepin connect masque -server proxy.example.com
+
+# Against a self-signed proxy (skips certificate verification — testing only):
+sudo ./veepin connect masque -server 10.0.0.1 -insecure
+```
+
+The proxy assigns an address and advertises a full-tunnel route, so the default
+is to route everything through it; `-no-route` brings the interface up without
+touching the system routing table.
+
+### Running a MASQUE proxy
+
+`veepin serve masque` is the CONNECT-IP responder. It needs a TLS certificate
+and key, since the tunnel is HTTP/3 and the client verifies the proxy the way it
+verifies any HTTPS server:
+
+```sh
+sudo ./veepin serve masque \
+  -cert /etc/veepin/proxy.crt -key /etc/veepin/proxy.key \
+  -pool 10.30.0.0/24 -setup-nat -wan eth0
+```
+
+Each client is one QUIC connection; the proxy assigns it a `/24` address from
+the pool, advertises a default route, and forwards its packets, checking that a
+client only ever sources traffic from the address it was given. The data path
+runs in **capsule mode** (see *What veepin does not protect against*): correct
+and interoperable, but reliable-and-ordered rather than the datagram profile a
+production MASQUE VPN would use.
+
 ## The example protocol
 
-**TOY provides no security.** It is not one of the eight protocols above; it is a
+**TOY provides no security.** It is not one of the nine protocols above; it is a
 worked example of how a protocol is put together here, with the cryptography
 replaced by placeholders simple enough to read in one sitting. Its "encryption"
 is a repeating 32-octet XOR pad and its "authentication" is FNV-1a, a hash-table
@@ -908,6 +987,7 @@ both roles, so all three cells below are exercised.
 | L2TP/IPsec| ✓ strongSwan + xl2tpd       | ✓ strongSwan + xl2tpd       | ✓                      |
 | AnyConnect| ✓ ocserv                    | ✓ openconnect               | ✓                      |
 | Nebula    | ✓ `nebula` (lighthouse)     | ✓ `nebula` (host)           | ✓ (via lighthouse)     |
+| MASQUE    | ✓ aioquic CONNECT-IP        | ✓ aioquic CONNECT-IP        | ✓                      |
 | TOY*      | ✓ independent Python peer   | ✓ independent Python peer   | ✓                      |
 
 `*` TOY is a **deliberately insecure example protocol**, not a real one. See
