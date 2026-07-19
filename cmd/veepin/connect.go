@@ -20,6 +20,7 @@ import (
 	"github.com/xen0bit/veepin/openvpn"
 	"github.com/xen0bit/veepin/ssh"
 	"github.com/xen0bit/veepin/sstp"
+	"github.com/xen0bit/veepin/toy"
 	"github.com/xen0bit/veepin/wireguard"
 )
 
@@ -280,6 +281,28 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 			}
 			if *noDTLS {
 				opts[anyconnect.OptNoDTLS] = "true"
+			}
+			return opts
+		}, nil
+	case "toy":
+		// An example protocol with no security whatsoever; see internal/toy.
+		// The flags are named to make that hard to miss.
+		var (
+			server = fs.String("server", "", "TOY server host or IP (required)")
+			port   = fs.Int("port", 0, "server UDP port (default 5555)")
+			user   = fs.String("user", "", "username (required)")
+			secret = fs.String("insecure-shared-secret", "", "shared secret (required); provides no real protection")
+			tun    = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+		)
+		return func() map[string]string {
+			opts := map[string]string{
+				toy.OptServer: *server,
+				toy.OptUser:   *user,
+				toy.OptSecret: *secret,
+				toy.OptTUN:    *tun,
+			}
+			if *port != 0 {
+				opts[toy.OptPort] = fmt.Sprint(*port)
 			}
 			return opts
 		}, nil

@@ -19,6 +19,7 @@ import (
 	"github.com/xen0bit/veepin/openvpn"
 	"github.com/xen0bit/veepin/ssh"
 	"github.com/xen0bit/veepin/sstp"
+	"github.com/xen0bit/veepin/toy"
 	"github.com/xen0bit/veepin/wireguard"
 )
 
@@ -227,6 +228,35 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			}
 			if *port != 0 {
 				opts[l2tp.OptServerPort] = fmt.Sprint(*port)
+			}
+			return opts
+		}, nil
+	case "toy":
+		// An example protocol with no security whatsoever; see internal/toy.
+		var (
+			listenIP = fs.String("listen", "0.0.0.0", "local IP to bind the UDP socket on")
+			port     = fs.Int("port", 0, "UDP port to listen on (default 5555)")
+			pool     = fs.String("pool", "10.9.0.0/24", "internal address pool handed to clients")
+			dns      = fs.String("dns", "", "comma-separated DNS servers assigned to clients")
+			user     = fs.String("user", "", "username to accept (required)")
+			secret   = fs.String("insecure-shared-secret", "", "that user's secret (required); provides no real protection")
+			mtu      = fs.Int("mtu", 0, "inner MTU offered to clients (default 1400)")
+			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+		)
+		return func() map[string]string {
+			opts := map[string]string{
+				toy.OptServerListen: *listenIP,
+				toy.OptServerPool:   *pool,
+				toy.OptServerDNS:    *dns,
+				toy.OptServerUser:   *user,
+				toy.OptServerSecret: *secret,
+				toy.OptServerTUN:    *tun,
+			}
+			if *port != 0 {
+				opts[toy.OptServerPort] = fmt.Sprint(*port)
+			}
+			if *mtu != 0 {
+				opts[toy.OptServerMTU] = fmt.Sprint(*mtu)
 			}
 			return opts
 		}, nil
