@@ -78,7 +78,7 @@ type Server struct {
 
 	listenAddr *net.UDPAddr
 	tun        *dataplane.TUN
-	conn       *net.UDPConn
+	conn       *dataplane.PacketConn
 	pump       *dataplane.Pump
 
 	nextPeerID atomic.Uint32
@@ -168,7 +168,7 @@ func (s *Server) ListenAndServe() error {
 	if err != nil {
 		return fmt.Errorf("openvpn: listen: %w", err)
 	}
-	s.conn = conn
+	s.conn = dataplane.NewPacketConn(conn)
 
 	// The pump routes TUN packets to a client tunnel by destination /32, and sends
 	// each encapsulated packet to that tunnel's current peer address; inbound data

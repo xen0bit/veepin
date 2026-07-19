@@ -180,7 +180,7 @@ type Server struct {
 	mu    sync.Mutex
 	peers map[[keySize]byte]*serverPeer
 
-	conn *net.UDPConn
+	conn *dataplane.PacketConn
 	pump *dataplane.Pump
 
 	closeOnce sync.Once
@@ -294,7 +294,7 @@ func (s *Server) ListenAndServe() error {
 	if err != nil {
 		return fmt.Errorf("wireguard: listen %s: %w", s.listenAddr, err)
 	}
-	s.conn = conn
+	s.conn = dataplane.NewPacketConn(conn)
 
 	// Unconnected socket: each send addresses a specific peer, so the pump's send
 	// uses the tunnel's current PeerAddr.

@@ -2,6 +2,8 @@ package ike
 
 import (
 	"net"
+
+	"github.com/xen0bit/veepin/dataplane"
 )
 
 // nonESPMarker is the 4-octet zero prefix that distinguishes an IKE message
@@ -17,8 +19,8 @@ type espSocketHandler func(esp []byte, from *net.UDPAddr)
 // for the initial exchange and port 4500 for post-NAT-detection traffic and
 // UDP-encapsulated ESP.
 type transport struct {
-	conn500  *net.UDPConn
-	conn4500 *net.UDPConn
+	conn500  *dataplane.PacketConn
+	conn4500 *dataplane.PacketConn
 	onESP    espSocketHandler
 }
 

@@ -41,8 +41,8 @@ type ServerConfig struct {
 // mutable state rather than used as identity.
 type Server struct {
 	cfg      ServerConfig
-	ikeConn  *net.UDPConn // port 500: Main Mode
-	nattConn *net.UDPConn // port 4500: floated IKE + UDP-encapsulated ESP
+	ikeConn  *dataplane.PacketConn // port 500: Main Mode
+	nattConn *dataplane.PacketConn // port 4500: floated IKE + UDP-encapsulated ESP
 	tun      tunIO
 	pool     *dataplane.AddrPool
 	gateway  net.IP
@@ -59,7 +59,9 @@ type Server struct {
 }
 
 // NewServer builds a server over the two bound UDP sockets and a TUN.
-func NewServer(ikeConn, nattConn *net.UDPConn, tun tunIO, cfg ServerConfig) *Server {
+func NewServer(rawIKE, rawNATT *net.UDPConn, tun tunIO, cfg ServerConfig) *Server {
+	ikeConn := dataplane.NewPacketConn(rawIKE)
+	nattConn := dataplane.NewPacketConn(rawNATT)
 	logger := cfg.Logger
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)

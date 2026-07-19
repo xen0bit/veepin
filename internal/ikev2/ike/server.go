@@ -141,7 +141,7 @@ func NewServer(cfg Config) (*Server, error) {
 		byRSPI:   make(map[uint64]*IKESA),
 		byRemote: make(map[string]*IKESA),
 	}
-	s.tr = &transport{conn500: c500, conn4500: c4500, onESP: s.handleESP}
+	s.tr = &transport{conn500: dataplane.NewPacketConn(c500), conn4500: dataplane.NewPacketConn(c4500), onESP: s.handleESP}
 	s.log.Printf("ikev2: listening on %s (IKE :%d, NAT-T/ESP :%d)",
 		cfg.ListenIP, cfg.Port500, cfg.Port4500)
 	return s, nil

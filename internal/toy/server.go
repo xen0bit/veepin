@@ -56,7 +56,7 @@ type pending struct {
 
 // Server is a running TOY server.
 type Server struct {
-	conn *net.UDPConn
+	conn *dataplane.PacketConn
 	tun  *dataplane.TUN
 	pump *dataplane.Pump
 	gate *dataplane.Gate
@@ -74,7 +74,8 @@ type Server struct {
 }
 
 // NewServer builds a server around an open socket and TUN.
-func NewServer(conn *net.UDPConn, tun *dataplane.TUN, cfg ServerConfig) (*Server, error) {
+func NewServer(rawConn *net.UDPConn, tun *dataplane.TUN, cfg ServerConfig) (*Server, error) {
+	conn := dataplane.NewPacketConn(rawConn)
 	if cfg.Pool == nil {
 		return nil, errors.New("toy: no address pool configured")
 	}
