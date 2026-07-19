@@ -132,9 +132,21 @@ func parseDTLSParams(h http.Header, tlsMTU int) (DTLSParams, error) {
 	return p, nil
 }
 
-// defaultMTU is the inner MTU veepin assigns when acting as the server. It
-// leaves room for the CSTP header, the TLS record overhead and the IP/TCP
-// carrier inside a 1500-octet path.
+// defaultMTU is the inner MTU veepin assigns when acting as the server.
+//
+// Unlike the UDP protocols in this tree, this one cannot be derived exactly.
+// The carrier is TLS over TCP, and TLS record overhead depends on the
+// negotiated version and cipher suite: TLS 1.3 spends one content-type octet
+// and a 16-octet tag, TLS 1.2 with AES-GCM spends an 8-octet explicit nonce and
+// a 16-octet tag, and the DTLS path spends a different amount again. Worst case
+// on a 1500-octet path:
+//
+//	1500 - 20 (IPv4) - 20 (TCP) - 5 (TLS record header)
+//	     - 24 (explicit nonce + tag) - 8 (CSTP header) = 1423
+//
+// 1400 sits under that with room to spare, which is what Cisco's own servers
+// hand out and therefore what clients expect. The margin absorbs TCP options —
+// timestamps alone cost 12 octets — that the bound above ignores.
 const defaultMTU = 1400
 
 // buildConnectRequest renders the CONNECT that turns the authenticated HTTPS

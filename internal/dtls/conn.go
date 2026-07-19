@@ -33,8 +33,16 @@ type Config struct {
 const (
 	initialRetransmit = 1 * time.Second
 	maxRetransmit     = 8 * time.Second
-	defaultMTU        = 1200
 	defaultTimeout    = 20 * time.Second
+
+	// defaultMTU bounds handshake *fragments*, not tunnel payloads — it is not
+	// an inner MTU, and deriving it from an encapsulation overhead would be a
+	// category error. A handshake has to complete across whatever path exists
+	// before anything can be negotiated about that path, so this is deliberately
+	// pessimistic: 1200 is the figure DTLS implementations converged on because
+	// it survives IPv6's 1280-octet minimum link MTU with the outer headers
+	// still to pay for. Config.MTU raises it when the path is known.
+	defaultMTU = 1200
 )
 
 // Conn is an established DTLS connection carrying application datagrams. It

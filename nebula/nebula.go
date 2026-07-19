@@ -62,9 +62,25 @@ import (
 
 func init() { client.Register("nebula", parseOptions) }
 
-// defaultMTU is nebula's own default: a 1500-octet path less the outer IP and
-// UDP headers, the 16-octet nebula header and the AEAD tag.
+// derivedMTU is what a 1500-octet ethernet path actually leaves for an inner
+// packet: the path, less the outer IPv4 and UDP headers, less nebula's own
+// header and AEAD tag. It works out to 1456.
+const derivedMTU = dataplane.DefaultPathMTU - dataplane.OuterUDP4 - inebula.Overhead
+
+// defaultMTU is nebula's own default, and it is deliberately well under
+// derivedMTU. Upstream nebula ships 1300 so a tunnel survives paths that carry
+// less than ethernet — PPPoE, or another tunnel underneath — without needing
+// path MTU discovery to converge first. Since an MTU is only useful if the peer
+// agrees with it, the conventional value wins here over the derived one.
+//
+// A previous comment on this constant claimed it was the derived figure. It
+// never was; the arithmetic above is what that claim would have produced.
 const defaultMTU = 1300
+
+// Raising defaultMTU past what the wire format leaves room for would produce a
+// tunnel that black-holes on an ordinary ethernet path. Declaring the slack as
+// an unsigned constant makes that a compile error rather than a field report.
+const _ uint = derivedMTU - defaultMTU
 
 // defaultPort is the UDP port nebula listens on by default.
 const defaultPort = 4242

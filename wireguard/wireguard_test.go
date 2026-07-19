@@ -148,3 +148,14 @@ func TestParseOptionsRejectsIncomplete(t *testing.T) {
 		t.Error("parseOptions accepted a config with no peer")
 	}
 }
+
+// defaultMTU is computed from the wire format rather than written down, so this
+// pins it to the number every other WireGuard implementation uses. If a change
+// to the transport header moves it, the tunnel would still come up and would
+// still pass every interop test -- and would quietly fragment or black-hole
+// against real peers. That failure is invisible without this assertion.
+func TestDefaultMTUMatchesTheProtocolConvention(t *testing.T) {
+	if defaultMTU != 1420 {
+		t.Errorf("defaultMTU = %d, want WireGuard's conventional 1420", defaultMTU)
+	}
+}

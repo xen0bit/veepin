@@ -250,6 +250,15 @@ func ParseCookieReply(pkt []byte) (*CookieReply, error) {
 // TransportHeaderLen is type(1)+reserved(3)+receiver(4)+counter(8).
 const TransportHeaderLen = 16
 
+// TagLen is the ChaCha20-Poly1305 authentication tag appended to the ciphertext.
+const TagLen = 16
+
+// Overhead is what WireGuard adds to an inner packet on the wire: the transport
+// header and the AEAD tag. It does not include the padding WireGuard applies to
+// round a plaintext up to a multiple of 16 — that padding is why the protocol's
+// conventional MTU leaves a little more slack than this sum alone accounts for.
+const Overhead = TransportHeaderLen + TagLen
+
 // PutTransportHeader writes a type-4 header into dst, which must be at least
 // TransportHeaderLen octets. The packet body (the AEAD output) follows.
 func PutTransportHeader(dst []byte, receiver uint32, counter uint64) error {

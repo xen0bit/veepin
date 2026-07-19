@@ -68,6 +68,12 @@ const (
 	// the value is arbitrary since there is only one.
 	dataTunnelKey = 1
 	// defaultMTU is the inner TUN MTU when the server pushes none.
+	//
+	// It is not derived, and should not be: OpenVPN's own `tun-mtu` default is
+	// 1500, and this value is only ever a fallback for a server that declined to
+	// push one. Substituting a smaller derived figure would silently disagree
+	// with what every other OpenVPN client uses against that same server. The
+	// negotiated path is the pushed value, which parseInstruction applies.
 	defaultMTU = 1500
 )
 

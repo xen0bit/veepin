@@ -33,6 +33,12 @@ import (
 // headerLen is the fixed size of the nebula header.
 const headerLen = 16
 
+// Overhead is what nebula adds to an inner packet on the wire: the fixed header,
+// which is authenticated as additional data rather than encrypted, and the AEAD
+// tag appended to the ciphertext. It is exported so the facade can size the
+// interface MTU from the wire format rather than from a literal.
+const Overhead = headerLen + tagSize
+
 // headerVersion is the only protocol version defined.
 const headerVersion uint8 = 1
 

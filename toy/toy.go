@@ -55,9 +55,15 @@ import (
 
 func init() { client.Register("toy", parseOptions) }
 
-// defaultMTU leaves room for the outer IPv4 and UDP headers, the 12-octet TOY
-// header and the 8-octet tag.
-const defaultMTU = 1400
+// defaultMTU is derived rather than chosen: an ordinary ethernet path, less the
+// outer IPv4 and UDP headers, less TOY's own header and tag. It comes to 1452.
+//
+// TOY is the protocol in this tree with no interoperability convention to
+// honour — nothing else implements it — so unlike nebula and WireGuard there is
+// no reason to ship anything but the exact figure. The comment here used to
+// describe this arithmetic while the constant next to it said 1400, which is
+// the kind of drift the derivation exists to prevent.
+const defaultMTU = dataplane.DefaultPathMTU - dataplane.OuterUDP4 - itoy.Overhead
 
 // Option keys accepted by client.Dial(ctx, "toy", opts).
 const (
