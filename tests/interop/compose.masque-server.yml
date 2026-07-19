@@ -1,0 +1,38 @@
+# Independent aioquic CONNECT-IP client -> veepin MASQUE proxy.
+#
+# The mirror of compose.masque.yml: here veepin is the proxy and the foreign
+# aioquic implementation is the client. It exercises veepin's server-side
+# Extended CONNECT handling, address assignment and capsule relay against a stack
+# that shares none of veepin's code.
+#
+# Data-path check: the aioquic client pings 10.32.0.1, the veepin proxy's gateway.
+name: veepin-interop-masque-server
+
+services:
+  veepin-masque-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    environment:
+      POOL: "10.32.0.0/24"
+    volumes:
+      - ./veepin/masque-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  aioquic-masque-client:
+    build:
+      context: masque
+    image: interop-masque
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-masque-server]
+    environment:
+      SERVER: "veepin-masque-server"
+    volumes:
+      - ./masque/client-entrypoint.sh:/entrypoint.sh:ro
+    command: ["/bin/sh", "/entrypoint.sh"]

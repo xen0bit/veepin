@@ -382,6 +382,32 @@ func TestInteropNebulaSelf(t *testing.T) {
 	runInterop(t, "compose.nebula-self.yml", "veepin-host-b", "10.42.0.3")
 }
 
+// MASQUE CONNECT-IP (RFC 9484) is IP-over-HTTP/3. The independent peer is
+// aioquic driven from the RFCs, so these cells test veepin's from-scratch
+// HTTP/3 layer -- varints, QPACK, the SETTINGS handshake, Extended CONNECT and
+// capsules -- against a QUIC/HTTP-3 stack that shares none of veepin's code. A
+// drift in any of that framing stops the ping crossing.
+
+// TestInteropVeepinMasqueClientAioquicProxy runs the veepin CONNECT-IP client
+// against the aioquic proxy and pings 10.31.0.1, the proxy's gateway.
+func TestInteropVeepinMasqueClientAioquicProxy(t *testing.T) {
+	runInterop(t, "compose.masque.yml", "veepin-masque-client", "10.31.0.1")
+}
+
+// TestInteropAioquicClientVeepinProxy is the mirror, exercising veepin's
+// responder: Extended CONNECT handling, address assignment, and a capsule
+// stream the foreign client has to parse.
+func TestInteropAioquicClientVeepinProxy(t *testing.T) {
+	runInterop(t, "compose.masque-server.yml", "aioquic-masque-client", "10.32.0.1")
+}
+
+// TestInteropMasqueSelf is the veepin<->veepin sanity check over real QUIC. Its
+// value is attribution: if it passes while the two cross-implementation cells
+// fail, veepin and the RFC have diverged rather than veepin being broken.
+func TestInteropMasqueSelf(t *testing.T) {
+	runInterop(t, "compose.masque-self.yml", "veepin-masque-client", "10.30.0.1")
+}
+
 // TOY is the example protocol (internal/toy) and provides no security; these
 // cells prove the *specification*, not the cryptography. The peer they talk to
 // is an independent Python implementation written from internal/toy/SPEC.md
