@@ -117,44 +117,86 @@ func TestUnknownUserRejected(t *testing.T) {
 	}
 }
 
-// A bad proof must release the address the handshake reserved, or a peer that
-// authenticates incorrectly repeatedly would drain the pool.
-func TestFailedAuthReleasesTheAddress(t *testing.T) {
-	srv, _ := newTestServer(t, "10.9.0.0/30") // room for very few clients
+// A forged AUTH must not cancel a legitimate handshake.
+//
+// Session IDs travel in the clear, so anyone who saw the CHALLENGE knows this
+// one, and sending a wrong proof for it costs nothing and requires no secret. If
+// that discarded the pending state, one spoofed packet would deny service to the
+// real client. This is the same rule as checking a packet tag before touching
+// the replay window: unauthenticated input must not destroy state.
+func TestForgedAuthDoesNotCancelTheHandshake(t *testing.T) {
+	srv, _ := newTestServer(t, "10.9.0.0/24")
+	victim := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}
+	attacker := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40001}
+
+	var nonce [NonceLen]byte
+	copy(nonce[:], "victim")
+	_, body, err := ParseHeader(helloFor(nonce, "alice"))
+	if err != nil {
+		t.Fatalf("ParseHeader: %v", err)
+	}
+	srv.handleHello(body, victim)
+
+	srv.mu.Lock()
+	var id uint16
+	var serverNonce [NonceLen]byte
+	for sid, p := range srv.pending {
+		id, serverNonce = sid, p.serverNonce
+	}
+	srv.mu.Unlock()
+	if id == 0 {
+		t.Fatal("no handshake was started")
+	}
+
+	// The attacker guesses at the session with a proof that cannot verify.
+	srv.handleAuth(Header{Type: MsgAuth, Session: id, Counter: 2}, make([]byte, TagLen), attacker)
+
+	// The real client must still be able to finish.
+	good := Proof("s3cret", nonce[:], serverNonce[:])
+	srv.handleAuth(Header{Type: MsgAuth, Session: id, Counter: 2}, good[:], victim)
+
+	srv.mu.Lock()
+	_, established := srv.sessions[id]
+	srv.mu.Unlock()
+	if !established {
+		t.Error("a forged AUTH cancelled a legitimate client's handshake")
+	}
+}
+
+// Addresses reserved by handshakes that never complete are reclaimed by expiry,
+// which is what bounds the resource a wrong proof can hold.
+func TestAbandonedHandshakesAreReclaimed(t *testing.T) {
+	srv, _ := newTestServer(t, "10.9.0.0/24")
 	from := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}
 
-	for i := range 8 {
+	for i := range 5 {
 		var nonce [NonceLen]byte
 		nonce[0] = byte(i)
-
 		_, body, err := ParseHeader(helloFor(nonce, "alice"))
 		if err != nil {
 			t.Fatalf("ParseHeader: %v", err)
 		}
 		srv.handleHello(body, from)
-
-		srv.mu.Lock()
-		var id uint16
-		for sid := range srv.pending {
-			id = sid
-			break
-		}
-		srv.mu.Unlock()
-		if id == 0 {
-			t.Fatalf("attempt %d: the pool was exhausted by failed authentications", i)
-		}
-
-		// Answer with a proof that cannot verify.
-		bad := make([]byte, TagLen)
-		srv.handleAuth(Header{Type: MsgAuth, Session: id, Counter: 2}, bad, from)
 	}
 
 	srv.mu.Lock()
-	sessions, pendingCount := len(srv.sessions), len(srv.pending)
+	if got := len(srv.pending); got != 5 {
+		srv.mu.Unlock()
+		t.Fatalf("pending = %d, want 5", got)
+	}
+	// Age them past the timeout rather than waiting a minute for it.
+	for _, p := range srv.pending {
+		p.created = p.created.Add(-2 * SessionTimeout)
+	}
 	srv.mu.Unlock()
-	if sessions != 0 || pendingCount != 0 {
-		t.Errorf("after eight failed authentications: %d sessions, %d pending; want 0, 0",
-			sessions, pendingCount)
+
+	srv.expire()
+
+	srv.mu.Lock()
+	remaining := len(srv.pending)
+	srv.mu.Unlock()
+	if remaining != 0 {
+		t.Errorf("%d abandoned handshakes survived expiry, want 0", remaining)
 	}
 }
 

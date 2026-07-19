@@ -45,7 +45,6 @@ type pending struct {
 	clientNonce [NonceLen]byte
 	serverNonce [NonceLen]byte
 	user        string
-	addr        *net.UDPAddr
 	assigned    net.IP
 	created     time.Time
 }
@@ -201,7 +200,7 @@ func (s *Server) handleHello(body []byte, from *net.UDPAddr) {
 		return
 	}
 
-	p := &pending{user: hello.User, addr: from, assigned: assigned, created: time.Now()}
+	p := &pending{user: hello.User, assigned: assigned, created: time.Now()}
 	p.clientNonce = hello.Nonce
 	if _, err := rand.Read(p.serverNonce[:]); err != nil {
 		s.cfg.Pool.Release(assigned)
@@ -237,10 +236,17 @@ func (s *Server) handleAuth(h Header, body []byte, from *net.UDPAddr) {
 
 	secret := s.cfg.Users[p.user]
 	if !CheckProof(secret, p.clientNonce[:], p.serverNonce[:], proof) {
-		s.mu.Lock()
-		delete(s.pending, h.Session)
-		s.mu.Unlock()
-		s.cfg.Pool.Release(p.assigned)
+		// The handshake is deliberately left intact.
+		//
+		// Session IDs travel in the clear, so anyone who saw the CHALLENGE knows
+		// this one. Discarding the pending state here would mean a single forged
+		// AUTH -- which costs an attacker nothing and requires no secret --
+		// cancels a legitimate client's handshake and strands the address it had
+		// been promised. Keeping it lets the real client still complete, and the
+		// pending timeout reclaims the address if nobody ever does.
+		//
+		// This is the same rule as checking a packet tag before touching the
+		// replay window: unauthenticated input must not be able to destroy state.
 		s.reject(from, h.Session, "authentication failed")
 		s.log.Printf("toy: session %d: authentication failed for %q", h.Session, p.user)
 		return
