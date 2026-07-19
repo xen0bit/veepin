@@ -23,6 +23,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/xen0bit/veepin/internal/replay"
 )
 
 // handshakeMessageCount is the number of messages the IX pattern exchanges, and
@@ -65,7 +67,7 @@ type tunnel struct {
 	established time.Time
 
 	mu     sync.Mutex
-	window *replayWindow
+	window *replay.Window
 }
 
 // newTunnel builds a tunnel from a completed handshake.
@@ -94,10 +96,10 @@ func newTunnel(c noiseCipher, weInitiated bool, localIndex, remoteIndex uint32, 
 		peerCert:    peer,
 		peerAddr:    addr,
 		established: time.Now(),
-		window:      newReplayWindow(),
+		window:      replay.New(),
 	}
 	t.counter.Store(handshakeMessageCount)
-	t.window.markSeen(handshakeMessageCount)
+	t.window.MarkSeen(handshakeMessageCount)
 	return t, nil
 }
 
@@ -140,7 +142,7 @@ func (t *tunnel) decrypt(pkt []byte) (header, []byte, error) {
 	}
 
 	t.mu.Lock()
-	ok := t.window.accept(h.MessageCounter)
+	ok := t.window.Accept(h.MessageCounter)
 	t.mu.Unlock()
 	if !ok {
 		return header{}, nil, errReplayed

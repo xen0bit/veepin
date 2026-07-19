@@ -1002,9 +1002,18 @@ place. Seal is a single allocation (the returned packet), open none.
   methods (TLS, PEAP, GTC) are out of scope. MSCHAPv2 is cryptographically dated
   and requires recoverable passwords server-side, but it is the interoperable
   username/password choice.
-- **No DoS cookies, no IKE fragmentation, no MOBIKE.** `CREATE_CHILD_SA` treats
-  rekey as a fresh child; the message-ID window accepts only the next expected
-  request (retransmits are dropped, not replayed from cache).
+- **No IKE fragmentation, no MOBIKE.** `CREATE_CHILD_SA` treats rekey as a fresh
+  child; the message-ID window accepts only the next expected request
+  (retransmits are dropped, not replayed from cache). IKEv2 *does* implement the
+  RFC 7296 §2.6 cookie exchange, demanded above a half-open threshold, and every
+  server bounds unauthenticated work through `dataplane.Gate`.
+- **Key material is not zeroed.** Keys, nonces and derived secrets are ordinary
+  Go values and are left for the garbage collector. Go's memory model makes
+  reliable zeroization impractical — values are copied by the collector and by
+  the runtime, so wiping one reference does not wipe the others — and a partial
+  job would invite more confidence than it earns. veepin therefore does not claim
+  any protection against an attacker who can read process memory or recover it
+  from swap or a core dump. This is a stated boundary, not an oversight.
 - **Client liveness is basic.** The client sends NAT keepalives to hold the NAT
   binding, but does not yet initiate DPD liveness checks or rekey the IKE/Child
   SA before their lifetimes expire, so very long-lived client sessions will
