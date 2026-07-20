@@ -86,7 +86,7 @@ func NewServer(cfg ServerConfig, tun io.ReadWriteCloser) (*Server, error) {
 	}, nil
 }
 
-// ServeHTTP dispatches the three Fortinet endpoints.
+// ServeHTTP dispatches the Fortinet endpoints.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case PathLoginCheck:
@@ -95,9 +95,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleConfig(w, r)
 	case PathTunnel:
 		s.handleTunnel(w, r)
+	case "/", "/remote/login":
+		// A real client's first request is a GET for the login page. It builds
+		// its own credential form and POSTs to logincheck regardless of the body,
+		// so a minimal 200 with no JavaScript redirect is all it needs to proceed.
+		s.handleLoginPage(w)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (s *Server) handleLoginPage(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/html")
+	_, _ = io.WriteString(w, `<html><body><form action="`+PathLoginCheck+`" method="post">`+
+		`<input name="username"><input name="credential" type="password"></form></body></html>`)
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {

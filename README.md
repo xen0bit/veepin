@@ -1071,17 +1071,18 @@ both roles, so all three cells below are exercised.
 | Nebula    | ✓ `nebula` (lighthouse)     | ✓ `nebula` (host)           | ✓ (via lighthouse)     |
 | MASQUE-IP | ✓ aioquic CONNECT-IP        | ✓ aioquic CONNECT-IP        | ✓                      |
 | MASQUE-UDP| ✓ aioquic CONNECT-UDP       | ✓ aioquic CONNECT-UDP       | ✓                      |
-| Fortinet  | ✓ openconnect fake server†  | ✓ openconnect               | ✓                      |
+| Fortinet  | —†                          | ✓ openconnect               | ✓                      |
 | TOY*      | ✓ independent Python peer   | ✓ independent Python peer   | ✓                      |
 
 `*` TOY is a **deliberately insecure example protocol**, not a real one. See
 [The example protocol](#the-example-protocol).
 
-`†` openconnect's Fortinet test server implements only the control plane (the
-tunnel endpoint is a stub), so the veepin-client cell verifies the login and
-config exchange; the packet-moving proof for that direction is the veepin↔veepin
-self cell, and the openconnect *client* against the veepin server carries real
-traffic.
+`†` Fortinet is asymmetric: no open-source FortiOS gateway exists to run the
+veepin *client* against with a full data path (openconnect ships only a Fortinet
+test *server* whose tunnel endpoint is a stub). So the independent-implementation
+proof is the real openconnect *client* against the veepin server — which does
+move packets — plus the veepin↔veepin self cell; the veepin client's login and
+config parsing is covered by unit tests and exercised by the self cell.
 
 Both roles share one API: a client registers with `client.Register` and is dialed
 by `client.Dial`; a server registers with `client.RegisterServer` and is built by
