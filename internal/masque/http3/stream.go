@@ -21,6 +21,10 @@ import (
 type RequestStream struct {
 	qs      *quic.Stream
 	readBuf []byte // capsule-stream bytes carried over from a partial DATA frame
+	// hdrBuf is the DATA frame header scratch for Write. It lives here so that
+	// framing a packet on the data path does not allocate: the stream is already
+	// on the heap, so writing through this buffer costs nothing per call.
+	hdrBuf []byte
 }
 
 // readHeaders reads the HEADERS frame at the head of the stream and decodes its
@@ -55,7 +59,12 @@ func (rs *RequestStream) ReadResponse() ([]Field, error) {
 // with a whole capsule, so one capsule becomes one DATA frame — the peer is free
 // to reframe, which is why Read does not assume that boundary holds.
 func (rs *RequestStream) Write(p []byte) (int, error) {
-	if err := WriteFrame(rs.qs, FrameData, p); err != nil {
+	rs.hdrBuf = AppendVarint(rs.hdrBuf[:0], FrameData)
+	rs.hdrBuf = AppendVarint(rs.hdrBuf, uint64(len(p)))
+	if _, err := rs.qs.Write(rs.hdrBuf); err != nil {
+		return 0, err
+	}
+	if _, err := rs.qs.Write(p); err != nil {
 		return 0, err
 	}
 	if err := rs.qs.Flush(); err != nil {

@@ -155,14 +155,16 @@ func StartClient(h3conn *http3.Conn, rs *http3.RequestStream, tun tunDevice, ass
 // capsule.
 func (c *Client) tunToStream() {
 	buf := make([]byte, maxInnerPacket)
+	// One encoder for the life of the loop, so a steady-state tunnel allocates
+	// nothing per packet.
+	var enc DatagramEncoder
 	for {
 		n, err := c.tun.Read(buf)
 		if err != nil {
 			c.stop(fmt.Errorf("masque: TUN read: %w", err))
 			return
 		}
-		payload := EncodeDatagramPayload(buf[:n])
-		if err := WriteCapsule(c.rs, CapsuleDatagram, payload); err != nil {
+		if _, err := c.rs.Write(enc.Encode(buf[:n])); err != nil {
 			c.stop(fmt.Errorf("masque: sending datagram: %w", err))
 			return
 		}
@@ -173,8 +175,12 @@ func (c *Client) tunToStream() {
 // that is not a datagram (a mid-session route update, say) is handled without
 // disturbing the data path.
 func (c *Client) streamToTun() {
+	// The reader's buffer is reused, so Value is only valid until the next Read.
+	// Nothing here keeps it: the TUN write copies, and ParseRoutes decodes into
+	// values rather than aliasing.
+	var cr CapsuleReader
 	for {
-		capsule, err := ReadCapsule(c.rs)
+		capsule, err := cr.Read(c.rs)
 		if err != nil {
 			c.stop(fmt.Errorf("masque: reading capsule: %w", err))
 			return

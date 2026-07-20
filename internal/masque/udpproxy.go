@@ -88,6 +88,9 @@ func (f *UDPForwarder) Run() error {
 	go f.expireLoop()
 
 	buf := make([]byte, maxInnerPacket)
+	// One encoder for this loop; every flow is written from here, so the shared
+	// buffer has a single writer.
+	var enc DatagramEncoder
 	for {
 		n, src, err := f.local.ReadFromUDP(buf)
 		if err != nil {
@@ -104,7 +107,7 @@ func (f *UDPForwarder) Run() error {
 			f.logger.Printf("masque: opening flow for %v: %v", src, err)
 			continue
 		}
-		if err := WriteCapsule(flow.rs, CapsuleDatagram, EncodeDatagramPayload(buf[:n])); err != nil {
+		if _, err := flow.rs.Write(enc.Encode(buf[:n])); err != nil {
 			f.logger.Printf("masque: forwarding from %v: %v", src, err)
 			f.dropFlow(src.String())
 		}
@@ -158,8 +161,11 @@ func (f *UDPForwarder) flowFor(src *net.UDPAddr) (*udpFlow, error) {
 
 // readFlow carries the target's replies back to the local sender.
 func (f *UDPForwarder) readFlow(flow *udpFlow) {
+	// One reader per flow goroutine; Value is valid only until the next Read,
+	// and the UDP write below copies before then.
+	var cr CapsuleReader
 	for {
-		capsule, err := ReadCapsule(flow.rs)
+		capsule, err := cr.Read(flow.rs)
 		if err != nil {
 			f.dropFlow(flow.src.String())
 			return

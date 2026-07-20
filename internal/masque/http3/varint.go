@@ -84,20 +84,22 @@ func ConsumeVarint(b []byte) (v uint64, rest []byte, err error) {
 // consumed before its payload length is known and there is nothing to
 // pre-buffer against.
 func ReadVarint(r io.Reader) (uint64, error) {
-	var first [1]byte
-	if _, err := io.ReadFull(r, first[:]); err != nil {
+	// One buffer for both reads: it escapes to the heap either way (io.ReadFull
+	// takes an interface), so sizing it for the longest varint costs a single
+	// small allocation rather than two.
+	var buf [8]byte
+	if _, err := io.ReadFull(r, buf[:1]); err != nil {
 		return 0, err
 	}
-	n := 1 << (first[0] >> 6)
-	v := uint64(first[0] & 0x3f)
+	n := 1 << (buf[0] >> 6)
+	v := uint64(buf[0] & 0x3f)
 	if n == 1 {
 		return v, nil
 	}
-	rest := make([]byte, n-1)
-	if _, err := io.ReadFull(r, rest); err != nil {
+	if _, err := io.ReadFull(r, buf[1:n]); err != nil {
 		return 0, err
 	}
-	for _, c := range rest {
+	for _, c := range buf[1:n] {
 		v = v<<8 | uint64(c)
 	}
 	return v, nil

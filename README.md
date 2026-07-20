@@ -162,7 +162,10 @@ drives the production client against the live server and checks bidirectional ES
   target, one CONNECT-UDP flow per local sender over a shared QUIC connection.
   Both roles are verified in Docker against the same aioquic peer, in both
   directions and against each other, with a UDP echo round-trip as the data-path
-  proof.
+  proof. Capsule mode makes the data path the hot loop, so it is **allocation-
+  free per packet**: a reusable encoder and capsule reader replace the naive path
+  that allocated twice the packet's size to send it, and a test pins the count at
+  zero so a later refactor cannot quietly lose it.
 - **Fortinet FortiOS SSL VPN client and server**: the second enterprise SSL VPN
   next to AnyConnect, and the highest-reuse protocol in the tree — structurally
   it is SSTP's PPP data path over an ordinary TLS carrier. An HTTPS login

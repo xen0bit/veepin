@@ -9,7 +9,10 @@
 // Because x/net/quic has no QUIC DATAGRAM frames, veepin runs in capsule mode:
 // every inner packet is a DATAGRAM capsule on the request stream rather than an
 // unreliable QUIC datagram. That is a documented performance boundary, not a
-// correctness one; the capsule formats are identical either way.
+// correctness one; the capsule formats are identical either way. What capsule
+// mode costs is reliability and ordering the tunnelled traffic did not ask for;
+// what it must not also cost is allocation, which is why the data path uses the
+// reusable DatagramEncoder and CapsuleReader at the bottom of this file.
 package masque
 
 import (
@@ -75,4 +78,91 @@ func ReadCapsule(r io.Reader) (Capsule, error) {
 		return Capsule{}, err
 	}
 	return Capsule{Type: typ, Value: value}, nil
+}
+
+// The allocation-free data path.
+//
+// WriteCapsule and ReadCapsule above are the straightforward forms, used where a
+// capsule is sent once: the address handshake, a route advertisement. The data
+// path cannot afford them. In capsule mode every tunnelled packet becomes a
+// DATAGRAM capsule, so an allocation there is an allocation per packet, and the
+// naive path allocated twice the packet's size to send it — a header buffer, a
+// payload buffer, and a copy into each.
+//
+// These two types do the same encoding against buffers they own and reuse, so a
+// steady-state tunnel allocates nothing per packet. The cost is that the buffer
+// is borrowed rather than given: a value returned here is valid only until the
+// next call on the same encoder or reader, which is exactly the discipline a
+// per-connection read or write loop already has.
+
+// DatagramEncoder builds DATAGRAM capsules carrying inner packets, reusing one
+// buffer across calls. One encoder belongs to one write loop; it is not safe for
+// concurrent use, which is why each loop owns its own rather than sharing.
+type DatagramEncoder struct {
+	buf []byte
+}
+
+// Encode returns the complete capsule for one inner packet: the DATAGRAM type,
+// the length, the context ID, and the packet. The returned slice aliases the
+// encoder's buffer and is only valid until the next Encode.
+func (e *DatagramEncoder) Encode(packet []byte) []byte {
+	e.buf = e.buf[:0]
+	e.buf = http3.AppendVarint(e.buf, CapsuleDatagram)
+	e.buf = http3.AppendVarint(e.buf, uint64(http3.VarintLen(contextIDPackets)+len(packet)))
+	e.buf = http3.AppendVarint(e.buf, contextIDPackets)
+	e.buf = append(e.buf, packet...)
+	return e.buf
+}
+
+// CapsuleReader reads capsules into a buffer it owns and reuses. Like the
+// encoder it belongs to a single read loop and is not safe for concurrent use.
+type CapsuleReader struct {
+	hdr [8]byte // varint scratch, kept here so reading a header does not allocate
+	buf []byte
+}
+
+// Read reads one capsule. The returned Capsule's Value aliases the reader's
+// buffer and is only valid until the next Read — a caller that keeps it (a route
+// advertisement it stores, say) must copy it first.
+func (cr *CapsuleReader) Read(r io.Reader) (Capsule, error) {
+	typ, err := cr.readVarint(r)
+	if err != nil {
+		return Capsule{}, err
+	}
+	length, err := cr.readVarint(r)
+	if err != nil {
+		return Capsule{}, err
+	}
+	if length > maxCapsuleValue {
+		return Capsule{}, fmt.Errorf("%w: %d octets", ErrCapsuleTooLarge, length)
+	}
+	// The length is bounded above, so growing to it cannot be forced past the
+	// ceiling; the buffer then settles at the largest capsule the peer sends.
+	if uint64(cap(cr.buf)) < length {
+		cr.buf = make([]byte, length)
+	}
+	value := cr.buf[:length]
+	if _, err := io.ReadFull(r, value); err != nil {
+		return Capsule{}, err
+	}
+	return Capsule{Type: typ, Value: value}, nil
+}
+
+// readVarint decodes one QUIC varint using the reader's own scratch space.
+func (cr *CapsuleReader) readVarint(r io.Reader) (uint64, error) {
+	if _, err := io.ReadFull(r, cr.hdr[:1]); err != nil {
+		return 0, err
+	}
+	n := 1 << (cr.hdr[0] >> 6)
+	v := uint64(cr.hdr[0] & 0x3f)
+	if n == 1 {
+		return v, nil
+	}
+	if _, err := io.ReadFull(r, cr.hdr[1:n]); err != nil {
+		return 0, err
+	}
+	for _, c := range cr.hdr[1:n] {
+		v = v<<8 | uint64(c)
+	}
+	return v, nil
 }

@@ -249,8 +249,9 @@ func (s *Server) serveClient(p *peer, remote *net.UDPAddr) {
 		s.log.Printf("masque: client %v (%v) disconnected", remote, p.assigned)
 	}()
 
+	var cr CapsuleReader
 	for {
-		capsule, err := ReadCapsule(p.rs)
+		capsule, err := cr.Read(p.rs)
 		if err != nil {
 			return
 		}
@@ -324,14 +325,15 @@ func (s *Server) serveConnectUDP(remote *net.UDPAddr, h3conn *http3.Conn, rs *ht
 	go func() {
 		defer close(done)
 		buf := make([]byte, maxInnerPacket)
+		var enc DatagramEncoder
 		for {
 			n, err := conn.Read(buf)
 			if err != nil {
 				return
 			}
-			payload := EncodeDatagramPayload(buf[:n])
+			capsule := enc.Encode(buf[:n])
 			writeMu.Lock()
-			err = WriteCapsule(rs, CapsuleDatagram, payload)
+			_, err = rs.Write(capsule)
 			writeMu.Unlock()
 			if err != nil {
 				return
@@ -340,8 +342,9 @@ func (s *Server) serveConnectUDP(remote *net.UDPAddr, h3conn *http3.Conn, rs *ht
 	}()
 
 	// Client -> target: read DATAGRAM capsules and send their payloads on.
+	var cr CapsuleReader
 	for {
-		capsule, err := ReadCapsule(rs)
+		capsule, err := cr.Read(rs)
 		if err != nil {
 			break
 		}
@@ -366,6 +369,9 @@ func (s *Server) serveConnectUDP(remote *net.UDPAddr, h3conn *http3.Conn, rs *ht
 // that owns its destination address.
 func (s *Server) tunLoop() {
 	buf := make([]byte, maxInnerPacket)
+	// This loop is the only user of the encoder, so its buffer needs no lock; the
+	// peer's lock guards the stream, which is what has more than one writer.
+	var enc DatagramEncoder
 	for {
 		n, err := s.tun.Read(buf)
 		if err != nil {
@@ -382,12 +388,10 @@ func (s *Server) tunLoop() {
 			// No client owns this destination; nothing to deliver it to.
 			continue
 		}
-		pkt := make([]byte, n)
-		copy(pkt, buf[:n])
-		payload := EncodeDatagramPayload(pkt)
+		capsule := enc.Encode(buf[:n])
 
 		p.writeMu.Lock()
-		err = WriteCapsule(p.rs, CapsuleDatagram, payload)
+		_, err = p.rs.Write(capsule)
 		p.writeMu.Unlock()
 		if err != nil {
 			s.log.Printf("masque: sending to %v: %v", dst, err)
