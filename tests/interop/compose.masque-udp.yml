@@ -1,0 +1,43 @@
+# veepin CONNECT-UDP forwarder -> independent aioquic proxy -> UDP echo.
+#
+# The peer is aioquic driven from RFC 9298. This cell tests veepin's CONNECT-UDP
+# request and capsule framing against a foreign proxy: the veepin forwarder binds
+# a local UDP socket, the aioquic proxy opens a socket to the echo target, and a
+# datagram must round-trip. If veepin's path template or datagram framing drifts,
+# the echo does not return.
+name: veepin-interop-masque-udp
+
+services:
+  udp-echo:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    command: ["socat", "-T30", "UDP-LISTEN:9999,fork,reuseaddr", "EXEC:cat"]
+
+  aioquic-masque-proxy:
+    build:
+      context: masque
+    image: interop-masque
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [udp-echo]
+    volumes:
+      - ./masque/server-entrypoint.sh:/entrypoint.sh:ro
+    environment:
+      POOL_BASE: "10.35.0"
+    command: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-masque-udp:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    depends_on: [aioquic-masque-proxy]
+    environment:
+      SERVER: "aioquic-masque-proxy"
+      TARGET: "udp-echo:9999"
+      LISTEN_PORT: "5353"
+    volumes:
+      - ./veepin/masque-udp-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

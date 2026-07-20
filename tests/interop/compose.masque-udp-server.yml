@@ -1,0 +1,44 @@
+# Independent aioquic CONNECT-UDP forwarder -> veepin MASQUE proxy -> UDP echo.
+#
+# The mirror of compose.masque-udp.yml: veepin is the proxy and the foreign
+# aioquic implementation is the forwarder. It exercises veepin's server-side
+# CONNECT-UDP handling -- path parsing, opening the target socket, and relaying
+# datagrams -- against a stack that shares none of veepin's code.
+name: veepin-interop-masque-udp-server
+
+services:
+  udp-echo:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    command: ["socat", "-T30", "UDP-LISTEN:9999,fork,reuseaddr", "EXEC:cat"]
+
+  veepin-masque-proxy:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    depends_on: [udp-echo]
+    environment:
+      POOL: "10.36.0.0/24"
+    volumes:
+      - ./veepin/masque-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  aioquic-masque-udp:
+    build:
+      context: masque
+    image: interop-masque
+    depends_on: [veepin-masque-proxy]
+    environment:
+      SERVER: "veepin-masque-proxy"
+      TARGET: "udp-echo:9999"
+      LISTEN_PORT: "5353"
+    volumes:
+      - ./masque/udp-entrypoint.sh:/entrypoint.sh:ro
+    command: ["/bin/sh", "/entrypoint.sh"]

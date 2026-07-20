@@ -8,7 +8,7 @@ FROM python:3.12-slim-bookworm
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        iproute2 iputils-ping procps openssl \
+        iproute2 iputils-ping procps openssl socat \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir aioquic==1.3.0
 

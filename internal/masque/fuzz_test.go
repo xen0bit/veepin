@@ -66,3 +66,24 @@ func FuzzDecodeDatagramPayload(f *testing.F) {
 		_, _, _ = DecodeDatagramPayload(data)
 	})
 }
+
+// The CONNECT-UDP target parser reads an attacker-influenced request path and
+// hands the result to a UDP dial, so it must never panic and must never accept a
+// path it did not fully understand.
+func FuzzParseConnectUDPTarget(f *testing.F) {
+	f.Add(ConnectUDPPath("1.1.1.1", 53))
+	f.Add("/.well-known/masque/udp/example.com/443/")
+	f.Add("")
+	f.Add("/.well-known/masque/udp//0/")
+
+	f.Fuzz(func(t *testing.T, path string) {
+		host, port, ok := ParseConnectUDPTarget(path)
+		if !ok {
+			return
+		}
+		// An accepted target must be usable: a non-empty host and a port in range.
+		if host == "" || port < 1 || port > 65535 {
+			t.Fatalf("accepted target %q:%d from %q", host, port, path)
+		}
+	})
+}

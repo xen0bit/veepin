@@ -10,6 +10,7 @@ package interop
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -408,6 +409,28 @@ func TestInteropMasqueSelf(t *testing.T) {
 	runInterop(t, "compose.masque-self.yml", "veepin-masque-client", "10.30.0.1")
 }
 
+// MASQUE CONNECT-UDP (RFC 9298) proxies one UDP flow rather than whole IP
+// packets. The data-path check is a UDP echo round-trip rather than a ping: a
+// forwarder binds a local socket, a datagram is proxied to an echo target, and
+// its reply must come back. The independent peer is again aioquic from the RFCs.
+
+// TestInteropVeepinUDPClientAioquicProxy runs the veepin CONNECT-UDP forwarder
+// against the aioquic proxy.
+func TestInteropVeepinUDPClientAioquicProxy(t *testing.T) {
+	runInteropUDPEcho(t, "compose.masque-udp.yml", "veepin-masque-udp", "127.0.0.1:5353")
+}
+
+// TestInteropAioquicUDPClientVeepinProxy is the mirror: veepin's server-side
+// CONNECT-UDP handling against a foreign forwarder.
+func TestInteropAioquicUDPClientVeepinProxy(t *testing.T) {
+	runInteropUDPEcho(t, "compose.masque-udp-server.yml", "aioquic-masque-udp", "127.0.0.1:5353")
+}
+
+// TestInteropMasqueUDPSelf is the veepin<->veepin CONNECT-UDP sanity check.
+func TestInteropMasqueUDPSelf(t *testing.T) {
+	runInteropUDPEcho(t, "compose.masque-udp-self.yml", "veepin-masque-udp", "127.0.0.1:5353")
+}
+
 // TOY is the example protocol (internal/toy) and provides no security; these
 // cells prove the *specification*, not the cryptography. The peer they talk to
 // is an independent Python implementation written from internal/toy/SPEC.md
@@ -484,6 +507,46 @@ func runInterop(t *testing.T, composeFile, pingSvc, target string) {
 	}
 	t.Fatalf("cross-tunnel ping %s -> %s never succeeded within %s:\n%s",
 		pingSvc, target, pingDeadline, last)
+}
+
+// runInteropUDPEcho brings up a CONNECT-UDP compose file, then sends a UDP
+// datagram from probeSvc to its local forwarder address and checks the echo
+// target's reply returns through the tunnel. It is the CONNECT-UDP counterpart
+// of runInterop's ping: a UDP flow rather than an IP tunnel, so the proof is a
+// datagram round-trip rather than ICMP.
+func runInteropUDPEcho(t *testing.T, composeFile, probeSvc, listen string) {
+	t.Helper()
+	requireDocker(t)
+
+	if out, err := compose(t, composeFile, "up", "--build", "-d"); err != nil {
+		t.Fatalf("compose up: %v\n%s", err, out)
+	}
+	t.Cleanup(func() {
+		if t.Failed() {
+			if logs, err := compose(t, composeFile, "logs", "--no-color"); err == nil {
+				t.Logf("--- compose logs (%s) ---\n%s", composeFile, logs)
+			}
+		}
+		_, _ = compose(t, composeFile, "down", "-v", "--timeout", "5")
+	})
+
+	// A distinct token per attempt is unnecessary; the echo returns whatever it
+	// was sent, so a fixed token proves the round trip.
+	const token = "veepin-connect-udp-interop"
+	probe := fmt.Sprintf("echo -n %s | socat -t3 - UDP:%s", token, listen)
+
+	deadline := time.Now().Add(pingDeadline)
+	var last string
+	for time.Now().Before(deadline) {
+		out, err := compose(t, composeFile, "exec", "-T", probeSvc, "sh", "-c", probe)
+		if err == nil && strings.Contains(out, token) {
+			t.Logf("CONNECT-UDP echo round-tripped through %s", composeFile)
+			return
+		}
+		last = out
+		time.Sleep(3 * time.Second)
+	}
+	t.Fatalf("CONNECT-UDP echo never returned within %s:\n%s", pingDeadline, last)
 }
 
 // compose runs `docker compose -f <file> <args...>` in the test's directory

@@ -1,0 +1,44 @@
+# veepin CONNECT-UDP forwarder -> veepin MASQUE proxy -> UDP echo.
+#
+# The veepin<->veepin sanity check for CONNECT-UDP over real QUIC. Its value is
+# attribution: if it passes while the two cross-implementation cells fail, veepin
+# and RFC 9298 have diverged rather than veepin being broken.
+name: veepin-interop-masque-udp-self
+
+services:
+  udp-echo:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    command: ["socat", "-T30", "UDP-LISTEN:9999,fork,reuseaddr", "EXEC:cat"]
+
+  veepin-masque-proxy:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    depends_on: [udp-echo]
+    environment:
+      POOL: "10.37.0.0/24"
+    volumes:
+      - ./veepin/masque-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-masque-udp:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    depends_on: [veepin-masque-proxy]
+    environment:
+      SERVER: "veepin-masque-proxy"
+      TARGET: "udp-echo:9999"
+      LISTEN_PORT: "5353"
+    volumes:
+      - ./veepin/masque-udp-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

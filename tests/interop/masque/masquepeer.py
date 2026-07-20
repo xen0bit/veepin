@@ -21,8 +21,10 @@ import argparse
 import asyncio
 import fcntl
 import os
+import socket
 import struct
 import sys
+import urllib.parse
 
 from aioquic.asyncio import connect, serve
 from aioquic.asyncio.protocol import QuicConnectionProtocol
@@ -181,6 +183,61 @@ def encode_route_full():
 # ---------------------------------------------------------------------------
 
 
+def parse_udp_target(path):
+    """Return (host, port) from /.well-known/masque/udp/{host}/{port}/ or None."""
+    prefix = "/.well-known/masque/udp/"
+    if not path.startswith(prefix):
+        return None
+    rest = path[len(prefix) :].rstrip("/")
+    parts = rest.split("/")
+    if len(parts) != 2:
+        return None
+    host = urllib.parse.unquote(parts[0])
+    if not host:
+        return None
+    try:
+        port = int(parts[1])
+    except ValueError:
+        return None
+    if not (1 <= port <= 65535):
+        return None
+    return host, port
+
+
+class UDPRelay:
+    """Bridges one CONNECT-UDP request stream to a connected UDP socket."""
+
+    def __init__(self, protocol, h3, stream_id, sock):
+        self.protocol = protocol
+        self.h3 = h3
+        self.stream_id = stream_id
+        self.sock = sock
+        self.buf = b""
+
+    def send_capsule(self, ctype, value):
+        self.h3.send_data(self.stream_id, encode_capsule(ctype, value), end_stream=False)
+        self.protocol.transmit()
+
+    def on_data(self, data):
+        self.buf += data
+        capsules, self.buf = parse_capsules(self.buf)
+        for ctype, value in capsules:
+            if ctype == CAPSULE_DATAGRAM:
+                payload = decode_datagram(value)
+                if payload is not None:
+                    try:
+                        self.sock.send(payload)
+                    except OSError:
+                        pass
+
+    def on_socket_readable(self):
+        try:
+            payload = self.sock.recv(65535)
+        except OSError:
+            return
+        self.send_capsule(CAPSULE_DATAGRAM, encode_datagram(payload))
+
+
 class Tunnel:
     """Bridges one CONNECT-IP request stream to the TUN."""
 
@@ -226,7 +283,8 @@ class ServerProtocol(QuicConnectionProtocol):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._h3 = None
-        self._tunnels = {}  # stream_id -> Tunnel
+        self._tunnels = {}  # stream_id -> Tunnel (CONNECT-IP)
+        self._udp = {}      # stream_id -> UDPRelay (CONNECT-UDP)
 
     def quic_event_received(self, event: QuicEvent):
         if self._h3 is None:
@@ -239,15 +297,52 @@ class ServerProtocol(QuicConnectionProtocol):
             headers = {k: v for k, v in event.headers}
             method = headers.get(b":method", b"")
             protocol = headers.get(b":protocol", b"")
-            if method != b"CONNECT" or protocol != b"connect-ip":
-                self._h3.send_headers(event.stream_id, [(b":status", b"400")], end_stream=True)
-                self.transmit()
+            path = headers.get(b":path", b"").decode()
+            if method != b"CONNECT":
+                self._reject(event.stream_id)
                 return
-            self._accept(event.stream_id)
+            if protocol == b"connect-ip":
+                self._accept(event.stream_id)
+            elif protocol == b"connect-udp":
+                self._accept_udp(event.stream_id, path)
+            else:
+                self._reject(event.stream_id)
         elif isinstance(event, DataReceived):
-            tun = self._tunnels.get(event.stream_id)
-            if tun:
-                tun.on_data(event.data)
+            relay = self._tunnels.get(event.stream_id) or self._udp.get(event.stream_id)
+            if relay:
+                relay.on_data(event.data)
+
+    def _reject(self, stream_id):
+        self._h3.send_headers(stream_id, [(b":status", b"400")], end_stream=True)
+        self.transmit()
+
+    def _accept_udp(self, stream_id, path):
+        target = parse_udp_target(path)
+        if target is None:
+            self._reject(stream_id)
+            return
+        host, port = target
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.connect((host, port))
+        except OSError:
+            self._h3.send_headers(stream_id, [(b":status", b"502")], end_stream=True)
+            self.transmit()
+            return
+        sock.setblocking(False)
+
+        self._h3.send_headers(
+            stream_id,
+            [(b":status", b"200"), (b"capsule-protocol", b"?1")],
+            end_stream=False,
+        )
+        self.transmit()
+
+        relay = UDPRelay(self, self._h3, stream_id, sock)
+        self._udp[stream_id] = relay
+        loop = asyncio.get_event_loop()
+        loop.add_reader(sock.fileno(), relay.on_socket_readable)
+        log(f"proxying UDP to {host}:{port} on stream {stream_id}")
 
     def _accept(self, stream_id):
         assigned = f"{ServerProtocol.pool_base}.{ServerProtocol.next_host}"
@@ -382,6 +477,101 @@ class ClientProtocol(QuicConnectionProtocol):
         self.tunnel.send_packet(pkt)
 
 
+class UDPForwardProtocol(QuicConnectionProtocol):
+    """The aioquic CONNECT-UDP forwarder: a local socket relayed to one target."""
+
+    target_host = None
+    target_port = None
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._h3 = None
+        self.local_sock = None
+        self.flows = {}    # local src -> stream_id
+        self.streams = {}  # stream_id -> local src
+        self.buf = {}      # stream_id -> bytes
+
+    def quic_event_received(self, event: QuicEvent):
+        if self._h3 is None:
+            self._h3 = H3Connection(self._quic)
+        for h3_event in self._h3.handle_event(event):
+            self._on_h3(h3_event)
+
+    def _on_h3(self, event):
+        if isinstance(event, DataReceived):
+            src = self.streams.get(event.stream_id)
+            if src is None:
+                return
+            self.buf[event.stream_id] = self.buf.get(event.stream_id, b"") + event.data
+            capsules, self.buf[event.stream_id] = parse_capsules(self.buf[event.stream_id])
+            for ctype, value in capsules:
+                if ctype == CAPSULE_DATAGRAM:
+                    payload = decode_datagram(value)
+                    if payload is not None:
+                        self.local_sock.sendto(payload, src)
+
+    def on_local_datagram(self, data, src):
+        stream_id = self.flows.get(src)
+        if stream_id is None:
+            stream_id = self._quic.get_next_available_stream_id()
+            path = f"/.well-known/masque/udp/{self.target_host}/{self.target_port}/"
+            self._h3.send_headers(
+                stream_id,
+                [
+                    (b":method", b"CONNECT"),
+                    (b":scheme", b"https"),
+                    (b":authority", b"proxy"),
+                    (b":path", path.encode()),
+                    (b":protocol", b"connect-udp"),
+                    (b"capsule-protocol", b"?1"),
+                ],
+                end_stream=False,
+            )
+            self.flows[src] = stream_id
+            self.streams[stream_id] = src
+            log(f"opened UDP flow for {src} -> {self.target_host}:{self.target_port}")
+        self._h3.send_data(
+            stream_id, encode_capsule(CAPSULE_DATAGRAM, encode_datagram(data)), end_stream=False
+        )
+        self.transmit()
+
+
+def run_udp_client(args):
+    host, _, port = args.target.rpartition(":")
+    target_host, target_port = host, int(port)
+    listen_host, _, listen_port = args.listen.rpartition(":")
+
+    config = QuicConfiguration(is_client=True, alpn_protocols=["h3"])
+    config.verify_mode = 0
+
+    async def main():
+        async with connect(
+            args.server, args.port, configuration=config, create_protocol=UDPForwardProtocol
+        ) as protocol:
+            protocol.target_host = target_host
+            protocol.target_port = target_port
+            await protocol.wait_connected()
+
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((listen_host or "0.0.0.0", int(listen_port)))
+            sock.setblocking(False)
+            protocol.local_sock = sock
+
+            def reader():
+                try:
+                    data, src = sock.recvfrom(65535)
+                except OSError:
+                    return
+                protocol.on_local_datagram(data, src)
+
+            asyncio.get_event_loop().add_reader(sock.fileno(), reader)
+            log(f"forwarding {args.listen} -> {args.target} via {args.server}:{args.port}")
+            await asyncio.Future()
+
+    asyncio.run(main())
+
+
 def run_client(args):
     config = QuicConfiguration(is_client=True, alpn_protocols=["h3"])
     config.verify_mode = 0  # ssl.CERT_NONE: the proxy uses a throwaway cert
@@ -420,9 +610,17 @@ def main():
     c.add_argument("--port", type=int, default=443)
     c.add_argument("--authority", default="")
 
+    u = sub.add_parser("udp")
+    u.add_argument("--server", required=True)
+    u.add_argument("--port", type=int, default=443)
+    u.add_argument("--listen", required=True, help="local host:port to bind")
+    u.add_argument("--target", required=True, help="remote host:port to proxy to")
+
     args = ap.parse_args()
     if args.mode == "server":
         run_server(args)
+    elif args.mode == "udp":
+        run_udp_client(args)
     else:
         run_client(args)
 

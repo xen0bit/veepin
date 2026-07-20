@@ -5,7 +5,7 @@ A **working userspace VPN in Go** — both a server (responder) and a client
 `golang.org/x` modules (`x/crypto`, and `x/net` for QUIC). It speaks nine
 protocols, **client and server for every one**: **IKEv2/ESP**, **WireGuard**,
 **OpenVPN**, **SSTP**, **SSH**, **L2TP/IPsec**, **AnyConnect**, **Nebula**, and
-**MASQUE** (CONNECT-IP over HTTP/3).
+**MASQUE** (CONNECT-IP and CONNECT-UDP over HTTP/3).
 The SSTP side runs Microsoft's Secure Socket Tunneling Protocol over TLS — the
 `SSTP_DUPLEX_POST` HTTP handshake, the CALL_CONNECT crypto binding, MS-CHAPv2
 authentication and a PPP/IPCP data path — as both client and server, verified
@@ -149,6 +149,19 @@ drives the production client against the live server and checks bidirectional ES
   performance boundary, not a correctness one (see *What veepin does not protect
   against*). Both roles are verified in Docker against an independent aioquic
   CONNECT-IP peer in both directions, and against each other.
+- **MASQUE CONNECT-UDP** (RFC 9298): the sibling of CONNECT-IP, proxying a single
+  UDP flow rather than whole IP packets — the more widely deployed of the two, as
+  the outer hop of Apple Private Relay and most MASQUE proxies. It reuses the
+  entire HTTP/3 substrate and the context-0 datagram payload unchanged; the
+  net-new part is the `/.well-known/masque/udp/{host}/{port}/` request and a
+  socket relay. Because it is a per-flow proxy and not a full-IP VPN, it does not
+  join the tunnel model: the server side is additive to the same
+  `veepin serve masque` proxy (which dispatches on `:protocol`), and the client
+  is a forwarder — `veepin udp-proxy` binds a local UDP socket and relays it to a
+  target, one CONNECT-UDP flow per local sender over a shared QUIC connection.
+  Both roles are verified in Docker against the same aioquic peer, in both
+  directions and against each other, with a UDP echo round-trip as the data-path
+  proof.
 
 ## Cryptography
 
@@ -292,8 +305,8 @@ internal/dtls                DTLS 1.2 PSK: record layer, handshake flights, frag
 internal/nebula              minimal protobuf codec, v1 certificates + CA pool, Noise IX, 16-octet header,
                              AEAD data path with anti-replay, the mesh host engine and the lighthouse protocol
 
-internal/masque              CONNECT-IP capsules (DATAGRAM/ADDRESS_ASSIGN/ROUTE_ADVERTISEMENT), the
-                             HTTP-Datagram payload, and the client/server engines binding it to a TUN
+internal/masque              CONNECT-IP + CONNECT-UDP: capsules, the HTTP-Datagram payload, the TUN
+                             client/server engines, and the CONNECT-UDP relay + local UDP forwarder
 internal/masque/http3        from-scratch HTTP/3 on x/net/quic: varints, minimal QPACK (zero dynamic table),
                              SETTINGS/control streams, Extended CONNECT, capsules over DATA frames
 
@@ -754,6 +767,25 @@ runs in **capsule mode** (see *What veepin does not protect against*): correct
 and interoperable, but reliable-and-ordered rather than the datagram profile a
 production MASQUE VPN would use.
 
+The same proxy also serves **CONNECT-UDP** (RFC 9298): it dispatches on the
+request's `:protocol`, so no separate server is needed.
+
+### Forwarding a UDP flow (CONNECT-UDP)
+
+`veepin udp-proxy` is the CONNECT-UDP client. It is not a VPN — it binds a local
+UDP socket and forwards its datagrams to one target through a MASQUE proxy, the
+way you would tunnel DNS or a QUIC service:
+
+```sh
+# Forward local :5353 to 1.1.1.1:53 through the proxy, then `dig @127.0.0.1 -p 5353`.
+./veepin udp-proxy -server proxy.example.com -listen 127.0.0.1:5353 -target 1.1.1.1:53
+```
+
+There is no TUN and no routing to configure: a datagram in one side comes out at
+the target, and its reply comes back. Each local sender gets its own CONNECT-UDP
+flow over a shared QUIC connection to the proxy, and an idle flow is reclaimed
+after a couple of minutes.
+
 ## The example protocol
 
 **TOY provides no security.** It is not one of the nine protocols above; it is a
@@ -987,7 +1019,8 @@ both roles, so all three cells below are exercised.
 | L2TP/IPsec| ✓ strongSwan + xl2tpd       | ✓ strongSwan + xl2tpd       | ✓                      |
 | AnyConnect| ✓ ocserv                    | ✓ openconnect               | ✓                      |
 | Nebula    | ✓ `nebula` (lighthouse)     | ✓ `nebula` (host)           | ✓ (via lighthouse)     |
-| MASQUE    | ✓ aioquic CONNECT-IP        | ✓ aioquic CONNECT-IP        | ✓                      |
+| MASQUE-IP | ✓ aioquic CONNECT-IP        | ✓ aioquic CONNECT-IP        | ✓                      |
+| MASQUE-UDP| ✓ aioquic CONNECT-UDP       | ✓ aioquic CONNECT-UDP       | ✓                      |
 | TOY*      | ✓ independent Python peer   | ✓ independent Python peer   | ✓                      |
 
 `*` TOY is a **deliberately insecure example protocol**, not a real one. See

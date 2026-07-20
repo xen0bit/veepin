@@ -182,11 +182,12 @@ jobs:
           ./internal/masque FuzzParseAddresses
           ./internal/masque FuzzParseRoutes
           ./internal/masque FuzzDecodeDatagramPayload
+          ./internal/masque FuzzParseConnectUDPTarget
           TARGETS
 
           # Guard against the truncation described above, and against a target
           # being added to the list without the loop reaching it.
-          expected=39
+          expected=40
           if [ "$ran" -ne "$expected" ]; then
             echo "::error::ran $ran fuzz targets, expected $expected -- the target list was truncated"
             exit 1
