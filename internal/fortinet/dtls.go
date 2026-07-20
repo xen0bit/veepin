@@ -61,6 +61,7 @@ func (s *Server) EnableDTLS(conn *net.UDPConn) (serve func(), err error) {
 		return nil, net.ErrClosed
 	}
 	s.dtls = mux
+	s.log.Printf("fortinet: DTLS data channel listening on %s", conn.LocalAddr())
 	return mux.Serve, nil
 }
 
@@ -68,8 +69,12 @@ func (s *Server) EnableDTLS(conn *net.UDPConn) (serve func(), err error) {
 // Only a ClientHello does; the cookie that authorises the flow comes later,
 // inside the established session, so nothing here can be trusted beyond "this
 // looks like the start of a handshake".
-func (s *Server) admitDTLS(_ *net.UDPAddr, pkt []byte) func(*udpmux.Conn) {
+func (s *Server) admitDTLS(addr *net.UDPAddr, pkt []byte) func(*udpmux.Conn) {
 	if !dtls.IsClientHello(pkt) {
+		// Logged because the alternative is a silent drop: when a client reports
+		// that its DTLS channel failed, this is the line that says whether the
+		// gateway ever saw the attempt.
+		s.log.Printf("fortinet: ignoring a %d-octet datagram from %s that is not a ClientHello", len(pkt), addr)
 		return nil
 	}
 	return s.serveDTLSPeer

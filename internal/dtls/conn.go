@@ -116,6 +116,22 @@ type Conn struct {
 	replay  replayWindow
 	pending [][]byte // decrypted application payloads not yet returned by Read
 	readBuf []byte
+
+	// deferred holds encrypted handshake records that arrived before the read
+	// keys were installed, so they can be decrypted once the keys exist rather
+	// than dropped. This happens when a peer coalesces its ClientKeyExchange,
+	// ChangeCipherSpec and Finished into one datagram: the Finished is at the new
+	// epoch, but the ClientKeyExchange that unlocks it is in the same datagram.
+	deferred []deferredRecord
+}
+
+// deferredRecord is an encrypted record held until its keys are available.
+type deferredRecord struct {
+	typ      uint8
+	version  uint16
+	epoch    uint16
+	sequence uint64
+	fragment []byte
 }
 
 // Client performs a DTLS handshake in the client role and returns the
@@ -371,6 +387,18 @@ func (c *Conn) consumeHandshake(hs *handshakeState, buf []byte) ([]handshakeMsg,
 			// Encrypted: the peer has already changed cipher spec, so this is its
 			// Finished.
 			if c.in == nil {
+				// The keys are not installed yet. A peer that coalesces its
+				// ClientKeyExchange and Finished into one datagram lands here for
+				// the Finished; hold it rather than drop it, so it can be
+				// decrypted once the ClientKeyExchange in this same datagram has
+				// installed the keys. drainDeferred replays it then.
+				c.deferred = append(c.deferred, deferredRecord{
+					typ:      rec.typ,
+					version:  rec.version,
+					epoch:    rec.epoch,
+					sequence: rec.sequence,
+					fragment: append([]byte(nil), rec.fragment...),
+				})
 				continue
 			}
 			if err := c.replay.check(rec.sequence); err != nil {
@@ -382,28 +410,68 @@ func (c *Conn) consumeHandshake(hs *handshakeState, buf []byte) ([]handshakeMsg,
 			}
 		}
 
-		switch rec.typ {
-		case recordChangeCipherSpec:
-			out = append(out, handshakeMsg{typ: pseudoChangeCipherSpec})
-		case recordAlert:
-			if len(payload) >= 2 && payload[0] == alertFatal {
-				return nil, fmt.Errorf("dtls: peer sent fatal alert %d", payload[1])
+		msgs, err := c.dispatchRecord(hs, rec.typ, payload)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, msgs...)
+	}
+	return out, nil
+}
+
+// dispatchRecord turns one decrypted record's payload into handshake messages:
+// a ChangeCipherSpec becomes its pseudo-message, a fatal alert is an error, and
+// a handshake record is split into fragments and fed to the reassembler.
+func (c *Conn) dispatchRecord(hs *handshakeState, typ uint8, payload []byte) ([]handshakeMsg, error) {
+	var out []handshakeMsg
+	switch typ {
+	case recordChangeCipherSpec:
+		out = append(out, handshakeMsg{typ: pseudoChangeCipherSpec})
+	case recordAlert:
+		if len(payload) >= 2 && payload[0] == alertFatal {
+			return nil, fmt.Errorf("dtls: peer sent fatal alert %d", payload[1])
+		}
+	case recordHandshake:
+		for len(payload) > 0 {
+			fh, err := parseFragment(payload)
+			if err != nil {
+				return nil, err
 			}
-		case recordHandshake:
-			for len(payload) > 0 {
-				fh, err := parseFragment(payload)
-				if err != nil {
-					return nil, err
-				}
-				payload = payload[fh.consumed:]
-				ready, err := hs.reasm.accept(fh)
-				if err != nil {
-					return nil, err
-				}
-				out = append(out, ready...)
+			payload = payload[fh.consumed:]
+			ready, err := hs.reasm.accept(fh)
+			if err != nil {
+				return nil, err
 			}
+			out = append(out, ready...)
 		}
 	}
+	return out, nil
+}
+
+// drainDeferred decrypts and processes the encrypted records that were held for
+// want of keys, returning the handshake messages they carried. It is called once
+// the read keys are installed, so a Finished that shared a datagram with the
+// ClientKeyExchange is recovered rather than lost.
+func (c *Conn) drainDeferred(hs *handshakeState) ([]handshakeMsg, error) {
+	if len(c.deferred) == 0 {
+		return nil, nil
+	}
+	var out []handshakeMsg
+	for _, rec := range c.deferred {
+		if err := c.replay.check(rec.sequence); err != nil {
+			continue
+		}
+		payload, err := c.in.open(rec.typ, rec.version, rec.epoch, rec.sequence, rec.fragment)
+		if err != nil {
+			return nil, fmt.Errorf("dtls: decrypting a deferred record: %w", err)
+		}
+		msgs, err := c.dispatchRecord(hs, rec.typ, payload)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, msgs...)
+	}
+	c.deferred = nil
 	return out, nil
 }
 

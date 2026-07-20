@@ -24,6 +24,13 @@ import (
 // strongSwan) charon startup.
 const pingDeadline = 100 * time.Second
 
+// logDeadline bounds how long we wait for a line that proves *which* carrier is
+// moving packets. It is separate from pingDeadline because it starts only once
+// the tunnel is already up, and the thing it waits for (a DTLS channel coming up
+// beside the TLS tunnel, with a retry if the first attempt loses a datagram) is
+// slower on a loaded CI runner than on a developer's machine.
+const logDeadline = 60 * time.Second
+
 // TestInteropSelf is the infra sanity check: veepin client <-> veepin server.
 // It isolates the container/TUN/NAT-T/ping harness from strongSwan.
 func TestInteropSelf(t *testing.T) {
@@ -542,17 +549,31 @@ func runInterop(t *testing.T, composeFile, pingSvc, target string) {
 // runInteropRequiringLog is runInterop plus an assertion on the compose logs. It
 // exists for cells where the ping proves a tunnel but not *which* carrier moved
 // it: a fallback path that still works would otherwise pass as a false green.
+//
+// The log is polled rather than read once, because the carrier it is looking for
+// comes up asynchronously to the ping. A client brings its UDP channel up
+// alongside the TLS tunnel and may retry after a first attempt fails, so the
+// tunnel can be pingable seconds before the line appears -- reading once turns
+// "not yet" into "never".
 func runInteropRequiringLog(t *testing.T, composeFile, pingSvc, target, want string) {
 	t.Helper()
 	runInterop(t, composeFile, pingSvc, target)
 
-	logs, err := compose(t, composeFile, "logs", "--no-color", pingSvc)
-	if err != nil {
-		t.Fatalf("compose logs: %v\n%s", err, logs)
+	deadline := time.Now().Add(logDeadline)
+	var logs string
+	for time.Now().Before(deadline) {
+		out, err := compose(t, composeFile, "logs", "--no-color", pingSvc)
+		if err == nil {
+			logs = out
+			if strings.Contains(logs, want) {
+				t.Logf("%s reported %q", pingSvc, want)
+				return
+			}
+		}
+		time.Sleep(3 * time.Second)
 	}
-	if !strings.Contains(logs, want) {
-		t.Fatalf("the tunnel came up but %q never appeared in %s's logs:\n%s", want, pingSvc, logs)
-	}
+	t.Fatalf("the tunnel came up but %q never appeared in %s's logs within %s:\n%s",
+		want, pingSvc, logDeadline, logs)
 }
 
 // runInteropUDPEcho brings up a CONNECT-UDP compose file, then sends a UDP

@@ -191,14 +191,25 @@ func (c *Conn) serverHandshake() error {
 	// What the client's Finished covers: everything through its ClientKeyExchange.
 	clientTranscript := append([]byte(nil), hs.transcript...)
 
-	got, err = c.readFlight(hs, flight, func(msgs []handshakeMsg) bool {
-		_, ok := findMsg(msgs, handshakeFinished)
-		return ok
-	})
+	// The client may have coalesced its Finished into the same datagram as its
+	// ClientKeyExchange, in which case it was held encrypted until the keys just
+	// installed above. Recover it before waiting for another flight, since a peer
+	// that sent everything at once will not retransmit unprompted.
+	deferred, err := c.drainDeferred(hs)
 	if err != nil {
 		return err
 	}
-	clientFin, ok := findMsg(got, handshakeFinished)
+	clientFin, ok := findMsg(deferred, handshakeFinished)
+	if !ok {
+		got, err = c.readFlight(hs, flight, func(msgs []handshakeMsg) bool {
+			_, ok := findMsg(msgs, handshakeFinished)
+			return ok
+		})
+		if err != nil {
+			return err
+		}
+		clientFin, ok = findMsg(got, handshakeFinished)
+	}
 	if !ok {
 		return errors.New("dtls: client never sent Finished")
 	}
