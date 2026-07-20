@@ -92,6 +92,12 @@ type Session struct {
 	lcpAuthNaks                 int
 	lcpUseMRU, lcpUseMagic      bool
 	lcpMRU                      uint16
+	// peerRequiresAuth records whether the server's accepted LCP Configure-Request
+	// carried an Auth-Protocol option. When it did not — as with Fortinet, whose
+	// HTTPS layer already authenticated — there is no CHAP exchange and the link
+	// goes straight from LCP to IPCP. SSTP servers always request auth, so this is
+	// true there and the MS-CHAPv2 path is unchanged.
+	peerRequiresAuth bool
 
 	ipcpReqID                     byte
 	ipcpConfigReq                 []byte // the outstanding request, for retransmission
@@ -339,10 +345,25 @@ func (s *Session) handleLCPConfigReq(pkt cpPacket) {
 		}
 		s.send(ProtocolLCP, cpPacket{Code: codeConfigureNak, ID: pkt.ID, Body: marshalOptions(naked)}.marshal())
 	default:
+		// This request is acceptable as-is. Whether it asked for authentication
+		// decides what happens after LCP: an Auth-Protocol option present here means
+		// a CHAP challenge is coming, its absence means the link authenticates
+		// elsewhere (Fortinet) and proceeds straight to IPCP.
+		s.peerRequiresAuth = hasAuthProto(opts)
 		s.send(ProtocolLCP, cpPacket{Code: codeConfigureAck, ID: pkt.ID, Body: pkt.Body}.marshal())
 		s.lcpRemoteOpen = true
 		s.maybeLCPUp()
 	}
+}
+
+// hasAuthProto reports whether an option list requests link authentication.
+func hasAuthProto(opts []option) bool {
+	for _, o := range opts {
+		if o.Type == optAuthProto {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Session) sendEchoReply(req cpPacket) {
@@ -357,9 +378,16 @@ func (s *Session) sendEchoReply(req cpPacket) {
 }
 
 func (s *Session) maybeLCPUp() {
-	if s.phase == phaseLCP && s.lcpLocalOpen && s.lcpRemoteOpen {
-		s.phase = phaseAuth // wait for the server's MS-CHAPv2 challenge
+	if s.phase != phaseLCP || !s.lcpLocalOpen || !s.lcpRemoteOpen {
+		return
 	}
+	if s.peerRequiresAuth {
+		s.phase = phaseAuth // wait for the server's MS-CHAPv2 challenge
+		return
+	}
+	// No authentication was negotiated: skip straight to IPCP.
+	s.phase = phaseIPCP
+	s.startIPCP()
 }
 
 // --- MS-CHAPv2 authentication ---

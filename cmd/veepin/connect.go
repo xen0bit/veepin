@@ -14,6 +14,7 @@ import (
 	"github.com/xen0bit/veepin/anyconnect"
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/veepin/fortinet"
 	"github.com/xen0bit/veepin/ikev2"
 	"github.com/xen0bit/veepin/l2tp"
 	"github.com/xen0bit/veepin/masque"
@@ -290,6 +291,34 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 			}
 			if *noDTLS {
 				opts[anyconnect.OptNoDTLS] = "true"
+			}
+			return opts
+		}, nil
+	case "fortinet":
+		var (
+			server   = fs.String("server", "", "Fortinet SSL VPN server host or IP (required)")
+			port     = fs.Int("port", 0, "server HTTPS port (default 443)")
+			user     = fs.String("user", "", "username (required)")
+			pass     = fs.String("pass", "", "password (required)")
+			realm    = fs.String("realm", "", "FortiOS realm (optional)")
+			ca       = fs.String("ca", "", "PEM bundle to verify the server against")
+			insecure = fs.Bool("insecure", false, "skip TLS certificate verification (self-signed servers)")
+			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+		)
+		return func() map[string]string {
+			opts := map[string]string{
+				fortinet.OptServer:   *server,
+				fortinet.OptUser:     *user,
+				fortinet.OptPassword: *pass,
+				fortinet.OptRealm:    *realm,
+				fortinet.OptCA:       *ca,
+				fortinet.OptTUN:      *tun,
+			}
+			if *port != 0 {
+				opts[fortinet.OptPort] = fmt.Sprint(*port)
+			}
+			if *insecure {
+				opts[fortinet.OptInsecure] = "true"
 			}
 			return opts
 		}, nil

@@ -4,8 +4,9 @@ A **working userspace VPN in Go** — both a server (responder) and a client
 (initiator) — written from scratch, depending only on the pure-Go
 `golang.org/x` modules (`x/crypto`, and `x/net` for QUIC). It speaks nine
 protocols, **client and server for every one**: **IKEv2/ESP**, **WireGuard**,
-**OpenVPN**, **SSTP**, **SSH**, **L2TP/IPsec**, **AnyConnect**, **Nebula**, and
-**MASQUE** (CONNECT-IP and CONNECT-UDP over HTTP/3).
+**OpenVPN**, **SSTP**, **SSH**, **L2TP/IPsec**, **AnyConnect**, **Nebula**,
+**MASQUE** (CONNECT-IP and CONNECT-UDP over HTTP/3), and **Fortinet** (FortiOS
+SSL VPN).
 The SSTP side runs Microsoft's Secure Socket Tunneling Protocol over TLS — the
 `SSTP_DUPLEX_POST` HTTP handshake, the CALL_CONNECT crypto binding, MS-CHAPv2
 authentication and a PPP/IPCP data path — as both client and server, verified
@@ -162,6 +163,20 @@ drives the production client against the live server and checks bidirectional ES
   Both roles are verified in Docker against the same aioquic peer, in both
   directions and against each other, with a UDP echo round-trip as the data-path
   proof.
+- **Fortinet FortiOS SSL VPN client and server**: the second enterprise SSL VPN
+  next to AnyConnect, and the highest-reuse protocol in the tree — structurally
+  it is SSTP's PPP data path over an ordinary TLS carrier. An HTTPS login
+  (`/remote/logincheck`, form auth, an `SVPNCOOKIE` session token) hands back an
+  XML config with the assigned address and routes; the tunnel is then a GET to
+  `/remote/sslvpn-tunnel` that turns the TLS stream into PPP, each frame wrapped
+  in Fortinet's 6-octet header. The link runs **LCP and IPCP with no PPP-level
+  authentication** — the cookie already authenticated — which drove a small,
+  RFC-correct addition to `internal/ppp`: an auth-optional mode negotiated
+  through LCP, leaving SSTP's mandatory MS-CHAPv2 untouched. Both roles are
+  verified in Docker against the openconnect client (`--protocol=fortinet`, the
+  packet-moving peer) and its Python test server, and against each other. The
+  PPP-over-DTLS data channel openconnect prefers is not implemented; a TLS-only
+  server makes the client fall back, which is the tested path.
 
 ## Cryptography
 
@@ -268,7 +283,10 @@ ssh                      public SSH entry point: Dial + NewServer, Config (x/cry
 l2tp                     public L2TP/IPsec entry point: Dial + NewServer, Config
 anyconnect               public AnyConnect entry point: Dial + NewServer, Config
 nebula                   public Nebula entry point: Dial + NewServer (lighthouse), Config
+anyconnect               (see above)
+fortinet                 public Fortinet entry point: Dial + NewServer (SSL VPN gateway), Config
 masque                   public MASQUE entry point: Dial + NewServer (CONNECT-IP proxy), Config
+fortinet                 public Fortinet entry point: Dial + NewServer (SSL VPN gateway), Config
 toy                      public TOY entry point: Dial + NewServer — an INSECURE teaching example
 
 dataplane                TUN device, address pool, packet pump (demux + routing), client routing
@@ -316,6 +334,8 @@ internal/toy                 the TOY example protocol + SPEC.md — NO SECURITY;
 internal/ikev1               ISAKMP/IKEv1: payload codec, Main + Quick mode, SKEYID/KEYMAT, CBC IV chaining
 internal/l2tp                RFC 2661 header/AVP codec, reliable control channel, PPP data channel,
                              plus the client/server engines binding IKEv1 + ESP + L2TP + PPP to a TUN
+internal/fortinet            FortiOS SSL VPN: the 6-octet PPP framing, the logincheck/SVPNCOOKIE
+                             login, the fortisslvpn_xml config, and the PPP-over-TLS client/server
 ```
 
 `dataplane` and `internal/cryptoutil` are protocol-agnostic: neither imports anything
@@ -786,6 +806,36 @@ the target, and its reply comes back. Each local sender gets its own CONNECT-UDP
 flow over a shared QUIC connection to the proxy, and an idle flow is reclaimed
 after a couple of minutes.
 
+### Connecting as a Fortinet client
+
+`veepin connect fortinet` speaks the FortiOS SSL VPN to a real FortiGate or to
+the veepin server. Authentication is a username and password (the SVPNCOOKIE the
+server issues carries the session; there is no PPP-level login):
+
+```sh
+sudo ./veepin connect fortinet -server vpn.example.com -user alice -pass hunter2
+
+# Against a self-signed test gateway (skips certificate verification):
+sudo ./veepin connect fortinet -server 10.0.0.1 -user alice -pass hunter2 -insecure
+```
+
+### Running a Fortinet server
+
+`veepin serve fortinet` is the gateway for the same protocol; a stock
+`openconnect --protocol=fortinet` connects to it unmodified. It needs a TLS
+certificate and key, since the control plane and tunnel are HTTPS:
+
+```sh
+sudo ./veepin serve fortinet \
+  -cert /etc/veepin/server.crt -key /etc/veepin/server.key \
+  -user alice -pass hunter2 \
+  -pool 10.40.0.0/24 -dns 1.1.1.1 -setup-nat -wan eth0
+```
+
+Each client authenticates, is assigned an address from the pool over IPCP, and
+its packets are relayed over PPP-over-TLS. veepin implements the TLS data
+channel; a client that prefers PPP-over-DTLS falls back to TLS automatically.
+
 ## The example protocol
 
 **TOY provides no security.** It is not one of the nine protocols above; it is a
@@ -1021,10 +1071,18 @@ both roles, so all three cells below are exercised.
 | Nebula    | ✓ `nebula` (lighthouse)     | ✓ `nebula` (host)           | ✓ (via lighthouse)     |
 | MASQUE-IP | ✓ aioquic CONNECT-IP        | ✓ aioquic CONNECT-IP        | ✓                      |
 | MASQUE-UDP| ✓ aioquic CONNECT-UDP       | ✓ aioquic CONNECT-UDP       | ✓                      |
+| Fortinet  | —†                          | ✓ openconnect               | ✓                      |
 | TOY*      | ✓ independent Python peer   | ✓ independent Python peer   | ✓                      |
 
 `*` TOY is a **deliberately insecure example protocol**, not a real one. See
 [The example protocol](#the-example-protocol).
+
+`†` Fortinet is asymmetric: no open-source FortiOS gateway exists to run the
+veepin *client* against with a full data path (openconnect ships only a Fortinet
+test *server* whose tunnel endpoint is a stub). So the independent-implementation
+proof is the real openconnect *client* against the veepin server — which does
+move packets — plus the veepin↔veepin self cell; the veepin client's login and
+config parsing is covered by unit tests and exercised by the self cell.
 
 Both roles share one API: a client registers with `client.Register` and is dialed
 by `client.Dial`; a server registers with `client.RegisterServer` and is built by

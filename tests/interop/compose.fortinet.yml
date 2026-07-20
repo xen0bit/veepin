@@ -1,0 +1,48 @@
+# Independent openconnect Fortinet client -> veepin Fortinet gateway.
+#
+# openconnect is the real reference client and fully implements the FortiOS SSL
+# VPN data channel, so this cell moves packets: it verifies veepin's server-side
+# login, config XML, framing and PPP against a stack that shares none of veepin's
+# code. The gateway publishes its certificate into a shared volume; the client
+# pins it by fingerprint.
+#
+# Data-path check: the openconnect client pings 10.40.0.1, the gateway.
+name: veepin-interop-fortinet
+
+volumes:
+  certs:
+
+services:
+  veepin-fortinet-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    environment:
+      USER: "alice"
+      PASSWORD: "s3cret"
+      POOL: "10.40.0.0/24"
+    volumes:
+      - ./veepin/fortinet-server-entrypoint.sh:/entrypoint.sh:ro
+      - certs:/certs
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  opnc-fortinet-client:
+    build:
+      context: fortinet
+    image: interop-fortinet
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-fortinet-server]
+    environment:
+      SERVER: "veepin-fortinet-server"
+      USER: "alice"
+      PASSWORD: "s3cret"
+    volumes:
+      - ./fortinet/openconnect-entrypoint.sh:/entrypoint.sh:ro
+      - certs:/certs
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

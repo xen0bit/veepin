@@ -13,6 +13,7 @@ import (
 
 	"github.com/xen0bit/veepin/anyconnect"
 	"github.com/xen0bit/veepin/client"
+	"github.com/xen0bit/veepin/fortinet"
 	"github.com/xen0bit/veepin/ikev2"
 	"github.com/xen0bit/veepin/l2tp"
 	"github.com/xen0bit/veepin/masque"
@@ -201,6 +202,34 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			}
 			if *port != 0 {
 				opts[sstp.OptServerPort] = fmt.Sprint(*port)
+			}
+			return opts
+		}, nil
+	case "fortinet":
+		var (
+			cert     = fs.String("cert", "", "path to the server TLS certificate PEM (required)")
+			key      = fs.String("key", "", "path to the server TLS private key PEM (required)")
+			listenIP = fs.String("listen", "0.0.0.0", "local IP to bind the HTTPS socket on")
+			port     = fs.Int("port", 0, "HTTPS port to listen on (default 443)")
+			pool     = fs.String("pool", "10.40.0.0/24", "internal address pool handed to clients")
+			dns      = fs.String("dns", "", "comma-separated DNS servers offered to clients")
+			user     = fs.String("user", "", "username to accept (required)")
+			pass     = fs.String("pass", "", "the user's password (required)")
+			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+		)
+		return func() map[string]string {
+			opts := map[string]string{
+				fortinet.OptServerCert:   *cert,
+				fortinet.OptServerKey:    *key,
+				fortinet.OptServerListen: *listenIP,
+				fortinet.OptServerPool:   *pool,
+				fortinet.OptServerDNS:    *dns,
+				fortinet.OptServerUser:   *user,
+				fortinet.OptServerPass:   *pass,
+				fortinet.OptServerTUN:    *tun,
+			}
+			if *port != 0 {
+				opts[fortinet.OptServerPort] = fmt.Sprint(*port)
 			}
 			return opts
 		}, nil

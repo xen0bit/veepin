@@ -431,6 +431,24 @@ func TestInteropMasqueUDPSelf(t *testing.T) {
 	runInteropUDPEcho(t, "compose.masque-udp-self.yml", "veepin-masque-udp", "127.0.0.1:5353")
 }
 
+// Fortinet FortiOS SSL VPN. The independent peer is the real openconnect client
+// (--protocol=fortinet), which fully implements the data channel -- so this cell
+// moves packets and verifies veepin's server-side login, config XML, 6-octet
+// framing and PPP against a stack that shares none of veepin's code. There is no
+// open FortiOS *server* to run the veepin client against with a full data path,
+// so that direction is covered by the self cell and unit tests.
+
+// TestInteropOpenconnectFortinetClientVeepinServer runs the openconnect Fortinet
+// client against the veepin gateway and pings 10.40.0.1, the gateway.
+func TestInteropOpenconnectFortinetClientVeepinServer(t *testing.T) {
+	runInterop(t, "compose.fortinet.yml", "opnc-fortinet-client", "10.40.0.1")
+}
+
+// TestInteropFortinetSelf is the veepin<->veepin sanity check.
+func TestInteropFortinetSelf(t *testing.T) {
+	runInterop(t, "compose.fortinet-self.yml", "veepin-fortinet-client", "10.40.0.1")
+}
+
 // TOY is the example protocol (internal/toy) and provides no security; these
 // cells prove the *specification*, not the cryptography. The peer they talk to
 // is an independent Python implementation written from internal/toy/SPEC.md

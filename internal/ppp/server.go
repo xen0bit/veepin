@@ -29,6 +29,12 @@ type ServerConfig struct {
 	ServerIP net.IP // server's own inner address (its IPCP request)
 	DNS      []net.IP
 	Auth     Authenticator
+	// NoAuth runs the link without PPP-level authentication: LCP omits the
+	// Auth-Protocol option and the link goes straight to IPCP with no CHAP
+	// challenge. It is for carriers that authenticate above PPP -- Fortinet, whose
+	// SVPNCOOKIE has already done so. With it unset (the SSTP default) MS-CHAPv2
+	// is required and cfg.Auth verifies the client.
+	NoAuth bool
 }
 
 // ServerSession is the authenticator side of a PPP link: it opens LCP requiring
@@ -48,6 +54,7 @@ type ServerSession struct {
 	lcpReqID                    byte
 	lcpConfigReq                []byte // the outstanding request, for retransmission
 	lcpLocalOpen, lcpRemoteOpen bool
+	lcpNoMagic                  bool // set if a NoAuth client rejected Magic-Number
 
 	authChallenge [mschap.ChallengeLen]byte
 	username      string
@@ -139,9 +146,14 @@ func (s *ServerSession) withLock(fn func()) {
 func (s *ServerSession) sendLCPConfigReq() {
 	var magic [4]byte
 	binary.BigEndian.PutUint32(magic[:], s.magic)
-	opts := []option{
-		{Type: optAuthProto, Value: authMSCHAPv2},
-		{Type: optMagic, Value: magic[:]},
+	var opts []option
+	if !s.cfg.NoAuth {
+		// The authenticator is the side that requests an Auth-Protocol; omitting it
+		// is how the peer is told this link does no PPP-level authentication.
+		opts = append(opts, option{Type: optAuthProto, Value: authMSCHAPv2})
+	}
+	if !s.lcpNoMagic {
+		opts = append(opts, option{Type: optMagic, Value: magic[:]})
 	}
 	s.lcpReqID = s.nextID()
 	s.lcpConfigReq = cpPacket{Code: codeConfigureRequest, ID: s.lcpReqID, Body: marshalOptions(opts)}.marshal()
@@ -175,6 +187,13 @@ func (s *ServerSession) handleLCP(payload []byte) {
 			s.maybeLCPUp()
 		}
 	case codeConfigureNak, codeConfigureReject:
+		if s.cfg.NoAuth {
+			// The only option we sent is Magic-Number; a client that will not accept
+			// it can run without it, so drop it and re-request rather than fail.
+			s.lcpNoMagic = true
+			s.sendLCPConfigReq()
+			return
+		}
 		// The client rejected or naked our request (auth-proto or magic). We require
 		// MS-CHAPv2, so a client that will not accept it cannot proceed.
 		s.failLocked(fmt.Errorf("ppp: client rejected MS-CHAPv2 authentication"))
@@ -220,10 +239,18 @@ func (s *ServerSession) sendEchoReply(req cpPacket) {
 }
 
 func (s *ServerSession) maybeLCPUp() {
-	if s.phase == phaseLCP && s.lcpLocalOpen && s.lcpRemoteOpen {
-		s.phase = phaseAuth
-		s.sendChallenge()
+	if s.phase != phaseLCP || !s.lcpLocalOpen || !s.lcpRemoteOpen {
+		return
 	}
+	if s.cfg.NoAuth {
+		// No PPP authentication: the carrier authenticated already, so assign the
+		// address straight away.
+		s.phase = phaseIPCP
+		s.sendIPCPConfigReq()
+		return
+	}
+	s.phase = phaseAuth
+	s.sendChallenge()
 }
 
 // --- MS-CHAPv2 authentication (authenticator role) ---
