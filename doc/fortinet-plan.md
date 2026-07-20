@@ -123,8 +123,18 @@ openconnect client**, which fully implements the data path.
 - **Phase 4 — interop.** Docker: openconnect client → veepin server (ping),
   veepin client → fake-fortinet-server (handshake), self. Fuzz the framing, the
   XML, and the auth parsers; extend the CI fuzz list and interop path filter.
-- **Phase 5 (optional) — PPP-over-DTLS.** The `GFtype` handshake and the DTLS
-  transport, reusing `internal/dtls`. Deferred because TLS already interoperates.
+- **Phase 5 — PPP-over-DTLS. DONE.** It was not the small follow-on this plan
+  assumed: `internal/dtls` was PSK-only (AnyConnect derives its key from a TLS
+  exporter), and Fortinet's channel is certificate-based, so the prerequisite was
+  a from-scratch **ECDHE-ECDSA DTLS 1.2 handshake** — Certificate, a signed
+  ServerKeyExchange, ECDH premaster — added alongside the PSK path and selected
+  by config, so the two never mix on one connection. On top of that: the `GFtype`
+  cookie exchange, a shared one-socket-many-peers demultiplexer
+  (`internal/udpmux`, now used by both DTLS listeners), and a link that carries
+  **two** carriers at once, because a real client attaches DTLS *alongside* its
+  TLS tunnel and prefers it rather than replacing it. Losing UDP detaches back to
+  TLS instead of ending the tunnel. Proven by a Docker cell in which openconnect
+  reports an established DTLS connection and pings across it.
 
 ## Verification
 
@@ -141,8 +151,12 @@ make interop   # openconnect client vs veepin server, veepin client vs fake serv
 - **ACFC on send** — veepin always sends the `0xFF 0x03` pair; confirm the
   openconnect Fortinet PPP parser accepts it (it handles ACFC, so it should), or
   negotiate ACFC in LCP.
-- **openconnect's DTLS-first preference** — a TLS-only server must decline DTLS
-  cleanly so the client falls back; verify the "no DTLS offered" path in Phase 4.
+- **openconnect's DTLS preference** — RESOLVED. A TLS-only server advertises
+  `dtls="0"` and the client stays on TLS (the `--no-dtls` cell pins that path);
+  a server with an ECDSA keypair advertises `dtls="1"` and serves the UDP channel
+  (the DTLS cell pins that one). An RSA gateway keypair cannot serve the
+  ECDHE-ECDSA suite, so it degrades to TLS-only with a log line rather than
+  refusing to start.
 - **2FA/challenge** (`ret=2`) is real surface; implement single-factor first and
   treat challenge as additive.
 - **FortiOS version drift** in the config XML — parse leniently, ignoring unknown

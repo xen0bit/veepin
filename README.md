@@ -174,9 +174,16 @@ drives the production client against the live server and checks bidirectional ES
   RFC-correct addition to `internal/ppp`: an auth-optional mode negotiated
   through LCP, leaving SSTP's mandatory MS-CHAPv2 untouched. Both roles are
   verified in Docker against the openconnect client (`--protocol=fortinet`, the
-  packet-moving peer) and its Python test server, and against each other. The
-  PPP-over-DTLS data channel openconnect prefers is not implemented; a TLS-only
-  server makes the client fall back, which is the tested path.
+  packet-moving peer) and its Python test server, and against each other. Both
+  roles also speak the **PPP-over-DTLS data channel**: the same framed PPP, one
+  record per datagram, over a **certificate-based DTLS 1.2 session**
+  (ECDHE-ECDSA) rather than AnyConnect's PSK channel. Since that session proves
+  only the *server*, the client is authorised inside it by presenting its
+  SVPNCOOKIE in Fortinet's "GFtype" exchange before any PPP flows. The gateway
+  advertises the channel as `dtls="1"` in the config XML; a client that cannot
+  use it — or a gateway with an RSA key, which the ECDSA suite cannot serve —
+  falls back to the TLS tunnel automatically, and `-no-dtls` on either side
+  forces that path.
 
 ## Cryptography
 
@@ -335,7 +342,10 @@ internal/ikev1               ISAKMP/IKEv1: payload codec, Main + Quick mode, SKE
 internal/l2tp                RFC 2661 header/AVP codec, reliable control channel, PPP data channel,
                              plus the client/server engines binding IKEv1 + ESP + L2TP + PPP to a TUN
 internal/fortinet            FortiOS SSL VPN: the 6-octet PPP framing, the logincheck/SVPNCOOKIE
-                             login, the fortisslvpn_xml config, and the PPP-over-TLS client/server
+                             login, the fortisslvpn_xml config, the PPP-over-TLS client/server,
+                             and the DTLS data channel with its GFtype cookie exchange
+internal/udpmux              one UDP socket demultiplexed into per-peer net.Conns, shared by the
+                             AnyConnect and Fortinet DTLS listeners
 ```
 
 `dataplane` and `internal/cryptoutil` are protocol-agnostic: neither imports anything
@@ -817,6 +827,9 @@ sudo ./veepin connect fortinet -server vpn.example.com -user alice -pass hunter2
 
 # Against a self-signed test gateway (skips certificate verification):
 sudo ./veepin connect fortinet -server 10.0.0.1 -user alice -pass hunter2 -insecure
+
+# Stay on the TLS tunnel even where the gateway offers the DTLS data channel:
+sudo ./veepin connect fortinet -server vpn.example.com -user alice -pass hunter2 -no-dtls
 ```
 
 ### Running a Fortinet server
@@ -833,8 +846,10 @@ sudo ./veepin serve fortinet \
 ```
 
 Each client authenticates, is assigned an address from the pool over IPCP, and
-its packets are relayed over PPP-over-TLS. veepin implements the TLS data
-channel; a client that prefers PPP-over-DTLS falls back to TLS automatically.
+its packets are relayed over PPP. The server binds the same port number on UDP
+for the DTLS data channel and advertises it; the certificate must carry an ECDSA
+key for that (an RSA gateway serves the TLS tunnel only). `-no-dtls` leaves the
+UDP port unbound.
 
 ## The example protocol
 
@@ -1071,7 +1086,7 @@ both roles, so all three cells below are exercised.
 | Nebula    | ✓ `nebula` (lighthouse)     | ✓ `nebula` (host)           | ✓ (via lighthouse)     |
 | MASQUE-IP | ✓ aioquic CONNECT-IP        | ✓ aioquic CONNECT-IP        | ✓                      |
 | MASQUE-UDP| ✓ aioquic CONNECT-UDP       | ✓ aioquic CONNECT-UDP       | ✓                      |
-| Fortinet  | —†                          | ✓ openconnect               | ✓                      |
+| Fortinet  | —†                          | ✓ openconnect (TLS + DTLS)  | ✓ (over DTLS)          |
 | TOY*      | ✓ independent Python peer   | ✓ independent Python peer   | ✓                      |
 
 `*` TOY is a **deliberately insecure example protocol**, not a real one. See
@@ -1082,7 +1097,11 @@ veepin *client* against with a full data path (openconnect ships only a Fortinet
 test *server* whose tunnel endpoint is a stub). So the independent-implementation
 proof is the real openconnect *client* against the veepin server — which does
 move packets — plus the veepin↔veepin self cell; the veepin client's login and
-config parsing is covered by unit tests and exercised by the self cell.
+config parsing is covered by unit tests and exercised by the self cell. The
+openconnect direction runs twice, once with `--no-dtls` and once with the UDP
+data channel on; the DTLS cell requires openconnect to *report* an established
+DTLS connection, so a silent fallback to TLS fails it rather than passing on the
+ping alone.
 
 Both roles share one API: a client registers with `client.Register` and is dialed
 by `client.Dial`; a server registers with `client.RegisterServer` and is built by

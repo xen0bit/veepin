@@ -9,6 +9,7 @@ package fortinet
 // before ListenAndServe.
 
 import (
+	"crypto/ecdsa"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -30,15 +31,16 @@ const defaultPool = "10.40.0.0/24"
 
 // Server option keys accepted by client.NewServer("fortinet", opts).
 const (
-	OptServerListen = "listen" // local IP to bind (default 0.0.0.0)
-	OptServerPort   = "port"   // HTTPS port (default 443)
-	OptServerPool   = "pool"   // client address pool CIDR
-	OptServerCert   = "cert"   // TLS certificate PEM (required)
-	OptServerKey    = "key"    // TLS private key PEM (required)
-	OptServerUser   = "user"   // username to accept (required)
-	OptServerPass   = "pass"   // that user's password (required)
-	OptServerDNS    = "dns"    // comma-separated DNS servers offered to clients
-	OptServerTUN    = "tun"    // TUN interface name
+	OptServerListen = "listen"  // local IP to bind (default 0.0.0.0)
+	OptServerPort   = "port"    // HTTPS port (default 443)
+	OptServerPool   = "pool"    // client address pool CIDR
+	OptServerCert   = "cert"    // TLS certificate PEM (required)
+	OptServerKey    = "key"     // TLS private key PEM (required)
+	OptServerUser   = "user"    // username to accept (required)
+	OptServerPass   = "pass"    // that user's password (required)
+	OptServerDNS    = "dns"     // comma-separated DNS servers offered to clients
+	OptServerNoDTLS = "no-dtls" // "true" to serve the TLS tunnel only
+	OptServerTUN    = "tun"     // TUN interface name
 )
 
 // ServerConfig configures a Fortinet SSL VPN server.
@@ -50,8 +52,10 @@ type ServerConfig struct {
 	Key      []byte
 	Users    map[string]string
 	DNS      []net.IP
-	TUNName  string
-	Logger   *log.Logger
+	// NoDTLS serves the TLS tunnel only, leaving the UDP port unbound.
+	NoDTLS  bool
+	TUNName string
+	Logger  *log.Logger
 }
 
 // Server is a Fortinet SSL VPN server.
@@ -62,9 +66,11 @@ type Server struct {
 	gateway net.IP
 	tun     *dataplane.TUN
 	engine  *ifortinet.Server
+	dtlsOK  bool // the UDP data channel is configured and will be bound
 
 	mu      sync.Mutex
 	httpSrv *http.Server
+	udpConn *net.UDPConn
 	started bool
 	closed  bool
 }
@@ -96,13 +102,24 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("fortinet: opening TUN: %w", err)
 	}
 
-	engine, err := ifortinet.NewServer(ifortinet.ServerConfig{
+	engineCfg := ifortinet.ServerConfig{
 		Users:    cfg.Users,
 		Pool:     pool,
 		ServerIP: gateway,
 		DNS:      cfg.DNS,
 		Logger:   cfg.Logger,
-	}, tun)
+	}
+	// The DTLS channel is ECDHE-ECDSA, so an RSA gateway keypair cannot serve it.
+	// That is a reason to run TLS-only, not to refuse to start: the TLS tunnel is
+	// unaffected and is what every client can already speak.
+	if !cfg.NoDTLS {
+		if _, ok := cert.PrivateKey.(*ecdsa.PrivateKey); ok {
+			engineCfg.Certificate = &cert
+		} else if cfg.Logger != nil {
+			cfg.Logger.Printf("fortinet: server key is not ECDSA; the DTLS data channel is disabled")
+		}
+	}
+	engine, err := ifortinet.NewServer(engineCfg, tun)
 	if err != nil {
 		_ = tun.Close()
 		return nil, err
@@ -110,6 +127,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 
 	return &Server{
 		cfg:     cfg,
+		dtlsOK:  engineCfg.Certificate != nil,
 		tlsCfg:  &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
 		pool:    pool,
 		gateway: gateway,
@@ -139,14 +157,39 @@ func (s *Server) ListenAndServe() error {
 	if listenIP == "" {
 		listenIP = "0.0.0.0"
 	}
-	ln, err := tls.Listen("tcp", net.JoinHostPort(listenIP, strconv.Itoa(port)), s.tlsCfg)
+	addr := net.JoinHostPort(listenIP, strconv.Itoa(port))
+	ln, err := tls.Listen("tcp", addr, s.tlsCfg)
 	if err != nil {
 		s.mu.Unlock()
 		return fmt.Errorf("fortinet: listen: %w", err)
 	}
+
+	// The UDP data channel shares the port number. It is bound and its serve loop
+	// started before the HTTPS listener accepts anything, so no client is ever
+	// told about a channel that is not yet being read.
+	var serveDTLS func()
+	if s.dtlsOK {
+		udp, uerr := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP(listenIP), Port: port})
+		if uerr != nil {
+			_ = ln.Close()
+			s.mu.Unlock()
+			return fmt.Errorf("fortinet: listen UDP: %w", uerr)
+		}
+		serveDTLS, err = s.engine.EnableDTLS(udp)
+		if err != nil {
+			_ = udp.Close()
+			_ = ln.Close()
+			s.mu.Unlock()
+			return err
+		}
+		s.udpConn = udp
+	}
 	s.httpSrv = &http.Server{Handler: s.engine}
 	s.mu.Unlock()
 
+	if serveDTLS != nil {
+		go serveDTLS()
+	}
 	go s.engine.RunTUN()
 
 	if err := s.httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -191,6 +234,7 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 	cfg := ServerConfig{
 		ListenIP: opts[OptServerListen],
 		Pool:     opts[OptServerPool],
+		NoDTLS:   opts[OptServerNoDTLS] == "true",
 		TUNName:  opts[OptServerTUN],
 		Logger:   log.New(logDest(), "", log.LstdFlags|log.Lmicroseconds),
 	}

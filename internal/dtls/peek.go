@@ -16,23 +16,41 @@ package dtls
 // ClientHelloSessionID extracts the session-id from a datagram that looks like
 // an initial ClientHello, reporting false for anything else.
 func ClientHelloSessionID(datagram []byte) ([]byte, bool) {
+	hello, ok := peekClientHello(datagram)
+	if !ok || len(hello.sessionID) == 0 {
+		return nil, false
+	}
+	return hello.sessionID, true
+}
+
+// IsClientHello reports whether a datagram is an initial ClientHello. It is for
+// a server whose sessions are not keyed by anything in the hello — Fortinet's
+// certificate-based channel authorises the flow afterwards, with a cookie inside
+// the established session, so all the demultiplexer needs to know here is that
+// this datagram is plausibly the start of a handshake.
+func IsClientHello(datagram []byte) bool {
+	_, ok := peekClientHello(datagram)
+	return ok
+}
+
+func peekClientHello(datagram []byte) (clientHello, bool) {
 	rec, _, err := parseRecord(datagram)
 	if err != nil || rec.typ != recordHandshake || rec.epoch != 0 {
-		return nil, false
+		return clientHello{}, false
 	}
 	h, err := parseFragment(rec.fragment)
 	if err != nil || h.typ != handshakeClientHello {
-		return nil, false
+		return clientHello{}, false
 	}
 	// Only an unfragmented ClientHello is considered. A real one is far smaller
 	// than any sane MTU, so a fragmented one is not worth reassembling before the
 	// peer has proven anything.
 	if h.offset != 0 || h.fragLen != h.length {
-		return nil, false
+		return clientHello{}, false
 	}
 	hello, err := parseClientHello(h.body)
-	if err != nil || len(hello.sessionID) == 0 {
-		return nil, false
+	if err != nil {
+		return clientHello{}, false
 	}
-	return hello.sessionID, true
+	return hello, true
 }

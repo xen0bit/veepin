@@ -3,9 +3,11 @@
 #
 # Waits for the veepin gateway's certificate to appear in the shared volume,
 # pins it by fingerprint (openconnect has no "skip verification" flag), then
-# connects with --protocol=fortinet. --no-dtls keeps the data channel on TLS,
-# which is what veepin's gateway speaks. openconnect's vpnc-script configures the
-# interface and routes; the harness then pings the gateway across the tunnel.
+# connects with --protocol=fortinet. NO_DTLS=1 keeps the data channel on TLS;
+# otherwise openconnect brings its DTLS channel up alongside the TLS tunnel and
+# prefers it, which is the path the veepin gateway's UDP listener serves.
+# openconnect's vpnc-script configures the interface and routes; the harness then
+# pings the gateway across the tunnel.
 set -u
 
 [ -c /dev/net/tun ] || { mkdir -p /dev/net; mknod /dev/net/tun c 10 200; }
@@ -24,12 +26,15 @@ PIN=$(openssl x509 -in /certs/cert.pem -pubkey -noout \
     | openssl dgst -sha256 -binary \
     | openssl base64)
 
-echo "opnc-fortinet-client: connecting to ${SERVER}, pinned pin-sha256:${PIN}"
+DTLS_FLAG=""
+[ "${NO_DTLS:-0}" = "1" ] && DTLS_FLAG="--no-dtls"
+
+echo "opnc-fortinet-client: connecting to ${SERVER}, pinned pin-sha256:${PIN} ${DTLS_FLAG}"
 echo "$PASSWORD" | openconnect \
     --protocol=fortinet \
     --user="$USER" \
     --passwd-on-stdin \
     --servercert "pin-sha256:${PIN}" \
-    --no-dtls \
+    $DTLS_FLAG \
     --interface=fortinet0 \
     "https://${SERVER}:${PORT:-443}"

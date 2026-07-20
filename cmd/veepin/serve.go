@@ -215,6 +215,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			dns      = fs.String("dns", "", "comma-separated DNS servers offered to clients")
 			user     = fs.String("user", "", "username to accept (required)")
 			pass     = fs.String("pass", "", "the user's password (required)")
+			noDTLS   = fs.Bool("no-dtls", false, "serve the TLS tunnel only, leaving the UDP port unbound")
 			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
 		)
 		return func() map[string]string {
@@ -230,6 +231,9 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			}
 			if *port != 0 {
 				opts[fortinet.OptServerPort] = fmt.Sprint(*port)
+			}
+			if *noDTLS {
+				opts[fortinet.OptServerNoDTLS] = "true"
 			}
 			return opts
 		}, nil

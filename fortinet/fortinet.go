@@ -47,6 +47,7 @@ const (
 	OptRealm    = "realm"    // FortiOS realm (optional)
 	OptCA       = "ca"       // PEM bundle to verify the server
 	OptInsecure = "insecure" // "true" to skip certificate verification
+	OptNoDTLS   = "no-dtls"  // "true" to stay on the TLS tunnel even if UDP is offered
 	OptTUN      = "tun"      // TUN interface name
 )
 
@@ -59,8 +60,11 @@ type Config struct {
 	Realm    string
 	RootCAs  *x509.CertPool
 	Insecure bool
-	TUNName  string
-	Logger   *log.Logger
+	// NoDTLS keeps the data path on the TLS tunnel even where the gateway
+	// advertises the UDP channel.
+	NoDTLS  bool
+	TUNName string
+	Logger  *log.Logger
 }
 
 // Session is a running Fortinet client.
@@ -106,23 +110,12 @@ func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
 		return nil, client.Result{}, fmt.Errorf("fortinet: server assigned no address")
 	}
 
-	// Data plane: a fresh TLS connection carrying the tunnel GET.
-	conn, err := tls.Dial("tcp", host, tlsConfig)
-	if err != nil {
-		return nil, client.Result{}, fmt.Errorf("fortinet: dialing tunnel: %w", err)
-	}
-	if _, err := conn.Write(ifortinet.TunnelRequest(host, cookie)); err != nil {
-		_ = conn.Close()
-		return nil, client.Result{}, fmt.Errorf("fortinet: sending tunnel request: %w", err)
-	}
-
 	tun, err := dataplane.OpenTUN(cfg.TUNName)
 	if err != nil {
-		_ = conn.Close()
 		return nil, client.Result{}, fmt.Errorf("fortinet: opening TUN: %w", err)
 	}
 
-	c, err := ifortinet.RunClient(conn, fcfg, tun, logger)
+	c, err := dialDataPath(host, cookie, fcfg, tlsConfig, tun, logger, !cfg.NoDTLS)
 	if err != nil {
 		_ = tun.Close()
 		return nil, client.Result{}, err
@@ -140,6 +133,65 @@ func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
 	}
 	logger.Printf("fortinet: tunnel up, assigned %s", fcfg.AssignedIP)
 	return &Session{client: c}, res, nil
+}
+
+// dialDataPath brings the tunnel up: always the TLS tunnel first, then the UDP
+// data channel alongside it when the gateway advertises one. That is the order
+// the reference client uses and the reason the protocol has a fallback at all —
+// the TLS carrier stays open underneath, so a UDP path that fails or later dies
+// costs nothing but the datagrams in flight.
+func dialDataPath(host, cookie string, fcfg ifortinet.Config, tlsConfig *tls.Config,
+	tun io.ReadWriteCloser, logger *log.Logger, wantDTLS bool,
+) (*ifortinet.Client, error) {
+	c, err := dialTLSPath(host, cookie, fcfg, tlsConfig, tun, logger)
+	if err != nil {
+		return nil, err
+	}
+	if !wantDTLS || !fcfg.DTLS {
+		return c, nil
+	}
+	dc, err := dialDTLSChannel(host, cookie, tlsConfig)
+	if err != nil {
+		logger.Printf("fortinet: DTLS channel unavailable (%v), staying on the TLS tunnel", err)
+		return c, nil
+	}
+	c.AttachDTLS(dc)
+	logger.Printf("fortinet: data channel over DTLS")
+	return c, nil
+}
+
+// dialDTLSChannel opens the UDP data channel and presents the cookie on it.
+func dialDTLSChannel(host, cookie string, tlsConfig *tls.Config) (net.Conn, error) {
+	// The UDP channel is the same port number as the HTTPS control plane.
+	udp, err := net.Dial("udp", host)
+	if err != nil {
+		return nil, fmt.Errorf("fortinet: dialing DTLS channel: %w", err)
+	}
+	dc, err := ifortinet.DialDTLS(udp, cookie, tlsConfig)
+	if err != nil {
+		_ = udp.Close()
+		return nil, err
+	}
+	return dc, nil
+}
+
+func dialTLSPath(host, cookie string, fcfg ifortinet.Config, tlsConfig *tls.Config,
+	tun io.ReadWriteCloser, logger *log.Logger,
+) (*ifortinet.Client, error) {
+	conn, err := tls.Dial("tcp", host, tlsConfig)
+	if err != nil {
+		return nil, fmt.Errorf("fortinet: dialing tunnel: %w", err)
+	}
+	if _, err := conn.Write(ifortinet.TunnelRequest(host, cookie)); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("fortinet: sending tunnel request: %w", err)
+	}
+	c, err := ifortinet.RunClient(conn, fcfg, tun, logger)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return c, nil
 }
 
 // Wait blocks until the session ends or ctx is cancelled.
@@ -172,6 +224,7 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 		Password: opts[OptPassword],
 		Realm:    opts[OptRealm],
 		Insecure: opts[OptInsecure] == "true",
+		NoDTLS:   opts[OptNoDTLS] == "true",
 		TUNName:  opts[OptTUN],
 		Logger:   log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds),
 	}

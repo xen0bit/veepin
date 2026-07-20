@@ -444,9 +444,21 @@ func TestInteropOpenconnectFortinetClientVeepinServer(t *testing.T) {
 	runInterop(t, "compose.fortinet.yml", "opnc-fortinet-client", "10.40.0.1")
 }
 
-// TestInteropFortinetSelf is the veepin<->veepin sanity check.
+// TestInteropFortinetSelf is the veepin<->veepin sanity check. veepin's client
+// prefers the DTLS data channel where the gateway offers one, so this also
+// exercises the certificate-based DTLS handshake between the two veepin roles.
 func TestInteropFortinetSelf(t *testing.T) {
-	runInterop(t, "compose.fortinet-self.yml", "veepin-fortinet-client", "10.40.0.1")
+	runInteropRequiringLog(t, "compose.fortinet-self.yml", "veepin-fortinet-client", "10.40.0.1",
+		"data channel over DTLS")
+}
+
+// TestInteropOpenconnectFortinetDTLS is the same cell with the UDP data channel
+// left on: openconnect attaches its own DTLS session to the TLS tunnel and
+// prefers it. The ping alone would pass on a silent fallback to TLS, so the run
+// additionally requires openconnect to report an established DTLS connection.
+func TestInteropOpenconnectFortinetDTLS(t *testing.T) {
+	runInteropRequiringLog(t, "compose.fortinet-dtls.yml", "opnc-fortinet-client", "10.40.0.1",
+		"Established DTLS connection")
 }
 
 // TOY is the example protocol (internal/toy) and provides no security; these
@@ -525,6 +537,22 @@ func runInterop(t *testing.T, composeFile, pingSvc, target string) {
 	}
 	t.Fatalf("cross-tunnel ping %s -> %s never succeeded within %s:\n%s",
 		pingSvc, target, pingDeadline, last)
+}
+
+// runInteropRequiringLog is runInterop plus an assertion on the compose logs. It
+// exists for cells where the ping proves a tunnel but not *which* carrier moved
+// it: a fallback path that still works would otherwise pass as a false green.
+func runInteropRequiringLog(t *testing.T, composeFile, pingSvc, target, want string) {
+	t.Helper()
+	runInterop(t, composeFile, pingSvc, target)
+
+	logs, err := compose(t, composeFile, "logs", "--no-color", pingSvc)
+	if err != nil {
+		t.Fatalf("compose logs: %v\n%s", err, logs)
+	}
+	if !strings.Contains(logs, want) {
+		t.Fatalf("the tunnel came up but %q never appeared in %s's logs:\n%s", want, pingSvc, logs)
+	}
 }
 
 // runInteropUDPEcho brings up a CONNECT-UDP compose file, then sends a UDP

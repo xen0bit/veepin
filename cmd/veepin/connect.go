@@ -303,6 +303,7 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 			realm    = fs.String("realm", "", "FortiOS realm (optional)")
 			ca       = fs.String("ca", "", "PEM bundle to verify the server against")
 			insecure = fs.Bool("insecure", false, "skip TLS certificate verification (self-signed servers)")
+			noDTLS   = fs.Bool("no-dtls", false, "stay on the TLS tunnel even where the gateway offers DTLS")
 			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
 		)
 		return func() map[string]string {
@@ -319,6 +320,9 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 			}
 			if *insecure {
 				opts[fortinet.OptInsecure] = "true"
+			}
+			if *noDTLS {
+				opts[fortinet.OptNoDTLS] = "true"
 			}
 			return opts
 		}, nil

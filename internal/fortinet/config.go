@@ -32,17 +32,24 @@ type Config struct {
 	Include []Route
 	// Exclude are split-exclude routes (the negate="1" set).
 	Exclude []Route
+	// DTLS reports whether the gateway offers the UDP data channel, from the
+	// dtls attribute on <sslvpn-tunnel>. A client that can speak it prefers it.
+	DTLS bool
 }
 
 // BuildConfigXML renders a Config as the fortisslvpn_xml document. A full tunnel
 // (no Include routes) omits <split-tunnel-info> entirely, which is how the client
 // is told to route everything — the presence of split-includes is what switches
-// it to split tunnelling. dtls="0" advertises no DTLS data channel, so a client
-// that prefers DTLS falls back to the TLS tunnel this server speaks.
+// it to split tunnelling. The dtls attribute advertises the UDP data channel;
+// dtls="0" leaves a client that would prefer it on the TLS tunnel.
 func BuildConfigXML(cfg Config) []byte {
+	dtls := "0"
+	if cfg.DTLS {
+		dtls = "1"
+	}
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="utf-8"?>`)
-	b.WriteString(`<sslvpn-tunnel ver="2" dtls="0">`)
+	b.WriteString(`<sslvpn-tunnel ver="2" dtls="` + dtls + `">`)
 	b.WriteString(`<ipv4>`)
 	fmt.Fprintf(&b, `<assigned-addr ipv4=%q/>`, cfg.AssignedIP.String())
 	for _, d := range cfg.DNS {
@@ -78,6 +85,7 @@ func writeSplit(b *strings.Builder, routes []Route, negate bool) {
 // xmlTunnel mirrors the parts of <sslvpn-tunnel> this code reads.
 type xmlTunnel struct {
 	XMLName xml.Name `xml:"sslvpn-tunnel"`
+	DTLS    string   `xml:"dtls,attr"`
 	IPv4    xmlIPv4  `xml:"ipv4"`
 }
 
@@ -110,6 +118,7 @@ func ParseConfigXML(data []byte) (Config, error) {
 	}
 
 	var cfg Config
+	cfg.DTLS = t.DTLS == "1"
 	if s := t.IPv4.Assigned.IPv4; s != "" {
 		cfg.AssignedIP = net.ParseIP(s)
 		if cfg.AssignedIP == nil {

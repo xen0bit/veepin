@@ -103,6 +103,17 @@ func (c *Client) AssignedConfig() Config { return c.cfg }
 // Login, used for the returned Result; the link itself confirms the address over
 // IPCP.
 func RunClient(conn net.Conn, cfg Config, tun io.ReadWriteCloser, logger *log.Logger) (*Client, error) {
+	return runClient(conn, cfg, tun, logger, false)
+}
+
+// RunDTLSClient is RunClient over the UDP data channel: conn is the established
+// DTLS session from DialDTLS, which has already presented the cookie, and each
+// datagram carries exactly one framed record.
+func RunDTLSClient(conn net.Conn, cfg Config, tun io.ReadWriteCloser, logger *log.Logger) (*Client, error) {
+	return runClient(conn, cfg, tun, logger, true)
+}
+
+func runClient(conn net.Conn, cfg Config, tun io.ReadWriteCloser, logger *log.Logger, datagram bool) (*Client, error) {
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)
 	}
@@ -112,7 +123,7 @@ func RunClient(conn net.Conn, cfg Config, tun io.ReadWriteCloser, logger *log.Lo
 	// with it and then registered back on the link for inbound control frames.
 	// No PPP-level credentials: the SVPNCOOKIE already authenticated, so the
 	// server will not request authentication and the link goes LCP->IPCP.
-	link := &pppLink{conn: conn, tun: tun, ownsTUN: true, logger: logger, done: make(chan struct{})}
+	link := &pppLink{conn: conn, tun: tun, ownsTUN: true, datagram: datagram, logger: logger, done: make(chan struct{})}
 	sess := ppp.New("", "", link, h)
 	link.client = sess
 
@@ -132,6 +143,12 @@ func RunClient(conn net.Conn, cfg Config, tun io.ReadWriteCloser, logger *log.Lo
 		return nil, fmt.Errorf("fortinet: timed out waiting for the link to come up")
 	}
 }
+
+// AttachDTLS adds an established DTLS session to a running tunnel and makes it
+// the egress, which is how a real client uses the UDP channel: the TLS tunnel
+// stays open as the fallback, and losing UDP costs a detach rather than the
+// tunnel. conn comes from DialDTLS, which has already presented the cookie.
+func (c *Client) AttachDTLS(conn net.Conn) { c.link.attachDTLS(conn) }
 
 // Wait blocks until the tunnel stops.
 func (c *Client) Wait() error { return c.link.Wait() }

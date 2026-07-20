@@ -12,6 +12,7 @@ package fortinet
 
 import (
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -25,6 +26,7 @@ import (
 	"github.com/xen0bit/veepin/internal/cryptoutil"
 	"github.com/xen0bit/veepin/internal/mschap"
 	"github.com/xen0bit/veepin/internal/ppp"
+	"github.com/xen0bit/veepin/internal/udpmux"
 )
 
 // ServerConfig configures a Fortinet SSL VPN server.
@@ -41,6 +43,9 @@ type ServerConfig struct {
 	Logger *log.Logger
 	// Gate bounds unauthenticated work; nil installs one with the defaults.
 	Gate *dataplane.Gate
+	// Certificate is the gateway's certificate and key for the DTLS data
+	// channel. Without it ServeDTLS refuses to run and the server is TLS-only.
+	Certificate *tls.Certificate
 }
 
 // Server is a running Fortinet SSL VPN server. It satisfies http.Handler for the
@@ -52,8 +57,11 @@ type Server struct {
 	log  *log.Logger
 
 	mu       sync.Mutex
+	dtls     *udpmux.Mux             // the UDP data channel, once ServeDTLS runs
 	pending  map[string]net.IP       // cookie -> assigned address, between login and tunnel
 	links    map[netip.Addr]*pppLink // assigned address -> active tunnel
+	byCookie map[string]*pppLink     // cookie -> active tunnel, so a later DTLS
+	//                                 session can attach to the link it belongs to
 	closed   bool
 	closedCh chan struct{}
 }
@@ -82,6 +90,7 @@ func NewServer(cfg ServerConfig, tun io.ReadWriteCloser) (*Server, error) {
 		log:      logger,
 		pending:  map[string]net.IP{},
 		links:    map[netip.Addr]*pppLink{},
+		byCookie: map[string]*pppLink{},
 		closedCh: make(chan struct{}),
 	}, nil
 }
@@ -155,9 +164,13 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no session", http.StatusForbidden)
 		return
 	}
+	s.mu.Lock()
+	offerDTLS := s.dtls != nil
+	s.mu.Unlock()
 	cfg := Config{
 		AssignedIP: addr,
 		DNS:        s.cfg.DNS,
+		DTLS:       offerDTLS,
 		// No Include routes: a full tunnel, so the client installs a default route.
 	}
 	w.Header().Set("Content-Type", "application/xml")
@@ -184,15 +197,31 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 	// The session moves from "pending" (holding a pool address) to an active
 	// link. Admission was released for it here — its cost is now the connection,
 	// not the gate.
+	cookie := cookieValueFrom(r)
+	s.mu.Lock()
+	delete(s.pending, cookie)
+	s.mu.Unlock()
+	s.gate.Done()
+
+	// The hijacked reader may hold buffered bytes, so it is the read side.
+	s.runServerLink(conn, buf.Reader, addr, false, cookie)
+}
+
+// runServerLink builds a NoAuth PPP server over conn, registers it under the
+// client's inner address, and serves it until it ends -- releasing the address
+// on the way out. reader is the read side (nil uses conn); datagram is true for
+// the DTLS carrier, where each datagram is one framed record.
+func (s *Server) runServerLink(conn net.Conn, reader io.Reader, addr net.IP, datagram bool, cookie string) {
 	na, _ := netip.AddrFromSlice(addr.To4())
 	na = na.Unmap()
 
 	link := &pppLink{
 		conn:        conn,
-		reader:      buf.Reader, // the hijacked reader may hold buffered bytes
+		reader:      reader,
 		tun:         s.tun,
 		ownsTUN:     false,
 		assignedSrc: addr,
+		datagram:    datagram,
 		logger:      s.log,
 		done:        make(chan struct{}),
 	}
@@ -205,24 +234,31 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 	link.server = srv
 
 	s.mu.Lock()
-	delete(s.pending, cookieValueFrom(r))
 	s.links[na] = link
+	if cookie != "" {
+		s.byCookie[cookie] = link
+	}
 	s.mu.Unlock()
-	s.gate.Done()
-	s.log.Printf("fortinet: tunnel up for %s", addr)
+	carrier := "TLS"
+	if datagram {
+		carrier = "DTLS"
+	}
+	s.log.Printf("fortinet: tunnel up for %s over %s", addr, carrier)
 
 	go link.readLoop()
 	srv.Start()
 
-	// Block until the link ends, then release its address and route.
-	go func() {
-		_ = link.Wait()
-		s.mu.Lock()
+	_ = link.Wait()
+	s.mu.Lock()
+	if s.links[na] == link {
 		delete(s.links, na)
-		s.mu.Unlock()
-		s.cfg.Pool.Release(addr)
-		s.log.Printf("fortinet: tunnel for %s closed", addr)
-	}()
+	}
+	if s.byCookie[cookie] == link {
+		delete(s.byCookie, cookie)
+	}
+	s.mu.Unlock()
+	s.cfg.Pool.Release(addr)
+	s.log.Printf("fortinet: tunnel for %s (%s) closed", addr, carrier)
 }
 
 // RunTUN reads the shared TUN and routes each packet to the client that owns its
@@ -268,12 +304,16 @@ func (s *Server) Close() error {
 	}
 	s.closed = true
 	close(s.closedCh)
+	mux := s.dtls
 	links := make([]*pppLink, 0, len(s.links))
 	for _, l := range s.links {
 		links = append(links, l)
 	}
 	s.mu.Unlock()
 
+	if mux != nil {
+		_ = mux.Close()
+	}
 	for _, l := range links {
 		_ = l.Close()
 	}

@@ -161,3 +161,8 @@ func TestLoginRejectsWrongPassword(t *testing.T) {
 		t.Error("Login accepted a wrong password")
 	}
 }
+
+// newTestPool is the address pool the tests share.
+func newTestPool() (*dataplane.AddrPool, net.IP, error) {
+	return dataplane.NewAddrPool("10.40.0.0/24")
+}

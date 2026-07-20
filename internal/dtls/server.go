@@ -1,6 +1,8 @@
 package dtls
 
 import (
+	"crypto"
+	"crypto/ecdh"
 	"errors"
 	"fmt"
 )
@@ -72,7 +74,7 @@ func (c *Conn) serverHandshake() error {
 	hs.record(chMsg)
 	hs.clientRand = ch.random
 
-	s, err := selectSuite(ch.cipherSuites)
+	s, err := c.selectSuite(ch.cipherSuites)
 	if err != nil {
 		return err
 	}
@@ -84,7 +86,8 @@ func (c *Conn) serverHandshake() error {
 	}
 	hs.serverRand = serverRand
 
-	// Flight 3: ServerHello, ServerKeyExchange (an empty PSK hint), ServerHelloDone.
+	// Flight 3: ServerHello, then either an empty PSK hint or the certificate and
+	// a signed ECDHE key share, then ServerHelloDone.
 	sh := handshakeMsg{
 		typ: handshakeServerHello,
 		seq: hs.sendSeq,
@@ -96,15 +99,45 @@ func (c *Conn) serverHandshake() error {
 		}.marshal(),
 	}
 	hs.sendSeq++
-	ske := handshakeMsg{typ: handshakeServerKeyExchange, seq: hs.sendSeq, body: pskIdentityHint{}.marshal()}
-	hs.sendSeq++
+
+	var ecdheKey *ecdh.PrivateKey
+	var mid []handshakeMsg
+	if s.kx == kxECDHE {
+		if c.cfg.Certificate == nil {
+			return errors.New("dtls: ECDHE suite selected but no certificate configured")
+		}
+		signer, ok := c.cfg.Certificate.PrivateKey.(crypto.Signer)
+		if !ok {
+			return errors.New("dtls: certificate private key does not implement crypto.Signer")
+		}
+		priv, pub, err := newECDHEKey()
+		if err != nil {
+			return err
+		}
+		ecdheKey = priv
+		params := ecdheServerParams(pub)
+		sig, err := signECDHE(signer, hs.clientRand, serverRand, params)
+		if err != nil {
+			return err
+		}
+		mid = []handshakeMsg{
+			{typ: handshakeCertificate, seq: hs.sendSeq, body: marshalCertificate(c.cfg.Certificate.Certificate)},
+			{typ: handshakeServerKeyExchange, seq: hs.sendSeq + 1, body: marshalECDHEServerKeyExchange(params, sig)},
+		}
+		hs.sendSeq += 2
+	} else {
+		mid = []handshakeMsg{{typ: handshakeServerKeyExchange, seq: hs.sendSeq, body: pskIdentityHint{}.marshal()}}
+		hs.sendSeq++
+	}
 	shd := handshakeMsg{typ: handshakeServerHelloDone, seq: hs.sendSeq}
 	hs.sendSeq++
 
-	for _, m := range []handshakeMsg{sh, ske, shd} {
+	flight3 := append([]handshakeMsg{sh}, mid...)
+	flight3 = append(flight3, shd)
+	for _, m := range flight3 {
 		hs.record(m)
 	}
-	flight, err := c.sendFlight(hs, []handshakeMsg{sh, ske, shd})
+	flight, err := c.sendFlight(hs, flight3)
 	if err != nil {
 		return err
 	}
@@ -123,12 +156,24 @@ func (c *Conn) serverHandshake() error {
 	if !ok {
 		return errors.New("dtls: client never sent a ClientKeyExchange")
 	}
-	if _, err := parsePSKClientKeyExchange(cke.body); err != nil {
-		return err
+	var premaster []byte
+	if s.kx == kxECDHE {
+		peerPub, err := parseECDHEClientKeyExchange(cke.body)
+		if err != nil {
+			return err
+		}
+		if premaster, err = ecdhePremaster(ecdheKey, peerPub); err != nil {
+			return err
+		}
+	} else {
+		if _, err := parsePSKClientKeyExchange(cke.body); err != nil {
+			return err
+		}
+		premaster = pskPremaster(c.cfg.PSK)
 	}
 	hs.record(cke)
 
-	master := masterSecret(s.prfHash, pskPremaster(c.cfg.PSK), hs.clientRand, hs.serverRand)
+	master := masterSecret(s.prfHash, premaster, hs.clientRand, hs.serverRand)
 	c.master = master
 	km := expandKeys(s, master, hs.clientRand, hs.serverRand)
 
@@ -173,10 +218,10 @@ func (c *Conn) serverHandshake() error {
 	return c.sendEncryptedHandshake(fin)
 }
 
-// selectSuite picks the first offered suite we support, in our preference order
-// rather than the client's.
-func selectSuite(offered []uint16) (suite, error) {
-	for _, s := range supportedSuites {
+// selectSuite picks the first suite this server supports, in our preference
+// order rather than the client's. The supported set is PSK or ECDHE by config.
+func (c *Conn) selectSuite(offered []uint16) (suite, error) {
+	for _, s := range c.serverSuites() {
 		for _, id := range offered {
 			if id == s.id {
 				return s, nil

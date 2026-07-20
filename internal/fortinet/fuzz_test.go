@@ -57,3 +57,34 @@ func FuzzParseLoginForm(f *testing.F) {
 		_, _ = ParseLoginForm(body)
 	})
 }
+
+// The GFtype exchange is the first thing an unauthenticated peer sends over a
+// fresh DTLS session, so its parsers see attacker-chosen bytes by design.
+func FuzzParseDTLSClientHello(f *testing.F) {
+	f.Add(BuildDTLSClientHello("cookie"))
+	f.Add(BuildDTLSClientHello(""))
+	f.Add([]byte{})
+	f.Add([]byte{0xff, 0xff})
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		cookie, err := ParseDTLSClientHello(data)
+		if err != nil {
+			return
+		}
+		// An accepted message must re-encode to exactly what was accepted:
+		// anything else means the parser read a cookie the builder cannot express.
+		if enc := BuildDTLSClientHello(cookie); string(enc) != string(data) {
+			t.Fatalf("cookie %q re-encoded to %d octets, input was %d", cookie, len(enc), len(data))
+		}
+	})
+}
+
+func FuzzParseDTLSServerHello(f *testing.F) {
+	f.Add(BuildDTLSServerHello())
+	f.Add([]byte{})
+	f.Add([]byte{0x00, 0x02})
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		_ = ParseDTLSServerHello(data)
+	})
+}

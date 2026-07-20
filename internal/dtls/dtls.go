@@ -36,6 +36,7 @@ const (
 	handshakeClientHello       uint8 = 1
 	handshakeServerHello       uint8 = 2
 	handshakeHelloVerifyReq    uint8 = 3
+	handshakeCertificate       uint8 = 11
 	handshakeServerKeyExchange uint8 = 12
 	handshakeServerHelloDone   uint8 = 14
 	handshakeClientKeyExchange uint8 = 16
@@ -55,16 +56,29 @@ const (
 	alertUnsupportedExtension uint8 = 110
 )
 
-// Cipher suites. Only the two PSK AEAD suites AnyConnect peers negotiate are
-// implemented; the 256-bit suite is preferred.
+// Cipher suites. The PSK AEAD suites are what AnyConnect negotiates; the ECDHE
+// suite is what Fortinet's certificate-based DTLS uses. Which set a connection
+// offers is decided by its configuration, not mixed: a PSK connection never
+// offers ECDHE and vice versa, so neither protocol can be steered onto the
+// other's key exchange.
 const (
-	tlsPSKWithAES256GCMSHA384 uint16 = 0x00a9
-	tlsPSKWithAES128GCMSHA256 uint16 = 0x00a8
+	tlsPSKWithAES256GCMSHA384        uint16 = 0x00a9
+	tlsPSKWithAES128GCMSHA256        uint16 = 0x00a8
+	tlsECDHEECDSAWithAES128GCMSHA256 uint16 = 0xc02b
+)
+
+// keyExchange is how a suite establishes the premaster secret.
+type keyExchange int
+
+const (
+	kxPSK   keyExchange = iota // RFC 4279 pre-shared key
+	kxECDHE                    // ephemeral ECDH with a certificate-signed key share
 )
 
 // suite describes one supported cipher suite.
 type suite struct {
 	id      uint16
+	kx      keyExchange
 	keyLen  int // AEAD key length in octets
 	ivLen   int // implicit (salt) nonce length
 	hash    hashID
@@ -79,17 +93,27 @@ const (
 	hashSHA384
 )
 
-// supportedSuites is in preference order.
-var supportedSuites = []suite{
-	{id: tlsPSKWithAES256GCMSHA384, keyLen: 32, ivLen: 4, hash: hashSHA384, prfHash: hashSHA384},
-	{id: tlsPSKWithAES128GCMSHA256, keyLen: 16, ivLen: 4, hash: hashSHA256, prfHash: hashSHA256},
+// pskSuites are the AnyConnect PSK suites, in preference order.
+var pskSuites = []suite{
+	{id: tlsPSKWithAES256GCMSHA384, kx: kxPSK, keyLen: 32, ivLen: 4, hash: hashSHA384, prfHash: hashSHA384},
+	{id: tlsPSKWithAES128GCMSHA256, kx: kxPSK, keyLen: 16, ivLen: 4, hash: hashSHA256, prfHash: hashSHA256},
 }
 
-// suiteByID looks up a negotiated suite.
+// ecdheSuites are the certificate-based suites Fortinet's DTLS uses. Only
+// ECDHE-ECDSA is implemented, matching the ECDSA certificates these gateways
+// present; adding ECDHE-RSA would be a second signature path and is deferred
+// until a peer needs it.
+var ecdheSuites = []suite{
+	{id: tlsECDHEECDSAWithAES128GCMSHA256, kx: kxECDHE, keyLen: 16, ivLen: 4, hash: hashSHA256, prfHash: hashSHA256},
+}
+
+// suiteByID looks up a negotiated suite across both sets.
 func suiteByID(id uint16) (suite, error) {
-	for _, s := range supportedSuites {
-		if s.id == id {
-			return s, nil
+	for _, list := range [][]suite{pskSuites, ecdheSuites} {
+		for _, s := range list {
+			if s.id == id {
+				return s, nil
+			}
 		}
 	}
 	return suite{}, fmt.Errorf("dtls: unsupported cipher suite %#04x", id)
