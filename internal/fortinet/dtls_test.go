@@ -294,11 +294,61 @@ func TestDTLSAttachesToTLSTunnel(t *testing.T) {
 
 	// Losing the UDP carrier must detach, not end the tunnel: the same session
 	// keeps moving packets over the TLS connection that was never closed.
+	//
+	// Recovery is eventual, not immediate, and that is the protocol rather than
+	// the test being lenient. The far end cannot learn the carrier is gone until
+	// its read loop sees the close, and a datagram written to the dead carrier in
+	// the meantime is simply lost -- ordinary UDP loss, which is what the inner
+	// traffic (a retrying ping, a retransmitting TCP) already copes with. So the
+	// proof the link survived is that packets cross again, not that the very next
+	// one does.
 	_ = dc.Close()
-	roundTrip(t, clientTUN, serverTUN, clientIP, gateway, "after-detach")
+	roundTripEventually(t, clientTUN, serverTUN, clientIP, gateway, "after-detach")
 
 	if n := srv.Clients(); n != 1 {
 		t.Errorf("server has %d links, want 1 (the attach must not have made a second)", n)
+	}
+}
+
+// roundTripEventually retries a round trip until one completes, for the window
+// after a carrier is lost in which datagrams may still be written to it.
+func roundTripEventually(t *testing.T, clientTUN, serverTUN *fakeTUN, clientIP, gateway net.IP, tag string) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for attempt := 1; time.Now().Before(deadline); attempt++ {
+		if tryRoundTrip(clientTUN, serverTUN, clientIP, gateway, tag, time.Second) {
+			if attempt > 1 {
+				t.Logf("%s: crossed on attempt %d, after the detach lost the datagrams in flight", tag, attempt)
+			}
+			return
+		}
+	}
+	t.Fatalf("%s: no packet crossed in either direction after the carrier was lost", tag)
+}
+
+// tryRoundTrip sends a packet each way and reports whether both arrived within
+// the timeout.
+func tryRoundTrip(clientTUN, serverTUN *fakeTUN, clientIP, gateway net.IP, tag string, timeout time.Duration) bool {
+	select {
+	case clientTUN.inbound <- ipv4(clientIP, gateway, tag):
+	case <-time.After(timeout):
+		return false
+	}
+	select {
+	case <-serverTUN.outbound:
+	case <-time.After(timeout):
+		return false
+	}
+	select {
+	case serverTUN.inbound <- ipv4(gateway, clientIP, tag):
+	case <-time.After(timeout):
+		return false
+	}
+	select {
+	case <-clientTUN.outbound:
+		return true
+	case <-time.After(timeout):
+		return false
 	}
 }
 

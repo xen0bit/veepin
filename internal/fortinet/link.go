@@ -95,6 +95,12 @@ func (l *pppLink) attachDTLS(conn net.Conn) {
 
 // detachDTLS drops a DTLS carrier, returning the egress to TLS. It is a no-op if
 // conn is not the current carrier, so a losing race cannot unseat its successor.
+//
+// Recovery is eventual: the far end does not learn the carrier is gone until its
+// own read loop sees the close, and a frame written to the dead carrier before
+// then is lost. That is ordinary datagram loss, which is what the traffic inside
+// the tunnel already copes with -- and it is why the TLS carrier is kept rather
+// than replaced, so the loss is a gap rather than the end of the tunnel.
 func (l *pppLink) detachDTLS(conn net.Conn) {
 	l.writeMu.Lock()
 	if l.alt == conn {
