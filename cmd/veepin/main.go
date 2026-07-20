@@ -51,6 +51,8 @@ func main() {
 		run(runServe(os.Args[2:]))
 	case "probe":
 		run(runProbe(os.Args[2:]))
+	case "udp-proxy":
+		run(runUDPProxy(os.Args[2:]))
 	case "-version", "--version", "version":
 		fmt.Printf("veepin %s (commit %s, built %s, %s)\n", version, commit, date, runtime.Version())
 	case "-h", "--help", "help":
@@ -73,10 +75,11 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `veepin %s — a userspace VPN client and server
 
 Usage:
-  veepin connect <protocol> [flags]   bring up a tunnel to a server
-  veepin serve   <protocol> [flags]   run a VPN server
-  veepin probe   <protocol> [flags]   diagnostic: handshake + one data packet
-  veepin version                      print build information
+  veepin connect   <protocol> [flags]   bring up a tunnel to a server
+  veepin serve     <protocol> [flags]   run a VPN server
+  veepin probe     <protocol> [flags]   diagnostic: handshake + one data packet
+  veepin udp-proxy [flags]              forward a local UDP socket via MASQUE CONNECT-UDP
+  veepin version                        print build information
 
 Protocols: %s
 
