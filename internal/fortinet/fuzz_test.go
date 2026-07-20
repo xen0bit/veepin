@@ -88,3 +88,27 @@ func FuzzParseDTLSServerHello(f *testing.F) {
 		_ = ParseDTLSServerHello(data)
 	})
 }
+
+// The challenge forms cross the same trust boundary as the login ones: the
+// gateway parses whatever a client POSTs, and the client parses whatever the
+// gateway answers.
+func FuzzParseChallengeForm(f *testing.F) {
+	f.Add(BuildChallengeForm("alice", "123456", "", Challenge{Echo: map[string]string{"reqid": "r", "magic": "m"}}))
+	f.Add(BuildChallengeForm("alice", "", "", Challenge{TokenInfo: "ftm_push", Echo: map[string]string{"reqid": "r"}}))
+	f.Add("reqid=1&code=2")
+	f.Add("")
+	f.Add("%%%")
+
+	f.Fuzz(func(t *testing.T, body string) {
+		req, err := ParseChallengeForm(body)
+		if err != nil {
+			return
+		}
+		// Anything that parses must also be recognised as a challenge form when
+		// it carries a reqid; the server routes on exactly that distinction, so a
+		// disagreement between the two would send a stage to the wrong handler.
+		if _, ok := req.Echo["reqid"]; ok != IsChallengeForm(body) {
+			t.Fatalf("reqid present = %v but IsChallengeForm = %v for %q", ok, IsChallengeForm(body), body)
+		}
+	})
+}

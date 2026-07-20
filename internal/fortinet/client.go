@@ -32,22 +32,38 @@ var ErrAuth = errors.New("fortinet: authentication failed")
 // link up before giving up.
 const networkUpTimeout = 20 * time.Second
 
+// TokenFunc supplies the one-time code for a second-factor challenge. It
+// receives the gateway's prompt so a caller can show it, and returns the code to
+// submit. Returning an empty code against an ftm_push challenge requests a
+// mobile push approval instead of a typed code.
+//
+// A nil TokenFunc means the caller cannot answer a challenge, and a gateway that
+// asks for one fails the login rather than hanging.
+type TokenFunc func(Challenge) (string, error)
+
+// ErrChallenge reports that the gateway demanded a second factor the caller was
+// not equipped to answer, so it can be told apart from a wrong password.
+var ErrChallenge = errors.New("fortinet: the gateway requires a second factor")
+
 // Login performs the /remote/logincheck exchange and fetches the tunnel config.
 // hc must carry a cookie jar so the SVPNCOOKIE it receives is sent on the config
-// fetch. base is the server's https:// origin. It returns the parsed config and
-// the SVPNCOOKIE value, which the caller puts on the tunnel request.
-func Login(hc *http.Client, base, username, password, realm string) (Config, string, error) {
+// fetch. base is the server's https:// origin. token answers a second-factor
+// challenge and may be nil where none is expected. It returns the parsed config
+// and the SVPNCOOKIE value, which the caller puts on the tunnel request.
+func Login(hc *http.Client, base, username, password, realm string, token TokenFunc) (Config, string, error) {
 	form := BuildLoginForm(username, password, realm)
-	resp, err := hc.Post(base+PathLoginCheck, "application/x-www-form-urlencoded", strings.NewReader(form))
-	if err != nil {
-		return Config{}, "", fmt.Errorf("fortinet: login request: %w", err)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
-
-	result, err := ParseLoginResult(string(body))
+	result, err := postLogin(hc, base, form)
 	if err != nil {
 		return Config{}, "", err
+	}
+
+	// A gateway that wants a second factor answers the password with a challenge
+	// rather than a cookie; answering it correctly resumes the same exchange.
+	if result.IsChallenge() {
+		result, err = answerChallenge(hc, base, username, realm, result.Challenge(), token)
+		if err != nil {
+			return Config{}, "", err
+		}
 	}
 	if result.Ret != 1 {
 		return Config{}, "", fmt.Errorf("%w: login returned ret=%d", ErrAuth, result.Ret)
@@ -74,6 +90,48 @@ func Login(hc *http.Client, base, username, password, realm string) (Config, str
 		return Config{}, "", err
 	}
 	return cfg, cookie, nil
+}
+
+// postLogin submits a logincheck form and decodes the response line.
+func postLogin(hc *http.Client, base, form string) (LoginResult, error) {
+	resp, err := hc.Post(base+PathLoginCheck, "application/x-www-form-urlencoded", strings.NewReader(form))
+	if err != nil {
+		return LoginResult{}, fmt.Errorf("fortinet: login request: %w", err)
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	_ = resp.Body.Close()
+
+	// A rejected login is an HTTP error with no parsable line, so it is reported
+	// as an auth failure rather than as a malformed response.
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusUnauthorized ||
+		resp.StatusCode == http.StatusMethodNotAllowed {
+		return LoginResult{}, fmt.Errorf("%w: gateway returned %s", ErrAuth, resp.Status)
+	}
+	return ParseLoginResult(string(body))
+}
+
+// answerChallenge submits the second factor and returns the follow-up result.
+func answerChallenge(hc *http.Client, base, username, realm string, c Challenge, token TokenFunc) (LoginResult, error) {
+	if token == nil {
+		if c.Message != "" {
+			return LoginResult{}, fmt.Errorf("%w: %s", ErrChallenge, c.Message)
+		}
+		return LoginResult{}, ErrChallenge
+	}
+	code, err := token(c)
+	if err != nil {
+		return LoginResult{}, fmt.Errorf("fortinet: obtaining the token code: %w", err)
+	}
+	result, err := postLogin(hc, base, BuildChallengeForm(username, code, realm, c))
+	if err != nil {
+		return LoginResult{}, err
+	}
+	// One challenge is answered once. A gateway that keeps asking is either
+	// misconfigured or the code is wrong, and looping would only make it worse.
+	if result.IsChallenge() {
+		return LoginResult{}, fmt.Errorf("%w: the gateway rejected the token code", ErrAuth)
+	}
+	return result, nil
 }
 
 // TunnelRequest is the raw HTTP request that turns a fresh TLS connection into

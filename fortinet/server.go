@@ -23,6 +23,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	ifortinet "github.com/xen0bit/veepin/internal/fortinet"
+	"github.com/xen0bit/veepin/internal/otp"
 )
 
 func init() { client.RegisterServer("fortinet", parseServerOptions) }
@@ -40,6 +41,7 @@ const (
 	OptServerPass   = "pass"    // that user's password (required)
 	OptServerDNS    = "dns"     // comma-separated DNS servers offered to clients
 	OptServerNoDTLS = "no-dtls" // "true" to serve the TLS tunnel only
+	OptServerTOTP   = "totp"    // base32 TOTP secret; set it to require a second factor
 	OptServerTUN    = "tun"     // TUN interface name
 )
 
@@ -53,9 +55,12 @@ type ServerConfig struct {
 	Users    map[string]string
 	DNS      []net.IP
 	// NoDTLS serves the TLS tunnel only, leaving the UDP port unbound.
-	NoDTLS  bool
-	TUNName string
-	Logger  *log.Logger
+	NoDTLS bool
+	// TOTPSecrets maps a username to its base32 TOTP secret. A user listed here
+	// must pass a second factor after its password.
+	TOTPSecrets map[string]string
+	TUNName     string
+	Logger      *log.Logger
 }
 
 // Server is a Fortinet SSL VPN server.
@@ -102,12 +107,18 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("fortinet: opening TUN: %w", err)
 	}
 
+	for user, secret := range cfg.TOTPSecrets {
+		if _, err := otp.DecodeSecret(secret); err != nil {
+			return nil, fmt.Errorf("fortinet: TOTP secret for %q: %w", user, err)
+		}
+	}
 	engineCfg := ifortinet.ServerConfig{
-		Users:    cfg.Users,
-		Pool:     pool,
-		ServerIP: gateway,
-		DNS:      cfg.DNS,
-		Logger:   cfg.Logger,
+		Users:       cfg.Users,
+		Pool:        pool,
+		ServerIP:    gateway,
+		DNS:         cfg.DNS,
+		Logger:      cfg.Logger,
+		TOTPSecrets: cfg.TOTPSecrets,
 	}
 	// The DTLS channel is ECDHE-ECDSA, so an RSA gateway keypair cannot serve it.
 	// That is a reason to run TLS-only, not to refuse to start: the TLS tunnel is
@@ -241,6 +252,9 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 	user, pass := opts[OptServerUser], opts[OptServerPass]
 	if user == "" || pass == "" {
 		return nil, errors.New("fortinet: user and pass are required")
+	}
+	if secret := opts[OptServerTOTP]; secret != "" {
+		cfg.TOTPSecrets = map[string]string{user: secret}
 	}
 	cfg.Users = map[string]string{user: pass}
 

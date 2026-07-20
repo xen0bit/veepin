@@ -18,8 +18,16 @@ chmod 0644 /certs/cert.pem
 # Signal readiness to the client, which waits on this file.
 touch /certs/ready
 
+TOTP_FLAG=""
+if [ -n "${TOTP_SECRET:-}" ]; then
+    TOTP_FLAG="-totp ${TOTP_SECRET}"
+    echo "veepin-fortinet-server: requiring a second factor from ${USER}"
+fi
+
 echo "veepin-fortinet-server: starting on 0.0.0.0:${PORT:-443}, pool ${POOL}"
+# shellcheck disable=SC2086 # TOTP_FLAG is deliberately word-split into two args
 exec veepin serve fortinet \
+    $TOTP_FLAG \
     -listen 0.0.0.0 \
     -port "${PORT:-443}" \
     -pool "$POOL" \

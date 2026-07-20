@@ -459,6 +459,14 @@ func TestInteropFortinetSelf(t *testing.T) {
 		"data channel over DTLS")
 }
 
+// TestInteropOpenconnectFortinet2FA adds a second factor: the gateway answers
+// the password with a ret=2 challenge, and openconnect generates the TOTP code
+// from a shared secret. Both ends compute the code independently, so this pins
+// veepin's RFC 6238 arithmetic and its challenge form against the real client.
+func TestInteropOpenconnectFortinet2FA(t *testing.T) {
+	runInterop(t, "compose.fortinet-2fa.yml", "opnc-fortinet-client", "10.40.0.1")
+}
+
 // TestInteropOpenconnectFortinetDTLS is the same cell with the UDP data channel
 // left on: openconnect attaches its own DTLS session to the TLS tunnel and
 // prefers it. The ping alone would pass on a silent fallback to TLS, so the run

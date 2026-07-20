@@ -304,6 +304,8 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 			ca       = fs.String("ca", "", "PEM bundle to verify the server against")
 			insecure = fs.Bool("insecure", false, "skip TLS certificate verification (self-signed servers)")
 			noDTLS   = fs.Bool("no-dtls", false, "stay on the TLS tunnel even where the gateway offers DTLS")
+			token    = fs.String("token", "", "one-time code to answer a 2FA challenge (single use)")
+			totp     = fs.String("totp", "", "base32 TOTP secret, to generate codes as the gateway asks")
 			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
 		)
 		return func() map[string]string {
@@ -313,6 +315,8 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 				fortinet.OptPassword: *pass,
 				fortinet.OptRealm:    *realm,
 				fortinet.OptCA:       *ca,
+				fortinet.OptToken:    *token,
+				fortinet.OptTOTP:     *totp,
 				fortinet.OptTUN:      *tun,
 			}
 			if *port != 0 {

@@ -20,10 +20,12 @@ import (
 	"net/http/cookiejar"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	ifortinet "github.com/xen0bit/veepin/internal/fortinet"
+	"github.com/xen0bit/veepin/internal/otp"
 )
 
 func init() { client.Register("fortinet", parseOptions) }
@@ -48,6 +50,8 @@ const (
 	OptCA       = "ca"       // PEM bundle to verify the server
 	OptInsecure = "insecure" // "true" to skip certificate verification
 	OptNoDTLS   = "no-dtls"  // "true" to stay on the TLS tunnel even if UDP is offered
+	OptToken    = "token"    // a one-time code to answer a 2FA challenge with
+	OptTOTP     = "totp"     // base32 TOTP secret, so codes are generated as needed
 	OptTUN      = "tun"      // TUN interface name
 )
 
@@ -62,9 +66,16 @@ type Config struct {
 	Insecure bool
 	// NoDTLS keeps the data path on the TLS tunnel even where the gateway
 	// advertises the UDP channel.
-	NoDTLS  bool
-	TUNName string
-	Logger  *log.Logger
+	NoDTLS bool
+	// Token is a one-time code to answer a second-factor challenge with. It is
+	// good for one login, since that is what a one-time code means.
+	Token string
+	// TOTPSecret is a base32 shared secret; when set, codes are generated from
+	// it as the gateway asks, so a long-running client survives a reconnect that
+	// a single Token would not.
+	TOTPSecret string
+	TUNName    string
+	Logger     *log.Logger
 }
 
 // Session is a running Fortinet client.
@@ -102,7 +113,11 @@ func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
 	// fetch.
 	jar, _ := cookiejar.New(nil)
 	hc := &http.Client{Jar: jar, Transport: &http.Transport{TLSClientConfig: tlsConfig}}
-	fcfg, cookie, err := ifortinet.Login(hc, base, cfg.Username, cfg.Password, cfg.Realm)
+	token, err := tokenFunc(cfg, logger)
+	if err != nil {
+		return nil, client.Result{}, err
+	}
+	fcfg, cookie, err := ifortinet.Login(hc, base, cfg.Username, cfg.Password, cfg.Realm, token)
 	if err != nil {
 		return nil, client.Result{}, err
 	}
@@ -133,6 +148,34 @@ func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
 	}
 	logger.Printf("fortinet: tunnel up, assigned %s", fcfg.AssignedIP)
 	return &Session{client: c}, res, nil
+}
+
+// tokenFunc builds the second-factor answerer from the configuration: a TOTP
+// secret generates a code whenever the gateway asks, a literal token answers
+// once, and neither means a challenge fails the login rather than hanging on a
+// prompt this client has no way to show.
+func tokenFunc(cfg Config, logger *log.Logger) (ifortinet.TokenFunc, error) {
+	if cfg.TOTPSecret != "" {
+		secret, err := otp.DecodeSecret(cfg.TOTPSecret)
+		if err != nil {
+			return nil, fmt.Errorf("fortinet: %s: %w", OptTOTP, err)
+		}
+		return func(c ifortinet.Challenge) (string, error) {
+			if c.Message != "" {
+				logger.Printf("fortinet: second factor requested: %s", c.Message)
+			}
+			return otp.TOTP(secret, time.Now(), otp.Config{})
+		}, nil
+	}
+	if cfg.Token != "" {
+		return func(c ifortinet.Challenge) (string, error) {
+			if c.Message != "" {
+				logger.Printf("fortinet: second factor requested: %s", c.Message)
+			}
+			return cfg.Token, nil
+		}, nil
+	}
+	return nil, nil
 }
 
 // dialDataPath brings the tunnel up: always the TLS tunnel first, then the UDP
@@ -219,14 +262,16 @@ func (d dialer) Dial(ctx context.Context) (client.Session, client.Result, error)
 // parseOptions turns registry options into a Config.
 func parseOptions(opts map[string]string) (client.Dialer, error) {
 	cfg := Config{
-		Server:   opts[OptServer],
-		Username: opts[OptUser],
-		Password: opts[OptPassword],
-		Realm:    opts[OptRealm],
-		Insecure: opts[OptInsecure] == "true",
-		NoDTLS:   opts[OptNoDTLS] == "true",
-		TUNName:  opts[OptTUN],
-		Logger:   log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds),
+		Server:     opts[OptServer],
+		Username:   opts[OptUser],
+		Password:   opts[OptPassword],
+		Realm:      opts[OptRealm],
+		Insecure:   opts[OptInsecure] == "true",
+		NoDTLS:     opts[OptNoDTLS] == "true",
+		Token:      opts[OptToken],
+		TOTPSecret: opts[OptTOTP],
+		TUNName:    opts[OptTUN],
+		Logger:     log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds),
 	}
 	if cfg.Server == "" {
 		return nil, fmt.Errorf("fortinet: server is required")

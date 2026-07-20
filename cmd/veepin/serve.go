@@ -216,6 +216,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			user     = fs.String("user", "", "username to accept (required)")
 			pass     = fs.String("pass", "", "the user's password (required)")
 			noDTLS   = fs.Bool("no-dtls", false, "serve the TLS tunnel only, leaving the UDP port unbound")
+			totp     = fs.String("totp", "", "base32 TOTP secret; set it to require a second factor from the user")
 			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
 		)
 		return func() map[string]string {
@@ -227,6 +228,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 				fortinet.OptServerDNS:    *dns,
 				fortinet.OptServerUser:   *user,
 				fortinet.OptServerPass:   *pass,
+				fortinet.OptServerTOTP:   *totp,
 				fortinet.OptServerTUN:    *tun,
 			}
 			if *port != 0 {

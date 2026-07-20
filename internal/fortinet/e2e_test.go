@@ -94,7 +94,7 @@ func TestClientServerEndToEnd(t *testing.T) {
 		Jar:       jar,
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
 	}
-	cfg, cookie, err := Login(hc, ts.URL, "alice", "s3cret", "")
+	cfg, cookie, err := Login(hc, ts.URL, "alice", "s3cret", "", nil)
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestLoginRejectsWrongPassword(t *testing.T) {
 	hc := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
 	jar, _ := cookiejar.New(nil)
 	hc.Jar = jar
-	if _, _, err := Login(hc, ts.URL, "alice", "wrong", ""); err == nil {
+	if _, _, err := Login(hc, ts.URL, "alice", "wrong", "", nil); err == nil {
 		t.Error("Login accepted a wrong password")
 	}
 }

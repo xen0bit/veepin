@@ -21,10 +21,12 @@ import (
 	"net/http"
 	"net/netip"
 	"sync"
+	"time"
 
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/cryptoutil"
 	"github.com/xen0bit/veepin/internal/mschap"
+	"github.com/xen0bit/veepin/internal/otp"
 	"github.com/xen0bit/veepin/internal/ppp"
 	"github.com/xen0bit/veepin/internal/udpmux"
 )
@@ -46,6 +48,13 @@ type ServerConfig struct {
 	// Certificate is the gateway's certificate and key for the DTLS data
 	// channel. Without it ServeDTLS refuses to run and the server is TLS-only.
 	Certificate *tls.Certificate
+	// TOTPSecrets maps a username to its base32 TOTP shared secret. A user
+	// listed here must pass a second factor: the password gets them a challenge
+	// rather than a cookie. Users absent from this map log in with one factor.
+	TOTPSecrets map[string]string
+	// TOTP parameters the second factor. The zero value is what authenticator
+	// apps assume: SHA1, 6 digits, a 30-second step, one step of drift allowed.
+	TOTP otp.Config
 }
 
 // Server is a running Fortinet SSL VPN server. It satisfies http.Handler for the
@@ -56,11 +65,12 @@ type Server struct {
 	gate *dataplane.Gate
 	log  *log.Logger
 
-	mu       sync.Mutex
-	dtls     *udpmux.Mux             // the UDP data channel, once ServeDTLS runs
-	pending  map[string]net.IP       // cookie -> assigned address, between login and tunnel
-	links    map[netip.Addr]*pppLink // assigned address -> active tunnel
-	byCookie map[string]*pppLink     // cookie -> active tunnel, so a later DTLS
+	mu         sync.Mutex
+	dtls       *udpmux.Mux                // the UDP data channel, once ServeDTLS runs
+	pending2FA map[string]*challengeState // reqid -> a login awaiting its second factor
+	pending    map[string]net.IP          // cookie -> assigned address, between login and tunnel
+	links      map[netip.Addr]*pppLink    // assigned address -> active tunnel
+	byCookie   map[string]*pppLink        // cookie -> active tunnel, so a later DTLS
 	//                                 session can attach to the link it belongs to
 	closed   bool
 	closedCh chan struct{}
@@ -84,14 +94,15 @@ func NewServer(cfg ServerConfig, tun io.ReadWriteCloser) (*Server, error) {
 		gate = dataplane.NewGate(dataplane.AdmissionConfig{})
 	}
 	return &Server{
-		cfg:      cfg,
-		tun:      tun,
-		gate:     gate,
-		log:      logger,
-		pending:  map[string]net.IP{},
-		links:    map[netip.Addr]*pppLink{},
-		byCookie: map[string]*pppLink{},
-		closedCh: make(chan struct{}),
+		cfg:        cfg,
+		tun:        tun,
+		gate:       gate,
+		log:        logger,
+		pending:    map[string]net.IP{},
+		pending2FA: map[string]*challengeState{},
+		links:      map[netip.Addr]*pppLink{},
+		byCookie:   map[string]*pppLink{},
+		closedCh:   make(chan struct{}),
 	}, nil
 }
 
@@ -120,8 +131,28 @@ func (s *Server) handleLoginPage(w http.ResponseWriter) {
 		`<input name="username"><input name="credential" type="password"></form></body></html>`)
 }
 
+// challengeState is a login that passed its password and is waiting for a second
+// factor. It is deliberately short-lived: it holds no address reservation, so an
+// abandoned challenge costs a map entry until it expires.
+type challengeState struct {
+	username string
+	expires  time.Time
+}
+
+// challengeTTL bounds how long a second factor may be outstanding. It is
+// generous enough to fetch a phone and short enough that a captured reqid is
+// worth little.
+const challengeTTL = 3 * time.Minute
+
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+
+	// One endpoint serves both stages, as FortiOS does; the body says which.
+	if IsChallengeForm(string(body)) {
+		s.handleChallenge(w, r, string(body))
+		return
+	}
+
 	req, err := ParseLoginForm(string(body))
 	if err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -137,6 +168,85 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A user with a second factor gets a challenge, not a session. No address is
+	// reserved and no admission is taken yet: the login is not finished, and a
+	// half-finished one must not be able to exhaust either.
+	if _, needs2FA := s.cfg.TOTPSecrets[req.Username]; needs2FA {
+		s.issueChallenge(w, req.Username)
+		return
+	}
+
+	s.grantSession(w, r, req.Username)
+}
+
+// issueChallenge answers a correct password with a second-factor prompt.
+func (s *Server) issueChallenge(w http.ResponseWriter, username string) {
+	reqid := newCookie()
+	s.mu.Lock()
+	s.expireChallengesLocked()
+	s.pending2FA[reqid] = &challengeState{username: username, expires: time.Now().Add(challengeTTL)}
+	s.mu.Unlock()
+
+	s.log.Printf("fortinet: %q passed its password, awaiting a second factor", username)
+	_, _ = io.WriteString(w, BuildChallengeResponse("Enter your token code",
+		map[string]string{"reqid": reqid, "polid": "1", "grp": "sslvpn", "magic": reqid}))
+}
+
+// handleChallenge verifies the second factor and, on success, issues the session
+// the password alone did not earn.
+func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request, body string) {
+	req, err := ParseChallengeForm(body)
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	s.mu.Lock()
+	s.expireChallengesLocked()
+	state, ok := s.pending2FA[req.Echo["reqid"]]
+	if ok {
+		// A challenge is single-use whatever the outcome, so a captured reqid
+		// cannot be replayed and codes cannot be guessed against it repeatedly.
+		delete(s.pending2FA, req.Echo["reqid"])
+	}
+	s.mu.Unlock()
+
+	if !ok || state.username != req.Username {
+		s.log.Printf("fortinet: challenge response with an unknown or expired reqid")
+		http.Error(w, "ret=4", http.StatusForbidden)
+		return
+	}
+	// A push approval is not something this gateway can do -- there is no phone
+	// to ask -- so it is refused rather than silently treated as an empty code.
+	if req.FTMPush {
+		s.log.Printf("fortinet: %q asked for a push approval, which is not offered", req.Username)
+		http.Error(w, "ret=4", http.StatusForbidden)
+		return
+	}
+
+	secret, err := otp.DecodeSecret(s.cfg.TOTPSecrets[state.username])
+	if err != nil || !otp.Verify(secret, req.Code, time.Now(), s.cfg.TOTP) {
+		s.log.Printf("fortinet: second factor rejected for %q", state.username)
+		http.Error(w, "ret=4", http.StatusForbidden)
+		return
+	}
+	s.log.Printf("fortinet: %q passed its second factor", state.username)
+	s.grantSession(w, r, state.username)
+}
+
+// expireChallengesLocked drops challenges nobody answered. The caller holds mu.
+func (s *Server) expireChallengesLocked() {
+	now := time.Now()
+	for id, st := range s.pending2FA {
+		if now.After(st.expires) {
+			delete(s.pending2FA, id)
+		}
+	}
+}
+
+// grantSession completes a login: it takes admission, reserves an address, and
+// hands back the cookie that authorises the tunnel.
+func (s *Server) grantSession(w http.ResponseWriter, r *http.Request, username string) {
 	if s.gate.Admit(remoteAddr(r)) != dataplane.Admitted {
 		http.Error(w, "busy", http.StatusServiceUnavailable)
 		return
@@ -155,7 +265,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	http.SetCookie(w, &http.Cookie{Name: CookieName, Value: cookie, Path: "/"})
 	_, _ = io.WriteString(w, BuildLoginSuccess(PathConfigXML))
-	s.log.Printf("fortinet: %q authenticated, assigned %s", req.Username, addr)
+	s.log.Printf("fortinet: %q authenticated, assigned %s", username, addr)
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {

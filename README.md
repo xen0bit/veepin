@@ -183,7 +183,11 @@ drives the production client against the live server and checks bidirectional ES
   advertises the channel as `dtls="1"` in the config XML; a client that cannot
   use it — or a gateway with an RSA key, which the ECDSA suite cannot serve —
   falls back to the TLS tunnel automatically, and `-no-dtls` on either side
-  forces that path.
+  forces that path. Both roles also do **two-factor authentication**: a gateway
+  that wants a second factor answers the password with a `ret=2` challenge, and
+  the client submits a one-time code plus the opaque fields it must parrot back.
+  The factor itself is **TOTP** (RFC 6238) from `internal/otp`, so the interop
+  cell has openconnect generate real codes against veepin's gateway.
 
 ## Cryptography
 
@@ -346,6 +350,8 @@ internal/fortinet            FortiOS SSL VPN: the 6-octet PPP framing, the login
                              and the DTLS data channel with its GFtype cookie exchange
 internal/udpmux              one UDP socket demultiplexed into per-peer net.Conns, shared by the
                              AnyConnect and Fortinet DTLS listeners
+internal/otp                 HOTP (RFC 4226) and TOTP (RFC 6238), generation and constant-time
+                             verification — the second factor behind Fortinet's ret=2 challenge
 ```
 
 `dataplane` and `internal/cryptoutil` are protocol-agnostic: neither imports anything
@@ -830,6 +836,11 @@ sudo ./veepin connect fortinet -server 10.0.0.1 -user alice -pass hunter2 -insec
 
 # Stay on the TLS tunnel even where the gateway offers the DTLS data channel:
 sudo ./veepin connect fortinet -server vpn.example.com -user alice -pass hunter2 -no-dtls
+
+# Against a gateway that wants a second factor: -token is one code, good once;
+# -totp is the shared secret, so codes are generated as often as asked.
+sudo ./veepin connect fortinet -server vpn.example.com -user alice -pass hunter2 -token 123456
+sudo ./veepin connect fortinet -server vpn.example.com -user alice -pass hunter2 -totp JBSWY3DPEHPK3PXP
 ```
 
 ### Running a Fortinet server
@@ -844,6 +855,10 @@ sudo ./veepin serve fortinet \
   -user alice -pass hunter2 \
   -pool 10.40.0.0/24 -dns 1.1.1.1 -setup-nat -wan eth0
 ```
+
+`-totp <base32-secret>` makes the server demand a second factor from that user:
+the password earns a challenge rather than a cookie, and only the right one-time
+code completes the login.
 
 Each client authenticates, is assigned an address from the pool over IPCP, and
 its packets are relayed over PPP. The server binds the same port number on UDP
@@ -1086,7 +1101,7 @@ both roles, so all three cells below are exercised.
 | Nebula    | ✓ `nebula` (lighthouse)     | ✓ `nebula` (host)           | ✓ (via lighthouse)     |
 | MASQUE-IP | ✓ aioquic CONNECT-IP        | ✓ aioquic CONNECT-IP        | ✓                      |
 | MASQUE-UDP| ✓ aioquic CONNECT-UDP       | ✓ aioquic CONNECT-UDP       | ✓                      |
-| Fortinet  | —†                          | ✓ openconnect (TLS + DTLS)  | ✓ (over DTLS)          |
+| Fortinet  | —†                          | ✓ openconnect (TLS, DTLS, 2FA) | ✓ (over DTLS)       |
 | TOY*      | ✓ independent Python peer   | ✓ independent Python peer   | ✓                      |
 
 `*` TOY is a **deliberately insecure example protocol**, not a real one. See
@@ -1098,10 +1113,10 @@ test *server* whose tunnel endpoint is a stub). So the independent-implementatio
 proof is the real openconnect *client* against the veepin server — which does
 move packets — plus the veepin↔veepin self cell; the veepin client's login and
 config parsing is covered by unit tests and exercised by the self cell. The
-openconnect direction runs twice, once with `--no-dtls` and once with the UDP
-data channel on; the DTLS cell requires openconnect to *report* an established
-DTLS connection, so a silent fallback to TLS fails it rather than passing on the
-ping alone.
+openconnect direction runs three times: once with `--no-dtls`, once with the UDP
+data channel on, and once with a TOTP second factor. The DTLS cell requires
+openconnect to *report* an established DTLS connection, so a silent fallback to
+TLS fails it rather than passing on the ping alone.
 
 Both roles share one API: a client registers with `client.Register` and is dialed
 by `client.Dial`; a server registers with `client.RegisterServer` and is built by

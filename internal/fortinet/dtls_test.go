@@ -100,7 +100,7 @@ func TestDTLSEndToEnd(t *testing.T) {
 		Jar:       jar,
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots}},
 	}
-	cfg, cookie, err := Login(hc, base, "alice", "s3cret", "")
+	cfg, cookie, err := Login(hc, base, "alice", "s3cret", "", nil)
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
@@ -258,7 +258,7 @@ func TestDTLSAttachesToTLSTunnel(t *testing.T) {
 
 	jar, _ := cookiejar.New(nil)
 	hc := &http.Client{Jar: jar, Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots}}}
-	cfg, cookie, err := Login(hc, base, "alice", "s3cret", "")
+	cfg, cookie, err := Login(hc, base, "alice", "s3cret", "", nil)
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}

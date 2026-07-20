@@ -1,0 +1,55 @@
+# openconnect Fortinet client -> veepin gateway, with a second factor.
+#
+# The gateway demands TOTP from alice, so the login becomes two stages: the
+# password earns a ret=2 challenge carrying a reqid, and openconnect generates
+# the code from the shared secret and parrots the opaque fields back. Both ends
+# compute the code independently -- veepin's internal/otp against openconnect's
+# own TOTP -- so a drift in either the RFC 6238 arithmetic or the challenge form
+# stops the login, and the ping never happens.
+#
+# The secret is a throwaway fixed value; it authenticates nothing outside this
+# compose file.
+#
+# Data-path check: the openconnect client pings 10.40.0.1, the gateway.
+name: veepin-interop-fortinet-2fa
+
+volumes:
+  certs:
+
+services:
+  veepin-fortinet-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    environment:
+      USER: "alice"
+      PASSWORD: "s3cret"
+      POOL: "10.40.0.0/24"
+      TOTP_SECRET: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+    volumes:
+      - ./veepin/fortinet-server-entrypoint.sh:/entrypoint.sh:ro
+      - certs:/certs
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  opnc-fortinet-client:
+    build:
+      context: fortinet
+    image: interop-fortinet
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-fortinet-server]
+    environment:
+      SERVER: "veepin-fortinet-server"
+      USER: "alice"
+      PASSWORD: "s3cret"
+      NO_DTLS: "1"
+      TOTP_SECRET: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+    volumes:
+      - ./fortinet/openconnect-entrypoint.sh:/entrypoint.sh:ro
+      - certs:/certs
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
