@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -226,5 +227,100 @@ func TestEnableDTLSRequiresCertificate(t *testing.T) {
 	defer udp.Close()
 	if _, err := srv.EnableDTLS(udp); err == nil {
 		t.Fatal("EnableDTLS bound a channel with no certificate")
+	}
+}
+
+// The path a real client takes: bring the TLS tunnel up first, then attach DTLS
+// to the same session and keep going. The PPP session must survive the switch,
+// egress must move to UDP, and losing UDP must fall back rather than end the
+// tunnel.
+func TestDTLSAttachesToTLSTunnel(t *testing.T) {
+	cert, roots := selfSignedECDSA(t)
+	pool, gateway, err := newTestPool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverTUN := newFakeTUN()
+	srv, err := NewServer(ServerConfig{
+		Users:       map[string]string{"alice": "s3cret"},
+		Pool:        pool,
+		ServerIP:    gateway,
+		Certificate: &cert,
+	}, serverTUN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.RunTUN()
+	defer srv.Close()
+
+	base, udpAddr := dtlsTestServer(t, srv, cert)
+	host := strings.TrimPrefix(base, "https://")
+
+	jar, _ := cookiejar.New(nil)
+	hc := &http.Client{Jar: jar, Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots}}}
+	cfg, cookie, err := Login(hc, base, "alice", "s3cret", "")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	clientIP := cfg.AssignedIP
+
+	conn, err := tls.Dial("tcp", host, &tls.Config{RootCAs: roots})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Write(TunnelRequest(host, cookie)); err != nil {
+		t.Fatal(err)
+	}
+	clientTUN := newFakeTUN()
+	client, err := RunClient(conn, cfg, clientTUN, nil)
+	if err != nil {
+		t.Fatalf("RunClient: %v", err)
+	}
+	defer client.Close()
+
+	// The same cookie, now naming an active tunnel, must attach rather than be
+	// refused as spent.
+	udp, err := net.DialUDP("udp", nil, udpAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dc, err := DialDTLS(udp, cookie, &tls.Config{RootCAs: roots, ServerName: "127.0.0.1"})
+	if err != nil {
+		t.Fatalf("DialDTLS onto an established tunnel: %v", err)
+	}
+	client.AttachDTLS(dc)
+
+	roundTrip(t, clientTUN, serverTUN, clientIP, gateway, "over-dtls")
+
+	// Losing the UDP carrier must detach, not end the tunnel: the same session
+	// keeps moving packets over the TLS connection that was never closed.
+	_ = dc.Close()
+	roundTrip(t, clientTUN, serverTUN, clientIP, gateway, "after-detach")
+
+	if n := srv.Clients(); n != 1 {
+		t.Errorf("server has %d links, want 1 (the attach must not have made a second)", n)
+	}
+}
+
+// roundTrip sends a packet each way and fails if either does not arrive.
+func roundTrip(t *testing.T, clientTUN, serverTUN *fakeTUN, clientIP, gateway net.IP, tag string) {
+	t.Helper()
+	clientTUN.inbound <- ipv4(clientIP, gateway, tag)
+	select {
+	case got := <-serverTUN.outbound:
+		if string(got[20:]) != tag {
+			t.Errorf("server TUN payload = %q, want %q", got[20:], tag)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%s: packet did not reach the server TUN", tag)
+	}
+	serverTUN.inbound <- ipv4(gateway, clientIP, tag)
+	select {
+	case got := <-clientTUN.outbound:
+		if string(got[20:]) != tag {
+			t.Errorf("client TUN payload = %q, want %q", got[20:], tag)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%s: packet did not reach the client TUN", tag)
 	}
 }

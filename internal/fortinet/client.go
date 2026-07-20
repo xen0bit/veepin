@@ -144,6 +144,12 @@ func runClient(conn net.Conn, cfg Config, tun io.ReadWriteCloser, logger *log.Lo
 	}
 }
 
+// AttachDTLS adds an established DTLS session to a running tunnel and makes it
+// the egress, which is how a real client uses the UDP channel: the TLS tunnel
+// stays open as the fallback, and losing UDP costs a detach rather than the
+// tunnel. conn comes from DialDTLS, which has already presented the cookie.
+func (c *Client) AttachDTLS(conn net.Conn) { c.link.attachDTLS(conn) }
+
 // Wait blocks until the tunnel stops.
 func (c *Client) Wait() error { return c.link.Wait() }
 

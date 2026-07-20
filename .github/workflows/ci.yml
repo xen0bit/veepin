@@ -187,11 +187,13 @@ jobs:
           ./internal/fortinet FuzzParseConfigXML
           ./internal/fortinet FuzzParseLoginResult
           ./internal/fortinet FuzzParseLoginForm
+          ./internal/fortinet FuzzParseDTLSClientHello
+          ./internal/fortinet FuzzParseDTLSServerHello
           TARGETS
 
           # Guard against the truncation described above, and against a target
           # being added to the list without the loop reaching it.
-          expected=44
+          expected=46
           if [ "$ran" -ne "$expected" ]; then
             echo "::error::ran $ran fuzz targets, expected $expected -- the target list was truncated"
             exit 1

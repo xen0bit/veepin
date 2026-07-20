@@ -60,6 +60,8 @@ type Server struct {
 	dtls     *udpmux.Mux             // the UDP data channel, once ServeDTLS runs
 	pending  map[string]net.IP       // cookie -> assigned address, between login and tunnel
 	links    map[netip.Addr]*pppLink // assigned address -> active tunnel
+	byCookie map[string]*pppLink     // cookie -> active tunnel, so a later DTLS
+	//                                 session can attach to the link it belongs to
 	closed   bool
 	closedCh chan struct{}
 }
@@ -88,6 +90,7 @@ func NewServer(cfg ServerConfig, tun io.ReadWriteCloser) (*Server, error) {
 		log:      logger,
 		pending:  map[string]net.IP{},
 		links:    map[netip.Addr]*pppLink{},
+		byCookie: map[string]*pppLink{},
 		closedCh: make(chan struct{}),
 	}, nil
 }
@@ -194,20 +197,21 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 	// The session moves from "pending" (holding a pool address) to an active
 	// link. Admission was released for it here — its cost is now the connection,
 	// not the gate.
+	cookie := cookieValueFrom(r)
 	s.mu.Lock()
-	delete(s.pending, cookieValueFrom(r))
+	delete(s.pending, cookie)
 	s.mu.Unlock()
 	s.gate.Done()
 
 	// The hijacked reader may hold buffered bytes, so it is the read side.
-	s.runServerLink(conn, buf.Reader, addr, false)
+	s.runServerLink(conn, buf.Reader, addr, false, cookie)
 }
 
 // runServerLink builds a NoAuth PPP server over conn, registers it under the
 // client's inner address, and serves it until it ends -- releasing the address
 // on the way out. reader is the read side (nil uses conn); datagram is true for
 // the DTLS carrier, where each datagram is one framed record.
-func (s *Server) runServerLink(conn net.Conn, reader io.Reader, addr net.IP, datagram bool) {
+func (s *Server) runServerLink(conn net.Conn, reader io.Reader, addr net.IP, datagram bool, cookie string) {
 	na, _ := netip.AddrFromSlice(addr.To4())
 	na = na.Unmap()
 
@@ -231,6 +235,9 @@ func (s *Server) runServerLink(conn net.Conn, reader io.Reader, addr net.IP, dat
 
 	s.mu.Lock()
 	s.links[na] = link
+	if cookie != "" {
+		s.byCookie[cookie] = link
+	}
 	s.mu.Unlock()
 	carrier := "TLS"
 	if datagram {
@@ -245,6 +252,9 @@ func (s *Server) runServerLink(conn net.Conn, reader io.Reader, addr net.IP, dat
 	s.mu.Lock()
 	if s.links[na] == link {
 		delete(s.links, na)
+	}
+	if s.byCookie[cookie] == link {
+		delete(s.byCookie, cookie)
 	}
 	s.mu.Unlock()
 	s.cfg.Pool.Release(addr)

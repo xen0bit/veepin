@@ -44,7 +44,13 @@ type pppLink struct {
 	client *ppp.Session
 	server *ppp.ServerSession
 
-	writeMu   sync.Mutex // serialises writes to conn (PPP negotiation vs the TUN loop)
+	// alt is a DTLS carrier attached to a link that already has a TLS one. A
+	// real client brings DTLS up alongside the tunnel rather than instead of it
+	// and then prefers it, so both carry frames for the same PPP session: alt is
+	// the egress while it lives, and either read loop feeds the same session.
+	// Guarded by writeMu, which is what chooses the egress.
+	alt       net.Conn
+	writeMu   sync.Mutex // serialises writes to the carrier (PPP negotiation vs the TUN loop)
 	done      chan struct{}
 	closeOnce sync.Once
 	err       error
@@ -64,8 +70,59 @@ func (l *pppLink) rd() io.Reader {
 func (l *pppLink) SendPPP(frame []byte) error {
 	l.writeMu.Lock()
 	defer l.writeMu.Unlock()
-	_, err := l.conn.Write(EncodeFrame(frame))
+	w := l.conn
+	if l.alt != nil {
+		w = l.alt
+	}
+	_, err := w.Write(EncodeFrame(frame))
 	return err
+}
+
+// attachDTLS gives an established link a DTLS carrier and makes it the egress.
+// The TLS connection stays open underneath: it is the fallback the client keeps
+// for exactly this reason, so losing UDP costs a detach, not the tunnel.
+func (l *pppLink) attachDTLS(conn net.Conn) {
+	l.writeMu.Lock()
+	prev := l.alt
+	l.alt = conn
+	l.writeMu.Unlock()
+	if prev != nil {
+		// A second DTLS session for the same client supersedes the first.
+		_ = prev.Close()
+	}
+	go l.readAlt(conn)
+}
+
+// detachDTLS drops a DTLS carrier, returning the egress to TLS. It is a no-op if
+// conn is not the current carrier, so a losing race cannot unseat its successor.
+func (l *pppLink) detachDTLS(conn net.Conn) {
+	l.writeMu.Lock()
+	if l.alt == conn {
+		l.alt = nil
+	}
+	l.writeMu.Unlock()
+	_ = conn.Close()
+}
+
+// readAlt reads the DTLS carrier's frames into the same PPP session. Its end is
+// not the link's end: the TLS carrier is still there, so it detaches instead.
+func (l *pppLink) readAlt(conn net.Conn) {
+	dgram := make([]byte, maxInnerPacket)
+	for {
+		n, err := conn.Read(dgram)
+		if err != nil {
+			l.detachDTLS(conn)
+			return
+		}
+		frame, _, err := ParseFrame(dgram[:n])
+		if err != nil {
+			// One malformed datagram is not worth the carrier; drop it.
+			continue
+		}
+		if !l.dispatch(frame) {
+			return
+		}
+	}
 }
 
 // readLoop reads framed records and dispatches them until the connection ends.
@@ -80,24 +137,33 @@ func (l *pppLink) readLoop() {
 			l.stop(err)
 			return
 		}
-		if ipPacket, ok := ppp.IsIP(frame); ok {
-			if l.assignedSrc != nil && !sourceIs(ipPacket, l.assignedSrc) {
-				// A client sending from an address it was not assigned is spoofing;
-				// drop it rather than let it reach the shared TUN as another client.
-				continue
-			}
-			if _, err := l.tun.Write(ipPacket); err != nil {
-				l.stop(err)
-				return
-			}
-			continue
-		}
-		if l.client != nil {
-			l.client.Receive(frame)
-		} else {
-			l.server.Receive(frame)
+		if !l.dispatch(frame) {
+			return
 		}
 	}
+}
+
+// dispatch routes one PPP frame -- an IP packet to the TUN, anything else to the
+// session -- and reports whether the link is still usable.
+func (l *pppLink) dispatch(frame []byte) bool {
+	if ipPacket, ok := ppp.IsIP(frame); ok {
+		if l.assignedSrc != nil && !sourceIs(ipPacket, l.assignedSrc) {
+			// A client sending from an address it was not assigned is spoofing;
+			// drop it rather than let it reach the shared TUN as another client.
+			return true
+		}
+		if _, err := l.tun.Write(ipPacket); err != nil {
+			l.stop(err)
+			return false
+		}
+		return true
+	}
+	if l.client != nil {
+		l.client.Receive(frame)
+	} else {
+		l.server.Receive(frame)
+	}
+	return true
 }
 
 // readFrame reads one framed record, from the byte stream (TLS) or one whole
@@ -139,6 +205,13 @@ func (l *pppLink) stop(cause error) {
 	l.closeOnce.Do(func() {
 		l.err = cause
 		close(l.done)
+		l.writeMu.Lock()
+		alt := l.alt
+		l.alt = nil
+		l.writeMu.Unlock()
+		if alt != nil {
+			_ = alt.Close()
+		}
 		_ = l.conn.Close()
 		if l.ownsTUN && l.tun != nil {
 			_ = l.tun.Close()

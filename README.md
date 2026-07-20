@@ -1086,7 +1086,7 @@ both roles, so all three cells below are exercised.
 | Nebula    | ✓ `nebula` (lighthouse)     | ✓ `nebula` (host)           | ✓ (via lighthouse)     |
 | MASQUE-IP | ✓ aioquic CONNECT-IP        | ✓ aioquic CONNECT-IP        | ✓                      |
 | MASQUE-UDP| ✓ aioquic CONNECT-UDP       | ✓ aioquic CONNECT-UDP       | ✓                      |
-| Fortinet  | —†                          | ✓ openconnect               | ✓                      |
+| Fortinet  | —†                          | ✓ openconnect (TLS + DTLS)  | ✓ (over DTLS)          |
 | TOY*      | ✓ independent Python peer   | ✓ independent Python peer   | ✓                      |
 
 `*` TOY is a **deliberately insecure example protocol**, not a real one. See
@@ -1097,7 +1097,11 @@ veepin *client* against with a full data path (openconnect ships only a Fortinet
 test *server* whose tunnel endpoint is a stub). So the independent-implementation
 proof is the real openconnect *client* against the veepin server — which does
 move packets — plus the veepin↔veepin self cell; the veepin client's login and
-config parsing is covered by unit tests and exercised by the self cell.
+config parsing is covered by unit tests and exercised by the self cell. The
+openconnect direction runs twice, once with `--no-dtls` and once with the UDP
+data channel on; the DTLS cell requires openconnect to *report* an established
+DTLS connection, so a silent fallback to TLS fails it rather than passing on the
+ping alone.
 
 Both roles share one API: a client registers with `client.Register` and is dialed
 by `client.Dial`; a server registers with `client.RegisterServer` and is built by

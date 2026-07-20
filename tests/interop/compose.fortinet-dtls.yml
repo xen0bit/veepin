@@ -1,13 +1,15 @@
-# Independent openconnect Fortinet client -> veepin Fortinet gateway.
+# Independent openconnect Fortinet client -> veepin gateway, over DTLS.
 #
-# openconnect is the real reference client and fully implements the FortiOS SSL
-# VPN data channel, so this cell moves packets: it verifies veepin's server-side
-# login, config XML, framing and PPP against a stack that shares none of veepin's
-# code. The gateway publishes its certificate into a shared volume; the client
-# pins it by fingerprint.
+# The sibling of compose.fortinet.yml with the UDP data channel left on. It is
+# the strongest proof veepin's DTLS channel is right: openconnect brings the TLS
+# tunnel up, then attaches its own DTLS session with the GFtype cookie exchange
+# and prefers it, so the ping crosses a certificate-based DTLS 1.2 session that
+# veepin's from-scratch handshake and openconnect's GnuTLS both had to agree on.
 #
-# Data-path check: the openconnect client pings 10.40.0.1, the gateway.
-name: veepin-interop-fortinet
+# Data-path check: the openconnect client pings 10.40.0.1, the gateway. The test
+# additionally requires openconnect to report the DTLS connection, so a silent
+# fallback to TLS fails the cell rather than passing as a false green.
+name: veepin-interop-fortinet-dtls
 
 volumes:
   certs:
@@ -42,7 +44,6 @@ services:
       SERVER: "veepin-fortinet-server"
       USER: "alice"
       PASSWORD: "s3cret"
-      NO_DTLS: "1"
     volumes:
       - ./fortinet/openconnect-entrypoint.sh:/entrypoint.sh:ro
       - certs:/certs

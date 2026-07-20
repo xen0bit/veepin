@@ -135,27 +135,33 @@ func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
 	return &Session{client: c}, res, nil
 }
 
-// dialDataPath brings the tunnel up, preferring the UDP data channel when the
-// gateway advertises it. DTLS is tried first and the TLS tunnel is the fallback:
-// a failure there costs one handshake, and the cookie is only spent once the
-// server has confirmed the GFtype exchange, so falling back is always safe.
+// dialDataPath brings the tunnel up: always the TLS tunnel first, then the UDP
+// data channel alongside it when the gateway advertises one. That is the order
+// the reference client uses and the reason the protocol has a fallback at all —
+// the TLS carrier stays open underneath, so a UDP path that fails or later dies
+// costs nothing but the datagrams in flight.
 func dialDataPath(host, cookie string, fcfg ifortinet.Config, tlsConfig *tls.Config,
 	tun io.ReadWriteCloser, logger *log.Logger, wantDTLS bool,
 ) (*ifortinet.Client, error) {
-	if wantDTLS && fcfg.DTLS {
-		c, err := dialDTLSPath(host, cookie, fcfg, tlsConfig, tun, logger)
-		if err == nil {
-			logger.Printf("fortinet: data channel over DTLS")
-			return c, nil
-		}
-		logger.Printf("fortinet: DTLS channel unavailable (%v), falling back to the TLS tunnel", err)
+	c, err := dialTLSPath(host, cookie, fcfg, tlsConfig, tun, logger)
+	if err != nil {
+		return nil, err
 	}
-	return dialTLSPath(host, cookie, fcfg, tlsConfig, tun, logger)
+	if !wantDTLS || !fcfg.DTLS {
+		return c, nil
+	}
+	dc, err := dialDTLSChannel(host, cookie, tlsConfig)
+	if err != nil {
+		logger.Printf("fortinet: DTLS channel unavailable (%v), staying on the TLS tunnel", err)
+		return c, nil
+	}
+	c.AttachDTLS(dc)
+	logger.Printf("fortinet: data channel over DTLS")
+	return c, nil
 }
 
-func dialDTLSPath(host, cookie string, fcfg ifortinet.Config, tlsConfig *tls.Config,
-	tun io.ReadWriteCloser, logger *log.Logger,
-) (*ifortinet.Client, error) {
+// dialDTLSChannel opens the UDP data channel and presents the cookie on it.
+func dialDTLSChannel(host, cookie string, tlsConfig *tls.Config) (net.Conn, error) {
 	// The UDP channel is the same port number as the HTTPS control plane.
 	udp, err := net.Dial("udp", host)
 	if err != nil {
@@ -166,12 +172,7 @@ func dialDTLSPath(host, cookie string, fcfg ifortinet.Config, tlsConfig *tls.Con
 		_ = udp.Close()
 		return nil, err
 	}
-	c, err := ifortinet.RunDTLSClient(dc, fcfg, tun, logger)
-	if err != nil {
-		_ = dc.Close()
-		return nil, err
-	}
-	return c, nil
+	return dc, nil
 }
 
 func dialTLSPath(host, cookie string, fcfg ifortinet.Config, tlsConfig *tls.Config,

@@ -91,51 +91,67 @@ func (s *Server) serveDTLSPeer(p *udpmux.Conn) {
 		return
 	}
 
-	addr, err := s.dtlsAuthorize(conn)
-	if err != nil {
+	if err := s.dtlsAuthorize(conn); err != nil {
 		s.log.Printf("fortinet: DTLS session from %s rejected: %v", p.RemoteAddr(), err)
 		_ = conn.Close()
 		mux.Drop(p)
-		return
 	}
-	s.runServerLink(conn, nil, addr, true)
 }
 
-// dtlsAuthorize runs the GFtype exchange: the client's cookie must be one the
-// HTTPS login issued and has not yet spent. The address that login reserved
-// becomes this link's, exactly as it would over the TLS tunnel.
-func (s *Server) dtlsAuthorize(conn *dtls.Conn) (net.IP, error) {
+// dtlsAuthorize runs the GFtype exchange and puts the session to work. The
+// cookie decides which of two things happens, and a cookie the login never
+// issued gets neither:
+//
+//   - it names an active tunnel: a real client brings DTLS up *alongside* its
+//     TLS tunnel and then prefers it, so this attaches to that link as a second
+//     carrier and the PPP session continues untouched.
+//   - it is still pending: the client went straight to UDP, so this session is
+//     the tunnel, and a PPP server runs on it as it would over TLS.
+//
+// On success the session belongs to the link; on error the caller closes it.
+func (s *Server) dtlsAuthorize(conn *dtls.Conn) error {
 	_ = conn.SetReadDeadline(time.Now().Add(gfHandshakeTimeout))
 	buf := make([]byte, maxDTLSDatagram)
 	n, err := conn.Read(buf)
 	if err != nil {
-		return nil, fmt.Errorf("reading clthello: %w", err)
+		return fmt.Errorf("reading clthello: %w", err)
 	}
 	_ = conn.SetReadDeadline(time.Time{})
 
 	cookie, err := ParseDTLSClientHello(buf[:n])
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	s.mu.Lock()
-	addr, ok := s.pending[cookie]
-	if ok {
+	link := s.byCookie[cookie]
+	addr, pending := s.pending[cookie]
+	if link == nil && pending {
 		delete(s.pending, cookie)
 	}
 	s.mu.Unlock()
-	if !ok {
-		return nil, errors.New("unknown or already-used SVPNCOOKIE")
+
+	if link == nil && !pending {
+		return errors.New("unknown or already-used SVPNCOOKIE")
+	}
+	if _, err := conn.Write(BuildDTLSServerHello()); err != nil {
+		if link == nil {
+			s.gate.Done()
+			s.cfg.Pool.Release(addr)
+		}
+		return fmt.Errorf("writing svrhello: %w", err)
+	}
+
+	if link != nil {
+		link.attachDTLS(conn)
+		s.log.Printf("fortinet: DTLS carrier attached to the tunnel for %s", link.assignedSrc)
+		return nil
 	}
 	// The session's cost is now the link, not the admission gate — the same
 	// accounting the TLS tunnel does when it takes over from a pending login.
 	s.gate.Done()
-
-	if _, err := conn.Write(BuildDTLSServerHello()); err != nil {
-		s.cfg.Pool.Release(addr)
-		return nil, fmt.Errorf("writing svrhello: %w", err)
-	}
-	return addr, nil
+	s.runServerLink(conn, nil, addr, true, cookie)
+	return nil
 }
 
 // DialDTLS brings up the client side of the data channel: a certificate-based
