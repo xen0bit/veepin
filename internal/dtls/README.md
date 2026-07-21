@@ -63,5 +63,11 @@ sequenceDiagram
   the TLS tunnel is the correct behaviour — see the AnyConnect docs.
 - **The replay window is per-epoch** (RFC 6347), distinct from every other window
   in the tree; not the shared [`internal/replay`](../replay).
+- **The record layer is allocation-guarded.** `seal` allocates once (the explicit
+  nonce is written into the output buffer and `Seal` appends the ciphertext after
+  it) and `open` not at all (in place). Each `aeadState` seals xor opens and runs
+  single-goroutine (`Conn.Write` under `writeMu`, `Conn.Read` under `readMu`), so
+  the reused nonce/additional-data scratch needs no lock and does not escape.
+  `TestRecordAllocations` pins it; numbers are in the root `README.md`.
 - The package doc comment predates the ECDHE work and mentions only PSK; the
   cert-based path is real (see `Config.Certificate`/`RootCAs` and the ECDHE tests).

@@ -191,7 +191,10 @@ func (c *Conn) buildRecordLocked(typ uint8, payload []byte) []byte {
 	seq := c.writeSeq
 	c.writeSeq++
 	sealed := c.out.seal(typ, version1_2, c.writeEp, seq, payload)
-	out := appendRecordHeader(nil, typ, version1_2, c.writeEp, seq, len(sealed))
+	// Size the record buffer for the header plus the sealed payload so appending
+	// the header and the sealed bytes does not reallocate.
+	out := make([]byte, 0, recordHeaderLen+len(sealed))
+	out = appendRecordHeader(out, typ, version1_2, c.writeEp, seq, len(sealed))
 	return append(out, sealed...)
 }
 

@@ -1178,6 +1178,17 @@ What's measured:
   and open (packet-ID nonce, tag-first wire order, replay window) across the same
   sizes. Same profile: Seal one allocation, Open zero, ~1.9 GB/s seal / ~2.9 GB/s
   open at 1400 B.
+- **Nebula** (`internal/nebula`) — the AES-GCM and ChaCha20-Poly1305 packet
+  encrypt/decrypt across the same sizes. Same profile as the others: encrypt one
+  allocation, decrypt zero (in place), ~2.2 GB/s encrypt / ~2.7 GB/s decrypt at
+  1400 B AES-GCM.
+- **DTLS record layer** (`internal/dtls`) — the AES-GCM seal/open shared by the
+  AnyConnect and Fortinet UDP data channels. seal one allocation, open zero,
+  ~2.4 GB/s seal / ~3.3 GB/s open at 1400 B.
+- **Framing** (`internal/anyconnect`, `internal/fortinet`, `internal/sstp/wire`,
+  `internal/sshtun`, `internal/l2tp`) — the header-prepend paths whose
+  confidentiality comes from their carrier (TLS/DTLS/ESP). Each is a single
+  allocation to frame, zero to parse, and runs 6–8 GB/s.
 - **Handshake** (`internal/ikev2/ike`) — SK message seal/open, and a full PSK
   handshake (IKE_SA_INIT + IKE_AUTH) over real UDP loopback against the live
   server.
@@ -1250,6 +1261,26 @@ index is zeroed to supply the four leading zeros), while OpenVPN reuses a
 per-`Cipher` receive-nonce buffer (safe because open runs on the single inbound
 pump goroutine) and rotates the tag-first wire layout into Go's tag-last order in
 place. Seal is a single allocation (the returned packet), open none.
+
+The **Nebula** and **DTLS** crypto paths were brought to the same standard. Both
+had the nonce heap-escape on every packet and opened into a freshly allocated
+buffer; Nebula's encrypt allocated twice and its decrypt twice, DTLS's seal four
+times and its open three. The fixes are the familiar ones: build the send nonce
+in the output buffer's spare tail (Nebula) or write the explicit nonce into the
+output and let `Seal` append the ciphertext after it (DTLS, folding a separate
+sealed buffer and a copy into one allocation), and open in place with a
+per-tunnel / per-`aeadState` receive-nonce scratch — safe because each runs
+single-goroutine (Nebula on the one `readUDP` loop, DTLS under the connection's
+read and write locks). Both now match the rest: encrypt/seal one allocation,
+decrypt/open zero, each guarded by a `TestDataPathAllocations`/`TestRecordAllocations`.
+
+The remaining protocols' data paths carry their payload inside a header-prepend
+frame and delegate confidentiality to a carrier that is either the standard
+library (AnyConnect, SSTP and Fortinet over TLS; SSH over `x/crypto/ssh`) or an
+already-optimized veepin path (Fortinet/AnyConnect over the DTLS layer above,
+L2TP over ESP). Those framing steps were already at the floor — one allocation to
+build the frame, none to parse — and now carry benchmarks and allocation guards
+so they stay there.
 
 ## Scope and limitations
 

@@ -55,3 +55,8 @@ flowchart TD
 - **The anti-replay window here was the duplicate** that seeded
   [`internal/replay`](../replay) (shared with `internal/toy`); this package can use
   that shared window since its rule is exactly "a counter and a window".
+- **The data path is allocation-guarded.** `encrypt` allocates once (the returned
+  packet — the nonce is built in its spare tail, not a fresh escaping slice) and
+  `decrypt` not at all (in place, with a per-tunnel receive-nonce scratch that is
+  safe because decrypt runs only on the Host's single `readUDP` goroutine).
+  `TestDataPathAllocations` pins both; the root `README.md` has the numbers.
