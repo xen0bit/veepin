@@ -60,6 +60,73 @@ make_wireguard_connection(void)
     return c;
 }
 
+/* A data item to seed and the value to expect after a round-trip. */
+typedef struct {
+    const char *key;
+    const char *val;
+    gboolean    secret;
+} KV;
+
+/* round_trip pre-fills the editor from a connection carrying `protocol` plus the
+ * given data/secret items, reads it back, and checks every item survived and no
+ * foreign key (`must_be_absent`, e.g. a key from another protocol) leaked in. */
+static int
+round_trip(NMVpnEditorPlugin *plugin, const char *protocol, const KV *items, int n,
+           const char *must_be_absent)
+{
+    GError *err = NULL;
+    NMConnection *c = nm_simple_connection_new();
+    NMSetting *sc = nm_setting_connection_new();
+    g_object_set(sc, NM_SETTING_CONNECTION_ID, "test", NM_SETTING_CONNECTION_TYPE, "vpn", NULL);
+    nm_connection_add_setting(c, sc);
+
+    NMSettingVpn *vpn = NM_SETTING_VPN(nm_setting_vpn_new());
+    g_object_set(vpn, NM_SETTING_VPN_SERVICE_TYPE, SERVICE, NULL);
+    nm_setting_vpn_add_data_item(vpn, "protocol", protocol);
+    for (int i = 0; i < n; i++) {
+        if (items[i].secret)
+            nm_setting_vpn_add_secret(vpn, items[i].key, items[i].val);
+        else
+            nm_setting_vpn_add_data_item(vpn, items[i].key, items[i].val);
+    }
+    nm_connection_add_setting(c, NM_SETTING(vpn));
+
+    NMVpnEditor *editor = nm_vpn_editor_plugin_get_editor(plugin, c, &err);
+    if (!editor) {
+        g_printerr("FAIL: get_editor (%s): %s\n", protocol, err ? err->message : "?");
+        return 1;
+    }
+    NMConnection *out = nm_simple_connection_new();
+    if (!nm_vpn_editor_update_connection(editor, out, &err)) {
+        g_printerr("FAIL: update_connection (%s): %s\n", protocol, err ? err->message : "?");
+        return 1;
+    }
+    NMSettingVpn *o = nm_connection_get_setting_vpn(out);
+    if (!o) {
+        g_printerr("FAIL: no vpn setting (%s)\n", protocol);
+        return 1;
+    }
+    if (g_strcmp0(nm_setting_vpn_get_data_item(o, "protocol"), protocol) != 0) {
+        g_printerr("FAIL: protocol not preserved (%s)\n", protocol);
+        return 1;
+    }
+    for (int i = 0; i < n; i++) {
+        const char *got = items[i].secret ? nm_setting_vpn_get_secret(o, items[i].key)
+                                           : nm_setting_vpn_get_data_item(o, items[i].key);
+        if (g_strcmp0(got, items[i].val) != 0) {
+            g_printerr("FAIL: %s[%s] = %s, want %s\n", protocol, items[i].key,
+                       got ? got : "(null)", items[i].val);
+            return 1;
+        }
+    }
+    if (must_be_absent && nm_setting_vpn_get_data_item(o, must_be_absent) != NULL) {
+        g_printerr("FAIL: %s leaked into a %s connection\n", must_be_absent, protocol);
+        return 1;
+    }
+    g_print("%s round-trip OK\n", protocol);
+    return 0;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -200,6 +267,39 @@ main(int argc, char **argv)
         return 1;
     }
     g_print("wireguard round-trip OK\n");
+
+    /* Round-trip a representative spread of the other protocols: a
+     * username/password gateway with an optional data field (Fortinet, plus a
+     * TOTP secret), a certificate-only mesh with no secrets (Nebula), and one
+     * with two required secrets (L2TP). Each also checks a foreign key does not
+     * leak into it. */
+    const KV fortinet[] = {
+        { "server", "fw.example.com", FALSE },
+        { "user", "alice", FALSE },
+        { "realm", "corp", FALSE },
+        { "password", "pw", TRUE },
+        { "totp", "JBSWY3DPEHPK3PXP", TRUE },
+    };
+    if (round_trip(plugin, "fortinet", fortinet, G_N_ELEMENTS(fortinet), "gateway"))
+        return 1;
+
+    const KV nebula[] = {
+        { "ca", "/etc/nebula/ca.crt", FALSE },
+        { "cert", "/etc/nebula/host.crt", FALSE },
+        { "key", "/etc/nebula/host.key", FALSE },
+        { "lighthouses", "192.168.100.1", FALSE },
+    };
+    if (round_trip(plugin, "nebula", nebula, G_N_ELEMENTS(nebula), "password"))
+        return 1;
+
+    const KV l2tp[] = {
+        { "server", "vpn.example.com", FALSE },
+        { "user", "bob", FALSE },
+        { "psk", "s3cret", TRUE },
+        { "password", "pw", TRUE },
+    };
+    if (round_trip(plugin, "l2tp", l2tp, G_N_ELEMENTS(l2tp), "gateway"))
+        return 1;
 
     /* Validation: an empty connection must be rejected (no gateway). */
     NMVpnEditor *empty = nm_vpn_editor_plugin_get_editor(plugin, NULL, &err);

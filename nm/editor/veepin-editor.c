@@ -11,12 +11,13 @@
  * Go. It is built separately (see ../Makefile) and never linked into any Go
  * binary, so the core veepin binaries stay CGO-free.
  *
- * A protocol chooser at the top switches between two field sets. Keys must match
- * nm/internal/nmconfig:
- *   common   protocol, full-tunnel, mtu
- *   ikev2    gateway, local-id, server-id, user (data); psk, password (secrets)
- *   wireguard public-key, endpoint, address, allowed-ips, dns (data);
- *            private-key, preshared-key (secrets)
+ * A protocol chooser at the top switches between one field set per protocol. The
+ * field sets are data-driven: each protocol is a row in the `protocols` table
+ * below listing its fields (label, vpn key, and whether the key is a required
+ * data item, an optional data item, or a secret). Adding or changing a protocol
+ * is a table edit here — the widget building, validation and (de)serialisation
+ * are generic. The keys must match nm/internal/nmconfig's requireKeys /
+ * secretMissing switches (and each protocol package's Opt* constants).
  */
 
 #include <gtk/gtk.h>
@@ -30,24 +31,164 @@
 #define KEY_PROTOCOL      "protocol"
 #define KEY_FULL_TUNNEL   "full-tunnel"
 #define KEY_MTU           "mtu"
-/* IKEv2 */
+/* Shared across protocols. */
+#define KEY_SERVER        "server"
+#define KEY_PORT          "port"
+#define KEY_USER          "user"
+#define KEY_PASSWORD      "password"
+#define KEY_DNS           "dns"
+#define KEY_CA            "ca"
+#define KEY_CERT          "cert"
+#define KEY_KEYFILE       "key"
+/* IKEv2. */
 #define KEY_GATEWAY       "gateway"
 #define KEY_LOCAL_ID      "local-id"
 #define KEY_SERVER_ID     "server-id"
-#define KEY_USER          "user"
 #define KEY_PSK           "psk"
-#define KEY_PASSWORD      "password"
-/* WireGuard */
+/* WireGuard. */
 #define KEY_PUBLIC_KEY    "public-key"
 #define KEY_ENDPOINT      "endpoint"
 #define KEY_ADDRESS       "address"
 #define KEY_ALLOWED_IPS   "allowed-ips"
-#define KEY_DNS           "dns"
 #define KEY_PRIVATE_KEY   "private-key"
 #define KEY_PRESHARED_KEY "preshared-key"
+/* OpenVPN (its user key differs from the rest). */
+#define KEY_REMOTE        "remote"
+#define KEY_USERNAME      "username"
+/* SSH. */
+#define KEY_IDENTITY      "identity"
+/* Fortinet. */
+#define KEY_REALM         "realm"
+#define KEY_TOTP          "totp"
+/* MASQUE. */
+#define KEY_AUTHORITY     "authority"
+/* Nebula. */
+#define KEY_LIGHTHOUSES   "lighthouses"
+#define KEY_STATIC_HOSTS  "static-hosts"
 
-#define PROTOCOL_IKEV2     "ikev2"
-#define PROTOCOL_WIREGUARD "wireguard"
+/*****************************************************************************/
+/* Protocol / field model                                                    */
+/*****************************************************************************/
+
+typedef enum {
+    F_REQUIRED, /* required data item — update_connection fails if empty */
+    F_DATA,     /* optional data item — written only when non-empty */
+    F_SECRET,   /* stored as a secret with the chosen storage flag */
+} FieldKind;
+
+typedef struct {
+    const char *label;
+    const char *key;
+    FieldKind   kind;
+} FieldDef;
+
+typedef struct {
+    const char     *id;    /* vpn.data "protocol" value */
+    const char     *label; /* combo display text */
+    const FieldDef *fields;
+    guint           n_fields;
+} ProtocolDef;
+
+static const FieldDef ikev2_fields[] = {
+    { "Gateway",        KEY_GATEWAY,   F_REQUIRED },
+    { "Local ID",       KEY_LOCAL_ID,  F_REQUIRED },
+    { "Server ID",      KEY_SERVER_ID, F_DATA },
+    { "Username",       KEY_USER,      F_DATA },
+    { "Pre-shared key", KEY_PSK,       F_SECRET },
+    { "Password",       KEY_PASSWORD,  F_SECRET },
+};
+
+static const FieldDef wireguard_fields[] = {
+    { "Private key",     KEY_PRIVATE_KEY,   F_SECRET },
+    { "Peer public key", KEY_PUBLIC_KEY,    F_REQUIRED },
+    { "Endpoint",        KEY_ENDPOINT,      F_REQUIRED },
+    { "Address",         KEY_ADDRESS,       F_REQUIRED },
+    { "Allowed IPs",     KEY_ALLOWED_IPS,   F_REQUIRED },
+    { "Pre-shared key",  KEY_PRESHARED_KEY, F_SECRET },
+    { "DNS",             KEY_DNS,           F_DATA },
+};
+
+static const FieldDef openvpn_fields[] = {
+    { "Remote (host)",     KEY_REMOTE,   F_REQUIRED },
+    { "Port",              KEY_PORT,     F_DATA },
+    { "CA (path)",         KEY_CA,       F_DATA },
+    { "Certificate (path)", KEY_CERT,    F_DATA },
+    { "Key (path)",        KEY_KEYFILE,  F_DATA },
+    { "Username",          KEY_USERNAME, F_DATA },
+    { "Password",          KEY_PASSWORD, F_SECRET },
+};
+
+static const FieldDef sstp_fields[] = {
+    { "Server",   KEY_SERVER,   F_REQUIRED },
+    { "Port",     KEY_PORT,     F_DATA },
+    { "Username", KEY_USER,     F_REQUIRED },
+    { "Password", KEY_PASSWORD, F_SECRET },
+};
+
+static const FieldDef ssh_fields[] = {
+    { "Server",         KEY_SERVER,   F_REQUIRED },
+    { "Username",       KEY_USER,     F_REQUIRED },
+    { "Port",           KEY_PORT,     F_DATA },
+    { "Identity (path)", KEY_IDENTITY, F_DATA },
+    { "Password",       KEY_PASSWORD, F_SECRET },
+};
+
+static const FieldDef anyconnect_fields[] = {
+    { "Server",   KEY_SERVER,   F_REQUIRED },
+    { "Username", KEY_USER,     F_REQUIRED },
+    { "Port",     KEY_PORT,     F_DATA },
+    { "Password", KEY_PASSWORD, F_SECRET },
+};
+
+static const FieldDef nebula_fields[] = {
+    { "CA (path)",          KEY_CA,           F_REQUIRED },
+    { "Certificate (path)", KEY_CERT,         F_REQUIRED },
+    { "Private key (path)", KEY_KEYFILE,      F_REQUIRED },
+    { "Lighthouses",        KEY_LIGHTHOUSES,  F_DATA },
+    { "Static hosts",       KEY_STATIC_HOSTS, F_DATA },
+};
+
+static const FieldDef masque_fields[] = {
+    { "Server",         KEY_SERVER,    F_REQUIRED },
+    { "Port",           KEY_PORT,      F_DATA },
+    { "Authority",      KEY_AUTHORITY, F_DATA },
+    { "CA (path)",      KEY_CA,        F_DATA },
+};
+
+static const FieldDef fortinet_fields[] = {
+    { "Server",       KEY_SERVER,   F_REQUIRED },
+    { "Username",     KEY_USER,     F_REQUIRED },
+    { "Port",         KEY_PORT,     F_DATA },
+    { "Realm",        KEY_REALM,    F_DATA },
+    { "Password",     KEY_PASSWORD, F_SECRET },
+    { "TOTP secret",  KEY_TOTP,     F_SECRET },
+};
+
+static const FieldDef l2tp_fields[] = {
+    { "Server",        KEY_SERVER,   F_REQUIRED },
+    { "Username",      KEY_USER,     F_REQUIRED },
+    { "Port",          KEY_PORT,     F_DATA },
+    { "Pre-shared key", KEY_PSK,     F_SECRET },
+    { "Password",      KEY_PASSWORD, F_SECRET },
+    { "DNS",           KEY_DNS,      F_DATA },
+};
+
+#define PROTO(id_, label_, fields_) { id_, label_, fields_, G_N_ELEMENTS(fields_) }
+
+static const ProtocolDef protocols[] = {
+    PROTO("ikev2",      "IKEv2",       ikev2_fields),
+    PROTO("wireguard",  "WireGuard",   wireguard_fields),
+    PROTO("openvpn",    "OpenVPN",     openvpn_fields),
+    PROTO("sstp",       "SSTP",        sstp_fields),
+    PROTO("ssh",        "SSH",         ssh_fields),
+    PROTO("anyconnect", "AnyConnect",  anyconnect_fields),
+    PROTO("nebula",     "Nebula",      nebula_fields),
+    PROTO("masque",     "MASQUE",      masque_fields),
+    PROTO("fortinet",   "Fortinet",    fortinet_fields),
+    PROTO("l2tp",       "L2TP/IPsec",  l2tp_fields),
+};
+
+#define N_PROTOCOLS G_N_ELEMENTS(protocols)
 
 /*****************************************************************************/
 /* Editor widget                                                             */
@@ -57,28 +198,12 @@ typedef struct {
     GObject parent;
     GtkWidget *widget; /* top-level container returned by get_widget */
 
-    GtkWidget *protocol; /* combo: ikev2 / wireguard */
+    GtkWidget *protocol; /* combo selecting the protocol */
 
-    /* Field groups, shown one at a time by the protocol combo. */
-    GtkWidget *ikev2_box;
-    GtkWidget *wireguard_box;
-
-    /* IKEv2 fields. */
-    GtkWidget *gateway;
-    GtkWidget *local_id;
-    GtkWidget *server_id;
-    GtkWidget *psk;
-    GtkWidget *user;
-    GtkWidget *password;
-
-    /* WireGuard fields. */
-    GtkWidget *private_key;
-    GtkWidget *public_key;
-    GtkWidget *endpoint;
-    GtkWidget *address;
-    GtkWidget *allowed_ips;
-    GtkWidget *preshared_key;
-    GtkWidget *dns;
+    /* One field-set box per protocol, shown one at a time, and the entry
+     * widgets inside it — entries[i][j] is field j of protocols[i]. */
+    GtkWidget  *boxes[N_PROTOCOLS];
+    GtkWidget **entries[N_PROTOCOLS];
 
     /* Common. */
     GtkWidget *full_tunnel;
@@ -115,23 +240,39 @@ field_changed(GtkWidget *w, gpointer user_data)
     g_signal_emit_by_name(NM_VPN_EDITOR(user_data), "changed");
 }
 
-/* selected_protocol returns "ikev2" or "wireguard" from the combo, defaulting to
- * ikev2 (which is also nmconfig's default). */
-static const char *
-selected_protocol(VeepinEditor *self)
+/* selected_index returns the index into protocols[] of the chosen protocol,
+ * defaulting to 0 (ikev2, which is also nmconfig's default). */
+static guint
+selected_index(VeepinEditor *self)
 {
     const char *id = gtk_combo_box_get_active_id(GTK_COMBO_BOX(self->protocol));
-    return id ? id : PROTOCOL_IKEV2;
+    if (id) {
+        for (guint i = 0; i < N_PROTOCOLS; i++)
+            if (g_strcmp0(id, protocols[i].id) == 0)
+                return i;
+    }
+    return 0;
 }
 
-/* update_visibility shows the field group for the selected protocol and hides
- * the other. */
+/* first_secret_key returns the key of a protocol's first secret field, or NULL
+ * if it has none — used to reflect the stored save-secrets flag in the checkbox. */
+static const char *
+first_secret_key(guint idx)
+{
+    const ProtocolDef *p = &protocols[idx];
+    for (guint j = 0; j < p->n_fields; j++)
+        if (p->fields[j].kind == F_SECRET)
+            return p->fields[j].key;
+    return NULL;
+}
+
+/* update_visibility shows only the selected protocol's field box. */
 static void
 update_visibility(VeepinEditor *self)
 {
-    gboolean wg = g_strcmp0(selected_protocol(self), PROTOCOL_WIREGUARD) == 0;
-    gtk_widget_set_visible(self->ikev2_box, !wg);
-    gtk_widget_set_visible(self->wireguard_box, wg);
+    guint sel = selected_index(self);
+    for (guint i = 0; i < N_PROTOCOLS; i++)
+        gtk_widget_set_visible(self->boxes[i], i == sel);
 }
 
 static void
@@ -181,12 +322,13 @@ static gboolean
 update_connection(NMVpnEditor *editor, NMConnection *connection, GError **error)
 {
     VeepinEditor *self = VEEPIN_EDITOR(editor);
+    guint sel = selected_index(self);
+    const ProtocolDef *p = &protocols[sel];
     NMSettingVpn *vpn;
-    const char *protocol = selected_protocol(self);
 
     vpn = NM_SETTING_VPN(nm_setting_vpn_new());
     g_object_set(vpn, NM_SETTING_VPN_SERVICE_TYPE, VEEPIN_SERVICE, NULL);
-    nm_setting_vpn_add_data_item(vpn, KEY_PROTOCOL, protocol);
+    nm_setting_vpn_add_data_item(vpn, KEY_PROTOCOL, p->id);
 
     /* Secret storage: NONE means "the system saves this secret with the
      * connection" (the root service reads it at Connect, no prompt needed);
@@ -196,27 +338,23 @@ update_connection(NMVpnEditor *editor, NMConnection *connection, GError **error)
             ? NM_SETTING_SECRET_FLAG_NONE
             : NM_SETTING_SECRET_FLAG_NOT_SAVED;
 
-    if (g_strcmp0(protocol, PROTOCOL_WIREGUARD) == 0) {
-        if (!require(vpn, self->public_key, KEY_PUBLIC_KEY, "A peer public key", error) ||
-            !require(vpn, self->endpoint, KEY_ENDPOINT, "An endpoint (host:port)", error) ||
-            !require(vpn, self->address, KEY_ADDRESS, "A tunnel address", error) ||
-            !require(vpn, self->allowed_ips, KEY_ALLOWED_IPS, "Allowed IPs", error)) {
-            g_object_unref(vpn);
-            return FALSE;
+    for (guint j = 0; j < p->n_fields; j++) {
+        const FieldDef *f = &p->fields[j];
+        GtkWidget *entry = self->entries[sel][j];
+        switch (f->kind) {
+        case F_REQUIRED:
+            if (!require(vpn, entry, f->key, f->label, error)) {
+                g_object_unref(vpn);
+                return FALSE;
+            }
+            break;
+        case F_DATA:
+            add_optional_data(vpn, entry, f->key);
+            break;
+        case F_SECRET:
+            add_secret(vpn, entry, f->key, flags);
+            break;
         }
-        add_optional_data(vpn, self->dns, KEY_DNS);
-        add_secret(vpn, self->private_key, KEY_PRIVATE_KEY, flags);
-        add_secret(vpn, self->preshared_key, KEY_PRESHARED_KEY, flags);
-    } else {
-        if (!require(vpn, self->gateway, KEY_GATEWAY, "A gateway (server address)", error) ||
-            !require(vpn, self->local_id, KEY_LOCAL_ID, "A local identity", error)) {
-            g_object_unref(vpn);
-            return FALSE;
-        }
-        add_optional_data(vpn, self->server_id, KEY_SERVER_ID);
-        add_optional_data(vpn, self->user, KEY_USER);
-        add_secret(vpn, self->psk, KEY_PSK, flags);
-        add_secret(vpn, self->password, KEY_PASSWORD, flags);
     }
 
     add_optional_data(vpn, self->mtu, KEY_MTU);
@@ -289,8 +427,7 @@ build_ui(VeepinEditor *self, NMConnection *connection)
 {
     NMSettingVpn *vpn = connection ? nm_connection_get_setting_vpn(connection) : NULL;
     GtkWidget *box;
-    GtkGrid *top, *ike, *wg;
-    int row;
+    GtkGrid *top;
 
     box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
     gtk_container_set_border_width(GTK_CONTAINER(box), 12);
@@ -298,35 +435,31 @@ build_ui(VeepinEditor *self, NMConnection *connection)
     /* Protocol chooser. */
     top = new_grid();
     self->protocol = gtk_combo_box_text_new();
-    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(self->protocol), PROTOCOL_IKEV2, "IKEv2");
-    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(self->protocol), PROTOCOL_WIREGUARD, "WireGuard");
+    for (guint i = 0; i < N_PROTOCOLS; i++)
+        gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(self->protocol),
+                                  protocols[i].id, protocols[i].label);
     add_row(top, 0, "Protocol", self->protocol);
     gtk_box_pack_start(GTK_BOX(box), GTK_WIDGET(top), FALSE, FALSE, 0);
 
-    /* IKEv2 fields. */
-    ike = new_grid();
-    row = 0;
-    self->gateway   = add_row(ike, row++, "Gateway",        make_entry(FALSE));
-    self->local_id  = add_row(ike, row++, "Local ID",       make_entry(FALSE));
-    self->server_id = add_row(ike, row++, "Server ID",      make_entry(FALSE));
-    self->psk       = add_row(ike, row++, "Pre-shared key", make_entry(TRUE));
-    self->user      = add_row(ike, row++, "Username",       make_entry(FALSE));
-    self->password  = add_row(ike, row++, "Password",       make_entry(TRUE));
-    self->ikev2_box = GTK_WIDGET(ike);
-    gtk_box_pack_start(GTK_BOX(box), self->ikev2_box, FALSE, FALSE, 0);
-
-    /* WireGuard fields. */
-    wg = new_grid();
-    row = 0;
-    self->private_key   = add_row(wg, row++, "Private key",    make_entry(TRUE));
-    self->public_key    = add_row(wg, row++, "Peer public key", make_entry(FALSE));
-    self->endpoint      = add_row(wg, row++, "Endpoint",       make_entry(FALSE));
-    self->address       = add_row(wg, row++, "Address",        make_entry(FALSE));
-    self->allowed_ips   = add_row(wg, row++, "Allowed IPs",    make_entry(FALSE));
-    self->preshared_key = add_row(wg, row++, "Pre-shared key", make_entry(TRUE));
-    self->dns           = add_row(wg, row++, "DNS (optional)", make_entry(FALSE));
-    self->wireguard_box = GTK_WIDGET(wg);
-    gtk_box_pack_start(GTK_BOX(box), self->wireguard_box, FALSE, FALSE, 0);
+    /* One field box per protocol, built and pre-filled from its table. */
+    for (guint i = 0; i < N_PROTOCOLS; i++) {
+        const ProtocolDef *p = &protocols[i];
+        GtkGrid *grid = new_grid();
+        self->entries[i] = g_new0(GtkWidget *, p->n_fields);
+        for (guint j = 0; j < p->n_fields; j++) {
+            const FieldDef *f = &p->fields[j];
+            GtkWidget *e = make_entry(f->kind == F_SECRET);
+            add_row(grid, (int) j, f->label, e);
+            self->entries[i][j] = e;
+            connect_changed(self, e);
+            if (f->kind == F_SECRET)
+                set_entry_from_secret(e, vpn, f->key);
+            else
+                set_entry_from_data(e, vpn, f->key);
+        }
+        self->boxes[i] = GTK_WIDGET(grid);
+        gtk_box_pack_start(GTK_BOX(box), self->boxes[i], FALSE, FALSE, 0);
+    }
 
     /* Common fields. */
     GtkGrid *common = new_grid();
@@ -341,24 +474,10 @@ build_ui(VeepinEditor *self, NMConnection *connection)
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(self->save_secrets), TRUE);
     gtk_box_pack_start(GTK_BOX(box), self->save_secrets, FALSE, FALSE, 0);
 
-    /* Pre-fill from an existing connection. */
+    /* Select the connection's protocol (default ikev2) and pre-fill the commons. */
     const char *proto = vpn ? nm_setting_vpn_get_data_item(vpn, KEY_PROTOCOL) : NULL;
     gtk_combo_box_set_active_id(GTK_COMBO_BOX(self->protocol),
-                                proto ? proto : PROTOCOL_IKEV2);
-
-    set_entry_from_data(self->gateway, vpn, KEY_GATEWAY);
-    set_entry_from_data(self->local_id, vpn, KEY_LOCAL_ID);
-    set_entry_from_data(self->server_id, vpn, KEY_SERVER_ID);
-    set_entry_from_data(self->user, vpn, KEY_USER);
-    set_entry_from_secret(self->psk, vpn, KEY_PSK);
-
-    set_entry_from_data(self->public_key, vpn, KEY_PUBLIC_KEY);
-    set_entry_from_data(self->endpoint, vpn, KEY_ENDPOINT);
-    set_entry_from_data(self->address, vpn, KEY_ADDRESS);
-    set_entry_from_data(self->allowed_ips, vpn, KEY_ALLOWED_IPS);
-    set_entry_from_data(self->dns, vpn, KEY_DNS);
-    set_entry_from_secret(self->private_key, vpn, KEY_PRIVATE_KEY);
-    set_entry_from_secret(self->preshared_key, vpn, KEY_PRESHARED_KEY);
+                                proto ? proto : protocols[0].id);
 
     set_entry_from_data(self->mtu, vpn, KEY_MTU);
     if (vpn) {
@@ -366,29 +485,19 @@ build_ui(VeepinEditor *self, NMConnection *connection)
         if (ft)
             gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(self->full_tunnel),
                                          g_strcmp0(ft, "no") != 0);
-        /* Reflect the stored PSK/private-key secret flag in the checkbox. */
-        const char *skey = (g_strcmp0(proto, PROTOCOL_WIREGUARD) == 0) ? KEY_PRIVATE_KEY : KEY_PSK;
-        NMSettingSecretFlags fl = NM_SETTING_SECRET_FLAG_NONE;
-        nm_setting_get_secret_flags(NM_SETTING(vpn), skey, &fl, NULL);
-        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(self->save_secrets),
-                                     fl != NM_SETTING_SECRET_FLAG_NOT_SAVED);
+        /* Reflect the stored secret flag (from the selected protocol's first
+         * secret) in the checkbox; protocols with no secret keep the default. */
+        const char *skey = first_secret_key(selected_index(self));
+        if (skey) {
+            NMSettingSecretFlags fl = NM_SETTING_SECRET_FLAG_NONE;
+            nm_setting_get_secret_flags(NM_SETTING(vpn), skey, &fl, NULL);
+            gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(self->save_secrets),
+                                         fl != NM_SETTING_SECRET_FLAG_NOT_SAVED);
+        }
     }
 
     /* Re-validate on any edit. */
     g_signal_connect(self->protocol, "changed", G_CALLBACK(protocol_changed), self);
-    connect_changed(self, self->gateway);
-    connect_changed(self, self->local_id);
-    connect_changed(self, self->server_id);
-    connect_changed(self, self->psk);
-    connect_changed(self, self->user);
-    connect_changed(self, self->password);
-    connect_changed(self, self->private_key);
-    connect_changed(self, self->public_key);
-    connect_changed(self, self->endpoint);
-    connect_changed(self, self->address);
-    connect_changed(self, self->allowed_ips);
-    connect_changed(self, self->preshared_key);
-    connect_changed(self, self->dns);
     connect_changed(self, self->mtu);
     g_signal_connect(self->full_tunnel, "toggled", G_CALLBACK(field_changed), self);
     g_signal_connect(self->save_secrets, "toggled", G_CALLBACK(field_changed), self);
@@ -409,6 +518,8 @@ static void
 veepin_editor_dispose(GObject *object)
 {
     VeepinEditor *self = VEEPIN_EDITOR(object);
+    for (guint i = 0; i < N_PROTOCOLS; i++)
+        g_clear_pointer(&self->entries[i], g_free); /* frees the array, not the widgets */
     g_clear_object(&self->widget);
     G_OBJECT_CLASS(veepin_editor_parent_class)->dispose(object);
 }
@@ -484,7 +595,9 @@ plugin_get_property(GObject *object, guint prop_id, GValue *value, GParamSpec *p
         g_value_set_string(value, "veepin VPN");
         break;
     case PROP_DESC:
-        g_value_set_string(value, "IKEv2 or WireGuard via the veepin VPN backend.");
+        g_value_set_string(value,
+                           "Connect via the veepin VPN backend (IKEv2, WireGuard, OpenVPN, "
+                           "SSTP, SSH, AnyConnect, Nebula, MASQUE, Fortinet, L2TP/IPsec).");
         break;
     case PROP_SERVICE:
         g_value_set_string(value, VEEPIN_SERVICE);

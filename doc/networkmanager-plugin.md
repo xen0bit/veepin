@@ -351,9 +351,15 @@ protocol's package is not blank-imported (a runtime "unknown protocol") or a
 registered protocol is missing from `SupportedProtocols`.
 
 The GTK **editor** (`nm/editor`) has a protocol chooser at the top of the form
-that switches between the IKEv2 and WireGuard field sets, so either can be created
-graphically; the other protocols are configured from the command line (richer
-editor forms are the outstanding GUI phase). A WireGuard profile can equally be
+that switches between one field set per protocol, covering all ten, so any of
+them can be created and edited graphically. The field sets are data-driven: each
+protocol is a row in the `protocols` table in `veepin-editor.c` listing its
+fields (label, vpn key, and whether the key is a required data item, an optional
+data item, or a secret), and the widget building, validation and
+(de)serialisation are generic — so adding a protocol is a table edit there,
+mirroring the `requireKeys`/`secretMissing` switches in `nmconfig`. The editor
+smoke test (`editor/editor_smoketest.c`, run under `xvfb` in CI) round-trips a
+spread of protocols through the real dlopen'd plugin. A profile can equally be
 created from the command line:
 
 ```sh
