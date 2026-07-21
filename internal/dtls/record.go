@@ -69,10 +69,19 @@ func appendRecordHeader(dst []byte, typ uint8, version uint16, epoch uint16, seq
 	return binary.BigEndian.AppendUint16(dst, uint16(length))
 }
 
-// aeadState holds one direction's AEAD and its implicit nonce salt.
+// aeadState holds one direction's AEAD and its implicit nonce salt. An instance
+// is used for exactly one direction — the read AEAD only opens, the write AEAD
+// only seals — and each direction is driven by a single goroutine (Conn.Read
+// under readMu, Conn.Write under writeMu). That lets the per-record nonce and
+// additional-data buffers be reused across records without a lock and, crucially,
+// without escaping to the heap through the cipher.AEAD interface on every packet.
 type aeadState struct {
 	aead cipher.AEAD
 	salt []byte
+	// nonce is salt (fixed) followed by the 8-octet explicit part, rewritten per
+	// record. aad is the 13-octet additional data, likewise rewritten per record.
+	nonce []byte
+	aad   [13]byte
 }
 
 func newAEAD(key, salt []byte) (*aeadState, error) {
@@ -84,7 +93,19 @@ func newAEAD(key, salt []byte) (*aeadState, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dtls: GCM: %w", err)
 	}
-	return &aeadState{aead: gcm, salt: append([]byte(nil), salt...)}, nil
+	a := &aeadState{aead: gcm, salt: append([]byte(nil), salt...)}
+	a.nonce = make([]byte, len(a.salt)+explicitNonceLen)
+	copy(a.nonce, a.salt) // the salt prefix never changes
+	return a, nil
+}
+
+// putAAD fills the reused additional-data buffer for one record.
+func (a *aeadState) putAAD(typ uint8, version uint16, epoch uint16, seq uint64, length int) {
+	binary.BigEndian.PutUint16(a.aad[0:2], epoch)
+	putUint48(a.aad[2:8], seq)
+	a.aad[8] = typ
+	binary.BigEndian.PutUint16(a.aad[9:11], version)
+	binary.BigEndian.PutUint16(a.aad[11:13], uint16(length))
 }
 
 // seal encrypts a record payload. The GCM nonce is the 4-octet salt from the key
@@ -92,55 +113,37 @@ func newAEAD(key, salt []byte) (*aeadState, error) {
 // the ciphertext; using the record's epoch and sequence for it makes the nonce
 // unique without any extra state (RFC 5288).
 func (a *aeadState) seal(typ uint8, version uint16, epoch uint16, seq uint64, plaintext []byte) []byte {
-	var explicit [explicitNonceLen]byte
-	binary.BigEndian.PutUint16(explicit[0:2], epoch)
-	putUint48(explicit[2:8], seq)
+	// The output begins with the explicit nonce, sent in the clear, and has room
+	// for the ciphertext and tag Seal appends after it — one allocation for the
+	// whole record payload rather than a separate sealed buffer and a copy.
+	out := make([]byte, explicitNonceLen, explicitNonceLen+len(plaintext)+a.aead.Overhead())
+	binary.BigEndian.PutUint16(out[0:2], epoch)
+	putUint48(out[2:8], seq)
 
-	nonce := make([]byte, 0, len(a.salt)+explicitNonceLen)
-	nonce = append(nonce, a.salt...)
-	nonce = append(nonce, explicit[:]...)
-
-	aad := additionalData(typ, version, epoch, seq, len(plaintext))
-	sealed := a.aead.Seal(nil, nonce, plaintext, aad)
-
-	out := make([]byte, 0, explicitNonceLen+len(sealed))
-	out = append(out, explicit[:]...)
-	return append(out, sealed...)
+	// The reused nonce is salt||explicit; only the explicit part changes here.
+	copy(a.nonce[len(a.salt):], out[:explicitNonceLen])
+	a.putAAD(typ, version, epoch, seq, len(plaintext))
+	return a.aead.Seal(out, a.nonce, plaintext, a.aad[:])
 }
 
-// open decrypts a record payload, taking the explicit nonce from its front.
+// open decrypts a record payload in place, taking the explicit nonce from its
+// front. The returned plaintext aliases ciphertext; the caller (Conn.Read /
+// the handshake reader) copies or consumes it before the buffer is reused.
 func (a *aeadState) open(typ uint8, version uint16, epoch uint16, seq uint64, ciphertext []byte) ([]byte, error) {
 	if len(ciphertext) < explicitNonceLen+a.aead.Overhead() {
 		return nil, errShortRecord
 	}
-	nonce := make([]byte, 0, len(a.salt)+explicitNonceLen)
-	nonce = append(nonce, a.salt...)
-	nonce = append(nonce, ciphertext[:explicitNonceLen]...)
+	copy(a.nonce[len(a.salt):], ciphertext[:explicitNonceLen])
 
 	body := ciphertext[explicitNonceLen:]
 	// The additional data covers the plaintext length, which is the ciphertext
 	// less the explicit nonce and the tag.
-	aad := additionalData(typ, version, epoch, seq, len(body)-a.aead.Overhead())
-	plain, err := a.aead.Open(nil, nonce, body, aad)
+	a.putAAD(typ, version, epoch, seq, len(body)-a.aead.Overhead())
+	plain, err := a.aead.Open(body[:0], a.nonce, body, a.aad[:])
 	if err != nil {
 		return nil, fmt.Errorf("dtls: record decryption failed: %w", err)
 	}
 	return plain, nil
-}
-
-// additionalData is the authenticated-but-unencrypted header the AEAD binds a
-// record to: its sequence (epoch and 48-bit counter together), type, version and
-// plaintext length. Binding these is what stops a record being replayed into a
-// different epoch or retyped.
-func additionalData(typ uint8, version uint16, epoch uint16, seq uint64, length int) []byte {
-	aad := make([]byte, 0, 13)
-	aad = binary.BigEndian.AppendUint16(aad, epoch)
-	aad = append(aad,
-		byte(seq>>40), byte(seq>>32), byte(seq>>24),
-		byte(seq>>16), byte(seq>>8), byte(seq))
-	aad = append(aad, typ)
-	aad = binary.BigEndian.AppendUint16(aad, version)
-	return binary.BigEndian.AppendUint16(aad, uint16(length))
 }
 
 func putUint48(dst []byte, v uint64) {
