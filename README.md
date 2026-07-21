@@ -1073,9 +1073,9 @@ UI rather than mid-handshake.
 
 See [`doc/networkmanager-plugin.md`](doc/networkmanager-plugin.md) for the full
 design, the D-Bus contract, the per-protocol key reference, and the runbook. The
-graphical *Add VPN* form (the C/libnm editor `.so`) currently offers field sets
-for IKEv2 and WireGuard; the other protocols are configured via `nmcli` as above,
-and richer editor forms remain the outstanding GUI phase.
+graphical *Add VPN* form (the C/libnm editor `.so`) has a protocol chooser
+covering all ten protocols, so any of them can be created and edited from the
+desktop UI as well as via `nmcli`.
 
 ## Testing
 
