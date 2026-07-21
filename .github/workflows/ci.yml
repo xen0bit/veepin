@@ -5,6 +5,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # The fuzz job is manual-only (see its `if:`); this makes it dispatchable.
+  workflow_dispatch:
 
 # Cancel superseded runs on the same ref (e.g. rapid PR pushes).
 concurrency:
@@ -103,6 +105,12 @@ jobs:
   fuzz:
     name: fuzz (smoke)
     runs-on: ubuntu-latest
+    # Manual-only: the per-target budget makes this the slowest job, and a short
+    # smoke run rarely catches what the out-of-band long campaigns do not. Run it
+    # from the Actions tab ("Run workflow") before a release or after touching a
+    # parser. Regressions long campaigns find are pinned as testdata/fuzz seeds,
+    # which the ordinary `go test` (in the test job) replays on every push.
+    if: github.event_name == 'workflow_dispatch'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
