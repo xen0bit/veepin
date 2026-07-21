@@ -68,6 +68,11 @@ type tunnel struct {
 
 	mu     sync.Mutex
 	window *replay.Window
+
+	// recvNonce is scratch for the inbound nonce. decrypt runs only on the Host's
+	// single readUDP goroutine, so one buffer per tunnel is reused across packets
+	// without a lock and without escaping to the heap on every Open.
+	recvNonce [nonceLen]byte
 }
 
 // newTunnel builds a tunnel from a completed handshake.
@@ -117,8 +122,15 @@ func (t *tunnel) encrypt(typ messageType, sub messageSubType, payload []byte) []
 		RemoteIndex:    t.remoteIndex,
 		MessageCounter: counter,
 	}
-	out := h.encode(make([]byte, 0, headerLen+len(payload)+tagSize))
-	return t.send.Seal(out, t.cipher.nonce(counter), payload, out[:headerLen])
+	// Allocate the output with room for the nonce past where Seal will write, and
+	// build the nonce there. Because that scratch lives in the buffer already being
+	// returned, it does not escape separately — each concurrent encrypt has its own
+	// buffer, so no lock is needed either.
+	sealedLen := headerLen + len(payload) + tagSize
+	out := h.encode(make([]byte, 0, sealedLen+nonceLen))
+	nonce := out[sealedLen : sealedLen+nonceLen]
+	t.cipher.putNonce(nonce, counter)
+	return t.send.Seal(out, nonce, payload, out[:headerLen])
 }
 
 // decrypt authenticates and unwraps a received packet.
@@ -136,7 +148,13 @@ func (t *tunnel) decrypt(pkt []byte) (header, []byte, error) {
 		return header{}, nil, errShortPacket
 	}
 
-	pt, err := t.recv.Open(nil, t.cipher.nonce(h.MessageCounter), pkt[headerLen:], pkt[:headerLen])
+	// Decrypt in place: the plaintext reuses the ciphertext's storage, and the
+	// nonce comes from per-tunnel scratch (safe on the single inbound goroutine),
+	// so a received packet is opened without allocating. The returned plaintext
+	// aliases pkt, which readUDP owns exclusively until this returns.
+	t.cipher.putNonce(t.recvNonce[:], h.MessageCounter)
+	body := pkt[headerLen:]
+	pt, err := t.recv.Open(body[:0], t.recvNonce[:], body, pkt[:headerLen])
 	if err != nil {
 		return header{}, nil, fmt.Errorf("%w: %w", errNotForUs, err)
 	}

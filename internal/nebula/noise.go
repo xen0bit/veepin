@@ -49,6 +49,8 @@ const (
 	keySize = 32
 	// tagSize is the AEAD authentication tag length.
 	tagSize = 16
+	// nonceLen is the 96-bit AEAD nonce both ciphers use.
+	nonceLen = 12
 )
 
 var errHandshake = errors.New("nebula: noise handshake failed")
@@ -81,17 +83,29 @@ func (c noiseCipher) aead(key []byte) (cipher.AEAD, error) {
 	return cipher.NewGCM(block)
 }
 
-// nonce renders a Noise counter. Both ciphers use a 96-bit nonce of four zero
-// bytes followed by the counter, but AES-GCM writes it big-endian and
-// ChaCha20-Poly1305 little-endian.
-func (c noiseCipher) nonce(n uint64) []byte {
-	var nb [12]byte
+// putNonce renders a Noise counter into dst (which must be nonceLen bytes). Both
+// ciphers use a 96-bit nonce of four zero bytes followed by the counter, but
+// AES-GCM writes it big-endian and ChaCha20-Poly1305 little-endian.
+//
+// It writes into a caller-supplied buffer rather than returning one so the data
+// path can keep the nonce in memory it has already allocated: a fresh []byte
+// returned here would escape to the heap through the cipher.AEAD interface, one
+// allocation on every packet.
+func (c noiseCipher) putNonce(dst []byte, n uint64) {
+	dst[0], dst[1], dst[2], dst[3] = 0, 0, 0, 0
 	if c == cipherChaChaPoly {
-		binary.LittleEndian.PutUint64(nb[4:], n)
+		binary.LittleEndian.PutUint64(dst[4:], n)
 	} else {
-		binary.BigEndian.PutUint64(nb[4:], n)
+		binary.BigEndian.PutUint64(dst[4:], n)
 	}
-	return nb[:]
+}
+
+// nonce renders a Noise counter into a fresh slice. Used only on the handshake
+// path, where the extra allocation is negligible; the data path uses putNonce.
+func (c noiseCipher) nonce(n uint64) []byte {
+	nb := make([]byte, nonceLen)
+	c.putNonce(nb, n)
+	return nb
 }
 
 // hkdf2 is the Noise HKDF, returning the two outputs the pattern needs.
