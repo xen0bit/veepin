@@ -27,6 +27,16 @@ type Settings = map[string]map[string]dbus.Variant
 // profiles written before veepin gained a second protocol working unchanged.
 const DefaultProtocol = "ikev2"
 
+// SupportedProtocols is every protocol the plugin can dial — the set the
+// requireKeys and secretMissing switches below handle. The service command must
+// blank-import each one's package so client.Dial can find it at runtime; the
+// cmd package's TestAllSupportedProtocolsRegistered guards that the two lists
+// agree. The insecure "toy" example protocol is intentionally excluded.
+var SupportedProtocols = []string{
+	"ikev2", "wireguard", "openvpn", "sstp", "ssh",
+	"anyconnect", "nebula", "masque", "fortinet", "l2tp",
+}
+
 // Connection is the parsed, validated form of a VPN connection.
 type Connection struct {
 	Protocol   string            // which protocol to dial (default "ikev2")
@@ -53,6 +63,17 @@ const (
 	KeyEndpoint   = "endpoint"    // peer host:port
 	KeyAddress    = "address"     // our tunnel address(es)
 	KeyAllowedIPs = "allowed-ips" // destinations routed to the peer
+
+	// Shared by the TLS/UDP client protocols (SSTP, SSH, AnyConnect, Fortinet,
+	// L2TP, MASQUE). The names match each protocol package's Opt* constants, so
+	// they pass through untranslated; only the *required*-key bookkeeping differs.
+	KeyServer   = "server"   // gateway host or IP
+	KeyRemote   = "remote"   // OpenVPN's name for the server host
+	KeyUsername = "username" // OpenVPN spells the user key differently from the rest
+	KeyCA       = "ca"       // CA bundle path (Nebula, OpenVPN)
+	KeyCert     = "cert"     // certificate path (Nebula)
+	KeyKeyFile  = "key"      // private-key file path (Nebula)
+	KeyIdentity = "identity" // SSH private-key file — an alternative to a password
 )
 
 // Secret keys recognised in vpn.secrets.
@@ -102,9 +123,9 @@ func Parse(s Settings) (Connection, error) {
 		c.MTU = n
 	}
 
-	// NM wants a clear error before it spawns anything, so the required keys are
-	// checked here as well as by the protocol's own parser. These are IKEv2's
-	// requirements; a protocol with different ones needs a branch here.
+	// NM wants a clear error before it spawns anything, so the minimum non-secret
+	// keys each protocol cannot start without are checked here as well as by the
+	// protocol's own parser.
 	if err := requireKeys(c.Protocol, c.Options); err != nil {
 		return Connection{}, err
 	}
@@ -125,6 +146,8 @@ func protocolOptions(data, secrets map[string]string) map[string]string {
 }
 
 // requireKeys checks the non-secret options a protocol cannot start without.
+// Adding a protocol is a case here plus a matching import in the service's main
+// package (so client.Dial can find it) and a secretMissing branch below.
 func requireKeys(protocol string, opts map[string]string) error {
 	switch protocol {
 	case "ikev2":
@@ -135,6 +158,22 @@ func requireKeys(protocol string, opts map[string]string) error {
 			return nil
 		}
 		return requirePresent(opts, KeyPublicKey, KeyEndpoint, KeyAddress, KeyAllowedIPs)
+	case "openvpn":
+		// An .ovpn file carries the remote (and usually the CA/cert); without one,
+		// a remote host is the minimum needed to dial.
+		if opts[KeyConfig] != "" {
+			return nil
+		}
+		return requirePresent(opts, KeyRemote)
+	case "sstp", "ssh", "anyconnect", "fortinet", "l2tp":
+		// Connection-oriented gateways authenticated by a username (plus a password
+		// or, for SSH, an identity key).
+		return requirePresent(opts, KeyServer, KeyUser)
+	case "nebula":
+		// A certificate mesh: the CA bundle, this host's certificate and its key.
+		return requirePresent(opts, KeyCA, KeyCert, KeyKeyFile)
+	case "masque":
+		return requirePresent(opts, KeyServer)
 	default:
 		return fmt.Errorf("nmconfig: unsupported %q: %q", KeyProtocol, protocol)
 	}
@@ -152,32 +191,54 @@ func requirePresent(opts map[string]string, keys ...string) error {
 
 // MissingSecret reports the name of the setting whose secrets NM must still
 // supply (for VPN.Plugin.NeedSecrets), or "" if all required secrets are
-// present. For IKEv2 the PSK is always required; the EAP password is required
-// only when a username is configured. An error is returned if the non-secret
-// config is itself invalid.
+// present. An error is returned if the non-secret config is itself invalid.
 func MissingSecret(s Settings) (string, error) {
 	conn, err := Parse(s)
 	if err != nil {
 		return "", err
 	}
-	switch conn.Protocol {
+	if secretMissing(conn.Protocol, conn.Options) {
+		return "vpn", nil
+	}
+	return "", nil
+}
+
+// secretMissing reports whether a secret the protocol needs to dial is not yet
+// present in opts (data and secrets merged). File-path credentials — CA/cert/key
+// PEMs, wg-quick/.ovpn files, an SSH identity key — live in vpn.data, not
+// vpn.secrets, so they are not treated as NM-prompted secrets here.
+//
+// Parse has already rejected any unknown protocol, so the default never fires for
+// a Connection that reached this point.
+func secretMissing(protocol string, opts map[string]string) bool {
+	switch protocol {
 	case "ikev2":
-		if conn.Options[KeyPSK] == "" {
-			return "vpn", nil
+		// The PSK is always required; the EAP password only when a user is set.
+		if opts[KeyPSK] == "" {
+			return true
 		}
-		if conn.Options[KeyUser] != "" && conn.Options[KeyPassword] == "" {
-			return "vpn", nil
-		}
-		return "", nil
+		return opts[KeyUser] != "" && opts[KeyPassword] == ""
 	case "wireguard":
-		// A wg-quick file holds its own keys; otherwise the private key is a
-		// required secret. The preshared key is optional.
-		if conn.Options[KeyConfig] == "" && conn.Options[KeyPrivateKey] == "" {
-			return "vpn", nil
-		}
-		return "", nil
+		// A wg-quick file holds its own keys; otherwise the private key is required.
+		// The preshared key is optional.
+		return opts[KeyConfig] == "" && opts[KeyPrivateKey] == ""
+	case "openvpn":
+		// Password only when a username is configured; certificate-only auth (or an
+		// .ovpn with embedded credentials) needs no NM-prompted secret.
+		return opts[KeyUsername] != "" && opts[KeyPassword] == ""
+	case "sstp", "anyconnect", "fortinet":
+		return opts[KeyPassword] == ""
+	case "ssh":
+		// A private-key identity file is an alternative to a password.
+		return opts[KeyIdentity] == "" && opts[KeyPassword] == ""
+	case "l2tp":
+		// Both the IPsec PSK and the PPP password are required.
+		return opts[KeyPSK] == "" || opts[KeyPassword] == ""
+	case "nebula", "masque":
+		// Authenticated by a certificate / TLS only: no NM-prompted secret.
+		return false
 	default:
-		return "", fmt.Errorf("nmconfig: unsupported %q: %q", KeyProtocol, conn.Protocol)
+		return false
 	}
 }
 

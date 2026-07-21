@@ -1051,9 +1051,31 @@ nmcli connection modify home-veepin vpn.secrets 'psk=a-strong-preshared-key'
 nmcli connection up home-veepin
 ```
 
+The service dials **every veepin protocol** — `ikev2` (the default), `wireguard`,
+`openvpn`, `sstp`, `ssh`, `anyconnect`, `nebula`, `masque`, `fortinet` and
+`l2tp` — selected by the `protocol=` key in `vpn.data`. The remaining keys are
+the protocol's own option names (matching each package's `Opt*` constants), so a
+WireGuard or Fortinet profile is the same `nmcli` command with different keys:
+
+```sh
+# WireGuard
+vpn.data 'protocol=wireguard, public-key=…, endpoint=host:51820, address=10.0.0.2/32, allowed-ips=0.0.0.0/0'
+vpn.secrets 'private-key=…'
+
+# Fortinet (username/password, optional TOTP second factor)
+vpn.data 'protocol=fortinet, server=vpn.example.com, user=alice'
+vpn.secrets 'password=…'
+```
+
+The plugin validates the required keys and reports missing secrets to
+NetworkManager before it spawns anything, so a mistyped profile fails fast in the
+UI rather than mid-handshake.
+
 See [`doc/networkmanager-plugin.md`](doc/networkmanager-plugin.md) for the full
-design, the D-Bus contract, the runbook, and the roadmap (a graphical *Add VPN*
-form is the remaining phase).
+design, the D-Bus contract, the per-protocol key reference, and the runbook. The
+graphical *Add VPN* form (the C/libnm editor `.so`) currently offers field sets
+for IKEv2 and WireGuard; the other protocols are configured via `nmcli` as above,
+and richer editor forms remain the outstanding GUI phase.
 
 ## Testing
 

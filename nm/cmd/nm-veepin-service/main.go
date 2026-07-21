@@ -18,8 +18,18 @@ import (
 
 	// Registers the protocols this plugin can dial with the client registry.
 	// Without the import the binary still links, and every Connect fails at
-	// runtime with "unknown protocol" — so a new protocol must be added here.
+	// runtime with "unknown protocol" — so a new protocol must be added here (and
+	// given requireKeys/secretMissing branches in internal/nmconfig). The insecure
+	// "toy" example protocol is deliberately left out.
+	_ "github.com/xen0bit/veepin/anyconnect"
+	_ "github.com/xen0bit/veepin/fortinet"
 	_ "github.com/xen0bit/veepin/ikev2"
+	_ "github.com/xen0bit/veepin/l2tp"
+	_ "github.com/xen0bit/veepin/masque"
+	_ "github.com/xen0bit/veepin/nebula"
+	_ "github.com/xen0bit/veepin/openvpn"
+	_ "github.com/xen0bit/veepin/ssh"
+	_ "github.com/xen0bit/veepin/sstp"
 	_ "github.com/xen0bit/veepin/wireguard"
 )
 

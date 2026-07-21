@@ -282,12 +282,15 @@ lines can be omitted (no editor yet).
   protocol name plus an option map; call `client.Dial(ctx, protocol, opts)`; on
   success emit `Config` + `Ip4Config`, then `StateChanged(STARTED)`. On failure
   emit `Failure(...)` + `StateChanged(STOPPED)`.
-  The service blank-imports the protocol packages it can dial
-  (`_ "github.com/xen0bit/veepin/ikev2"`, `_ ".../wireguard"`); without that
-  import the binary still links and every `Connect` fails at runtime with
-  "unknown protocol", so `TestDefaultProtocolIsRegistered` guards it.
-- **`NeedSecrets`**: return `"vpn"` if the PSK (or EAP password) is absent from the
-  connection's secrets, else `""`. Drives NM's secret-agent/auth-dialog prompt.
+  The service blank-imports every protocol package it can dial (`ikev2`,
+  `wireguard`, `openvpn`, `sstp`, `ssh`, `anyconnect`, `nebula`, `masque`,
+  `fortinet`, `l2tp`); without the import the binary still links and every
+  `Connect` fails at runtime with "unknown protocol", so
+  `TestDefaultProtocolIsRegistered` and `TestAllSupportedProtocolsRegistered`
+  guard it.
+- **`NeedSecrets`**: return `"vpn"` if a secret the selected protocol needs is
+  absent from the connection's secrets (`secretMissing`), else `""`. Drives NM's
+  secret-agent/auth-dialog prompt.
 - **`Disconnect`**: `Session.Close()`, emit `StateChanged(STOPPED)`, quit.
 - Runs the `Session.Wait()` loop on a goroutine; a dropped tunnel → `Failure` +
   state transition so NM can react.
@@ -304,38 +307,54 @@ option map `client.Dial` parses. Three keys are consumed by the plugin itself;
 everything else is passed through to the protocol untouched, so a new protocol's
 options need no change here.
 
+Three keys are consumed by the plugin itself:
+
 | NM `vpn.data` key | Consumed by | Notes |
 |-------------------|-------------|-------|
 | `protocol` | plugin | which protocol to dial; default `ikev2` |
 | `full-tunnel` | plugin (→ `never-default`) | `"yes"`/`"no"`, default yes |
 | `mtu` | plugin (→ `Ip4Config` mtu) | optional override |
-| `gateway` | protocol | required (IKEv2) |
-| `port` | protocol | optional (IKEv2) |
-| `local-id` | protocol | required (IKEv2) |
-| `server-id` | protocol | optional (IKEv2), verified if set |
-| `user` | protocol | presence selects EAP-MSCHAPv2 (IKEv2) |
-| `public-key` | protocol | required (WireGuard) |
-| `endpoint` | protocol | required (WireGuard), `host:port` |
-| `address` | protocol | required (WireGuard), our tunnel CIDR |
-| `allowed-ips` | protocol | required (WireGuard), destinations for the peer |
-| `config` | protocol | optional (WireGuard), wg-quick file path — excuses the four keys above |
-| **`vpn.secrets`** `psk` | protocol | secret (IKEv2) |
-| **`vpn.secrets`** `password` | protocol | secret (IKEv2 EAP) |
-| **`vpn.secrets`** `private-key` | protocol | secret (WireGuard), required unless `config` is set |
-| **`vpn.secrets`** `preshared-key` | protocol | secret (WireGuard), optional |
 
-The key names deliberately match the protocol packages' option constants
-(`ikev2.OptGateway` and friends), so the pass-through needs no translation table.
+Everything else is a protocol option, passed through untouched. The key names
+deliberately match the protocol packages' option constants (`ikev2.OptGateway`,
+`fortinet.OptServer`, and friends), so the pass-through needs no translation
+table. What `nmconfig` adds per protocol is only the *bookkeeping* NM needs before
+it spawns anything: the minimum non-secret keys (`requireKeys`) and which secrets
+it must prompt for (`secretMissing`). Every protocol veepin ships is dialable —
+the set is `nmconfig.SupportedProtocols`:
 
-`protocol` defaults to `ikev2`, so profiles written before veepin gained a second
-protocol keep working unchanged. `protocol=wireguard` selects the WireGuard
-client; each protocol's required keys are checked in `Parse` (`requireKeys`,
-`MissingSecret`). An unsupported value is rejected in `Parse` rather than deferred
-to `client.Dial`, so NM gets a clear error before it spawns anything.
+| `protocol=` | required `vpn.data` keys | required `vpn.secrets` |
+|-------------|--------------------------|------------------------|
+| `ikev2` (default) | `gateway`, `local-id` | `psk`; `password` if `user` set |
+| `wireguard` | `public-key`,`endpoint`,`address`,`allowed-ips` — or `config` (wg-quick) | `private-key` unless `config` |
+| `openvpn` | `remote` — or `config` (`.ovpn`) | `password` if `username` set |
+| `sstp` | `server`, `user` | `password` |
+| `ssh` | `server`, `user` | `password` unless `identity` (key file) set |
+| `anyconnect` | `server`, `user` | `password` |
+| `nebula` | `ca`, `cert`, `key` (PEM paths) | — |
+| `masque` | `server` | — |
+| `fortinet` | `server`, `user` | `password` (`token`/`totp` optional for 2FA) |
+| `l2tp` | `server`, `user` | `psk` **and** `password` |
+
+File-path credentials (CA/cert/key PEMs, wg-quick/`.ovpn` files, an SSH identity
+key) live in `vpn.data`, not `vpn.secrets`, so they are not treated as
+NM-prompted secrets. The insecure `toy` example protocol is intentionally not
+offered.
+
+`protocol` defaults to `ikev2`, so profiles written before veepin gained more
+protocols keep working unchanged. An unsupported value is rejected in `Parse`
+rather than deferred to `client.Dial`, so NM gets a clear error before it spawns
+anything. Two tests keep the wiring honest: `nmconfig` is unit-tested per
+protocol (pass-through, required-key rejection, secret bookkeeping), and the
+service command's `TestAllSupportedProtocolsRegistered` fails if a supported
+protocol's package is not blank-imported (a runtime "unknown protocol") or a
+registered protocol is missing from `SupportedProtocols`.
 
 The GTK **editor** (`nm/editor`) has a protocol chooser at the top of the form
 that switches between the IKEv2 and WireGuard field sets, so either can be created
-graphically. A WireGuard profile can equally be created from the command line:
+graphically; the other protocols are configured from the command line (richer
+editor forms are the outstanding GUI phase). A WireGuard profile can equally be
+created from the command line:
 
 ```sh
 nmcli connection add type vpn vpn-type org.freedesktop.NetworkManager.veepin \
