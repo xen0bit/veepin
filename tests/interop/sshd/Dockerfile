@@ -4,7 +4,7 @@
 FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        openssh-server iproute2 iputils-ping \
+        openssh-server iproute2 iputils-ping iperf3 \
     && rm -rf /var/lib/apt/lists/*
 COPY sshd_config /etc/ssh/sshd_config.d/tunnel.conf
 COPY entrypoint.sh /entrypoint.sh

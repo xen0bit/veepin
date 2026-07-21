@@ -1,0 +1,88 @@
+name: benchmark
+
+# Runs the full microbenchmark suite and refreshes the "Full benchmark table
+# (live)" region of the README from the result. Split from ci.yml so a benchmark
+# run never slows the per-PR merge gate: the whole suite is minutes of CPU, and
+# its numbers are informational, not a pass/fail signal. On push to main the
+# refreshed table is committed back (the living README); on a pull request the
+# diff is only previewed in the log.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "internal/**"
+      - "dataplane/**"
+      - "cmd/livingreadme/**"
+      - ".github/workflows/benchmark.yml"
+      - ".github/scripts/living-readme-commit.sh"
+  pull_request:
+    branches: [main]
+    paths:
+      - "internal/**"
+      - "dataplane/**"
+      - "cmd/livingreadme/**"
+      - ".github/workflows/benchmark.yml"
+      - ".github/scripts/living-readme-preview.sh"
+
+concurrency:
+  group: benchmark-${{ github.ref }}
+  cancel-in-progress: true
+
+# contents:write so the push-to-main run can commit the refreshed benchmark table
+# back into the README. Pull-request runs only preview, so the scope is unused.
+permissions:
+  contents: write
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history so the commit-back can rebase onto a main the interop
+          # workflow may have moved while this ran.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Run benchmarks
+        run: |
+          # -run=^$ so no ordinary tests run; -benchmem for the allocs column the
+          # table reports. tee keeps the raw output in the log for debugging.
+          #
+          # Deliberately no `set -o pipefail`: benchmarks are informational, not a
+          # correctness gate (the ci.yml test job is that). A single flaky
+          # live-network benchmark — e.g. internal/ikev2/ike's UDP-loopback
+          # handshake timing out under CI load — must not sink the whole table
+          # refresh. go test's non-zero exit is swallowed by tee; that flaky row
+          # is simply absent this run and refreshes next time.
+          go test -run='^$' -bench=. -benchmem ./... | tee bench.txt
+
+          # But a *total* failure (compile break, empty run) must still fail, or
+          # the table would silently blank. Require a healthy floor of results.
+          count=$(grep -cE '^Benchmark' bench.txt || true)
+          echo "collected $count benchmark result lines"
+          if [ "$count" -lt 20 ]; then
+            echo "::error::only $count benchmark result lines collected; benchmarks did not run"
+            exit 1
+          fi
+
+      - name: Refresh benchmark table and commit (push to main)
+        if: github.event_name == 'push'
+        env:
+          SHA: ${{ github.sha }}
+          REF: ${{ github.ref_name }}
+        run: .github/scripts/living-readme-commit.sh "benchmark table" benchmark bench.txt
+
+      - name: Preview benchmark table diff (pull request)
+        if: github.event_name == 'pull_request'
+        env:
+          SHA: ${{ github.sha }}
+          REF: ${{ github.ref_name }}
+        run: .github/scripts/living-readme-preview.sh "benchmark table" benchmark bench.txt

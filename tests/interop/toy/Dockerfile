@@ -11,7 +11,7 @@ FROM python:3.12-slim-bookworm
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        iproute2 iputils-ping \
+        iproute2 iputils-ping iperf3 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY toypeer.py /usr/local/bin/toypeer

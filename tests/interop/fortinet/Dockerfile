@@ -8,7 +8,7 @@ FROM debian:bookworm-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        openconnect vpnc-scripts iproute2 iputils-ping openssl \
+        openconnect vpnc-scripts iproute2 iputils-ping iperf3 openssl \
     && rm -rf /var/lib/apt/lists/*
 
 # Entrypoint is bind-mounted by compose; default to a shell.

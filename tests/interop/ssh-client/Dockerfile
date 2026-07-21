@@ -4,7 +4,7 @@
 FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        openssh-client iproute2 iputils-ping \
+        openssh-client iproute2 iputils-ping iperf3 \
     && rm -rf /var/lib/apt/lists/*
 COPY entrypoint.sh /entrypoint.sh
 ENTRYPOINT ["/bin/sh", "/entrypoint.sh"]

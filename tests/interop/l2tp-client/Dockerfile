@@ -8,6 +8,6 @@ RUN apt-get update \
         strongswan strongswan-swanctl \
         libcharon-extra-plugins libstrongswan-standard-plugins \
         xl2tpd ppp \
-        iproute2 iptables iputils-ping tcpdump procps \
+        iproute2 iptables iputils-ping iperf3 tcpdump procps \
     && rm -rf /var/lib/apt/lists/*
 CMD ["/bin/sh", "/entrypoint.sh"]

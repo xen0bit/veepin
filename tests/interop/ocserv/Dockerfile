@@ -6,6 +6,6 @@ FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ocserv gnutls-bin \
-        iproute2 iptables iputils-ping procps \
+        iproute2 iptables iputils-ping iperf3 procps \
     && rm -rf /var/lib/apt/lists/*
 CMD ["/bin/sh", "/entrypoint.sh"]

@@ -6,6 +6,6 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         strongswan strongswan-swanctl \
         libcharon-extra-plugins libstrongswan-standard-plugins \
-        iproute2 iptables iputils-ping tcpdump \
+        iproute2 iptables iputils-ping iperf3 tcpdump \
     && rm -rf /var/lib/apt/lists/*
 CMD ["/bin/sh", "/entrypoint.sh"]

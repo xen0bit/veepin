@@ -26,7 +26,7 @@ RUN git clone --depth 1 --branch ${NEBULA_VERSION} https://github.com/slackhq/ne
 FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        iproute2 iputils-ping ca-certificates \
+        iproute2 iputils-ping iperf3 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/nebula /usr/local/bin/nebula
 COPY --from=build /out/nebula-cert /usr/local/bin/nebula-cert

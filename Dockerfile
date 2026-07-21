@@ -22,7 +22,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/ ./cmd/veepin
 FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        iproute2 iptables iputils-ping procps ca-certificates openssl socat \
+        iproute2 iptables iputils-ping iperf3 procps ca-certificates openssl socat \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/veepin /usr/local/bin/
 # Entrypoint scripts are bind-mounted by compose; default to a shell.

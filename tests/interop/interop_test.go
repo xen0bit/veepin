@@ -10,6 +10,7 @@ package interop
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,6 +18,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/xen0bit/veepin/internal/livingreadme"
 )
 
 // pingDeadline bounds how long we retry the cross-tunnel ping. It must cover
@@ -34,19 +37,19 @@ const logDeadline = 60 * time.Second
 // TestInteropSelf is the infra sanity check: veepin client <-> veepin server.
 // It isolates the container/TUN/NAT-T/ping harness from strongSwan.
 func TestInteropSelf(t *testing.T) {
-	runInterop(t, "compose.selftest.yml", "client", "10.10.10.1")
+	runInteropBench(t, "compose.selftest.yml", "client", "server", "10.10.10.1")
 }
 
 // TestInteropVeepinClientStrongswanServer is Direction A: the veepin client
 // (ikev2) tunnels to a strongSwan responder and pings a strongSwan-side address.
 func TestInteropVeepinClientStrongswanServer(t *testing.T) {
-	runInterop(t, "compose.client-ss.yml", "veepin-client", "10.20.30.254")
+	runInteropBench(t, "compose.client-ss.yml", "veepin-client", "strongswan-server", "10.20.30.254")
 }
 
 // TestInteropStrongswanClientVeepinServer is Direction B: a strongSwan
 // initiator tunnels to the veepin server (`veepin serve ikev2`) and pings its TUN gateway.
 func TestInteropStrongswanClientVeepinServer(t *testing.T) {
-	runInterop(t, "compose.server-ss.yml", "strongswan-client", "10.10.10.1")
+	runInteropBench(t, "compose.server-ss.yml", "strongswan-client", "veepin-server", "10.10.10.1")
 }
 
 // TestInteropVeepinClientWireguardServer proves the WireGuard initiator against
@@ -56,7 +59,7 @@ func TestInteropStrongswanClientVeepinServer(t *testing.T) {
 // the counter-nonce transport crypto, and cryptokey routing end to end against
 // an implementation veepin shares no code with.
 func TestInteropVeepinClientWireguardServer(t *testing.T) {
-	runInterop(t, "compose.wireguard.yml", "veepin-wg-client", "10.10.10.1")
+	runInteropBench(t, "compose.wireguard.yml", "veepin-wg-client", "wg-server", "10.10.10.1")
 }
 
 // TestInteropWireguardClientVeepinServer is the mirror: a real wireguard-go
@@ -65,14 +68,14 @@ func TestInteropVeepinClientWireguardServer(t *testing.T) {
 // verification, static-key lookup, the response message, and multi-peer
 // cryptokey routing — against a client veepin shares no code with.
 func TestInteropWireguardClientVeepinServer(t *testing.T) {
-	runInterop(t, "compose.wireguard-server.yml", "wg-client", "10.10.10.1")
+	runInteropBench(t, "compose.wireguard-server.yml", "wg-client", "veepin-wg-server", "10.10.10.1")
 }
 
 // TestInteropWireguardSelf is the veepin<->veepin WireGuard sanity check: the
 // veepin client and server over real sockets and TUNs, isolating a veepin break
 // from an interop break.
 func TestInteropWireguardSelf(t *testing.T) {
-	runInterop(t, "compose.wireguard-self.yml", "veepin-wg-client", "10.10.10.1")
+	runInteropBench(t, "compose.wireguard-self.yml", "veepin-wg-client", "veepin-wg-server", "10.10.10.1")
 }
 
 // TestInteropVeepinClientOpenVPNServer proves the OpenVPN client against a real
@@ -132,7 +135,7 @@ func TestInteropSSTPSelf(t *testing.T) {
 		t.Fatalf("generate SSTP cert: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
-	runInterop(t, "compose.sstp-self.yml", "veepin-sstp-client", "10.9.0.1")
+	runInteropBench(t, "compose.sstp-self.yml", "veepin-sstp-client", "veepin-sstp-server", "10.9.0.1")
 }
 
 // TestInteropSSTPClientVeepinServer is the reverse direction: a real SSTP client
@@ -148,7 +151,7 @@ func TestInteropSSTPClientVeepinServer(t *testing.T) {
 		t.Fatalf("generate SSTP cert: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
-	runInterop(t, "compose.sstp-server.yml", "sstp-client", "10.9.0.1")
+	runInteropBench(t, "compose.sstp-server.yml", "sstp-client", "veepin-sstp-server", "10.9.0.1")
 }
 
 // TestInteropSSHSelf is the veepin<->veepin SSH sanity check: the veepin client
@@ -163,7 +166,7 @@ func TestInteropSSHSelf(t *testing.T) {
 		t.Fatalf("generate SSH keys: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(keyDir) })
-	runInterop(t, "compose.ssh-self.yml", "veepin-ssh-client", "10.200.0.1")
+	runInteropBench(t, "compose.ssh-self.yml", "veepin-ssh-client", "veepin-ssh-server", "10.200.0.1")
 }
 
 // TestInteropSSHClientVeepinServer is the reverse direction: a real OpenSSH
@@ -178,7 +181,7 @@ func TestInteropSSHClientVeepinServer(t *testing.T) {
 		t.Fatalf("generate SSH keys: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(keyDir) })
-	runInterop(t, "compose.ssh-server.yml", "ssh-client", "10.200.0.1")
+	runInteropBench(t, "compose.ssh-server.yml", "ssh-client", "veepin-ssh-server", "10.200.0.1")
 }
 
 // TestInteropVeepinClientSSHServer proves the veepin SSH client against a real
@@ -192,7 +195,7 @@ func TestInteropVeepinClientSSHServer(t *testing.T) {
 		t.Fatalf("generate SSH keys: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(keyDir) })
-	runInterop(t, "compose.ssh-sshd.yml", "veepin-ssh-client", "10.200.0.1")
+	runInteropBench(t, "compose.ssh-sshd.yml", "veepin-ssh-client", "sshd", "10.200.0.1")
 }
 
 // runOpenVPNInterop generates the shared throwaway PKI (and static key), then
@@ -205,7 +208,7 @@ func runOpenVPNInterop(t *testing.T, composeFile string) {
 		t.Fatalf("generate PKI: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
-	runInterop(t, composeFile, "veepin-ovpn-client", "10.8.0.1")
+	runInteropBench(t, composeFile, "veepin-ovpn-client", "openvpn-server", "10.8.0.1")
 }
 
 // TestInteropOpenVPNClientVeepinServer is the reverse direction: a real OpenVPN
@@ -220,7 +223,7 @@ func TestInteropOpenVPNClientVeepinServer(t *testing.T) {
 		t.Fatalf("generate PKI: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
-	runInterop(t, "compose.openvpn-server.yml", "openvpn-client", "10.8.0.1")
+	runInteropBench(t, "compose.openvpn-server.yml", "openvpn-client", "veepin-ovpn-server", "10.8.0.1")
 }
 
 // TestInteropOpenVPNSelf is the veepin<->veepin OpenVPN sanity check: the veepin
@@ -233,7 +236,7 @@ func TestInteropOpenVPNSelf(t *testing.T) {
 		t.Fatalf("generate PKI: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
-	runInterop(t, "compose.openvpn-self.yml", "veepin-ovpn-client", "10.8.0.1")
+	runInteropBench(t, "compose.openvpn-self.yml", "veepin-ovpn-client", "veepin-ovpn-server", "10.8.0.1")
 }
 
 // TestInteropWireguardRekey proves the client rekey loop end to end: the veepin
@@ -297,7 +300,7 @@ func TestInteropVeepinClientAnyConnectServer(t *testing.T) {
 		t.Fatalf("generate AnyConnect cert: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
-	runInterop(t, "compose.anyconnect.yml", "veepin-anyconnect-client", "10.12.0.1")
+	runInteropBench(t, "compose.anyconnect.yml", "veepin-anyconnect-client", "ocserv", "10.12.0.1")
 }
 
 // TestInteropAnyConnectClientVeepinServer is the reverse direction: the real
@@ -313,7 +316,7 @@ func TestInteropAnyConnectClientVeepinServer(t *testing.T) {
 		t.Fatalf("generate AnyConnect cert: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
-	runInterop(t, "compose.anyconnect-server.yml", "openconnect", "10.11.0.1")
+	runInteropBench(t, "compose.anyconnect-server.yml", "openconnect", "veepin-anyconnect-server", "10.11.0.1")
 }
 
 // TestInteropAnyConnectSelf is the veepin<->veepin AnyConnect sanity check: both
@@ -326,7 +329,7 @@ func TestInteropAnyConnectSelf(t *testing.T) {
 		t.Fatalf("generate AnyConnect cert: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
-	runInterop(t, "compose.anyconnect-self.yml", "veepin-anyconnect-client", "10.11.0.1")
+	runInteropBench(t, "compose.anyconnect-self.yml", "veepin-anyconnect-client", "veepin-anyconnect-server", "10.11.0.1")
 }
 
 // TestInteropVeepinClientL2TPServer proves the L2TP/IPsec client against the
@@ -337,7 +340,7 @@ func TestInteropAnyConnectSelf(t *testing.T) {
 // 10.30.0.1 — pppd's LNS-side address — across the tunnel. Every layer here
 // faces an implementation veepin shares no code with.
 func TestInteropVeepinClientL2TPServer(t *testing.T) {
-	runInterop(t, "compose.l2tp.yml", "veepin-l2tp-client", "10.30.0.1")
+	runInteropBench(t, "compose.l2tp.yml", "veepin-l2tp-client", "l2tp-server", "10.30.0.1")
 }
 
 // TestInteropL2TPClientVeepinServer is the reverse direction: strongSwan as the
@@ -348,7 +351,7 @@ func TestInteropVeepinClientL2TPServer(t *testing.T) {
 // with MS-CHAPv2 and pool-based IPCP assignment. The client pings 10.20.0.1, the
 // veepin server's tunnel gateway.
 func TestInteropL2TPClientVeepinServer(t *testing.T) {
-	runInterop(t, "compose.l2tp-server.yml", "l2tp-client", "10.20.0.1")
+	runInteropBench(t, "compose.l2tp-server.yml", "l2tp-client", "veepin-l2tp-server", "10.20.0.1")
 }
 
 // TestInteropL2TPSelf is the veepin<->veepin L2TP/IPsec sanity check, and the
@@ -357,7 +360,7 @@ func TestInteropL2TPClientVeepinServer(t *testing.T) {
 // session before it reaches the server's tunnel gateway. Because the stack is so
 // layered, this isolates a break in any one layer from an interop break.
 func TestInteropL2TPSelf(t *testing.T) {
-	runInterop(t, "compose.l2tp-self.yml", "veepin-l2tp-client", "10.20.0.1")
+	runInteropBench(t, "compose.l2tp-self.yml", "veepin-l2tp-client", "veepin-l2tp-server", "10.20.0.1")
 }
 
 // TestInteropVeepinNebulaHostReferenceLighthouse proves the veepin nebula host
@@ -369,7 +372,7 @@ func TestInteropL2TPSelf(t *testing.T) {
 // host through nebula's own lighthouse protocol rather than a static entry,
 // then pings 10.42.0.1.
 func TestInteropVeepinNebulaHostReferenceLighthouse(t *testing.T) {
-	runInterop(t, "compose.nebula.yml", "veepin-nebula", "10.42.0.1")
+	runInteropBench(t, "compose.nebula.yml", "veepin-nebula", "nebula-host", "10.42.0.1")
 }
 
 // TestInteropNebulaHostVeepinLighthouse is the mirror, and the direction that
@@ -378,7 +381,7 @@ func TestInteropVeepinNebulaHostReferenceLighthouse(t *testing.T) {
 // veepin's responder side. The reference host pings 10.42.0.1, the veepin
 // lighthouse's overlay address.
 func TestInteropNebulaHostVeepinLighthouse(t *testing.T) {
-	runInterop(t, "compose.nebula-server.yml", "nebula-host", "10.42.0.1")
+	runInteropBench(t, "compose.nebula-server.yml", "nebula-host", "veepin-nebula", "10.42.0.1")
 }
 
 // TestInteropNebulaSelf is the veepin<->veepin mesh check, and the one cell that
@@ -387,7 +390,7 @@ func TestInteropNebulaHostVeepinLighthouse(t *testing.T) {
 // lighthouse, the lighthouse answers and nudges the other to punch, and the two
 // then handshake directly. It isolates a veepin break from an interop break.
 func TestInteropNebulaSelf(t *testing.T) {
-	runInterop(t, "compose.nebula-self.yml", "veepin-host-b", "10.42.0.3")
+	runInteropBench(t, "compose.nebula-self.yml", "veepin-host-b", "veepin-host-c", "10.42.0.3")
 }
 
 // MASQUE CONNECT-IP (RFC 9484) is IP-over-HTTP/3. The independent peer is
@@ -399,21 +402,21 @@ func TestInteropNebulaSelf(t *testing.T) {
 // TestInteropVeepinMasqueClientAioquicProxy runs the veepin CONNECT-IP client
 // against the aioquic proxy and pings 10.31.0.1, the proxy's gateway.
 func TestInteropVeepinMasqueClientAioquicProxy(t *testing.T) {
-	runInterop(t, "compose.masque.yml", "veepin-masque-client", "10.31.0.1")
+	runInteropBench(t, "compose.masque.yml", "veepin-masque-client", "aioquic-masque-server", "10.31.0.1")
 }
 
 // TestInteropAioquicClientVeepinProxy is the mirror, exercising veepin's
 // responder: Extended CONNECT handling, address assignment, and a capsule
 // stream the foreign client has to parse.
 func TestInteropAioquicClientVeepinProxy(t *testing.T) {
-	runInterop(t, "compose.masque-server.yml", "aioquic-masque-client", "10.32.0.1")
+	runInteropBench(t, "compose.masque-server.yml", "aioquic-masque-client", "veepin-masque-server", "10.32.0.1")
 }
 
 // TestInteropMasqueSelf is the veepin<->veepin sanity check over real QUIC. Its
 // value is attribution: if it passes while the two cross-implementation cells
 // fail, veepin and the RFC have diverged rather than veepin being broken.
 func TestInteropMasqueSelf(t *testing.T) {
-	runInterop(t, "compose.masque-self.yml", "veepin-masque-client", "10.30.0.1")
+	runInteropBench(t, "compose.masque-self.yml", "veepin-masque-client", "veepin-masque-server", "10.30.0.1")
 }
 
 // MASQUE CONNECT-UDP (RFC 9298) proxies one UDP flow rather than whole IP
@@ -448,7 +451,7 @@ func TestInteropMasqueUDPSelf(t *testing.T) {
 // TestInteropOpenconnectFortinetClientVeepinServer runs the openconnect Fortinet
 // client against the veepin gateway and pings 10.40.0.1, the gateway.
 func TestInteropOpenconnectFortinetClientVeepinServer(t *testing.T) {
-	runInterop(t, "compose.fortinet.yml", "opnc-fortinet-client", "10.40.0.1")
+	runInteropBench(t, "compose.fortinet.yml", "opnc-fortinet-client", "veepin-fortinet-server", "10.40.0.1")
 }
 
 // TestInteropFortinetSelf is the veepin<->veepin sanity check. veepin's client
@@ -457,6 +460,7 @@ func TestInteropOpenconnectFortinetClientVeepinServer(t *testing.T) {
 func TestInteropFortinetSelf(t *testing.T) {
 	runInteropRequiringLog(t, "compose.fortinet-self.yml", "veepin-fortinet-client", "10.40.0.1",
 		"data channel over DTLS")
+	measureThroughput(t, "compose.fortinet-self.yml", "veepin-fortinet-server", "veepin-fortinet-client", "10.40.0.1")
 }
 
 // TestInteropOpenconnectFortinet2FA adds a second factor: the gateway answers
@@ -485,21 +489,21 @@ func TestInteropOpenconnectFortinetDTLS(t *testing.T) {
 // TestInteropVeepinToyClientReferencePeer runs the veepin TOY client against
 // that independent peer and pings 10.9.0.1, the peer's gateway.
 func TestInteropVeepinToyClientReferencePeer(t *testing.T) {
-	runInterop(t, "compose.toy.yml", "veepin-toy-client", "10.9.0.1")
+	runInteropBench(t, "compose.toy.yml", "veepin-toy-client", "toy-server", "10.9.0.1")
 }
 
 // TestInteropToyClientVeepinServer is the mirror, exercising veepin's responder:
 // session allocation, proof verification, pool assignment, and a WELCOME the
 // independent client has to be able to parse.
 func TestInteropToyClientVeepinServer(t *testing.T) {
-	runInterop(t, "compose.toy-server.yml", "toy-client", "10.9.0.1")
+	runInteropBench(t, "compose.toy-server.yml", "toy-client", "veepin-toy-server", "10.9.0.1")
 }
 
 // TestInteropToySelf is the veepin<->veepin sanity check. Its value is
 // attribution: if it passes while the two cross-implementation cells fail, the
 // spec and the implementation have diverged rather than veepin being broken.
 func TestInteropToySelf(t *testing.T) {
-	runInterop(t, "compose.toy-self.yml", "veepin-toy-client", "10.9.0.1")
+	runInteropBench(t, "compose.toy-self.yml", "veepin-toy-client", "veepin-toy-server", "10.9.0.1")
 }
 
 // waitPing retries a short ping from pingSvc to target until one reports no loss
@@ -552,6 +556,90 @@ func runInterop(t *testing.T, composeFile, pingSvc, target string) {
 	}
 	t.Fatalf("cross-tunnel ping %s -> %s never succeeded within %s:\n%s",
 		pingSvc, target, pingDeadline, last)
+}
+
+// benchWarmup lets an iperf3 server settle before the client connects.
+const benchWarmup = 1 * time.Second
+
+// runInteropBench is runInterop plus an iperf3 throughput measurement across the
+// tunnel it just proved. serverSvc is the container reachable at target (it runs
+// `iperf3 -s`); pingSvc is both the ping source and the iperf3 client. The result
+// feeds the interop-benchmark table in the README.
+//
+// The measurement is best-effort: it never fails the test. The interop pass/fail
+// is the ping (runInterop); a cell whose iperf3 cannot run — a peer without a
+// bindable tunnel address, a firewall that permits only ICMP — simply reports no
+// number and shows an em dash in the table, rather than turning a working tunnel
+// red.
+func runInteropBench(t *testing.T, composeFile, pingSvc, serverSvc, target string) {
+	t.Helper()
+	runInterop(t, composeFile, pingSvc, target)
+	measureThroughput(t, composeFile, serverSvc, pingSvc, target)
+}
+
+// measureThroughput runs one iperf3 flow across an already-up tunnel: `iperf3 -s`
+// (one-shot) in serverSvc, `iperf3 -c target` in clientSvc, and logs the received
+// rate as a livingreadme marker that `go test -json` carries out to the
+// README-generation step. Any failure is logged and swallowed (see
+// runInteropBench).
+func measureThroughput(t *testing.T, composeFile, serverSvc, clientSvc, target string) {
+	t.Helper()
+
+	// -s server, one-shot (-1: exit after a single client), detached. No -B, so
+	// it listens on all interfaces including the tunnel one; the client reaches
+	// it by the tunnel-internal target address.
+	if out, err := compose(t, composeFile, "exec", "-d", serverSvc, "iperf3", "-s", "-1"); err != nil {
+		t.Logf("throughput: iperf3 server did not start in %s (skipped): %v\n%s", serverSvc, err, out)
+		return
+	}
+	time.Sleep(benchWarmup)
+
+	// -J JSON, -t short measured window, -O omit the first second (TCP slow
+	// start), bounded connect. -c takes the tunnel-internal server address.
+	out, err := compose(t, composeFile, "exec", "-T", clientSvc,
+		"iperf3", "-c", target, "-J", "-t", "4", "-O", "1", "--connect-timeout", "5000")
+	if err != nil {
+		t.Logf("throughput: iperf3 client %s -> %s failed (skipped): %v\n%s", clientSvc, target, err, out)
+		return
+	}
+	bps, err := parseIperfBits(out)
+	if err != nil {
+		t.Logf("throughput: could not read iperf3 result (skipped): %v", err)
+		return
+	}
+	// The marker the interop-benchmark region is generated from, keyed by the
+	// test name so the manifest can place it in the matrix.
+	t.Log(livingreadme.IperfLine(t.Name(), bps))
+	t.Logf("throughput %s -> %s: %.0f bit/s", clientSvc, target, bps)
+}
+
+// parseIperfBits pulls the received bits/second out of `iperf3 -J` output. The
+// stream is CombinedOutput, so it isolates the JSON object before decoding in
+// case a warning is interleaved on stderr.
+func parseIperfBits(out string) (float64, error) {
+	start := strings.IndexByte(out, '{')
+	end := strings.LastIndexByte(out, '}')
+	if start < 0 || end < start {
+		return 0, fmt.Errorf("no JSON object in iperf3 output")
+	}
+	var r struct {
+		End struct {
+			SumReceived struct {
+				BitsPerSecond float64 `json:"bits_per_second"`
+			} `json:"sum_received"`
+		} `json:"end"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(out[start:end+1]), &r); err != nil {
+		return 0, err
+	}
+	if r.Error != "" {
+		return 0, fmt.Errorf("iperf3: %s", r.Error)
+	}
+	if r.End.SumReceived.BitsPerSecond <= 0 {
+		return 0, fmt.Errorf("iperf3 reported no throughput")
+	}
+	return r.End.SumReceived.BitsPerSecond, nil
 }
 
 // runInteropRequiringLog is runInterop plus an assertion on the compose logs. It

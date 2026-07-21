@@ -20,7 +20,7 @@ RUN go install golang.zx2c4.com/wireguard@v0.0.0-20260522210424-ecfc5a8d5446
 FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        wireguard-tools iproute2 iputils-ping \
+        wireguard-tools iproute2 iputils-ping iperf3 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /go/bin/wireguard /usr/local/bin/wireguard-go
 # Entrypoint is bind-mounted by compose; default to a shell.
