@@ -32,6 +32,7 @@ on:
       - "toy/**"
       - "Dockerfile"
       - "tests/interop/**"
+      - "cmd/livingreadme/**"
       - ".github/workflows/interop.yml"
   pull_request:
     branches: [main]
@@ -55,14 +56,18 @@ on:
       - "toy/**"
       - "Dockerfile"
       - "tests/interop/**"
+      - "cmd/livingreadme/**"
       - ".github/workflows/interop.yml"
 
 concurrency:
   group: interop-${{ github.ref }}
   cancel-in-progress: true
 
+# contents:write so the push-to-main run can commit the refreshed interop matrix
+# back into the README (the "living README"). Pull-request runs only preview the
+# diff, so the elevated scope is unused there.
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   interop:
@@ -70,6 +75,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Full history so the commit-back step can rebase onto a main that may
+          # have moved (e.g. the benchmark workflow pushing its own region).
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -85,4 +94,24 @@ jobs:
           ls -l /dev/net/tun
 
       - name: Run interop tests (vs strongSwan, over Docker)
-        run: go test -tags interop -count=1 -timeout 25m -v ./tests/interop/...
+        run: |
+          # -json so the living-README tool can read the per-cell pass/fail; tee
+          # keeps the raw stream in the log. pipefail makes go test's exit code
+          # (not tee's) fail the job, so the commit-back steps below run only when
+          # every cell passed.
+          set -o pipefail
+          go test -tags interop -json -count=1 -timeout 25m ./tests/interop/... | tee interop.json
+
+      - name: Refresh interop matrix and commit (push to main)
+        if: github.event_name == 'push'
+        env:
+          SHA: ${{ github.sha }}
+          REF: ${{ github.ref_name }}
+        run: .github/scripts/living-readme-commit.sh interop interop.json "interop matrix"
+
+      - name: Preview interop matrix diff (pull request)
+        if: github.event_name == 'pull_request'
+        env:
+          SHA: ${{ github.sha }}
+          REF: ${{ github.ref_name }}
+        run: .github/scripts/living-readme-preview.sh interop interop.json

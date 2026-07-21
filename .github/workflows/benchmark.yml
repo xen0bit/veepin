@@ -1,0 +1,73 @@
+name: benchmark
+
+# Runs the full microbenchmark suite and refreshes the "Full benchmark table
+# (live)" region of the README from the result. Split from ci.yml so a benchmark
+# run never slows the per-PR merge gate: the whole suite is minutes of CPU, and
+# its numbers are informational, not a pass/fail signal. On push to main the
+# refreshed table is committed back (the living README); on a pull request the
+# diff is only previewed in the log.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "internal/**"
+      - "dataplane/**"
+      - "cmd/livingreadme/**"
+      - ".github/workflows/benchmark.yml"
+      - ".github/scripts/living-readme-commit.sh"
+  pull_request:
+    branches: [main]
+    paths:
+      - "internal/**"
+      - "dataplane/**"
+      - "cmd/livingreadme/**"
+      - ".github/workflows/benchmark.yml"
+      - ".github/scripts/living-readme-preview.sh"
+
+concurrency:
+  group: benchmark-${{ github.ref }}
+  cancel-in-progress: true
+
+# contents:write so the push-to-main run can commit the refreshed benchmark table
+# back into the README. Pull-request runs only preview, so the scope is unused.
+permissions:
+  contents: write
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history so the commit-back can rebase onto a main the interop
+          # workflow may have moved while this ran.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Run benchmarks
+        run: |
+          # -run=^$ so no ordinary tests run; -benchmem for the allocs column the
+          # table reports. tee keeps the raw output in the log for debugging.
+          set -o pipefail
+          go test -run='^$' -bench=. -benchmem ./... | tee bench.txt
+
+      - name: Refresh benchmark table and commit (push to main)
+        if: github.event_name == 'push'
+        env:
+          SHA: ${{ github.sha }}
+          REF: ${{ github.ref_name }}
+        run: .github/scripts/living-readme-commit.sh benchmark bench.txt "benchmark table"
+
+      - name: Preview benchmark table diff (pull request)
+        if: github.event_name == 'pull_request'
+        env:
+          SHA: ${{ github.sha }}
+          REF: ${{ github.ref_name }}
+        run: .github/scripts/living-readme-preview.sh benchmark bench.txt
