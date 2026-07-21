@@ -1192,6 +1192,11 @@ What's measured:
 - **Handshake** (`internal/ikev2/ike`) — SK message seal/open, and a full PSK
   handshake (IKE_SA_INIT + IKE_AUTH) over real UDP loopback against the live
   server.
+- **IKEv1 handshake** (`internal/ikev1`) — the Main Mode key schedule
+  (SKEYID / SKEYID_d/a/e derivation), Quick Mode KEYMAT, the HASH_I auth PRF, the
+  phase-1 AES-CBC message crypto, and a full Main + Quick PSK exchange in process.
+  The full exchange is dominated by its two MODP-2048 exponentiations (~14 ms),
+  which is exactly what the breakdown makes visible.
 - **Asymmetric crypto** (`internal/cryptoutil`, `internal/ikev2/ike`) — DH key generation
   and shared-secret computation for each group, prf+ expansion and raw cipher seal,
   plus IKE/Child key derivation.
