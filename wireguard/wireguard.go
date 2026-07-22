@@ -430,8 +430,10 @@ func (s *session) readLoop() {
 		bufs[i] = make([]byte, 65535)
 	}
 	sizes := make([]int, readBatch)
+	data := make([][]byte, 0, readBatch)
 	for {
 		n, err := bc.ReadBatch(bufs, sizes)
+		data = data[:0]
 		for i := range n {
 			pkt := bufs[i][:sizes[i]]
 			t, ok := wire.Type(pkt)
@@ -440,10 +442,11 @@ func (s *session) readLoop() {
 			}
 			switch t {
 			case wire.TypeTransportData:
-				// No copy: the pump decrypts in place and writes the TUN before
-				// returning; bufs[i] is not touched again until the next
-				// ReadBatch.
-				s.pump.HandleInbound(pkt, nil)
+				// Collected without a copy: the whole batch goes to the pump
+				// at once so inbound TCP can coalesce (GRO); the pump decrypts
+				// in place and writes the TUN before returning — bufs[i] is
+				// not touched again until the next ReadBatch.
+				data = append(data, pkt)
 			case wire.TypeHandshakeResponse:
 				// Copied: a delivered response is handed to the rekey goroutine
 				// and outlives this batch's buffers.
@@ -452,6 +455,9 @@ func (s *session) readLoop() {
 				// A stray initiation or a cookie reply: nothing an established
 				// client tunnel acts on.
 			}
+		}
+		if len(data) > 0 {
+			s.pump.HandleInboundBatch(data, nil)
 		}
 		if err != nil {
 			return

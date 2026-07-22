@@ -131,3 +131,9 @@ func (d *PumpDataPath) RemoveChild(sa *IKESA, child *ChildSA) {
 func (d *PumpDataPath) HandleESP(espPkt []byte, from *net.UDPAddr) {
 	d.pump.HandleInbound(espPkt, from)
 }
+
+// HandleESPBatch forwards one read batch of ESP datagrams at once, letting the
+// pump coalesce inbound TCP (GRO) with the batch as its window.
+func (d *PumpDataPath) HandleESPBatch(espPkts [][]byte, froms []*net.UDPAddr) {
+	d.pump.HandleInboundBatch(espPkts, froms)
+}

@@ -13,10 +13,16 @@ import (
 
 // fakeGSOTUN feeds the pump a queue of vnet-framed reads and captures what the
 // pump writes back, standing in for a Linux TUN in vnet mode.
+type gsoWrite struct {
+	hdr virtioNetHdr
+	pkt []byte
+}
+
 type fakeGSOTUN struct {
 	mu     sync.Mutex
 	reads  [][]byte
 	vnetWr [][]byte
+	gsoWr  []gsoWrite
 	closed chan struct{}
 }
 
@@ -46,6 +52,16 @@ func (f *fakeGSOTUN) GSO() bool { return true }
 func (f *fakeGSOTUN) writeVnet(pkt []byte) (int, error) {
 	f.mu.Lock()
 	f.vnetWr = append(f.vnetWr, append([]byte(nil), pkt...))
+	f.mu.Unlock()
+	return len(pkt), nil
+}
+
+func (f *fakeGSOTUN) writeVnetGSO(hdr, pkt []byte) (int, error) {
+	f.mu.Lock()
+	f.gsoWr = append(f.gsoWr, gsoWrite{
+		hdr: parseVirtioNetHdr(append([]byte(nil), hdr...)),
+		pkt: append([]byte(nil), pkt...),
+	})
 	f.mu.Unlock()
 	return len(pkt), nil
 }

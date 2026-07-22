@@ -214,8 +214,11 @@ func (s *Server) readLoop() {
 	}
 	sizes := make([]int, readBatch)
 	froms := make([]*net.UDPAddr, readBatch)
+	dataPkts := make([][]byte, 0, readBatch)
+	dataFroms := make([]*net.UDPAddr, 0, readBatch)
 	for {
 		n, err := s.conn.ReadBatch(bufs, sizes, froms)
+		dataPkts, dataFroms = dataPkts[:0], dataFroms[:0]
 		for i := range n {
 			pkt, from := bufs[i][:sizes[i]], froms[i]
 			op, keyID, ok := wire.Opcode(pkt)
@@ -224,15 +227,20 @@ func (s *Server) readLoop() {
 			}
 			switch {
 			case data.IsDataOpcode(op):
-				// No copy: the pump decrypts in place and writes the TUN before
-				// returning; bufs[i] is not touched again until the next
-				// ReadBatch.
-				s.pump.HandleInbound(pkt, from)
+				// Collected without a copy: the whole batch goes to the pump
+				// at once so inbound TCP can coalesce (GRO); the pump decrypts
+				// in place and writes the TUN before returning — bufs[i] is
+				// not touched again until the next ReadBatch.
+				dataPkts = append(dataPkts, pkt)
+				dataFroms = append(dataFroms, from)
 			case wire.IsControl(op):
 				// Copied out: control handling queues the packet to the owning
 				// session, beyond this batch's buffers.
 				s.handleControl(op, keyID, append([]byte(nil), pkt...), from)
 			}
+		}
+		if len(dataPkts) > 0 {
+			s.pump.HandleInboundBatch(dataPkts, dataFroms)
 		}
 		if err != nil {
 			return // socket closed

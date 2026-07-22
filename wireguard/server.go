@@ -342,8 +342,11 @@ func (s *Server) readLoop() {
 	}
 	sizes := make([]int, readBatch)
 	froms := make([]*net.UDPAddr, readBatch)
+	data := make([][]byte, 0, readBatch)
+	dataFroms := make([]*net.UDPAddr, 0, readBatch)
 	for {
 		n, err := s.conn.ReadBatch(bufs, sizes, froms)
+		data, dataFroms = data[:0], dataFroms[:0]
 		for i := range n {
 			pkt, from := bufs[i][:sizes[i]], froms[i]
 			typ, ok := wire.Type(pkt)
@@ -356,16 +359,21 @@ func (s *Server) readLoop() {
 				// buffer the next batch will overwrite.
 				s.handleInitiation(append([]byte(nil), pkt...), from)
 			case wire.TypeTransportData:
-				// Handed over without a copy: the pump decrypts in place,
-				// updates the peer's return address from the source (so a
-				// roaming client's replies follow it), and writes the TUN
-				// before returning; bufs[i] is not touched again until the
-				// next ReadBatch.
-				s.pump.HandleInbound(pkt, from)
+				// Collected without a copy: the whole batch goes to the pump
+				// at once so inbound TCP can coalesce (GRO); the pump decrypts
+				// in place, updates each peer's return address from its source
+				// (so a roaming client's replies follow it), and writes the
+				// TUN before returning — bufs[i] is not touched again until
+				// the next ReadBatch.
+				data = append(data, pkt)
+				dataFroms = append(dataFroms, from)
 			default:
 				// Handshake responses and cookie replies are the initiator's to send,
 				// not to receive; drop them.
 			}
+		}
+		if len(data) > 0 {
+			s.pump.HandleInboundBatch(data, dataFroms)
 		}
 		if err != nil {
 			return // socket closed on Close

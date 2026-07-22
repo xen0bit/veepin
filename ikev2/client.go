@@ -231,18 +231,24 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 			bufs[i] = make([]byte, 65535)
 		}
 		sizes := make([]int, readBatch)
+		esps := make([][]byte, 0, readBatch)
 		for {
 			n, rerr := bc.ReadBatch(bufs, sizes)
+			esps = esps[:0]
 			for i := range n {
 				pkt := bufs[i][:sizes[i]]
 				if len(pkt) >= 4 && pkt[0] == 0 && pkt[1] == 0 && pkt[2] == 0 && pkt[3] == 0 {
 					continue
 				}
-				// No copy: the pump decrypts in place and writes the TUN before
-				// returning; bufs[i] is not touched again until the next
-				// ReadBatch. Connected socket: the source is implicitly the
-				// server, so no return-address update is needed (pass nil).
-				pump.HandleInbound(pkt, nil)
+				// Collected without a copy: the whole batch goes to the pump
+				// at once so inbound TCP can coalesce (GRO); the pump decrypts
+				// in place and writes the TUN before returning — bufs[i] is
+				// not touched again until the next ReadBatch. Connected
+				// socket: the source is implicitly the server (froms nil).
+				esps = append(esps, pkt)
+			}
+			if len(esps) > 0 {
+				pump.HandleInboundBatch(esps, nil)
 			}
 			if rerr != nil {
 				return
