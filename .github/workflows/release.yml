@@ -81,3 +81,54 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release upload "${GITHUB_REF_NAME}" bin/pkg/*.deb bin/pkg/*.rpm --clobber
+
+  # Signed APT repository on GitHub Pages, so Debian/Ubuntu users can
+  # `apt install veepin veepin-nm` and track releases with `apt upgrade`.
+  # Stateless: rebuilt from this release's .debs only (older versions stay on
+  # GitHub Releases). Needs the APT_SIGNING_KEY secret (armored GPG private
+  # key) and Pages enabled; configure-pages creates the site on first run.
+  apt-repo:
+    needs: [goreleaser, nm-packages]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download this release's debs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release download "${GITHUB_REF_NAME}" -p '*.deb' -D debs
+
+      - name: Import the repository signing key
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+        run: |
+          if [ -z "$APT_SIGNING_KEY" ]; then
+            echo "::error::APT_SIGNING_KEY secret is not set; refusing to publish an unsigned repo"
+            exit 1
+          fi
+          printf '%s' "$APT_SIGNING_KEY" | gpg --batch --import
+
+      - name: Build the signed repository
+        run: .github/scripts/build-apt-repo.sh debs site
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Upload site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4

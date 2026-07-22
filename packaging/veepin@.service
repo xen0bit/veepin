@@ -1,0 +1,44 @@
+# veepin server as a systemd template unit. Enable one instance per config:
+#
+#   /etc/veepin/ikev2.conf:
+#     VEEPIN_ARGS=ikev2 -id vpn.example.com -psk change-me -pool 10.10.10.0/24 -setup-nat
+#
+#   systemctl enable --now veepin@ikev2
+#
+# (see /usr/share/doc/veepin/veepin.conf.example)
+
+[Unit]
+Description=veepin VPN server (%i)
+Documentation=https://github.com/xen0bit/veepin
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+EnvironmentFile=/etc/veepin/%i.conf
+ExecStart=/usr/bin/veepin serve $VEEPIN_ARGS
+Restart=on-failure
+RestartSec=2s
+
+# The daemon needs CAP_NET_ADMIN for the TUN device and routes,
+# CAP_NET_BIND_SERVICE for listeners below 1024 (IKE's UDP/500, HTTPS-carried
+# protocols on 443), and CAP_NET_RAW so -setup-nat's iptables calls work.
+# Everything else is dropped, which is the packaging-portable answer to the
+# "run as root or setcap" note.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+NoNewPrivileges=yes
+
+# Hardening that provably keeps the data path working. PrivateDevices stays
+# off because the whole point is /dev/net/tun; netlink stays allowed because
+# route installation speaks it.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+DeviceAllow=/dev/net/tun rw
+
+[Install]
+WantedBy=multi-user.target

@@ -78,12 +78,20 @@ nfpms:
     formats: [deb, rpm, apk]
     bindir: /usr/bin
     # `veepin connect` and `veepin serve` open a TUN device / edit routes and
-    # need CAP_NET_ADMIN (run as root or `setcap cap_net_admin+ep`); this is
-    # noted rather than enforced, since packaging can't grant capabilities
-    # portably.
+    # need CAP_NET_ADMIN. Packaging can't grant file capabilities portably, so
+    # the shipped systemd template unit grants them as ambient capabilities
+    # instead (veepin@.service); running the binary by hand still needs root
+    # or `setcap cap_net_admin+ep`.
+    scripts:
+      postinstall: packaging/postinstall.sh
+      postremove: packaging/postremove.sh
     contents:
       - src: README.md
         dst: /usr/share/doc/veepin/README.md
+      - src: packaging/veepin@.service
+        dst: /usr/lib/systemd/system/veepin@.service
+      - src: packaging/veepin.conf.example
+        dst: /usr/share/doc/veepin/veepin.conf.example
 
 # ---------------------------------------------------------------------------
 # Checksums, signing hook (optional), snapshots, changelog, release.

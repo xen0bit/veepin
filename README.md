@@ -18,6 +18,7 @@ drives the production client against the live server and checks bidirectional ES
 - [What it does](#what-it-does) — the protocol capability table
 - [Cryptography](#cryptography) — algorithms, [dependencies](#dependencies), [security boundaries](#what-veepin-does-not-protect-against)
 - [Architecture](#architecture) — the package tree and the protocol-agnostic boundary
+- [Install](#install) — apt repository and packaged releases
 - [Build](#build) and [Run](#run) — building the binary; per-protocol runbooks
 - [The example protocol](#the-example-protocol) — TOY, the insecure teaching example
 - [Using the bundled client](#using-the-bundled-client) — CLI client, [embedding](#embedding-the-client), [NetworkManager](#desktop-integration-networkmanager)
@@ -207,6 +208,31 @@ anything else in this module, and neither knows IKEv2 exists. That boundary — 
 the pump demuxes inbound packets with a protocol-supplied `Demux`, how outbound
 routing picks a tunnel by most-specific route, and how a packet flows end to end —
 is written up in [`doc/architecture.md`](doc/architecture.md).
+
+## Install
+
+On Debian/Ubuntu (amd64, arm64, armhf), the signed APT repository tracks the
+latest release:
+
+```sh
+sudo curl -fsSL https://xen0bit.github.io/veepin/veepin-archive-keyring.gpg \
+     -o /usr/share/keyrings/veepin-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/veepin-archive-keyring.gpg] https://xen0bit.github.io/veepin stable main" \
+     | sudo tee /etc/apt/sources.list.d/veepin.list
+sudo apt update && sudo apt install veepin veepin-nm
+```
+
+`veepin` is the CLI (server + client, no runtime dependencies); `veepin-nm`
+(amd64) adds the NetworkManager desktop integration. The repository signing
+key's fingerprint is pinned in [packaging/apt-signing-key.asc](packaging/apt-signing-key.asc).
+The package ships a systemd template unit — drop arguments in
+`/etc/veepin/<name>.conf` and `systemctl enable --now veepin@<name>` (see
+`/usr/share/doc/veepin/veepin.conf.example`); it grants the daemon the
+capabilities it needs, so no root shell or setcap step.
+
+`.deb`/`.rpm`/`.apk` packages and plain tarballs for every version are on
+[GitHub Releases](https://github.com/xen0bit/veepin/releases)
+(`apt install ./veepin_<ver>_linux_<arch>.deb` works directly).
 
 ## Build
 
