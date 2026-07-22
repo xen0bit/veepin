@@ -115,8 +115,9 @@ reader may otherwise assume is handled — and none is an oversight:
 
 - **Key material is not zeroed after use.** veepin does not claim protection
   against an attacker who can read process memory (core dump, debugger, swap).
-- **Per-tunnel throughput is bounded by one core.** `dataplane.Pump` reads the
-  TUN from a single goroutine — a scaling ceiling, not a correctness problem.
+- **Throughput is bounded by one core per direction.** The data path runs one
+  TUN-reader goroutine and one socket-reader goroutine per server, shared across
+  all clients — a scaling ceiling, not a correctness problem.
 - **MASQUE carries every inner packet on one reliable QUIC stream** (capsule
   mode), so it reintroduces head-of-line blocking on a lossy path.
 

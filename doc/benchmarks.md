@@ -199,9 +199,14 @@ allocates nothing on the unknown-SPI path (and only the decrypt buffer on the
 replay path). `TestDataPathAllocationsGCM` asserts these counts (via
 `testing.AllocsPerRun`) so they cannot silently regress.
 
-The `ESPCrypter` is intended to be driven by one goroutine per SA direction
-(matching the pump); across multiple clients, work scales across cores, as
-`BenchmarkESPDecapParallel` exercises.
+The `ESPCrypter` holds no shared mutable state, so it is safe to call from
+several goroutines at once and scales linearly with cores — `BenchmarkESPDecapParallel`
+(via `b.RunParallel`) measures that the *primitive* has no contention. Note this
+is a property of the crypter, not of the deployed data path: a single-socket
+server drives decap from one reader goroutine (and the pump drives encap from
+one TUN reader), so today the crypter is parallel-ready but not actually run in
+parallel. Feeding it from multiple goroutines is the subject of
+[`scaling-the-data-path.md`](scaling-the-data-path.md).
 
 The WireGuard and OpenVPN data paths were held to the same standard, guarded by
 `TestDataPathAllocations` in each package. The recurring cost the AEAD interface

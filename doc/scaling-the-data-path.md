@@ -1,0 +1,162 @@
+# Scaling the data path past one core per direction
+
+Status: **design note, not implemented.** Written while sharpening the
+[security boundary](security.md#throughput-is-bounded-by-one-core-per-direction)
+that states the current ceiling. It captures which protocols the ceiling actually
+binds, the two levers that lift it (in the order worth trying them), and the
+single-goroutine *assumptions* a naive parallelization would break — so the work
+is scoped honestly rather than half-built.
+
+## Which protocols this even affects
+
+Split the protocols by how they read inbound traffic, because that is where the
+ceiling lives:
+
+- **Single-socket UDP demux** — IKEv2, WireGuard, OpenVPN, Nebula, L2TP. Every
+  client's ingress funnels through one socket-reader goroutine, and egress
+  through the one `Pump.Run` TUN reader. **This is the only class with the
+  ceiling.**
+- **Connection-per-client** — SSTP, SSH, AnyConnect, Fortinet, MASQUE. Each
+  client is its own TCP/TLS/QUIC connection with its own goroutine, so these
+  already scale across clients on the Go runtime for free. They need nothing
+  here.
+
+So "let every protocol inherit parallelism" is the wrong target: half of them
+already have it. The work is for the single-socket class — and, usefully, most of
+that class (`ikev2`, `wireguard`, `openvpn`, `nebula`) already shares
+`dataplane.Pump` for egress, so shared machinery can carry the fix.
+
+## The current model
+
+A single-socket server runs exactly two data-path goroutines, one per direction,
+both shared across every client:
+
+- **Outbound** — `dataplane.Pump.Run` (dataplane/pump.go) reads the TUN in one
+  loop, and for each packet looks up the tunnel, encapsulates, and sends.
+- **Inbound** — the transport's socket reader (e.g. `internal/ikev2/ike`
+  `transport.serve`, the UDP/4500 goroutine) reads every ESP datagram for every
+  client and calls `Pump.HandleInbound`, which decapsulates and writes the TUN.
+
+Adding clients adds no parallelism. The crypto is not the bottleneck — `ESPCrypter`
+holds no shared mutable state and scales linearly (`BenchmarkESPDecapParallel`) —
+the plumbing above it simply never calls it from more than one goroutine.
+
+## Profile before choosing
+
+One core already does **~15 Gbit/s of AES-GCM** (ESP decap benches at ~2 GB/s at
+1400 B). At that rate the limit is almost never the cipher; it is the
+**per-packet syscall cost** of reading the TUN and the UDP socket one datagram at
+a time. So the first task is to confirm *where* the time goes — a CPU profile of a
+saturated single tunnel. If it is syscall-bound (it usually is), the lever below
+that removes syscalls beats the one that adds cores, and does so without any
+reordering risk.
+
+## Option 1 (try first): batch the syscalls
+
+Cut the number of read/write/send calls per packet instead of adding goroutines.
+This is the higher-leverage lever for a userspace VPN — it multiplies throughput
+*on a single core*, carries **no packet-reordering risk**, and needs no change to
+any protocol's per-SA state. It is also where the reference `wireguard-go` got its
+throughput, not from more goroutines.
+
+- **UDP:** `recvmmsg`/`sendmmsg` (via `x/sys/unix`) to move a batch of datagrams
+  per syscall on both the inbound socket and the `Sender`.
+- **TUN:** the virtio-net header path (`IFF_VNET_HDR`) so the kernel hands up /
+  accepts back GSO super-frames — one read/write for many segments — with
+  segmentation offloaded.
+
+Because egress lives entirely in `Pump`, batching there is **inherited by every
+pump-using protocol** with no protocol code change: `Run` reads a batch,
+`routeOutbound` handles each, `send` flushes a batch. Inbound batching wants the
+shared UDP source described below so it, too, is written once. The `Tunnel`
+interface is unchanged — `Encapsulate`/`Decapsulate` are still called once per
+inner packet; only the transport syscalls are amortised.
+
+Batching alone may lift the ceiling far enough that Option 2 is never needed.
+
+## Option 2 (if still CPU-bound): parallelize, with per-tunnel affinity
+
+If profiling shows the work is genuinely CPU-bound after batching — the busy
+multi-client concentrator case, where aggregate crypto across hundreds of
+road-warriors exceeds one core per direction — then add worker goroutines. The
+design that lets protocols **inherit parallelism *and* safety unchanged** is
+per-tunnel affinity:
+
+> Shard tunnels across N workers and pin each tunnel to exactly one worker. A
+> tunnel is never touched by two goroutines at once; only *cross-tunnel* work runs
+> in parallel.
+
+That is the whole trick. Every protocol's data path was written assuming one
+goroutine per SA (see the hazards below); affinity preserves that assumption
+verbatim, so no `Tunnel` implementation has to be re-audited. The mechanism:
+
+- **Inbound — shared `dataplane` UDP source + `SO_REUSEPORT`.** Move socket
+  ownership out of each protocol into a small shared source that opens N sockets
+  on the port, runs one reader goroutine each, and calls a handler + `Demux`. The
+  kernel hashes each datagram's 4-tuple to one socket, so a given peer lands on
+  one reader — per-peer affinity for free. The single-socket protocols opt in by
+  swapping their read loop for the source; the connection-per-client protocols
+  never touch it.
+- **Outbound — multi-queue TUN (`IFF_MULTI_QUEUE`), N `Pump.Run` loops.** This is
+  the side with the wrinkle: the kernel distributes TUN packets by *inner-flow*
+  hash, which does **not** align with our tunnel-ownership sharding, so a queue
+  reader can hold a packet for a tunnel another worker owns. Either make the
+  owning worker do the encap (hand the packet to it over a per-worker queue —
+  restores affinity, costs a hop) or make `Encapsulate` concurrency-safe for that
+  one SA (an atomic ESP sequence counter — see hazard 2). The hand-off keeps the
+  affinity contract clean and is the safer default.
+
+Both options are `x/sys/unix` socket/ioctl surface, not new dependencies —
+consistent with how the tree already does PMTU and source-address selection.
+
+## What breaks if you skip affinity and just add goroutines
+
+Several data paths were deliberately made allocation-free by keeping **per-SA
+scratch that is only safe because one goroutine touches it.** These are exactly
+what per-tunnel affinity protects; drop affinity and they become races, not
+slowdowns:
+
+1. **Inbound receive-nonce scratch is per-SA, single-goroutine.** OpenVPN reuses a
+   per-`Cipher` receive-nonce buffer and Nebula/DTLS a per-tunnel / per-`aeadState`
+   scratch, each documented "safe because open runs on the single inbound
+   goroutine." Two packets of the *same* SA opening concurrently races that
+   scratch. Affinity (or `SO_REUSEPORT` per-4-tuple, treated as an optimisation
+   not a guarantee, since a roaming peer can move) keeps a single SA on one worker.
+
+2. **Outbound ESP sequence numbers are a per-SA counter.** `Encapsulate` assigns
+   the next anti-replay sequence number. Two workers encapsulating for the same SA
+   assign duplicates and the peer's replay window drops one — this is the outbound
+   wrinkle above. Fixed by the hand-off, or an atomic counter. (Seal itself is
+   already concurrency-safe: the nonce is built in the output buffer's own tail,
+   no shared scratch.)
+
+3. **The pump's `byKey`/`routes` maps are `RWMutex`-guarded.** One reader holds the
+   `RLock` at a time today; N readers taking it per packet is read-mostly but the
+   lock traffic is real. Swap an immutable snapshot on `AddTunnel`/`RemoveTunnel`
+   (RCU-style) to remove per-packet locking entirely — a pure win, worth doing
+   before the reader count is raised.
+
+4. **Reordering within a flow.** Flow/tunnel-sharded workers keep a single
+   5-tuple in order; anything that round-robins packets reintroduces reordering
+   that TCP reads as loss. Affinity is precisely what avoids it — any deviation
+   has to be justified against this.
+
+## Sequencing
+
+1. **Profile a saturated tunnel.** Confirm CPU-bound vs syscall-bound; it decides
+   whether Option 2 is even worth starting.
+2. **Option 1 — batching** in `Pump` (egress) and a shared UDP source (ingress).
+   Biggest, safest win; inherited by every pump-using protocol.
+3. **Lock-free pump map** (hazard 3). Pure win, testable in isolation, de-risks
+   Option 2.
+4. **Option 2 — per-tunnel-affinity workers**: shared `SO_REUSEPORT` source
+   inbound, multi-queue TUN with hand-off outbound. Guard with the interop matrix
+   plus a new multi-reader stress test.
+5. Validate with a multi-core benchmark **and** the full interop matrix. A
+   reordering regression shows up as a throughput cliff on the TCP-carried cells,
+   not a test failure, so watch the living throughput table across the change.
+
+None of this is urgent: one core per direction is already several Gbit/s, and no
+workload here is asking for more. The value of writing it down is that the
+single-goroutine assumptions are invisible until someone adds a goroutine — so
+this note exists to be read *before* that happens, not after.
