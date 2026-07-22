@@ -192,24 +192,39 @@ func (s *Server) ListenAndServe() error {
 
 // readLoop reads datagrams from every client on the shared socket and dispatches
 // each by opcode: data packets to the pump, control packets to the owning (or a
-// new) client session.
+// new) client session. Reads are batched (dataplane.PacketConn.ReadBatch): one
+// recvmmsg drains up to readBatch datagrams under load and blocks like a plain
+// read when idle.
 func (s *Server) readLoop() {
-	buf := make([]byte, 65535)
+	const readBatch = 16
+	bufs := make([][]byte, readBatch)
+	for i := range bufs {
+		bufs[i] = make([]byte, 65535)
+	}
+	sizes := make([]int, readBatch)
+	froms := make([]*net.UDPAddr, readBatch)
 	for {
-		n, from, err := s.conn.ReadFromUDP(buf)
+		n, err := s.conn.ReadBatch(bufs, sizes, froms)
+		for i := range n {
+			pkt, from := bufs[i][:sizes[i]], froms[i]
+			op, keyID, ok := wire.Opcode(pkt)
+			if !ok {
+				continue
+			}
+			switch {
+			case data.IsDataOpcode(op):
+				// No copy: the pump decrypts in place and writes the TUN before
+				// returning; bufs[i] is not touched again until the next
+				// ReadBatch.
+				s.pump.HandleInbound(pkt, from)
+			case wire.IsControl(op):
+				// Copied out: control handling queues the packet to the owning
+				// session, beyond this batch's buffers.
+				s.handleControl(op, keyID, append([]byte(nil), pkt...), from)
+			}
+		}
 		if err != nil {
 			return // socket closed
-		}
-		pkt := buf[:n]
-		op, keyID, ok := wire.Opcode(pkt)
-		if !ok {
-			continue
-		}
-		switch {
-		case data.IsDataOpcode(op):
-			s.pump.HandleInbound(append([]byte(nil), pkt...), from)
-		case wire.IsControl(op):
-			s.handleControl(op, keyID, append([]byte(nil), pkt...), from)
 		}
 	}
 }

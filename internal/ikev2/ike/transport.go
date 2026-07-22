@@ -71,30 +71,45 @@ func (t *transport) serve(handleIKE func(pkt []byte, from *net.UDPAddr, on4500 b
 		}
 	}()
 
-	// Port 4500: non-ESP marker => IKE; otherwise ESP.
+	// Port 4500: non-ESP marker => IKE; otherwise ESP. This is the data-path hot
+	// socket — every client's ESP arrives here — so it reads in recvmmsg batches
+	// (dataplane.PacketConn.ReadBatch): one syscall drains up to espBatch
+	// datagrams when traffic is queued, and blocks for one like a plain read when
+	// it is not, so batching adds no latency to an idle tunnel.
 	go func() {
-		buf := make([]byte, 65535)
+		const espBatch = 16
+		bufs := make([][]byte, espBatch)
+		for i := range bufs {
+			bufs[i] = make([]byte, 65535)
+		}
+		sizes := make([]int, espBatch)
+		froms := make([]*net.UDPAddr, espBatch)
 		for {
-			n, from, err := t.conn4500.ReadFromUDP(buf)
+			n, err := t.conn4500.ReadBatch(bufs, sizes, froms)
+			for i := range n {
+				pkt, from := bufs[i][:sizes[i]], froms[i]
+				if len(pkt) >= 4 && pkt[0] == 0 && pkt[1] == 0 && pkt[2] == 0 && pkt[3] == 0 {
+					// Non-ESP marker: the rest is an IKE message. Copied out,
+					// because IKE handling may outlive this batch's buffers.
+					ike := make([]byte, len(pkt)-4)
+					copy(ike, pkt[4:])
+					handleIKE(ike, from, true)
+					continue
+				}
+				// ESP datagram (non-zero SPI). Handed over without a copy: the
+				// handler chain (PumpDataPath.HandleESP -> Pump.HandleInbound)
+				// decapsulates and writes the TUN before returning, and bufs[i]
+				// is not touched again until the next ReadBatch.
+				if t.onESP != nil {
+					t.onESP(pkt, from)
+				}
+			}
 			if err != nil {
 				if closing() {
 					done <- struct{}{}
 					return
 				}
 				continue
-			}
-			if n >= 4 && buf[0] == 0 && buf[1] == 0 && buf[2] == 0 && buf[3] == 0 {
-				// Non-ESP marker: the rest is an IKE message.
-				pkt := make([]byte, n-4)
-				copy(pkt, buf[4:n])
-				handleIKE(pkt, from, true)
-				continue
-			}
-			// ESP datagram (non-zero SPI).
-			if t.onESP != nil {
-				esp := make([]byte, n)
-				copy(esp, buf[:n])
-				t.onESP(esp, from)
 			}
 		}
 	}()

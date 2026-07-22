@@ -43,30 +43,43 @@ func (m *muxer) setPump(p *dataplane.Pump) {
 }
 
 // readLoop reads datagrams until the socket closes, dispatching each by opcode.
+// Reads are batched (dataplane.BatchConn over the connected socket): one
+// recvmmsg drains up to readBatch datagrams under load and blocks like a plain
+// read when idle.
 func (m *muxer) readLoop() {
-	buf := make([]byte, 65535)
+	const readBatch = 16
+	bc := dataplane.NewBatchConn(m.conn)
+	bufs := make([][]byte, readBatch)
+	for i := range bufs {
+		bufs[i] = make([]byte, 65535)
+	}
+	sizes := make([]int, readBatch)
 	for {
-		n, err := m.conn.Read(buf)
+		n, err := bc.ReadBatch(bufs, sizes)
+		for i := range n {
+			pkt := bufs[i][:sizes[i]]
+			op, _, ok := wire.Opcode(pkt)
+			if !ok {
+				continue
+			}
+			switch {
+			case data.IsDataOpcode(op):
+				m.mu.Lock()
+				pump := m.pump
+				m.mu.Unlock()
+				if pump != nil {
+					// No copy: the pump decrypts in place and writes the TUN
+					// before returning; bufs[i] is not touched again until the
+					// next ReadBatch. The socket source is implicit on a
+					// connected client socket, so pass nil.
+					pump.HandleInbound(pkt, nil)
+				}
+			case wire.IsControl(op):
+				m.control.Deliver(pkt) // copies internally
+			}
+		}
 		if err != nil {
 			return
-		}
-		pkt := buf[:n]
-		op, _, ok := wire.Opcode(pkt)
-		if !ok {
-			continue
-		}
-		switch {
-		case data.IsDataOpcode(op):
-			m.mu.Lock()
-			pump := m.pump
-			m.mu.Unlock()
-			if pump != nil {
-				// The pump decrypts in place; the socket source is implicit on a
-				// connected client socket, so pass nil.
-				pump.HandleInbound(append([]byte(nil), pkt...), nil)
-			}
-		case wire.IsControl(op):
-			m.control.Deliver(pkt) // copies internally
 		}
 	}
 }

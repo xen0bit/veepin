@@ -32,6 +32,22 @@ func (p *PacketConn) ReadFromUDP(b []byte) (int, *net.UDPAddr, error) {
 	return p.conn.ReadFromUDP(b)
 }
 
+// ReadBatch matches the Linux build's batched-read surface with one datagram
+// per call — the platforms this file covers have no recvmmsg, and reading one
+// keeps a caller's batch loop identical everywhere. sizes and froms must be at
+// least len(bufs) long.
+func (p *PacketConn) ReadBatch(bufs [][]byte, sizes []int, froms []*net.UDPAddr) (int, error) {
+	if len(bufs) == 0 {
+		return 0, nil
+	}
+	n, from, err := p.conn.ReadFromUDP(bufs[0])
+	if err != nil {
+		return 0, err
+	}
+	sizes[0], froms[0] = n, from
+	return 1, nil
+}
+
 // WriteToUDP sends one datagram, letting the kernel choose the source.
 func (p *PacketConn) WriteToUDP(b []byte, to *net.UDPAddr) (int, error) {
 	return p.conn.WriteToUDP(b, to)

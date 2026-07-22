@@ -410,27 +410,41 @@ type pendingHandshake struct {
 // replies — is dropped. It exits when the socket is closed.
 func (s *session) readLoop() {
 	defer close(s.done)
-	buf := make([]byte, 65535)
+	// Reads are batched (dataplane.BatchConn over the connected socket): one
+	// recvmmsg drains up to readBatch datagrams under load and blocks like a
+	// plain read when idle.
+	const readBatch = 16
+	bc := dataplane.NewBatchConn(s.conn)
+	bufs := make([][]byte, readBatch)
+	for i := range bufs {
+		bufs[i] = make([]byte, 65535)
+	}
+	sizes := make([]int, readBatch)
 	for {
-		n, err := s.conn.Read(buf)
+		n, err := bc.ReadBatch(bufs, sizes)
+		for i := range n {
+			pkt := bufs[i][:sizes[i]]
+			t, ok := wire.Type(pkt)
+			if !ok {
+				continue
+			}
+			switch t {
+			case wire.TypeTransportData:
+				// No copy: the pump decrypts in place and writes the TUN before
+				// returning; bufs[i] is not touched again until the next
+				// ReadBatch.
+				s.pump.HandleInbound(pkt, nil)
+			case wire.TypeHandshakeResponse:
+				// Copied: a delivered response is handed to the rekey goroutine
+				// and outlives this batch's buffers.
+				s.deliverResponse(append([]byte(nil), pkt...))
+			default:
+				// A stray initiation or a cookie reply: nothing an established
+				// client tunnel acts on.
+			}
+		}
 		if err != nil {
 			return
-		}
-		// Copy: the pump decrypts in place, and a delivered response outlives
-		// this iteration's buffer.
-		pkt := append([]byte(nil), buf[:n]...)
-		t, ok := wire.Type(pkt)
-		if !ok {
-			continue
-		}
-		switch t {
-		case wire.TypeTransportData:
-			s.pump.HandleInbound(pkt, nil)
-		case wire.TypeHandshakeResponse:
-			s.deliverResponse(pkt)
-		default:
-			// A stray initiation or a cookie reply: nothing an established
-			// client tunnel acts on.
 		}
 	}
 }

@@ -114,22 +114,35 @@ func (s *Server) recvIKE() {
 }
 
 // recvNATT reads the NAT-T port, where IKE and ESP share a socket and the
-// non-ESP marker tells them apart.
+// non-ESP marker tells them apart. Reads are batched
+// (dataplane.PacketConn.ReadBatch): one recvmmsg drains up to readBatch
+// datagrams under load and blocks like a plain read when idle. Unlike the flat
+// ESP protocols, every datagram is still copied out: the L2TP engine behind
+// handleESP parses control AVPs whose handling may alias the packet beyond
+// this loop, so only the syscalls are batched, not the buffer ownership.
 func (s *Server) recvNATT() {
-	buf := make([]byte, 65535)
+	const readBatch = 16
+	bufs := make([][]byte, readBatch)
+	for i := range bufs {
+		bufs[i] = make([]byte, 65535)
+	}
+	sizes := make([]int, readBatch)
+	froms := make([]*net.UDPAddr, readBatch)
 	for {
-		n, addr, err := s.nattConn.ReadFromUDP(buf)
+		n, err := s.nattConn.ReadBatch(bufs, sizes, froms)
+		for i := range n {
+			pkt, addr := append([]byte(nil), bufs[i][:sizes[i]]...), froms[i]
+			if msg, ok := isIKE(pkt); ok {
+				s.dispatchIKE(msg, addr, true)
+				continue
+			}
+			if p := s.peerBySPI(pkt); p != nil {
+				p.noteAddr(addr)
+				p.handleESP(pkt)
+			}
+		}
 		if err != nil {
 			return
-		}
-		pkt := append([]byte(nil), buf[:n]...)
-		if msg, ok := isIKE(pkt); ok {
-			s.dispatchIKE(msg, addr, true)
-			continue
-		}
-		if p := s.peerBySPI(pkt); p != nil {
-			p.noteAddr(addr)
-			p.handleESP(pkt)
 		}
 	}
 }

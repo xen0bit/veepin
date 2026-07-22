@@ -40,6 +40,7 @@ import (
 	"sync"
 	"time"
 
+	xipv4 "golang.org/x/net/ipv4"
 	"golang.org/x/sys/unix"
 )
 
@@ -64,6 +65,12 @@ type PacketConn struct {
 	locals map[netip.AddrPort]localEntry
 	lastGC time.Time
 	now    func() time.Time
+
+	// Batched-read state, lazily built on first ReadBatch and reused across
+	// calls. Owned by the single reading goroutine, like the read side of the
+	// socket itself.
+	batch     *xipv4.PacketConn
+	batchMsgs []xipv4.Message
 }
 
 type localEntry struct {
@@ -116,6 +123,54 @@ func (p *PacketConn) ReadFromUDP(b []byte) (int, *net.UDPAddr, error) {
 		p.remember(from, local)
 	}
 	return n, from, nil
+}
+
+// ReadBatch reads up to len(bufs) datagrams — one recvmmsg syscall for the lot —
+// blocking until at least one arrives. Datagram i lands in bufs[i], its length
+// in sizes[i], and its source in froms[i]; the count read is returned. sizes and
+// froms must be at least len(bufs) long.
+//
+// Local addresses are recorded exactly as ReadFromUDP records them, so a batched
+// read loop keeps the source-address pinning this wrapper exists for: each
+// message carries its own IP_PKTINFO control data.
+//
+// Like the read side of the socket generally, ReadBatch must not be called
+// concurrently with itself or ReadFromUDP — the scratch state assumes the one
+// reader goroutine every serve loop here already has.
+func (p *PacketConn) ReadBatch(bufs [][]byte, sizes []int, froms []*net.UDPAddr) (int, error) {
+	if len(bufs) == 0 {
+		return 0, nil
+	}
+	if p.batch == nil {
+		p.batch = xipv4.NewPacketConn(p.conn)
+	}
+	if cap(p.batchMsgs) < len(bufs) {
+		msgs := make([]xipv4.Message, len(bufs))
+		copy(msgs, p.batchMsgs)
+		p.batchMsgs = msgs
+	}
+	msgs := p.batchMsgs[:len(bufs)]
+	for i := range msgs {
+		msgs[i].Buffers = append(msgs[i].Buffers[:0], bufs[i])
+		if p.pktInfo && msgs[i].OOB == nil {
+			// One control buffer per slot, sized like ReadFromUDP's and reused
+			// for the life of the conn.
+			msgs[i].OOB = make([]byte, 512)
+		}
+		msgs[i].OOB = msgs[i].OOB[:cap(msgs[i].OOB)]
+	}
+	n, err := p.batch.ReadBatch(msgs, 0)
+	for i := range n {
+		sizes[i] = msgs[i].N
+		from, _ := msgs[i].Addr.(*net.UDPAddr)
+		froms[i] = from
+		if p.pktInfo && from != nil {
+			if local := localFromControl(msgs[i].OOB[:msgs[i].NN]); local.IsValid() {
+				p.remember(from, local)
+			}
+		}
+	}
+	return n, err
 }
 
 // WriteToUDP sends a datagram, from the address this peer last reached us on

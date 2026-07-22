@@ -320,27 +320,44 @@ func (s *Server) ListenAndServe() error {
 
 // readLoop dispatches inbound datagrams: initiations to the handshake, transport
 // data to the pump, everything else dropped. It runs until the socket closes.
+// Reads are batched (dataplane.PacketConn.ReadBatch): one recvmmsg drains up to
+// readBatch datagrams under load and blocks like a plain read when idle, so
+// batching adds no latency to a quiet tunnel.
 func (s *Server) readLoop() {
-	buf := make([]byte, 65535)
+	const readBatch = 16
+	bufs := make([][]byte, readBatch)
+	for i := range bufs {
+		bufs[i] = make([]byte, 65535)
+	}
+	sizes := make([]int, readBatch)
+	froms := make([]*net.UDPAddr, readBatch)
 	for {
-		n, from, err := s.conn.ReadFromUDP(buf)
+		n, err := s.conn.ReadBatch(bufs, sizes, froms)
+		for i := range n {
+			pkt, from := bufs[i][:sizes[i]], froms[i]
+			typ, ok := wire.Type(pkt)
+			if !ok {
+				continue
+			}
+			switch typ {
+			case wire.TypeHandshakeInitiation:
+				// Copied out: handshake handling should not be trusted with a
+				// buffer the next batch will overwrite.
+				s.handleInitiation(append([]byte(nil), pkt...), from)
+			case wire.TypeTransportData:
+				// Handed over without a copy: the pump decrypts in place,
+				// updates the peer's return address from the source (so a
+				// roaming client's replies follow it), and writes the TUN
+				// before returning; bufs[i] is not touched again until the
+				// next ReadBatch.
+				s.pump.HandleInbound(pkt, from)
+			default:
+				// Handshake responses and cookie replies are the initiator's to send,
+				// not to receive; drop them.
+			}
+		}
 		if err != nil {
 			return // socket closed on Close
-		}
-		typ, ok := wire.Type(buf[:n])
-		if !ok {
-			continue
-		}
-		switch typ {
-		case wire.TypeHandshakeInitiation:
-			s.handleInitiation(append([]byte(nil), buf[:n]...), from)
-		case wire.TypeTransportData:
-			// The pump decrypts in place and updates the peer's return address
-			// from the source, so a roaming client's replies follow it.
-			s.pump.HandleInbound(append([]byte(nil), buf[:n]...), from)
-		default:
-			// Handshake responses and cookie replies are the initiator's to send,
-			// not to receive; drop them.
 		}
 	}
 }

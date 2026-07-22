@@ -9,6 +9,7 @@ import (
 	"net"
 	"sync"
 
+	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/ikev1"
 	"github.com/xen0bit/veepin/internal/ikev2/esp"
 	"github.com/xen0bit/veepin/internal/mschap"
@@ -184,27 +185,42 @@ func (c *Client) fail(err error) {
 
 // recvLoop demultiplexes the socket. On the IKE port every datagram is a bare
 // IKE message; on the NAT-T port the non-ESP marker tells IKE and ESP apart.
+// Reads are batched through a dataplane.PacketConn (the socket is unconnected —
+// it hears both server ports — so the batched reads must carry sources): one
+// recvmmsg drains up to readBatch datagrams under load and blocks like a plain
+// read when idle. As on the server side, every datagram is still copied out,
+// because L2TP control handling may alias the packet beyond this loop.
 func (c *Client) recvLoop() {
-	buf := make([]byte, 65535)
+	const readBatch = 16
+	pc := dataplane.NewPacketConn(c.conn)
+	bufs := make([][]byte, readBatch)
+	for i := range bufs {
+		bufs[i] = make([]byte, 65535)
+	}
+	sizes := make([]int, readBatch)
+	froms := make([]*net.UDPAddr, readBatch)
 	for {
-		n, from, err := c.conn.ReadFromUDP(buf)
+		n, err := pc.ReadBatch(bufs, sizes, froms)
+		for i := range n {
+			from := froms[i]
+			if !from.IP.Equal(c.cfg.ServerIP) {
+				continue
+			}
+			pkt := append([]byte(nil), bufs[i][:sizes[i]]...)
+			if from.Port == c.ikeAddr.Port {
+				c.ike.HandleInbound(pkt)
+				continue
+			}
+			if msg, ok := isIKE(pkt); ok {
+				c.ike.HandleInbound(msg)
+				continue
+			}
+			c.handleESP(pkt)
+		}
 		if err != nil {
 			c.fail(fmt.Errorf("l2tp: socket read: %w", err))
 			return
 		}
-		if !from.IP.Equal(c.cfg.ServerIP) {
-			continue
-		}
-		pkt := append([]byte(nil), buf[:n]...)
-		if from.Port == c.ikeAddr.Port {
-			c.ike.HandleInbound(pkt)
-			continue
-		}
-		if msg, ok := isIKE(pkt); ok {
-			c.ike.HandleInbound(msg)
-			continue
-		}
-		c.handleESP(pkt)
 	}
 }
 

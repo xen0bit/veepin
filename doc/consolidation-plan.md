@@ -368,6 +368,11 @@ bounded by a single core. That is a scaling ceiling rather than a defect, and
 changing it means reordering risk and lock contention for a benefit nothing here
 is currently asking for. Worth knowing; not worth doing now.
 
+*(Since written: the syscall half of that ceiling has been addressed — every
+single-socket UDP read loop now drains in `recvmmsg` batches. The goroutine
+model is unchanged; [scaling-the-data-path.md](scaling-the-data-path.md) covers
+what was measured and what remains.)*
+
 ## Explicitly out of scope
 
 - **MASQUE, and the `x/net` question generally.** Nothing above needs `x/net`;

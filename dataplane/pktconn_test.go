@@ -69,6 +69,118 @@ func TestPacketConnRepliesFromTheAddressContacted(t *testing.T) {
 	}
 }
 
+// ReadBatch must recover every datagram with its size and source intact, in
+// however many calls the platform needs (one recvmmsg on Linux, one datagram
+// per call elsewhere).
+func TestPacketConnReadBatchRoundTrip(t *testing.T) {
+	server, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("binding server: %v", err)
+	}
+	pc := NewPacketConn(server)
+	defer pc.Close()
+
+	client, err := net.DialUDP("udp4", nil, server.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatalf("dialing: %v", err)
+	}
+	defer client.Close()
+
+	want := []string{"one", "two-2", "three-33", "four", "five-5555"}
+	for _, w := range want {
+		if _, err := client.Write([]byte(w)); err != nil {
+			t.Fatalf("sending %q: %v", w, err)
+		}
+	}
+
+	bufs := make([][]byte, len(want))
+	for i := range bufs {
+		bufs[i] = make([]byte, 64)
+	}
+	sizes := make([]int, len(want))
+	froms := make([]*net.UDPAddr, len(want))
+	_ = pc.SetReadDeadline(time.Now().Add(3 * time.Second))
+	got := map[string]bool{}
+	for len(got) < len(want) {
+		n, err := pc.ReadBatch(bufs, sizes, froms)
+		if err != nil {
+			t.Fatalf("ReadBatch (have %d/%d): %v", len(got), len(want), err)
+		}
+		for i := range n {
+			got[string(bufs[i][:sizes[i]])] = true
+			if froms[i] == nil || froms[i].Port != client.LocalAddr().(*net.UDPAddr).Port {
+				t.Errorf("datagram %d: source %v, want the client's %v", i, froms[i], client.LocalAddr())
+			}
+		}
+	}
+	for _, w := range want {
+		if !got[w] {
+			t.Errorf("datagram %q not received", w)
+		}
+	}
+}
+
+// Batched reads must keep the property the wrapper exists for: a reply still
+// goes out from the address each datagram was sent to, because every message in
+// the batch carries its own IP_PKTINFO control data.
+func TestPacketConnReadBatchPreservesSource(t *testing.T) {
+	server, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
+	if err != nil {
+		t.Fatalf("binding server: %v", err)
+	}
+	pc := NewPacketConn(server)
+	defer pc.Close()
+
+	if !pc.PreservesSource() {
+		t.Skip("IP_PKTINFO unavailable on this host; the wrapper is a pass-through")
+	}
+	port := server.LocalAddr().(*net.UDPAddr).Port
+
+	// Echo every datagram of every batch back to whoever sent it.
+	go func() {
+		bufs := make([][]byte, 8)
+		for i := range bufs {
+			bufs[i] = make([]byte, 64)
+		}
+		sizes := make([]int, len(bufs))
+		froms := make([]*net.UDPAddr, len(bufs))
+		for {
+			n, err := pc.ReadBatch(bufs, sizes, froms)
+			for i := range n {
+				_, _ = pc.WriteToUDP(bufs[i][:sizes[i]], froms[i])
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	for _, target := range []string{"127.0.0.1", "127.0.0.2"} {
+		t.Run(target, func(t *testing.T) {
+			client, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+			if err != nil {
+				t.Fatalf("binding client: %v", err)
+			}
+			defer client.Close()
+
+			dst := &net.UDPAddr{IP: net.ParseIP(target), Port: port}
+			if _, err := client.WriteToUDP([]byte("ping"), dst); err != nil {
+				t.Fatalf("sending: %v", err)
+			}
+
+			_ = client.SetReadDeadline(time.Now().Add(3 * time.Second))
+			buf := make([]byte, 64)
+			_, from, err := client.ReadFromUDP(buf)
+			if err != nil {
+				t.Fatalf("no reply from %s: %v", target, err)
+			}
+			if got := from.IP.String(); got != target {
+				t.Errorf("contacted %s but the reply came from %s", target, got)
+			}
+		})
+	}
+}
+
 // The association table is a cache, and a cache on a public UDP socket has to be
 // bounded or it is the denial of service the admission gate exists to prevent.
 func TestPacketConnBoundsItsAssociationTable(t *testing.T) {

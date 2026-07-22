@@ -476,8 +476,47 @@ func (h *Host) beginHandshake(p *peer) {
 	}
 }
 
-// readUDP demultiplexes inbound datagrams.
+// batchReader is the optional batched-read surface of the socket, which
+// dataplane.PacketConn provides; the in-memory pairs tests substitute do not,
+// and read one datagram at a time.
+type batchReader interface {
+	ReadBatch(bufs [][]byte, sizes []int, froms []*net.UDPAddr) (int, error)
+}
+
+// readUDP demultiplexes inbound datagrams — in recvmmsg batches when the socket
+// supports them: one syscall drains up to readBatch datagrams under load and
+// blocks like a plain read when idle.
 func (h *Host) readUDP() {
+	br, ok := h.conn.(batchReader)
+	if !ok {
+		h.readUDPSingle()
+		return
+	}
+	const readBatch = 16
+	bufs := make([][]byte, readBatch)
+	for i := range bufs {
+		bufs[i] = make([]byte, maxPacket)
+	}
+	sizes := make([]int, readBatch)
+	froms := make([]*net.UDPAddr, readBatch)
+	for {
+		n, err := br.ReadBatch(bufs, sizes, froms)
+		for i := range n {
+			ap := froms[i].AddrPort()
+			h.handleDatagram(bufs[i][:sizes[i]], netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port()))
+		}
+		if err != nil {
+			if !h.isClosed() {
+				h.log.Printf("nebula: UDP read: %v", err)
+			}
+			return
+		}
+	}
+}
+
+// readUDPSingle is the one-datagram-per-read loop for sockets without a
+// batched-read surface.
+func (h *Host) readUDPSingle() {
 	buf := make([]byte, maxPacket)
 	for {
 		n, from, err := h.conn.ReadFromUDPAddrPort(buf)
@@ -487,10 +526,14 @@ func (h *Host) readUDP() {
 			}
 			return
 		}
-		h.handleDatagram(append([]byte(nil), buf[:n]...), from)
+		h.handleDatagram(buf[:n], from)
 	}
 }
 
+// handleDatagram dispatches one datagram. pkt is borrowed from the read loop's
+// buffer: the data path (typeMessage) consumes it — decrypt, source check, TUN
+// write — before returning, and every other type is copied out here because its
+// handling may outlive the buffer.
 func (h *Host) handleDatagram(pkt []byte, from netip.AddrPort) {
 	hdr, err := parseHeader(pkt)
 	if err != nil {
@@ -500,11 +543,14 @@ func (h *Host) handleDatagram(pkt []byte, from netip.AddrPort) {
 		return
 	}
 
+	if hdr.Type == typeMessage {
+		h.handleMessage(pkt, hdr, from)
+		return
+	}
+	pkt = append([]byte(nil), pkt...)
 	switch hdr.Type {
 	case typeHandshake:
 		h.handleHandshake(pkt, hdr, from)
-	case typeMessage:
-		h.handleMessage(pkt, hdr, from)
 	case typeLightHouse:
 		h.handleLighthouse(pkt, hdr, from)
 	case typeTest:

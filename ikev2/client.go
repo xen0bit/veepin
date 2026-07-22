@@ -210,22 +210,35 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 
 	// Inbound read loop on the shared socket. Exits when the socket is closed
 	// (on Close, via ike.Close()). A 4-zero-octet prefix marks a non-ESP datagram
-	// (NAT keepalive, or any late IKE) — skip it; everything else is ESP.
+	// (NAT keepalive, or any late IKE) — skip it; everything else is ESP. Reads
+	// are batched (dataplane.BatchConn over the connected socket): one recvmmsg
+	// drains up to readBatch datagrams under load and blocks like a plain read
+	// when idle.
 	go func() {
 		defer close(s.done)
-		buf := make([]byte, 65535)
+		const readBatch = 16
+		bc := dataplane.NewBatchConn(dataConn)
+		bufs := make([][]byte, readBatch)
+		for i := range bufs {
+			bufs[i] = make([]byte, 65535)
+		}
+		sizes := make([]int, readBatch)
 		for {
-			n, rerr := dataConn.Read(buf)
+			n, rerr := bc.ReadBatch(bufs, sizes)
+			for i := range n {
+				pkt := bufs[i][:sizes[i]]
+				if len(pkt) >= 4 && pkt[0] == 0 && pkt[1] == 0 && pkt[2] == 0 && pkt[3] == 0 {
+					continue
+				}
+				// No copy: the pump decrypts in place and writes the TUN before
+				// returning; bufs[i] is not touched again until the next
+				// ReadBatch. Connected socket: the source is implicitly the
+				// server, so no return-address update is needed (pass nil).
+				pump.HandleInbound(pkt, nil)
+			}
 			if rerr != nil {
 				return
 			}
-			pkt := buf[:n]
-			if len(pkt) >= 4 && pkt[0] == 0 && pkt[1] == 0 && pkt[2] == 0 && pkt[3] == 0 {
-				continue
-			}
-			// Connected socket: the source is implicitly the server, so no
-			// return-address update is needed (pass nil).
-			pump.HandleInbound(append([]byte(nil), pkt...), nil)
 		}
 	}()
 

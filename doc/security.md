@@ -20,11 +20,27 @@ access, or code execution in the process recovers live session keys. Defend that
 boundary at the layer that can actually hold it — process isolation, disabled
 core dumps, encrypted swap — not by hoping the language cooperated.
 
-## Per-tunnel throughput is bounded by one core
+## Throughput is bounded by one core per direction
 
-`dataplane.Pump` reads the TUN from a single goroutine. This is a scaling
-ceiling, not a correctness problem; raising it means taking on packet-reordering
-risk and lock contention that nothing here is currently asking for.
+The data path runs on two goroutines per server, one per direction, and both are
+shared across every tunnel rather than being per-client:
+
+- **Outbound:** `dataplane.Pump.Run` reads the TUN from a single goroutine,
+  encapsulating and sending every client's egress in turn.
+- **Inbound:** a single-socket server (IKEv2 on UDP/4500) reads that socket from
+  one goroutine and decapsulates every client's ingress in turn.
+
+So the ceiling is roughly one core per direction for the *whole* server, not just
+per tunnel — adding clients does not add parallelism. The crypto is not the limit:
+the `ESPCrypter` is safe to call concurrently and scales linearly with cores
+(`BenchmarkESPDecapParallel`), so it is *parallel-ready* even though the deployed
+path drives it from a single goroutine. Inbound reads are batched (`recvmmsg`,
+one syscall for up to 16 datagrams under load), which raises what that one core
+can do without changing the boundary. Lifting the ceiling therefore means adding
+readers (multi-queue TUN outbound, `SO_REUSEPORT` inbound), which brings
+packet-reordering risk and lock contention that nothing here is currently asking
+for — the approach and its costs are sketched in
+[`doc/scaling-the-data-path.md`](scaling-the-data-path.md).
 
 ## MASQUE carries every inner packet on one reliable QUIC stream
 
