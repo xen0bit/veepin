@@ -4,16 +4,18 @@
 # matrix / throughput / benchmark diff in the job log; the working tree is
 # restored afterwards.
 #
-# Usage: living-readme-preview.sh <label> <region> <results-file> [<region> <results-file> ...]
+# Usage: living-readme-preview.sh <label> <target-file> <region> <results-file> [<region> <results-file> ...]
 #
 # Environment: SHA, REF (provenance footer); GITHUB_WORKFLOW (workflow name).
 set -euo pipefail
 
 label="$1"
 shift
+file="$1"
+shift
 
 if [ "$#" -eq 0 ] || [ $(( $# % 2 )) -ne 0 ]; then
-  echo "::error::living-readme-preview: expected <label> then region/file pairs" >&2
+  echo "::error::living-readme-preview: expected <label> <target-file> then region/file pairs" >&2
   exit 2
 fi
 
@@ -23,19 +25,20 @@ while [ "$#" -gt 0 ]; do
   shift 2
   go run ./cmd/livingreadme \
     -region "$region" \
+    -readme "$file" \
     -in "$results" \
     -sha "${SHA:-}" \
     -ref "${REF:-}" \
     -workflow "${GITHUB_WORKFLOW:-ci}"
 done
 
-if git diff --quiet -- README.md; then
+if git diff --quiet -- "$file"; then
   echo "living-readme: $label already up to date on this branch."
 else
   echo "::group::living-readme: $label would change when merged to main"
-  git --no-pager diff -- README.md
+  git --no-pager diff -- "$file"
   echo "::endgroup::"
 fi
 
 # Leave the tree as we found it; the PR itself must not carry a generated region.
-git checkout -- README.md
+git checkout -- "$file"

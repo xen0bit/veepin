@@ -4,8 +4,11 @@
 # the job's tests/benchmarks have already succeeded — so a commit here means the
 # numbers it carries are real.
 #
-# Usage: living-readme-commit.sh <label> <region> <results-file> [<region> <results-file> ...]
+# Usage: living-readme-commit.sh <label> <target-file> <region> <results-file> [<region> <results-file> ...]
 #   label         short phrase for the commit message, e.g. "interop results"
+#   target-file   the Markdown file whose regions are updated and committed (e.g.
+#                 README.md for the interop tables, doc/benchmarks.md for the
+#                 benchmark table); all regions in one invocation share it
 #   region file   a livingreadme region and the job output it renders from; repeat
 #                 to refresh several regions (e.g. the interop matrix and the
 #                 interop throughput table, both from one -json stream) in one commit
@@ -15,9 +18,11 @@ set -euo pipefail
 
 label="$1"
 shift
+file="$1"
+shift
 
 if [ "$#" -eq 0 ] || [ $(( $# % 2 )) -ne 0 ]; then
-  echo "::error::living-readme-commit: expected <label> then region/file pairs" >&2
+  echo "::error::living-readme-commit: expected <label> <target-file> then region/file pairs" >&2
   exit 2
 fi
 
@@ -27,20 +32,21 @@ while [ "$#" -gt 0 ]; do
   shift 2
   go run ./cmd/livingreadme \
     -region "$region" \
+    -readme "$file" \
     -in "$results" \
     -sha "${SHA:-}" \
     -ref "${REF:-}" \
     -workflow "${GITHUB_WORKFLOW:-ci}"
 done
 
-if git diff --quiet -- README.md; then
+if git diff --quiet -- "$file"; then
   echo "living-readme: $label already up to date; nothing to commit"
   exit 0
 fi
 
 git config user.name "github-actions[bot]"
 git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-git add README.md
+git add "$file"
 # [skip ci] so the commit-back does not retrigger this workflow into a loop.
 git commit -m "docs(readme): refresh $label from CI [skip ci]"
 

@@ -113,11 +113,11 @@ jobs:
         env:
           SHA: ${{ github.sha }}
           REF: ${{ github.ref_name }}
-        run: .github/scripts/living-readme-commit.sh "interop results" interop interop.json interop-benchmark interop.json
+        run: .github/scripts/living-readme-commit.sh "interop results" README.md interop interop.json interop-benchmark interop.json
 
       - name: Preview interop matrix + throughput diff (pull request)
         if: github.event_name == 'pull_request'
         env:
           SHA: ${{ github.sha }}
           REF: ${{ github.ref_name }}
-        run: .github/scripts/living-readme-preview.sh "interop results" interop interop.json interop-benchmark interop.json
+        run: .github/scripts/living-readme-preview.sh "interop results" README.md interop interop.json interop-benchmark interop.json
