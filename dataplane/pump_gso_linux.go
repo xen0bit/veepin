@@ -15,8 +15,8 @@ package dataplane
 // runVnet is Run for a GSO device. It blocks until the TUN is closed.
 func (p *Pump) runVnet() {
 	buf := make([]byte, virtioNetHdrLen+65535)
-	var segs [][]byte              // segment scratch, reused across super-frames
-	outs := make([][]byte, 0, 64)  // encapsulated burst awaiting flush
+	var segs [][]byte             // segment scratch, reused across super-frames
+	outs := make([][]byte, 0, 64) // encapsulated burst awaiting flush
 	for {
 		n, err := p.tun.Read(buf)
 		if err != nil {

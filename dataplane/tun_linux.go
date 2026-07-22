@@ -15,15 +15,15 @@ import (
 
 // Linux TUN/TAP ioctl constants (from <linux/if_tun.h> and <linux/if.h>).
 const (
-	cIFF_TUN          = 0x0001
-	cIFF_NO_PI        = 0x1000
-	cIFF_VNET_HDR     = 0x4000
-	cTUNSETIFF        = 0x400454ca
-	cTUNSETOFFLOAD    = 0x400454d0
-	cTUNSETVNETHDRSZ  = 0x400454d8
-	cIFNAMSIZ         = 16
-	cTUN_F_CSUM       = 0x01
-	cTUN_F_TSO4       = 0x02
+	cIFF_TUN         = 0x0001
+	cIFF_NO_PI       = 0x1000
+	cIFF_VNET_HDR    = 0x4000
+	cTUNSETIFF       = 0x400454ca
+	cTUNSETOFFLOAD   = 0x400454d0
+	cTUNSETVNETHDRSZ = 0x400454d8
+	cIFNAMSIZ        = 16
+	cTUN_F_CSUM      = 0x01
+	cTUN_F_TSO4      = 0x02
 )
 
 // ifReq mirrors struct ifreq for the TUNSETIFF ioctl.

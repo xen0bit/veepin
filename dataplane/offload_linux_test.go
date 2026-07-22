@@ -20,8 +20,8 @@ func buildTCP4(t *testing.T, id uint16, seq uint32, flags byte, payload []byte) 
 	pkt[6] = 0x40 // DF
 	pkt[8] = 64   // TTL
 	pkt[9] = protoTCP
-	copy(pkt[12:16], []byte{10, 0, 0, 2})   // src
-	copy(pkt[16:20], []byte{10, 99, 0, 7})  // dst
+	copy(pkt[12:16], []byte{10, 0, 0, 2})  // src
+	copy(pkt[16:20], []byte{10, 99, 0, 7}) // dst
 	tcp := pkt[20:]
 	binary.BigEndian.PutUint16(tcp[0:2], 40000) // src port
 	binary.BigEndian.PutUint16(tcp[2:4], 443)   // dst port

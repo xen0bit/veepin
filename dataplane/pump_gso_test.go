@@ -54,9 +54,11 @@ func (f *fakeGSOTUN) writeVnet(pkt []byte) (int, error) {
 // buffer per call like every real data path (the one seal allocation).
 type prefixTunnel struct{ peer *net.UDPAddr }
 
-func (t *prefixTunnel) InboundKey() uint32       { return 1 }
-func (t *prefixTunnel) Routes() []netip.Prefix   { return []netip.Prefix{netip.MustParsePrefix("10.99.0.7/32")} }
-func (t *prefixTunnel) PeerAddr() *net.UDPAddr   { return t.peer }
+func (t *prefixTunnel) InboundKey() uint32 { return 1 }
+func (t *prefixTunnel) Routes() []netip.Prefix {
+	return []netip.Prefix{netip.MustParsePrefix("10.99.0.7/32")}
+}
+func (t *prefixTunnel) PeerAddr() *net.UDPAddr { return t.peer }
 func (t *prefixTunnel) Encapsulate(p []byte) ([]byte, error) {
 	return append([]byte{0xEE}, p...), nil
 }
