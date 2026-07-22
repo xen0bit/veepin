@@ -78,11 +78,11 @@ jobs:
         env:
           SHA: ${{ github.sha }}
           REF: ${{ github.ref_name }}
-        run: .github/scripts/living-readme-commit.sh "benchmark table" benchmark bench.txt
+        run: .github/scripts/living-readme-commit.sh "benchmark table" doc/benchmarks.md benchmark bench.txt
 
       - name: Preview benchmark table diff (pull request)
         if: github.event_name == 'pull_request'
         env:
           SHA: ${{ github.sha }}
           REF: ${{ github.ref_name }}
-        run: .github/scripts/living-readme-preview.sh "benchmark table" benchmark bench.txt
+        run: .github/scripts/living-readme-preview.sh "benchmark table" doc/benchmarks.md benchmark bench.txt
