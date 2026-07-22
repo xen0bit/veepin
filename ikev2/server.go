@@ -101,7 +101,9 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		logger.Printf("ikev2: EAP-MSCHAPv2 enabled with %d user(s) from %s", store.Count(), cfg.EAPUsers)
 	}
 
-	tun, err := dataplane.OpenTUN(cfg.TUNName)
+	// GSO: the kernel may hand the pump TCP super-frames to segment and batch
+	// (doc/scaling-the-data-path.md); falls back to a plain TUN transparently.
+	tun, err := dataplane.OpenTUNGSO(cfg.TUNName)
 	if err != nil {
 		return nil, fmt.Errorf("ikev2: open TUN: %w", err)
 	}
@@ -133,6 +135,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	// The pump sends through the server's own NAT-T socket, and the server
 	// hands it inbound ESP — hence SetDataPath after both exist.
 	pump := dataplane.NewPump(tun, srv.SendESP, dataplane.SPIDemux, logger)
+	pump.SetBatchSender(srv.SendESPBatch)
 	srv.SetDataPath(ike.NewPumpDataPath(pump))
 
 	return &Server{ike: srv, pump: pump, tun: tun, pool: pool, gateway: gateway}, nil

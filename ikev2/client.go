@@ -169,7 +169,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	}
 
 	// 2. TUN.
-	tun, err := dataplane.OpenTUN(cfg.TUNName)
+	tun, err := dataplane.OpenTUNGSO(cfg.TUNName)
 	if err != nil {
 		return fail(fmt.Errorf("ikev2: open TUN: %w", err))
 	}
@@ -204,6 +204,14 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	// The tunnel reports 0.0.0.0/0 as its route, so everything leaving the TUN is
 	// routed to the server; no separate default-route call is needed.
 	pump := dataplane.NewPump(tun, send, dataplane.SPIDemux, logger)
+	// GSO bursts flush with one sendmmsg on the connected socket. This
+	// BatchConn is the pump goroutine's own; the read loop below has another.
+	sendBC := dataplane.NewBatchConn(dataConn)
+	pump.SetBatchSender(func(pkts [][]byte, _ *net.UDPAddr) {
+		if _, werr := sendBC.WriteBatch(pkts, nil); werr != nil {
+			logger.Printf("ikev2: ESP batch send error: %v", werr)
+		}
+	})
 	pump.AddTunnel(tunnel)
 	s.pump = pump
 	go pump.Run()

@@ -218,6 +218,18 @@ func (s *Server) SendESP(esp []byte, to *net.UDPAddr) {
 	}
 }
 
+// SendESPBatch transmits a burst of encapsulated ESP datagrams for one peer —
+// one sendmmsg on the NAT-T socket. It matches the pump's batch-sender
+// signature; the GSO egress path produces the bursts.
+func (s *Server) SendESPBatch(esp [][]byte, to *net.UDPAddr) {
+	if s.tr == nil || to == nil {
+		return
+	}
+	if _, err := s.tr.conn4500.WriteBatch(esp, to); err != nil {
+		s.log.Printf("ikev2: ESP batch send error: %v", err)
+	}
+}
+
 // send transmits an IKE message to a peer on the correct port.
 func (s *Server) send(pkt []byte, remote *net.UDPAddr, on4500 bool) {
 	if err := s.tr.sendIKE(pkt, remote, on4500); err != nil {

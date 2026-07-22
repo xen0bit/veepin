@@ -53,6 +53,17 @@ func (p *PacketConn) WriteToUDP(b []byte, to *net.UDPAddr) (int, error) {
 	return p.conn.WriteToUDP(b, to)
 }
 
+// WriteBatch matches the Linux build's batched-write surface with one send
+// syscall per packet — the platforms this file covers have no sendmmsg.
+func (p *PacketConn) WriteBatch(pkts [][]byte, to *net.UDPAddr) (int, error) {
+	for i, pkt := range pkts {
+		if _, err := p.conn.WriteToUDP(pkt, to); err != nil {
+			return i, err
+		}
+	}
+	return len(pkts), nil
+}
+
 // ReadFromUDPAddrPort and WriteToUDPAddrPort are the netip forms, matching the
 // Linux build's surface so a protocol that speaks netip.AddrPort compiles the
 // same either way. Here they go straight to the socket.

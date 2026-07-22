@@ -16,6 +16,12 @@ func OpenTUN(name string) (*TUN, error) {
 	return nil, fmt.Errorf("dataplane: TUN device not supported on %s (Linux only)", runtime.GOOS)
 }
 
+// OpenTUNGSO is unsupported off Linux, like OpenTUN.
+func OpenTUNGSO(name string) (*TUN, error) { return OpenTUN(name) }
+
+// GSO is always false off Linux.
+func (t *TUN) GSO() bool { return false }
+
 // Name is unsupported off Linux.
 func (t *TUN) Name() string { return "" }
 

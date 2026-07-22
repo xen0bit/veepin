@@ -132,7 +132,9 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		mtu = defaultMTU
 	}
 
-	tun, err := dataplane.OpenTUN(cfg.TUNName)
+	// GSO: the kernel may hand the pump TCP super-frames to segment and batch
+	// (doc/scaling-the-data-path.md); falls back to a plain TUN transparently.
+	tun, err := dataplane.OpenTUNGSO(cfg.TUNName)
 	if err != nil {
 		return nil, fmt.Errorf("openvpn: open TUN: %w", err)
 	}
@@ -182,6 +184,15 @@ func (s *Server) ListenAndServe() error {
 		}
 	}
 	s.pump = dataplane.NewPump(s.tun, send, serverDataDemux, s.logger)
+	// GSO bursts flush with one sendmmsg, source-pinned like every send.
+	s.pump.SetBatchSender(func(pkts [][]byte, to *net.UDPAddr) {
+		if to == nil {
+			return
+		}
+		if _, werr := s.conn.WriteBatch(pkts, to); werr != nil {
+			s.logger.Printf("openvpn: batch send to %s: %v", to, werr)
+		}
+	})
 	s.pump.SetInnerMTU(s.mtu)
 	go s.pump.Run()
 

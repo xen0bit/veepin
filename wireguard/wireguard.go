@@ -259,7 +259,9 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 		return nil, client.Result{}, fmt.Errorf("wireguard: transport keys: %w", err)
 	}
 
-	tun, err := dataplane.OpenTUN(r.tunName)
+	// GSO: the kernel may hand the pump TCP super-frames to segment and batch
+	// (doc/scaling-the-data-path.md); falls back to a plain TUN transparently.
+	tun, err := dataplane.OpenTUNGSO(r.tunName)
 	if err != nil {
 		conn.Close()
 		return nil, client.Result{}, fmt.Errorf("wireguard: open TUN: %w", err)
@@ -288,6 +290,14 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	// Outbound TUN traffic is routed to the peer by longest-prefix match over its
 	// AllowedIPs; inbound transport packets demux on our receiver index.
 	pump := dataplane.NewPump(tun, send, wire.Demux, logger)
+	// GSO bursts flush with one sendmmsg on the connected socket. This
+	// BatchConn is the pump goroutine's own; readLoop has another.
+	sendBC := dataplane.NewBatchConn(conn)
+	pump.SetBatchSender(func(pkts [][]byte, _ *net.UDPAddr) {
+		if _, werr := sendBC.WriteBatch(pkts, nil); werr != nil {
+			logger.Printf("wireguard: batch send error: %v", werr)
+		}
+	})
 	pump.SetInnerMTU(r.mtu)
 	pump.AddTunnel(tunnel)
 	s.pump = pump

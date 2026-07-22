@@ -1,12 +1,15 @@
 # Scaling the data path past one core per direction
 
-Status: **design note; Option 1's UDP inbound half is built.** The batching
-primitive (`dataplane.BatchConn`) is implemented and measured,
-`dataplane.PacketConn.ReadBatch` carries it into the shared socket wrapper, and
-every single-socket UDP read loop — server and client, across IKEv2, WireGuard,
-OpenVPN, Nebula, and L2TP — reads through one of the two. The TUN half (and with
-it send-side batching) and everything under Option 2 are not built. Written
-while sharpening the
+Status: **design note; Option 1 is built.** The UDP batching primitive
+(`dataplane.BatchConn`) is implemented and measured,
+`dataplane.PacketConn.ReadBatch`/`WriteBatch` carry it into the shared socket
+wrapper, every single-socket UDP read loop — server and client, across IKEv2,
+WireGuard, OpenVPN, Nebula, and L2TP — reads through one of the two, and the
+TUN half is in: `OpenTUNGSO` negotiates the virtio-net header path so the
+kernel hands the pump TCP super-frames, which segment in userspace
+(offload_linux.go) and egress as one batched send (IKEv2, WireGuard, OpenVPN —
+server and client). Not built: GRO (write-side TUN coalescing), TSO6/USO, and
+everything under Option 2. Written while sharpening the
 [security boundary](security.md#throughput-is-bounded-by-one-core-per-direction)
 that states the current ceiling. It captures which protocols the ceiling actually
 binds, the two levers that lift it (in the order worth trying them), and the
@@ -71,7 +74,12 @@ throughput, not from more goroutines.
   `Sender`. `dataplane.BatchConn` is this primitive, measured below.
 - **TUN:** the virtio-net header path (`IFF_VNET_HDR`) so the kernel hands up /
   accepts back GSO super-frames — one read/write for many segments — with
-  segmentation offloaded.
+  segmentation offloaded. `dataplane.OpenTUNGSO` negotiates it
+  (`TUN_F_CSUM|TUN_F_TSO4`, falling back to a plain TUN on kernels that
+  refuse), and offload_linux.go is the userspace TSO: header replication,
+  per-segment length/ID/sequence fixups, and full checksum computation —
+  `TUN_F_CSUM` also hands us the NIC partial-checksum contract to finish,
+  GSO frame or not.
 
 The two halves are not symmetric, and the asymmetry decides what can be built
 when. **Inbound UDP batching stands alone**: `recvmmsg` drains whatever the
@@ -96,11 +104,31 @@ own buffer-retention audit, and the audits split the loops in two:
   parses control AVPs whose handling may alias the packet beyond the loop, so
   only its syscalls are batched, not the buffer ownership.
 
-**Outbound batching does not stand alone**: `Pump.Run` gets one packet per TUN
-read, so there is no natural accumulation point — holding a packet hoping a
-second arrives adds latency on exactly the interactive traffic that would notice.
-Send-side `sendmmsg` therefore waits for the TUN GSO half, whose multi-segment
-reads create the batches to flush.
+**Outbound batching needed the TUN half first**: a plain TUN read yields one
+packet, so there was no accumulation point — holding a packet hoping a second
+arrives adds latency on exactly the interactive traffic that would notice. A
+GSO super-frame *is* the accumulation point: it segments into a burst that all
+belongs to one tunnel (one route lookup for the lot), and
+`Pump.SetBatchSender` flushes the encapsulated burst in one `sendmmsg` — via
+`PacketConn.WriteBatch` on the servers (source-pinned per message) and
+`BatchConn` on the connected client sockets. One TUN read becomes one UDP
+syscall, instead of N reads and N sends. The kernel produces super-frames only
+when the sending application outpaces the wire — exactly when batching pays —
+and idle or interactive traffic arrives as ordinary packets on the same loop,
+so nothing waits on a timer.
+
+What the TUN half is *not*, yet: **GRO** — the write side still puts one
+decapsulated packet per TUN write (vnet-framed with a zero header). Coalescing
+inbound TCP back into super-frames the kernel accepts in one write is the
+symmetric other half, a flow table away; it is the remaining piece of Option 1.
+TSO6 and UDP GSO stay un-negotiated (the tree tunnels IPv4, and no data path
+here carries bulk UDP inner flows). Protocols with their own TUN loops (Nebula,
+L2TP, and the toy on purpose) keep plain TUNs — a GSO TUN may only be driven
+by the pump's vnet loop. There is no loopback micro-benchmark for this half —
+a real TUN needs CAP_NET_ADMIN — so its win shows where it should: the living
+throughput table, measured over real tunnels in CI. The segmentation itself is
+unit-tested (checksums verified the way a receiver would, allocation-free in
+steady state).
 
 ### Measured: what the UDP half alone buys
 
@@ -131,14 +159,16 @@ How to read that honestly:
   more than paid for by the dropped per-packet data copy, and hand-rolling
   `recvmmsg` stays the escape hatch if a profile ever blames it.
 
-Egress lives entirely in `Pump`, so when the TUN GSO half lands, send-side
-batching there will be **inherited by every pump-using protocol** with no
-protocol code change: `Run` reads a multi-segment batch, `routeOutbound` handles
-each, `send` flushes a batch. (Inbound batching did not need the shared UDP
-source described below after all — `PacketConn.ReadBatch` wrote the mechanism
-once and each read loop adopted it in place.) The `Tunnel` interface is
-unchanged — `Encapsulate`/`Decapsulate` are still called once per inner packet;
-only the transport syscalls are amortised.
+Egress lives entirely in `Pump`, so the GSO path is **inherited by every
+pump-using protocol** for the price of two lines in its facade: open the TUN
+with `OpenTUNGSO`, and hand `SetBatchSender` a batch-capable send (IKEv2,
+WireGuard, and OpenVPN did, server and client). (Inbound batching did not need
+the shared UDP source described below after all — `PacketConn.ReadBatch` wrote
+the mechanism once and each read loop adopted it in place.) The `Tunnel`
+interface is unchanged — `Encapsulate`/`Decapsulate` are still called once per
+inner packet, and `Encapsulate`'s one-seal-allocation contract is what lets the
+pump hold a whole burst's outputs before flushing; only the TUN and transport
+syscalls are amortised.
 
 Batching alone may lift the ceiling far enough that Option 2 is never needed.
 
@@ -213,10 +243,10 @@ slowdowns:
 
 1. **Profile a saturated tunnel.** Confirm CPU-bound vs syscall-bound; it decides
    whether Option 2 is even worth starting.
-2. **Option 1 — batching.** Ingress: **done** — `PacketConn.ReadBatch` /
-   `BatchConn` in every single-socket read loop, measured above. Egress rides on
-   the TUN GSO half, still open; once TUN reads yield batches, `Pump` flushes
-   them and every pump-using protocol inherits it.
+2. **Option 1 — batching: done.** Ingress: `PacketConn.ReadBatch` /
+   `BatchConn` in every single-socket read loop, measured above. Egress:
+   `OpenTUNGSO` + userspace TSO + `SetBatchSender` flush in the pump
+   protocols. Remaining inside Option 1: GRO on the TUN write side.
 3. **Lock-free pump map** (hazard 3). Pure win, testable in isolation, de-risks
    Option 2.
 4. **Option 2 — per-tunnel-affinity workers**: shared `SO_REUSEPORT` source

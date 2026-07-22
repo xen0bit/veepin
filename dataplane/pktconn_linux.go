@@ -66,11 +66,13 @@ type PacketConn struct {
 	lastGC time.Time
 	now    func() time.Time
 
-	// Batched-read state, lazily built on first ReadBatch and reused across
-	// calls. Owned by the single reading goroutine, like the read side of the
-	// socket itself.
-	batch     *xipv4.PacketConn
-	batchMsgs []xipv4.Message
+	// Batched I/O state. batch is built eagerly in NewPacketConn so the read
+	// and write sides never race a lazy init; the message scratch is per side —
+	// batchMsgs owned by the single reading goroutine, wbatchMsgs by the single
+	// sending goroutine (the pump), mirroring how the socket is already used.
+	batch      *xipv4.PacketConn
+	batchMsgs  []xipv4.Message
+	wbatchMsgs []xipv4.Message
 }
 
 type localEntry struct {
@@ -88,6 +90,7 @@ func NewPacketConn(conn *net.UDPConn) *PacketConn {
 		conn:   conn,
 		locals: map[netip.AddrPort]localEntry{},
 		now:    time.Now,
+		batch:  xipv4.NewPacketConn(conn),
 	}
 	p.lastGC = p.now()
 
@@ -141,9 +144,6 @@ func (p *PacketConn) ReadBatch(bufs [][]byte, sizes []int, froms []*net.UDPAddr)
 	if len(bufs) == 0 {
 		return 0, nil
 	}
-	if p.batch == nil {
-		p.batch = xipv4.NewPacketConn(p.conn)
-	}
 	if cap(p.batchMsgs) < len(bufs) {
 		msgs := make([]xipv4.Message, len(bufs))
 		copy(msgs, p.batchMsgs)
@@ -171,6 +171,49 @@ func (p *PacketConn) ReadBatch(bufs [][]byte, sizes []int, froms []*net.UDPAddr)
 		}
 	}
 	return n, err
+}
+
+// WriteBatch sends every packet in pkts to to — one sendmmsg for the lot —
+// pinning the reply source exactly as WriteToUDP does when the peer's local
+// address is known (one lookup for the batch; each message carries the same
+// IP_PKTINFO control data). It returns the number of packets the kernel
+// accepted.
+//
+// Like the pump's send path generally, WriteBatch must not be called
+// concurrently with itself — the scratch state assumes the one sending
+// goroutine. It is safe alongside the read side and alongside WriteToUDP from
+// other goroutines.
+func (p *PacketConn) WriteBatch(pkts [][]byte, to *net.UDPAddr) (int, error) {
+	if len(pkts) == 0 {
+		return 0, nil
+	}
+	var oob []byte
+	if p.pktInfo && to != nil {
+		if local, ok := p.lookup(to); ok && local.Is4() {
+			info := unix.Inet4Pktinfo{Spec_dst: local.As4()}
+			oob = unix.PktInfo4(&info)
+		}
+	}
+	if cap(p.wbatchMsgs) < len(pkts) {
+		msgs := make([]xipv4.Message, len(pkts))
+		copy(msgs, p.wbatchMsgs)
+		p.wbatchMsgs = msgs
+	}
+	msgs := p.wbatchMsgs[:len(pkts)]
+	for i, pkt := range pkts {
+		msgs[i].Buffers = append(msgs[i].Buffers[:0], pkt)
+		msgs[i].Addr = to
+		msgs[i].OOB = oob
+	}
+	sent := 0
+	for sent < len(pkts) {
+		n, err := p.batch.WriteBatch(msgs[sent:], 0)
+		sent += n
+		if err != nil {
+			return sent, err
+		}
+	}
+	return sent, nil
 }
 
 // WriteToUDP sends a datagram, from the address this peer last reached us on

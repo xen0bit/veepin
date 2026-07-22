@@ -224,7 +224,9 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("wireguard: %w", err)
 	}
 
-	tun, err := dataplane.OpenTUN(cfg.TUNName)
+	// GSO: the kernel may hand the pump TCP super-frames to segment and batch
+	// (doc/scaling-the-data-path.md); falls back to a plain TUN transparently.
+	tun, err := dataplane.OpenTUNGSO(cfg.TUNName)
 	if err != nil {
 		return nil, fmt.Errorf("wireguard: open TUN: %w", err)
 	}
@@ -307,6 +309,15 @@ func (s *Server) ListenAndServe() error {
 		}
 	}
 	s.pump = dataplane.NewPump(s.tun, send, wire.Demux, s.logger)
+	// GSO bursts flush with one sendmmsg, source-pinned like every send.
+	s.pump.SetBatchSender(func(pkts [][]byte, to *net.UDPAddr) {
+		if to == nil {
+			return
+		}
+		if _, werr := s.conn.WriteBatch(pkts, to); werr != nil {
+			s.logger.Printf("wireguard: batch send to %s: %v", to, werr)
+		}
+	})
 	// Oversized inner packets are answered with ICMP rather than dropped, so a
 	// client learns the tunnel MTU instead of black-holing.
 	s.pump.SetInnerMTU(s.mtu)

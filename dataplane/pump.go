@@ -70,6 +70,18 @@ type Pump struct {
 	send  Sender
 	demux Demux
 
+	// batchSend, when set (SetBatchSender), flushes a burst of encapsulated
+	// packets bound for one peer in as few syscalls as the transport allows.
+	// Only the GSO egress path produces bursts; without it every packet goes
+	// through send one at a time.
+	batchSend func(pkts [][]byte, to *net.UDPAddr)
+
+	// vnet is true when tun is a GSO device (gsoTUN below): reads carry a
+	// virtio-net header and may be super-frames for Run to segment, and every
+	// write must be vnet-framed through vnetWrite.
+	vnet      bool
+	vnetWrite func(pkt []byte) (int, error)
+
 	mu     sync.RWMutex
 	byKey  map[uint32]Tunnel // inbound demux
 	routes routeTable        // outbound, by longest-prefix match
@@ -80,6 +92,15 @@ type Pump struct {
 	closing bool
 }
 
+// gsoTUN is the optional GSO surface of the TUN device. *TUN provides it on
+// Linux; the in-memory devices tests substitute may, to exercise the vnet
+// path without a kernel.
+type gsoTUN interface {
+	tunIO
+	GSO() bool
+	writeVnet(pkt []byte) (int, error)
+}
+
 // NewPump creates a data-path pump over tun. send transmits encapsulated
 // packets to peers; demux extracts the tunnel key from inbound packets, and a
 // nil demux defaults to SPIDemux (ESP).
@@ -87,13 +108,36 @@ func NewPump(tun tunIO, send Sender, demux Demux, logger *log.Logger) *Pump {
 	if demux == nil {
 		demux = SPIDemux
 	}
-	return &Pump{
+	p := &Pump{
 		tun:   tun,
 		log:   logger,
 		send:  send,
 		demux: demux,
 		byKey: make(map[uint32]Tunnel),
 	}
+	if g, ok := tun.(gsoTUN); ok && g.GSO() {
+		p.vnet = true
+		p.vnetWrite = g.writeVnet
+	}
+	return p
+}
+
+// SetBatchSender registers a transport that can flush a burst of encapsulated
+// packets bound for one peer in fewer syscalls (sendmmsg) than sending them
+// one at a time. Bursts only arise on the GSO egress path — a TUN super-frame
+// segments into many packets for the same tunnel — so a protocol without a
+// batch-capable transport simply never calls this and loses nothing else.
+func (p *Pump) SetBatchSender(f func(pkts [][]byte, to *net.UDPAddr)) {
+	p.batchSend = f
+}
+
+// writeTUN writes one inner IP packet to the TUN, vnet-framed when the device
+// requires it.
+func (p *Pump) writeTUN(pkt []byte) (int, error) {
+	if p.vnet {
+		return p.vnetWrite(pkt)
+	}
+	return p.tun.Write(pkt)
 }
 
 // AddTunnel registers an established tunnel's data path: its inbound key for
@@ -180,7 +224,7 @@ func (p *Pump) HandleInbound(pkt []byte, from *net.UDPAddr) {
 		// nothing to deliver to the TUN.
 		return
 	}
-	if _, err := p.tun.Write(inner); err != nil {
+	if _, err := p.writeTUN(inner); err != nil {
 		if p.log != nil {
 			p.log.Printf("dataplane: TUN write failed: %v", err)
 		}
@@ -189,8 +233,13 @@ func (p *Pump) HandleInbound(pkt []byte, from *net.UDPAddr) {
 
 // Run reads packets from the TUN device, routes each to the tunnel whose client
 // owns the destination address, encapsulates, and sends. It blocks until the
-// TUN device is closed.
+// TUN device is closed. On a GSO device (OpenTUNGSO) it runs the vnet-aware
+// loop instead, which segments TCP super-frames and flushes them in batches.
 func (p *Pump) Run() {
+	if p.vnet {
+		p.runVnet()
+		return
+	}
 	buf := make([]byte, 65535)
 	for {
 		n, err := p.tun.Read(buf)
@@ -234,7 +283,7 @@ func (p *Pump) routeOutbound(pkt []byte) {
 	// small packets work, and anything large hangs forever with no diagnostic.
 	if mtu := p.innerMTU(); mtu > 0 && NeedsFragmentation(pkt, mtu) {
 		if reply := FragNeeded(pkt, mtu); reply != nil {
-			if _, err := p.tun.Write(reply); err != nil && p.log != nil {
+			if _, err := p.writeTUN(reply); err != nil && p.log != nil {
 				p.log.Printf("dataplane: writing ICMP frag-needed: %v", err)
 			}
 		}
