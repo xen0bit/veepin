@@ -1,6 +1,7 @@
 # Scaling the data path past one core per direction
 
-Status: **design note, not implemented.** Written while sharpening the
+Status: **design note.** The syscall-batching primitive (`dataplane.BatchConn`)
+is implemented and measured; nothing else here is built. Written while sharpening the
 [security boundary](security.md#throughput-is-bounded-by-one-core-per-direction)
 that states the current ceiling. It captures which protocols the ceiling actually
 binds, the two levers that lift it (in the order worth trying them), and the
@@ -54,16 +55,46 @@ reordering risk.
 ## Option 1 (try first): batch the syscalls
 
 Cut the number of read/write/send calls per packet instead of adding goroutines.
-This is the higher-leverage lever for a userspace VPN — it multiplies throughput
-*on a single core*, carries **no packet-reordering risk**, and needs no change to
-any protocol's per-SA state. It is also where the reference `wireguard-go` got its
+This is the first lever to pull for a userspace VPN — it works *on a single
+core*, carries **no packet-reordering risk**, and needs no change to any
+protocol's per-SA state. It is also where the reference `wireguard-go` got its
 throughput, not from more goroutines.
 
-- **UDP:** `recvmmsg`/`sendmmsg` (via `x/sys/unix`) to move a batch of datagrams
-  per syscall on both the inbound socket and the `Sender`.
+- **UDP:** `recvmmsg`/`sendmmsg`, wrapped by `golang.org/x/net/ipv4`'s
+  `PacketConn.ReadBatch`/`WriteBatch` (`x/sys/unix` has no mmsg wrappers), to
+  move a batch of datagrams per syscall on both the inbound socket and the
+  `Sender`. `dataplane.BatchConn` is this primitive, measured below.
 - **TUN:** the virtio-net header path (`IFF_VNET_HDR`) so the kernel hands up /
   accepts back GSO super-frames — one read/write for many segments — with
   segmentation offloaded.
+
+### Measured: what the UDP half alone buys
+
+`dataplane/batchconn_test.go` benchmarks mmsg batching in isolation — 1400-byte
+datagrams over loopback, `strace`-confirmed one `sendmmsg`/`recvmmsg` per batch:
+
+| direction | one datagram per syscall | batched | gain |
+|-----------|--------------------------|---------|------|
+| send | ~4.8 µs/pkt (~290 MB/s) | ~3.8 µs/pkt (~365 MB/s), saturates at batch-8 | ~20–25% |
+| receive | ~0.9 µs/pkt (~1.6 GB/s) | ~0.67 µs/pkt (~2.1 GB/s), saturates near batch-64 | ~15–33% |
+
+How to read that honestly:
+
+- **The send gain is real but loopback under-sells it.** Batching removes a
+  fixed ~1 µs/packet of syscall entry; the residual ~3.8 µs is loopback's
+  *inline per-datagram delivery*, cost that on a real NIC lives in the TX ring
+  and softirq, not in the send call. Treat the measured number as the floor.
+- **Batched receive dequeues at ~2.1 GB/s — parity with the single-core AES-GCM
+  rate** ([benchmarks](benchmarks.md)). After batching, the inbound syscall and
+  the cipher cost about the same, which is as good as the UDP half gets:
+  "multiplies throughput" would be too strong for mmsg alone. The multiplier,
+  if there is one, is the TUN GSO half — unmeasured, because it needs a real
+  TUN device.
+- **One wiring caveat:** `x/net/ipv4.ReadBatch` allocates each datagram's
+  source address (2 allocs, ~52 B per packet), where the tree's single-read
+  paths use `ReadFromUDPAddrPort` and allocate nothing. `WriteBatch` is
+  allocation-free. Inbound wiring either accepts that cost or hand-rolls
+  `recvmmsg` — a call to make from a profile, not in advance.
 
 Because egress lives entirely in `Pump`, batching there is **inherited by every
 pump-using protocol** with no protocol code change: `Run` reads a batch,
