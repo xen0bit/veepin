@@ -532,9 +532,17 @@ each a localized extension point, not a structural rework:
   reassembly (RFC 7383 — it negotiates and reassembles inbound SKF fragments but
   never fragments its own, always-small output) and the RFC 7296 §2.6 cookie
   exchange; every server bounds unauthenticated work through `dataplane.Gate`.
-- **Client liveness is basic.** NAT keepalives hold the binding, but the client
-  does not yet run DPD or rekey the IKE/Child SA before expiry, so very
-  long-lived sessions eventually reconnect.
+- **Client liveness is unified; SA rekey is the remaining piece.** A
+  cross-protocol monitor (`client.Prober`, applied automatically by
+  `client.Dial`) detects a dead peer and tears the tunnel down for a clean
+  re-dial. IKEv2 runs RFC 7296 dead-peer detection (an empty `INFORMATIONAL` the
+  server must answer); WireGuard probes with a handshake, which doubles as a
+  rekey; pump-based protocols expose an authenticated-idle signal
+  (`dataplane.Pump.IdleFor`), which TOY uses. Reliable-transport protocols
+  (SSTP, SSH, AnyConnect, MASQUE, Fortinet) surface a dead peer through the
+  transport's own read failure, so they need no probe. What remains is proactive
+  **SA rekey before expiry** for IKEv2's IKE/Child SAs, so a very long-lived
+  IKEv2 session still eventually reconnects rather than rekeying in place.
 - **IPv4 tunneling; single IKE SA per Child.** IPv6 inner traffic is not
   forwarded; sufficient for road-warrior clients, not a site-to-site multi-SA
   gateway.
