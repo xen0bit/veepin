@@ -71,7 +71,7 @@ nfpms:
     ids: [veepin]
     vendor: veepin
     homepage: https://github.com/xen0bit/veepin
-    maintainer: Remy <remaclematt@gmail.com>
+    maintainer: Remy <21974988+xen0bit@users.noreply.github.com>
     description: |-
       Pure-Go userspace VPN — server (responder) and client (initiator).
       `veepin connect` / `veepin serve` speak IKEv2: the full RFC 7296 handshake

@@ -10,7 +10,7 @@ platform: linux
 version: @VERSION@
 section: net
 priority: optional
-maintainer: Remy <remaclematt@gmail.com>
+maintainer: Remy <21974988+xen0bit@users.noreply.github.com>
 description: |
   NetworkManager VPN plugin for the veepin IKEv2 VPN.
   Adds an "IKEv2 (veepin)" VPN type to NetworkManager: a D-Bus service that
