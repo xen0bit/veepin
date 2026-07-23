@@ -120,6 +120,14 @@ type IKESA struct {
 	// NAT detection results from IKE_SA_INIT.
 	NAT natInfo
 
+	// MobikeEnabled is true once MOBIKE (RFC 4555) is negotiated in IKE_AUTH:
+	// the peer may relocate this SA's addresses with an UPDATE_SA_ADDRESSES
+	// INFORMATIONAL. peerMobike records that the peer advertised support,
+	// captured while processing IKE_AUTH so the response builder (which runs in
+	// finishIKEAuth for both the PSK and EAP flows) can echo the notify.
+	MobikeEnabled bool
+	peerMobike    bool
+
 	// ClientIP is the internal address assigned to this peer via CP.
 	ClientIP net.IP
 

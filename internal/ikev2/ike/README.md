@@ -11,6 +11,7 @@ auth), and produces [`esp`](../esp) SAs for the data path.
 - [RFC 7296](https://www.rfc-editor.org/rfc/rfc7296) — IKEv2 (exchanges, key derivation §2.14/§2.17, AUTH §2.15).
 - [RFC 3947](https://www.rfc-editor.org/rfc/rfc3947) / [RFC 3948](https://www.rfc-editor.org/rfc/rfc3948) — NAT-T detection and UDP-encapsulated ESP.
 - [RFC 7296 §3.15](https://www.rfc-editor.org/rfc/rfc7296#section-3.15) — Configuration payload (address assignment).
+- [RFC 4555](https://www.rfc-editor.org/rfc/rfc4555) — MOBIKE (address agility for a roaming peer).
 
 ## Handshake and SA lifecycle
 
@@ -43,6 +44,7 @@ stateDiagram-v2
     [*] --> INITIAL
     INITIAL --> SA_INIT_DONE: IKE_SA_INIT exchanged
     SA_INIT_DONE --> ESTABLISHED: IKE_AUTH ok, Child SA up
+    ESTABLISHED --> ESTABLISHED: MOBIKE UPDATE_SA_ADDRESSES (peer roamed)
     ESTABLISHED --> DELETING: INFORMATIONAL Delete
     DELETING --> CLOSED
     ESTABLISHED --> CLOSED: fatal error / peer gone
@@ -78,3 +80,15 @@ stateDiagram-v2
 - **`BuildESPSA` builds the data-path `ESPCrypter` once per SA** — never per
   packet. Reuse the returned `*esp.SA`; rebuilding it would reintroduce the
   per-packet allocations the data-plane benchmarks were tuned to remove.
+- **MOBIKE (RFC 4555) is negotiated with `MOBIKE_SUPPORTED` in `IKE_AUTH`.** A
+  roaming peer then sends a protected `UPDATE_SA_ADDRESSES` INFORMATIONAL from
+  its new address; the responder relocates the SA to the packet's *observed*
+  source (never a claimed one — a NAT may have rewritten it), re-runs NAT
+  detection, and repoints every Child SA's ESP return address (`PumpDataPath`
+  gets an immediate `UpdatePeerAddr`, ahead of the first inbound ESP from the
+  new address). `COOKIE2` return-routability probes are echoed verbatim
+  (§3.7). The initiator drives its own move with `Client.Roam`, which rebinds
+  the NAT-T socket and runs the exchange; `Client.MobikeEnabled` reports
+  whether the server agreed. This mirrors kernel/strongSwan behaviour, so a
+  native macOS/Windows IKEv2 client keeps its tunnel across a network change
+  rather than re-handshaking.

@@ -220,7 +220,15 @@ const (
 	ESPTFCPaddingNotSupported NotifyType = 16394
 	NonFirstFragmentsAlso     NotifyType = 16395
 	MobikeSupported           NotifyType = 16396
-	SignatureHashAlgorithms   NotifyType = 16431
+	// MOBIKE address agility (RFC 4555).
+	AdditionalIP4Address  NotifyType = 16397
+	AdditionalIP6Address  NotifyType = 16398
+	NoAdditionalAddresses NotifyType = 16399
+	UpdateSAAddresses     NotifyType = 16400
+	Cookie2               NotifyType = 16401
+	NoNATsAllowed         NotifyType = 16402
+
+	SignatureHashAlgorithms NotifyType = 16431
 )
 
 // Traffic-selector types (RFC 7296 section 3.13.1).

@@ -114,6 +114,19 @@ On Windows and macOS/iOS this is the "Username and password" user-authentication
 option on an IKEv2 profile; strongSwan uses `leftauth=psk` / `rightauth=eap-mschapv2`
 with `eap_identity` and a password secret.
 
+## Roaming (MOBIKE)
+
+The server supports MOBIKE (RFC 4555), so a client that changes network — phone
+leaving Wi-Fi for cellular, laptop switching APs — keeps its tunnel instead of
+re-handshaking. It is negotiated automatically (a `MOBIKE_SUPPORTED` notify in
+`IKE_AUTH`) and needs no configuration; native macOS/iOS and Windows IKEv2
+clients and strongSwan (`mobike=yes`, their default) all use it. When the client
+moves, it sends a protected `UPDATE_SA_ADDRESSES` from its new address and the
+server relocates the SA — including the ESP return path — to the address it
+actually observes, after echoing the client's `COOKIE2` return-routability
+probe. The veepin client initiates the same move through `Client.Roam` when its
+local address changes.
+
 ## Smoke-testing without an OS client
 
 `veepin probe` is a minimal built-in initiator for verifying a running server end

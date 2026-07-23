@@ -91,6 +91,11 @@ func (s *Server) handleInformational(sa *IKESA, hdr payload.Header, inners []pay
 	}
 
 	b := payload.NewBuilder()
+
+	// MOBIKE (RFC 4555): UPDATE_SA_ADDRESSES relocates the SA, COOKIE2 is a
+	// return-routability probe. Both append their response notifies to b.
+	s.handleMobikeInformational(sa, inners, remote, b)
+
 	deleteIKE := false
 	var deletedChildSPIs [][]byte
 

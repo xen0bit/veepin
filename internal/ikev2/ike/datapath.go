@@ -126,6 +126,21 @@ func (d *PumpDataPath) RemoveChild(sa *IKESA, child *ChildSA) {
 	}
 }
 
+// UpdatePeerAddr repoints every tunnel belonging to sa at addr, so ESP return
+// traffic follows a MOBIKE UPDATE_SA_ADDRESSES at once instead of waiting for
+// the first inbound ESP datagram from the new address. The caller holds sa.mu,
+// which guards sa.Children; d.mu guards byIn — the same lock order AddChild
+// takes (sa.mu already held, then d.mu).
+func (d *PumpDataPath) UpdatePeerAddr(sa *IKESA, addr *net.UDPAddr) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for inSPI := range sa.Children {
+		if t := d.byIn[inSPI]; t != nil {
+			t.SetPeerAddr(addr)
+		}
+	}
+}
+
 // HandleESP forwards an inbound ESP datagram (with its UDP source address, so
 // the return path can track the peer's real ESP socket) to the pump.
 func (d *PumpDataPath) HandleESP(espPkt []byte, from *net.UDPAddr) {

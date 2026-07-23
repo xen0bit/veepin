@@ -84,6 +84,10 @@ type Client struct {
 	sendMsgID  uint32
 	on4500     bool // true once floated to NAT-T port 4500 (IKE needs the marker)
 
+	// mobike is true once the server confirmed MOBIKE_SUPPORTED in IKE_AUTH,
+	// which is the precondition for Roam.
+	mobike bool
+
 	result *ClientResult
 
 	serverIDBody []byte // captured IDr body (for EAP final AUTH verification)
@@ -316,6 +320,9 @@ func (c *Client) authPSK() error {
 	if err != nil {
 		return err
 	}
+	// IKE_AUTH consumed message ID 1; the next initiator request (e.g. a MOBIKE
+	// UPDATE_SA_ADDRESSES) is 2.
+	c.sendMsgID = 2
 	return c.finishAuth(inners, childOutSPI, c.cfg.PSK, false)
 }
 
@@ -405,6 +412,8 @@ func (c *Client) authEAP() error {
 	if err != nil {
 		return err
 	}
+	// The EAP flow consumed message IDs 1..4; the next initiator request is 5.
+	c.sendMsgID = 5
 	return c.finishAuth(inners, childOutSPI, msk, true)
 }
 
@@ -438,6 +447,9 @@ func (c *Client) buildAuthInner(idBody []byte, auth *payload.AuthPayload) (*payl
 	b.Add(payload.TypeSA, false, payload.MarshalSA(payload.SAPayload{Proposals: []payload.Proposal{DefaultESPProposal(u32BE(childOutSPI))}}))
 	b.Add(payload.TypeTSi, false, payload.MarshalTS(tsAll))
 	b.Add(payload.TypeTSr, false, payload.MarshalTS(tsAll))
+	// Advertise MOBIKE (RFC 4555) so the server permits us to relocate this SA's
+	// addresses later without a full re-handshake.
+	addMobikeSupported(b)
 	return b, childOutSPI
 }
 
@@ -491,6 +503,9 @@ func (c *Client) finishAuth(inners []payload.RawPayload, childOutSPI uint32, aut
 	if err := c.verifyServerAuth(inners, authKey, eapMSK); err != nil {
 		return err
 	}
+
+	// MOBIKE is enabled only if the server confirmed it (RFC 4555 3.1).
+	c.mobike = findMobikeSupported(inners)
 
 	res := &ClientResult{OutboundSPI: 0, InboundSPI: childOutSPI}
 
@@ -554,6 +569,127 @@ func (c *Client) finishAuth(inners []payload.RawPayload, childOutSPI uint32, aut
 	res.UDPEncap = true
 
 	c.result = res
+	return nil
+}
+
+// --- MOBIKE (RFC 4555) ---
+
+// MobikeEnabled reports whether MOBIKE was negotiated, i.e. whether Roam may be
+// called. It is valid only after a successful Connect.
+func (c *Client) MobikeEnabled() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.mobike
+}
+
+// Roam relocates the IKE SA and its Child SAs to a fresh local address after
+// the client's network changed (RFC 4555). It re-dials the NAT-T socket from a
+// new local port and sends an UPDATE_SA_ADDRESSES INFORMATIONAL — with fresh
+// NAT-detection hashes and a COOKIE2 the responder must echo — over the new
+// socket. On success the client's data socket (DataConn) is the new one, so a
+// caller sharing that socket for ESP must re-fetch it.
+//
+// Roam is for a caller driving the data path itself; it must not run
+// concurrently with itself. It leaves the new socket without a read deadline,
+// matching the socket state Connect leaves for the data path.
+func (c *Client) Roam() error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return fmt.Errorf("client closed")
+	}
+	if !c.mobike {
+		c.mu.Unlock()
+		return fmt.Errorf("ike: MOBIKE was not negotiated")
+	}
+	srv := c.conn.RemoteAddr().(*net.UDPAddr)
+	c.mu.Unlock()
+
+	// New socket from a fresh local port to the same server (a NAT-T responder
+	// tracks the peer's current source address, so a new local port is fine).
+	nconn, err := net.DialUDP("udp", nil, srv)
+	if err != nil {
+		return fmt.Errorf("ike: roam dial: %w", err)
+	}
+	if err := nconn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		nconn.Close()
+		return err
+	}
+
+	// Publish the new socket so writeIKE/readMessage use it, keeping the old to
+	// restore on failure.
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		nconn.Close()
+		return fmt.Errorf("client closed")
+	}
+	old := c.conn
+	c.conn = nconn
+	c.mu.Unlock()
+
+	if err := c.sendUpdateSAAddresses(srv); err != nil {
+		c.mu.Lock()
+		c.conn = old
+		c.mu.Unlock()
+		nconn.Close()
+		return err
+	}
+	old.Close()
+	_ = c.conn.SetReadDeadline(time.Time{})
+	return nil
+}
+
+// sendUpdateSAAddresses performs the UPDATE_SA_ADDRESSES exchange over the
+// (already-swapped) new socket and verifies the responder echoed our COOKIE2.
+func (c *Client) sendUpdateSAAddresses(srv *net.UDPAddr) error {
+	local := c.conn.LocalAddr().(*net.UDPAddr)
+	cookie2 := mustNonce(16)
+
+	b := payload.NewBuilder()
+	b.Add(payload.TypeNotify, false, payload.MarshalNotify(payload.NotifyPayload{
+		Protocol: payload.ProtoNone, Type: payload.UpdateSAAddresses,
+	}))
+	// Fresh NAT detection from the new local address to the same server.
+	b.Add(payload.TypeNotify, false, payload.MarshalNotify(payload.NotifyPayload{
+		Protocol: payload.ProtoNone, Type: payload.NATDetectionSourceIP,
+		Data: natDetectionHash(c.spiI, c.spiR, local.IP, uint16(local.Port)),
+	}))
+	b.Add(payload.TypeNotify, false, payload.MarshalNotify(payload.NotifyPayload{
+		Protocol: payload.ProtoNone, Type: payload.NATDetectionDestinationIP,
+		Data: natDetectionHash(c.spiI, c.spiR, srv.IP, uint16(srv.Port)),
+	}))
+	// COOKIE2 return-routability probe; the responder must echo it.
+	b.Add(payload.TypeNotify, false, payload.MarshalNotify(payload.NotifyPayload{
+		Protocol: payload.ProtoNone, Type: payload.Cookie2, Data: cookie2,
+	}))
+
+	msgID := c.sendMsgID
+	pkt, err := c.seal(payload.INFORMATIONAL, msgID, b.FirstType(), b.Bytes())
+	if err != nil {
+		return err
+	}
+	if err := c.writeIKE(pkt); err != nil {
+		return fmt.Errorf("ike: roam send: %w", err)
+	}
+
+	inners, err := c.recvInners()
+	if err != nil {
+		return fmt.Errorf("ike: roam response: %w", err)
+	}
+	echo := findMobikeCookie2(inners)
+	if echo == nil || !equalBytes(echo, cookie2) {
+		return fmt.Errorf("ike: roam return-routability failed (COOKIE2 not echoed)")
+	}
+	c.sendMsgID = msgID + 1
+	return nil
+}
+
+// findMobikeCookie2 returns the COOKIE2 data among inners, or nil.
+func findMobikeCookie2(inners []payload.RawPayload) []byte {
+	if n := findNotify(inners, payload.Cookie2); n != nil {
+		return n.Data
+	}
 	return nil
 }
 

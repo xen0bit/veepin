@@ -107,7 +107,7 @@ func (s *Server) handleIKESAInit(pkt []byte, hdr payload.Header, remote *net.UDP
 
 	// NAT detection (RFC 7296 2.23). Compare the peer-supplied hashes against
 	// what we actually observe for source (the peer) and destination (us).
-	newSA.NAT = s.detectNAT(msg, hdr, remote, on4500)
+	newSA.NAT = s.detectNAT(msg.FindAll(payload.TypeNotify), hdr.InitiatorSPI, hdr.ResponderSPI, remote, on4500)
 
 	_, keys := DeriveIKEKeys(
 		suite.PRF, shared, newSA.Ni, newSA.Nr,
@@ -143,16 +143,26 @@ func (s *Server) handleIKESAInit(pkt []byte, hdr payload.Header, remote *net.UDP
 	newSA.ResponderSAInit = append([]byte(nil), resp...)
 	newSA.RecvMsgID = 1
 
+	// Read any SA fields for logging before publishing the SA: once storeSA
+	// makes it reachable, another exchange (e.g. a MOBIKE UPDATE_SA_ADDRESSES
+	// that rewrites NAT) may mutate it under sa.mu, which this goroutine does
+	// not hold here.
+	natDetected := newSA.NAT.natDetected()
+	rspi := newSA.ResponderSPI
+
 	s.storeSA(newSA)
 	s.send(resp, remote, on4500)
 	s.log.Printf("ikev2: SA_INIT done with %s (rSPI=%#x, encr=%d prf=%d dh=%d, nat=%v)",
-		remote, newSA.ResponderSPI, suite.EncrID, suite.PRFID, suite.DHID, newSA.NAT.natDetected())
+		remote, rspi, suite.EncrID, suite.PRFID, suite.DHID, natDetected)
 }
 
 // detectNAT compares the peer's NAT_DETECTION_* hashes against observed values.
 // The initiator computes the destination hash over the server IP/port it is
 // sending to, so we use our public IP and the port this datagram arrived on.
-func (s *Server) detectNAT(msg *payload.Message, hdr payload.Header, remote *net.UDPAddr, on4500 bool) natInfo {
+// It scans the notify payloads of any message carrying NAT detection: the
+// IKE_SA_INIT (using its zero responder SPI) or a MOBIKE UPDATE_SA_ADDRESSES on
+// an established SA (using both SPIs).
+func (s *Server) detectNAT(payloads []payload.RawPayload, spiI, spiR uint64, remote *net.UDPAddr, on4500 bool) natInfo {
 	var info natInfo
 	var srcSeen, dstSeen bool
 
@@ -165,7 +175,10 @@ func (s *Server) detectNAT(msg *payload.Message, hdr payload.Header, remote *net
 		ourIP = net.IPv4zero
 	}
 
-	for _, p := range msg.FindAll(payload.TypeNotify) {
+	for _, p := range payloads {
+		if p.Type != payload.TypeNotify {
+			continue
+		}
 		n, err := payload.ParseNotify(p.Body)
 		if err != nil {
 			continue
@@ -174,15 +187,14 @@ func (s *Server) detectNAT(msg *payload.Message, hdr payload.Header, remote *net
 		case payload.NATDetectionSourceIP:
 			srcSeen = true
 			// Source = the initiator, as we observe it on the wire.
-			want := natDetectionHash(hdr.InitiatorSPI, hdr.ResponderSPI,
-				remote.IP, uint16(remote.Port))
+			want := natDetectionHash(spiI, spiR, remote.IP, uint16(remote.Port))
 			if !equalBytes(want, n.Data) {
 				info.peerBehindNAT = true
 			}
 		case payload.NATDetectionDestinationIP:
 			dstSeen = true
 			// Destination = us, as the initiator addressed us.
-			want := natDetectionHash(hdr.InitiatorSPI, hdr.ResponderSPI, ourIP, ourPort)
+			want := natDetectionHash(spiI, spiR, ourIP, ourPort)
 			if !equalBytes(want, n.Data) {
 				// Only trust this if we actually know our public IP.
 				if s.cfg.PublicIP != nil {

@@ -220,6 +220,14 @@ type espBatchReceiver interface {
 	HandleESPBatch(esp [][]byte, froms []*net.UDPAddr)
 }
 
+// peerAddrUpdater, if implemented by the DataPath, is told when a peer's
+// transport address changes via MOBIKE UPDATE_SA_ADDRESSES, so ESP return
+// traffic follows the move at once rather than waiting for the first inbound
+// ESP datagram from the new address.
+type peerAddrUpdater interface {
+	UpdatePeerAddr(sa *IKESA, addr *net.UDPAddr)
+}
+
 // SetDataPath attaches a data plane after construction (used by the daemon so
 // the pump's send function can reference the server's transport).
 func (s *Server) SetDataPath(dp DataPath) {

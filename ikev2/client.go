@@ -27,6 +27,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xen0bit/veepin/client"
@@ -187,28 +188,30 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	dataConn := c.DataConn()
 
 	s := &session{
-		ike:      c,
-		tun:      tun,
-		dataConn: dataConn,
-		logger:   logger,
-		done:     make(chan struct{}),
-		stopKA:   make(chan struct{}),
+		ike:    c,
+		tun:    tun,
+		logger: logger,
+		done:   make(chan struct{}),
+		stopKA: make(chan struct{}),
 	}
+	// The ESP socket is held behind an atomic so MOBIKE Roam can swap it under
+	// the running data path (see session.Roam).
+	s.conn.Store(dataConn)
+	s.sendBC.Store(dataplane.NewBatchConn(dataConn))
 
 	// The socket is connected to the server, so the destination is implicit.
 	send := func(esp []byte, _ *net.UDPAddr) {
-		if _, werr := dataConn.Write(esp); werr != nil {
+		if _, werr := s.conn.Load().Write(esp); werr != nil && !s.roaming.Load() {
 			logger.Printf("ikev2: ESP send error: %v", werr)
 		}
 	}
 	// The tunnel reports 0.0.0.0/0 as its route, so everything leaving the TUN is
 	// routed to the server; no separate default-route call is needed.
 	pump := dataplane.NewPump(tun, send, dataplane.SPIDemux, logger)
-	// GSO bursts flush with one sendmmsg on the connected socket. This
-	// BatchConn is the pump goroutine's own; the read loop below has another.
-	sendBC := dataplane.NewBatchConn(dataConn)
+	// GSO bursts flush with one sendmmsg on the connected socket, via the
+	// swappable BatchConn.
 	pump.SetBatchSender(func(pkts [][]byte, _ *net.UDPAddr) {
-		if _, werr := sendBC.WriteBatch(pkts, nil); werr != nil {
+		if _, werr := s.sendBC.Load().WriteBatch(pkts, nil); werr != nil && !s.roaming.Load() {
 			logger.Printf("ikev2: ESP batch send error: %v", werr)
 		}
 	})
@@ -225,14 +228,21 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	go func() {
 		defer close(s.done)
 		const readBatch = 16
-		bc := dataplane.NewBatchConn(dataConn)
 		bufs := make([][]byte, readBatch)
 		for i := range bufs {
 			bufs[i] = make([]byte, 65535)
 		}
 		sizes := make([]int, readBatch)
 		esps := make([][]byte, 0, readBatch)
+		// bc wraps the current socket; it is rebuilt whenever a MOBIKE Roam
+		// swaps the socket (s.conn changes).
+		var bc *dataplane.BatchConn
+		var bcConn *net.UDPConn
 		for {
+			if conn := s.conn.Load(); conn != bcConn {
+				bc = dataplane.NewBatchConn(conn)
+				bcConn = conn
+			}
 			n, rerr := bc.ReadBatch(bufs, sizes)
 			esps = esps[:0]
 			for i := range n {
@@ -251,6 +261,21 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 				pump.HandleInboundBatch(esps, nil)
 			}
 			if rerr != nil {
+				if s.closing.Load() {
+					return
+				}
+				// A read error during a Roam is the old socket being closed as
+				// the SA relocates. Wait for the new socket to be published,
+				// then keep reading it rather than tearing the session down.
+				if s.roaming.Load() {
+					for s.roaming.Load() && !s.closing.Load() {
+						time.Sleep(time.Millisecond)
+					}
+					if s.closing.Load() {
+						return
+					}
+					continue
+				}
 				return
 			}
 		}
@@ -265,7 +290,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 			case <-s.stopKA:
 				return
 			case <-t.C:
-				_, _ = dataConn.Write([]byte{0xff})
+				_, _ = s.conn.Load().Write([]byte{0xff})
 			}
 		}
 	}()
@@ -289,16 +314,54 @@ type session struct {
 	ike  *ike.Client
 	tun  *dataplane.TUN
 	pump *dataplane.Pump
-	// dataConn is the IKE socket (floated to 4500), shared for the ESP data
-	// path so ESP and IKE share one source port as RFC 3948 NAT-T requires. It
-	// is owned by ike; Close closes it via ike.Close().
-	dataConn *net.UDPConn
-	logger   *log.Logger
+	// conn is the IKE socket (floated to 4500), shared for the ESP data path so
+	// ESP and IKE share one source port as RFC 3948 NAT-T requires. It is held
+	// atomically because MOBIKE Roam swaps it under the running data path; it is
+	// owned by ike, and Close closes the current one via ike.Close().
+	conn   atomic.Pointer[net.UDPConn]
+	sendBC atomic.Pointer[dataplane.BatchConn]
+	logger *log.Logger
+
+	roamMu  sync.Mutex  // serializes Roam
+	roaming atomic.Bool // a socket swap is in progress
+	closing atomic.Bool // Close was called; read-loop errors are terminal
 
 	closeOnce sync.Once
 	closeErr  error
 	done      chan struct{} // closed when the inbound loop exits (i.e. on Close)
 	stopKA    chan struct{} // stops the NAT-keepalive goroutine
+}
+
+// Roam relocates the tunnel to a fresh local address after the client's network
+// changed, using MOBIKE (RFC 4555): it drives an UPDATE_SA_ADDRESSES exchange
+// on a new socket and swaps the ESP data path onto it, all without tearing down
+// the Child SA or re-authenticating. It is a no-op error if MOBIKE was not
+// negotiated with the server. Safe to call from any goroutine; calls are
+// serialized.
+func (s *session) Roam() error {
+	if !s.ike.MobikeEnabled() {
+		return fmt.Errorf("ikev2: MOBIKE was not negotiated with the server")
+	}
+	s.roamMu.Lock()
+	defer s.roamMu.Unlock()
+	if s.closing.Load() {
+		return fmt.Errorf("ikev2: session closed")
+	}
+
+	// Signal the read loop that an imminent socket close is a roam, not a
+	// shutdown, and suppress transient send errors on the old socket. Cleared
+	// only after the new socket is published, so the read loop resumes on it.
+	s.roaming.Store(true)
+	defer s.roaming.Store(false)
+
+	if err := s.ike.Roam(); err != nil {
+		return fmt.Errorf("ikev2: roam: %w", err)
+	}
+	newConn := s.ike.DataConn()
+	s.sendBC.Store(dataplane.NewBatchConn(newConn))
+	s.conn.Store(newConn)
+	s.logger.Printf("ikev2: MOBIKE roamed to local %s", newConn.LocalAddr())
+	return nil
 }
 
 // Wait blocks until the session is closed or ctx is cancelled. It returns
@@ -316,6 +379,7 @@ func (s *session) Wait(ctx context.Context) error {
 // safe to call from any goroutine.
 func (s *session) Close() error {
 	s.closeOnce.Do(func() {
+		s.closing.Store(true)
 		close(s.stopKA)
 		if s.pump != nil {
 			s.pump.Close()

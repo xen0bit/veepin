@@ -38,6 +38,7 @@ func (s *Server) handleIKEAuth(sa *IKESA, hdr payload.Header, inners []payload.R
 	}
 	sa.PeerID = idi
 	sa.IDiForAuth = idPayloadBody(Identity{Type: idi.Type, Data: idi.Data})
+	sa.peerMobike = findMobikeSupported(inners)
 
 	// No AUTH payload → the client wants EAP.
 	if authPay == nil {
@@ -237,6 +238,13 @@ func (s *Server) finishIKEAuth(sa *IKESA, hdr payload.Header, inners []payload.R
 	}
 	if cpPay == nil && sa.eapCPpay != nil {
 		cpPay = &payload.RawPayload{Type: payload.TypeCP, Body: sa.eapCPpay}
+	}
+
+	// MOBIKE: if the peer advertised support, confirm it. We always support it,
+	// so the peer's advertisement alone enables address agility for this SA.
+	if sa.peerMobike {
+		sa.MobikeEnabled = true
+		addMobikeSupported(b)
 	}
 
 	// CP address assignment.
