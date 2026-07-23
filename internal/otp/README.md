@@ -18,7 +18,7 @@ flowchart TD
     H --> DT["dynamic truncation<br/>(RFC 4226 §5.3): low nibble picks a 31-bit window"]
     DT --> MOD["code = value mod 10^digits"]
     TIME["current time"] -->|counter = unix / period| H
-    subgraph Verify (gateway)
+    subgraph "Verify (gateway)"
       MOD --> CT["constant-time compare across ±skew steps"]
     end
 ```

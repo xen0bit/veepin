@@ -18,7 +18,7 @@ Nebula has no RFC; the wire protocol is defined by its Go implementation.
 
 ```mermaid
 flowchart TD
-    subgraph Handshake (Noise IX)
+    subgraph "Handshake (Noise IX)"
       H1["Host A → B: msg1 (ephemeral + encrypted static cert)"]
       H1 --> H2["B → A: msg2 (ephemeral + encrypted static cert)"]
       H2 --> V["each verifies peer cert vs CAPool<br/>→ transport keys"]

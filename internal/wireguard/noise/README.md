@@ -20,7 +20,7 @@ handed to [`transport`](../transport):
 sequenceDiagram
     participant I as Initiator
     participant R as Responder
-    Note over I,R: static keys known (IK); optional PSK mixed in (psk2)
+    Note over I,R: static keys known (IK), optional PSK mixed in (psk2)
     I->>R: Handshake Initiation<br/>(ephemeral, encrypted static, encrypted timestamp, mac1/mac2)
     Note over R: verify mac1 (addressed to me?), TAI64N timestamp (anti-replay)
     R->>I: Handshake Response<br/>(ephemeral, empty AEAD, psk mixed)

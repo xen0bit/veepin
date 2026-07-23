@@ -22,7 +22,7 @@ sequenceDiagram
     participant S as Server (authenticator)
     S->>P: EAP-Request / MSCHAPv2 Challenge (Authenticator Challenge)
     P->>S: EAP-Response / MSCHAPv2 (Peer Challenge, NT-Response)
-    Note over S: verify NT-Response vs stored password;<br/>compute Authenticator Response
+    Note over S: verify NT-Response vs stored password,<br/>compute Authenticator Response
     S->>P: EAP-Request / MSCHAPv2 Success (Authenticator Response)
     P->>S: EAP-Response / MSCHAPv2 Success (ack)
     S->>P: EAP-Success

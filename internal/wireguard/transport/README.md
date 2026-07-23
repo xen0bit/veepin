@@ -14,13 +14,13 @@ the tree's allocation-guarded hot paths.
 
 ```mermaid
 flowchart TD
-    subgraph Seal (outbound)
+    subgraph "Seal (outbound)"
       P["inner IP packet"] --> PAD["pad to 16B multiple"]
       PAD --> N1["nonce = 64-bit send counter++"]
       N1 --> S["ChaCha20-Poly1305 seal (empty AAD)"]
       S --> H["type-4 header: receiver index + counter"]
     end
-    subgraph Open (inbound)
+    subgraph "Open (inbound)"
       RX["type-4 message"] --> W{counter in replay window?}
       W -->|no / spent| DROP["drop (ErrDecrypt / replay)"]
       W -->|fresh| O["decrypt in place"]
