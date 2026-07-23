@@ -144,8 +144,12 @@ jobs:
           multiarch="$(dpkg-architecture -a${{ matrix.arch }} -qDEB_HOST_MULTIARCH 2>/dev/null)"
           export GOARCH=${{ matrix.goarch }} ${{ matrix.goenv }}
           export PKG_CONFIG_LIBDIR="/usr/lib/$multiarch/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig"
+          # -buildvcs=false: the checkout's owner differs from the container
+          # user, so git refuses to read the repo (exit 128) when go tries to
+          # stamp VCS info the service doesn't use anyway (VERSION goes to
+          # nfpm via ldflags-free packaging metadata).
           make packages VERSION="${GITHUB_REF_NAME#v}" PKG_ARCH=${{ matrix.pkg_arch }} \
-            CC="$triplet-gcc" NFPM="$(go env GOPATH)/bin/nfpm"
+            CC="$triplet-gcc" NFPM="$(go env GOPATH)/bin/nfpm" GOFLAGS=-buildvcs=false
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
