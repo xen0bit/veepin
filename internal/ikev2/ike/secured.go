@@ -39,17 +39,43 @@ func (s *Server) handleSecured(pkt []byte, hdr payload.Header, remote *net.UDPAd
 		s.log.Printf("ikev2: %s parse from %s: %v", ex, remote, err)
 		return
 	}
-	skPay := msg.Find(payload.TypeSK)
-	if skPay == nil {
-		s.log.Printf("ikev2: %s from %s missing SK payload", ex, remote)
-		return
+	var firstInner payload.PayloadType
+	var inner []byte
+	if skfPay := msg.Find(payload.TypeSKF); skfPay != nil {
+		// RFC 7383 fragment: decrypt it and hold it until every fragment of this
+		// message has arrived. Reassembly proceeds only once, on completion.
+		if !sa.fragEnabled {
+			s.log.Printf("ikev2: %s from %s sent an SKF fragment without negotiating fragmentation", ex, remote)
+			return
+		}
+		fragNum, total, fi, chunk, derr := decryptSKF(pkt, *skfPay, sa.Suite, sa.Keys, sa.dirForInbound())
+		if derr != nil {
+			s.log.Printf("ikev2: %s from %s SKF decrypt failed: %v", ex, remote, derr)
+			return
+		}
+		reasm, rfi, complete, rerr := sa.fragReasm.add(hdr.MessageID, fragNum, total, fi, chunk)
+		if rerr != nil {
+			s.log.Printf("ikev2: %s from %s fragment reassembly: %v", ex, remote, rerr)
+			return
+		}
+		if !complete {
+			return // await the remaining fragments
+		}
+		inner, firstInner = reasm, rfi
+	} else {
+		skPay := msg.Find(payload.TypeSK)
+		if skPay == nil {
+			s.log.Printf("ikev2: %s from %s missing SK payload", ex, remote)
+			return
+		}
+		fi, in, derr := decryptSK(pkt, hdr, *skPay, sa.Suite, sa.Keys, sa.dirForInbound())
+		if derr != nil {
+			s.log.Printf("ikev2: %s from %s decrypt failed: %v", ex, remote, derr)
+			return
+		}
+		firstInner, inner = fi, in
 	}
 
-	firstInner, inner, err := decryptSK(pkt, hdr, *skPay, sa.Suite, sa.Keys, sa.dirForInbound())
-	if err != nil {
-		s.log.Printf("ikev2: %s from %s decrypt failed: %v", ex, remote, err)
-		return
-	}
 	inners, err := parseInnerPayloads(firstInner, inner)
 	if err != nil {
 		s.log.Printf("ikev2: %s from %s inner parse: %v", ex, remote, err)

@@ -88,6 +88,13 @@ type Client struct {
 	// which is the precondition for Roam.
 	mobike bool
 
+	// frag is true once the server confirmed IKE_FRAGMENTATION_SUPPORTED in
+	// IKE_SA_INIT; fragReasm reassembles any fragmented responses it then sends.
+	// We advertise support and reassemble inbound fragments but never fragment
+	// our own requests.
+	frag      bool
+	fragReasm fragReassembler
+
 	result *ClientResult
 
 	serverIDBody []byte // captured IDr body (for EAP final AUTH verification)
@@ -242,6 +249,9 @@ func (c *Client) saInit() error {
 		Protocol: payload.ProtoNone, Type: payload.NATDetectionDestinationIP,
 		Data: natDetectionHash(c.spiI, 0, net.IPv4zero, 0),
 	}))
+	// Advertise IKE fragmentation (RFC 7383) so a server set to always fragment
+	// can deliver large protected responses as reassemblable SKF fragments.
+	addFragSupported(b)
 	chain := b.Bytes()
 
 	hdr := payload.Header{
@@ -268,6 +278,7 @@ func (c *Client) saInit() error {
 		return fmt.Errorf("server rejected SA_INIT: notify %d", n)
 	}
 	c.spiR = msg.Header.ResponderSPI
+	c.frag = findFragSupported(msg.Payloads)
 
 	saPay := msg.Find(payload.TypeSA)
 	kePay := msg.Find(payload.TypeKE)
@@ -704,39 +715,66 @@ func (c *Client) seal(ex payload.ExchangeType, msgID uint32, first payload.Paylo
 }
 
 func (c *Client) recvInners() ([]payload.RawPayload, error) {
-	raw, err := c.readMessage()
-	if err != nil {
-		return nil, err
-	}
-	msg, err := payload.ParseMessage(raw)
-	if err != nil {
-		return nil, err
-	}
-	if n := findNotifyError(msg); n != 0 {
-		return nil, fmt.Errorf("server error notify %d", n)
-	}
-	sk := msg.Find(payload.TypeSK)
-	if sk == nil {
-		return nil, fmt.Errorf("response has no SK payload")
-	}
-	first, inner, err := decryptSK(raw, msg.Header, *sk, c.suite, c.keys, dirResponderToInitiator)
-	if err != nil {
-		return nil, err
-	}
-	inners, err := parseInnerPayloads(first, inner)
-	if err != nil {
-		return nil, err
-	}
-	// A rejection arrives as an encrypted (inner) error notify; surface
-	// AUTHENTICATION_FAILED as ErrAuthFailed so callers can tell a bad
-	// credential from a transport failure.
-	if n := findInnerNotifyError(inners); n != 0 {
-		if n == uint16(payload.AuthenticationFailed) {
-			return nil, fmt.Errorf("server: notify %d: %w", n, ErrAuthFailed)
+	// A fragmented response spans several datagrams (RFC 7383); loop reading and
+	// reassembling until one complete message is in hand.
+	for {
+		raw, err := c.readMessage()
+		if err != nil {
+			return nil, err
 		}
-		return nil, fmt.Errorf("server error notify %d", n)
+		msg, err := payload.ParseMessage(raw)
+		if err != nil {
+			return nil, err
+		}
+		if n := findNotifyError(msg); n != 0 {
+			return nil, fmt.Errorf("server error notify %d", n)
+		}
+
+		var first payload.PayloadType
+		var inner []byte
+		if skf := msg.Find(payload.TypeSKF); skf != nil {
+			if !c.frag {
+				return nil, fmt.Errorf("server sent an SKF fragment without negotiating fragmentation")
+			}
+			fragNum, total, fi, chunk, derr := decryptSKF(raw, *skf, c.suite, c.keys, dirResponderToInitiator)
+			if derr != nil {
+				return nil, derr
+			}
+			reasm, rfi, complete, rerr := c.fragReasm.add(msg.Header.MessageID, fragNum, total, fi, chunk)
+			if rerr != nil {
+				return nil, rerr
+			}
+			if !complete {
+				continue // read the next fragment
+			}
+			inner, first = reasm, rfi
+		} else {
+			sk := msg.Find(payload.TypeSK)
+			if sk == nil {
+				return nil, fmt.Errorf("response has no SK payload")
+			}
+			fi, in, derr := decryptSK(raw, msg.Header, *sk, c.suite, c.keys, dirResponderToInitiator)
+			if derr != nil {
+				return nil, derr
+			}
+			first, inner = fi, in
+		}
+
+		inners, err := parseInnerPayloads(first, inner)
+		if err != nil {
+			return nil, err
+		}
+		// A rejection arrives as an encrypted (inner) error notify; surface
+		// AUTHENTICATION_FAILED as ErrAuthFailed so callers can tell a bad
+		// credential from a transport failure.
+		if n := findInnerNotifyError(inners); n != 0 {
+			if n == uint16(payload.AuthenticationFailed) {
+				return nil, fmt.Errorf("server: notify %d: %w", n, ErrAuthFailed)
+			}
+			return nil, fmt.Errorf("server error notify %d", n)
+		}
+		return inners, nil
 	}
-	return inners, nil
 }
 
 // findInnerNotifyError returns the first error-class notify type (< 16384) among

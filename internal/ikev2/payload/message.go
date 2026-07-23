@@ -149,10 +149,11 @@ func parsePayloadChain(first PayloadType, buf []byte) ([]RawPayload, error) {
 		body := buf[off+genericPayloadHeaderLen : off+length]
 		out = append(out, RawPayload{Type: thisType, Critical: critical, Body: body})
 		off += length
-		// The Encrypted (SK) payload is always terminal in the unencrypted
-		// chain: its NextPayload names the first *inner* payload, and its body
-		// is ciphertext rather than further generic payloads. Stop here.
-		if thisType == TypeSK {
+		// The Encrypted (SK) payload — and its fragment form (SKF, RFC 7383) —
+		// is always terminal in the unencrypted chain: its NextPayload names the
+		// first *inner* payload, and its body is ciphertext rather than further
+		// generic payloads. Stop here.
+		if thisType == TypeSK || thisType == TypeSKF {
 			break
 		}
 		next = nextType

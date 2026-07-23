@@ -12,6 +12,7 @@ auth), and produces [`esp`](../esp) SAs for the data path.
 - [RFC 3947](https://www.rfc-editor.org/rfc/rfc3947) / [RFC 3948](https://www.rfc-editor.org/rfc/rfc3948) — NAT-T detection and UDP-encapsulated ESP.
 - [RFC 7296 §3.15](https://www.rfc-editor.org/rfc/rfc7296#section-3.15) — Configuration payload (address assignment).
 - [RFC 4555](https://www.rfc-editor.org/rfc/rfc4555) — MOBIKE (address agility for a roaming peer).
+- [RFC 7383](https://www.rfc-editor.org/rfc/rfc7383) — IKEv2 fragmentation (inbound SKF reassembly).
 
 ## Handshake and SA lifecycle
 
@@ -92,3 +93,15 @@ stateDiagram-v2
   whether the server agreed. This mirrors kernel/strongSwan behaviour, so a
   native macOS/Windows IKEv2 client keeps its tunnel across a network change
   rather than re-handshaking.
+- **IKE fragmentation (RFC 7383) is reassemble-only.** Both ends advertise
+  `IKE_FRAGMENTATION_SUPPORTED` in `IKE_SA_INIT`; once negotiated, a peer may
+  deliver a large protected message (a certificate-bearing `IKE_AUTH`, or a peer
+  set to `fragmentation=force`) as independently encrypted-and-authenticated
+  `SKF` fragments, which `fragReassembler` verifies one at a time and stitches
+  back into the original inner-payload chain. veepin *never fragments its own
+  output* — its PSK/EAP messages are always small — which RFC 7383 §2.5.1
+  explicitly permits. Reassembly is bounded (`maxFragments`,
+  `maxReassembledBytes`, a TTL) since it buffers peer-supplied state; duplicate
+  and out-of-order fragments are handled. The `SK`/`SKF` decrypt and RFC 7296
+  de-padding are shared (`openSK`/`stripRFC7296Pad`), so a fragment opens exactly
+  like a whole message minus the reassembly.

@@ -55,6 +55,7 @@ const (
 	TypeSK        PayloadType = 46 // Encrypted and Authenticated
 	TypeCP        PayloadType = 47 // Configuration
 	TypeEAP       PayloadType = 48 // Extensible Authentication
+	TypeSKF       PayloadType = 53 // Encrypted and Authenticated Fragment (RFC 7383)
 )
 
 func (p PayloadType) String() string {
@@ -93,6 +94,8 @@ func (p PayloadType) String() string {
 		return "CP"
 	case TypeEAP:
 		return "EAP"
+	case TypeSKF:
+		return "SKF"
 	default:
 		return "UNKNOWN_PAYLOAD"
 	}
@@ -227,6 +230,10 @@ const (
 	UpdateSAAddresses     NotifyType = 16400
 	Cookie2               NotifyType = 16401
 	NoNATsAllowed         NotifyType = 16402
+
+	// IKEFragmentationSupported (RFC 7383): advertised in IKE_SA_INIT by both
+	// peers to permit IKE-layer fragmentation of later protected messages.
+	IKEFragmentationSupported NotifyType = 16430
 
 	SignatureHashAlgorithms NotifyType = 16431
 )

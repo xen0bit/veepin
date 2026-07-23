@@ -160,36 +160,45 @@ func decryptSK(raw []byte, hdr payload.Header, skPayload payload.RawPayload,
 	// firstInner comes from the SK generic header NextPayload byte.
 	firstInner = payload.PayloadType(raw[bodyStart-4])
 
-	var padded []byte
-	if suite.Integ == nil {
-		padded, err = suite.Cipher.Open(encKey, nil, aad, skPayload.Body)
-		if err != nil {
-			return 0, nil, err
-		}
-	} else {
-		cbc, ok := suite.Cipher.(interface {
-			OpenETM(encKey, integKey, aad, ivCtIcv []byte, integ *cryptoutil.Integrity) ([]byte, error)
-		})
-		if !ok {
-			return 0, nil, fmt.Errorf("ike: non-AEAD cipher lacks OpenETM")
-		}
-		padded, err = cbc.OpenETM(encKey, integKey, aad, skPayload.Body, suite.Integ)
-		if err != nil {
-			return 0, nil, err
-		}
+	padded, err := openSK(suite, encKey, integKey, aad, skPayload.Body)
+	if err != nil {
+		return 0, nil, err
 	}
+	inner, err = stripRFC7296Pad(padded)
+	if err != nil {
+		return 0, nil, err
+	}
+	return firstInner, inner, nil
+}
 
-	// Strip RFC 7296 padding: last octet is pad length, preceding padLen octets
-	// are padding.
+// openSK verifies and decrypts an iv||ciphertext||icv unit under the SK/SKF
+// cipher with the given associated data, returning the still-padded plaintext.
+// It is the inbound counterpart shared by the whole SK and SKF (RFC 7383) paths.
+func openSK(suite Suite, encKey, integKey, aad, ivCtIcv []byte) ([]byte, error) {
+	if suite.Integ == nil {
+		return suite.Cipher.Open(encKey, nil, aad, ivCtIcv)
+	}
+	cbc, ok := suite.Cipher.(interface {
+		OpenETM(encKey, integKey, aad, ivCtIcv []byte, integ *cryptoutil.Integrity) ([]byte, error)
+	})
+	if !ok {
+		return nil, fmt.Errorf("ike: non-AEAD cipher lacks OpenETM")
+	}
+	return cbc.OpenETM(encKey, integKey, aad, ivCtIcv, suite.Integ)
+}
+
+// stripRFC7296Pad removes RFC 7296 section 3.14 padding from a decrypted SK/SKF
+// plaintext: the final octet is the pad length and the preceding padLen octets
+// are padding.
+func stripRFC7296Pad(padded []byte) ([]byte, error) {
 	if len(padded) == 0 {
-		return firstInner, nil, nil
+		return nil, nil
 	}
 	padLen := int(padded[len(padded)-1])
 	if padLen+1 > len(padded) {
-		return 0, nil, fmt.Errorf("ike: bad SK pad length %d", padLen)
+		return nil, fmt.Errorf("ike: bad SK pad length %d", padLen)
 	}
-	inner = padded[:len(padded)-padLen-1]
-	return firstInner, inner, nil
+	return padded[:len(padded)-padLen-1], nil
 }
 
 // parseInnerPayloads decodes the decrypted inner payload chain.

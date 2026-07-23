@@ -109,6 +109,11 @@ func (s *Server) handleIKESAInit(pkt []byte, hdr payload.Header, remote *net.UDP
 	// what we actually observe for source (the peer) and destination (us).
 	newSA.NAT = s.detectNAT(msg.FindAll(payload.TypeNotify), hdr.InitiatorSPI, hdr.ResponderSPI, remote, on4500)
 
+	// IKE fragmentation (RFC 7383) is negotiated here: if the initiator supports
+	// it we echo the notify and enable reassembly of the peer's later protected
+	// messages. We never fragment our own output.
+	newSA.fragEnabled = findFragSupported(msg.Payloads)
+
 	_, keys := DeriveIKEKeys(
 		suite.PRF, shared, newSA.Ni, newSA.Nr,
 		newSA.InitiatorSPI, newSA.ResponderSPI,
@@ -127,6 +132,9 @@ func (s *Server) handleIKESAInit(pkt []byte, hdr payload.Header, remote *net.UDP
 	}))
 	b.Add(payload.TypeNonce, false, payload.MarshalNonce(newSA.Nr))
 	s.addNATDetection(b, newSA.InitiatorSPI, newSA.ResponderSPI, remote, on4500)
+	if newSA.fragEnabled {
+		addFragSupported(b)
+	}
 
 	chain := b.Bytes()
 	respHdr := payload.Header{

@@ -128,6 +128,13 @@ type IKESA struct {
 	MobikeEnabled bool
 	peerMobike    bool
 
+	// fragEnabled is true once IKE fragmentation (RFC 7383) is negotiated in
+	// IKE_SA_INIT: the peer may deliver later protected messages as SKF
+	// fragments, which fragReasm reassembles. veepin advertises support and
+	// reassembles inbound fragments but never fragments its own output.
+	fragEnabled bool
+	fragReasm   fragReassembler
+
 	// ClientIP is the internal address assigned to this peer via CP.
 	ClientIP net.IP
 

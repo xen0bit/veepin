@@ -127,6 +127,17 @@ actually observes, after echoing the client's `COOKIE2` return-routability
 probe. The veepin client initiates the same move through `Client.Roam` when its
 local address changes.
 
+## IKE fragmentation (RFC 7383)
+
+When both ends advertise `IKE_FRAGMENTATION_SUPPORTED` in `IKE_SA_INIT` (veepin
+does automatically, as do strongSwan and the native OS clients), a peer may send
+a large protected message — a certificate-bearing `IKE_AUTH`, or a peer
+configured to always fragment (`fragmentation=force`) — split into several
+`SKF` fragments instead of relying on IP fragmentation, which some middleboxes
+drop. veepin reassembles those fragments; it never fragments its own output, as
+its PSK/EAP messages are always small. This needs no configuration and lets
+veepin interoperate with a peer set to force fragmentation.
+
 ## Smoke-testing without an OS client
 
 `veepin probe` is a minimal built-in initiator for verifying a running server end

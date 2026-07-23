@@ -525,10 +525,13 @@ each a localized extension point, not a structural rework:
 - **PSK and EAP-MSCHAPv2 auth.** No certificate-based auth; EAP is MSCHAPv2 only
   (TLS/PEAP/GTC out of scope). MSCHAPv2 is dated and needs recoverable passwords
   server-side, but it is the interoperable username/password choice.
-- **No IKE fragmentation, no MOBIKE.** `CREATE_CHILD_SA` treats rekey as a fresh
+- **Child SA rekey is fresh-only.** `CREATE_CHILD_SA` treats rekey as a fresh
   child and the message-ID window accepts only the next expected request. IKEv2
-  *does* implement the RFC 7296 §2.6 cookie exchange, and every server bounds
-  unauthenticated work through `dataplane.Gate`.
+  *does* implement MOBIKE (RFC 4555 `UPDATE_SA_ADDRESSES`, so a roaming peer
+  survives an address change without re-handshaking), IKE fragmentation
+  reassembly (RFC 7383 — it negotiates and reassembles inbound SKF fragments but
+  never fragments its own, always-small output) and the RFC 7296 §2.6 cookie
+  exchange; every server bounds unauthenticated work through `dataplane.Gate`.
 - **Client liveness is basic.** NAT keepalives hold the binding, but the client
   does not yet run DPD or rekey the IKE/Child SA before expiry, so very
   long-lived sessions eventually reconnect.

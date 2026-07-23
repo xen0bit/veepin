@@ -1,0 +1,42 @@
+# Direction B with IKE fragmentation forced (RFC 7383): a strongSwan initiator
+# configured with `fragmentation = force` and a small charon.fragment_size splits
+# its IKE_AUTH into several SKF fragments, which the veepin server (`veepin serve
+# ikev2`) must reassemble before it can authenticate the peer and set up the
+# Child SA. Data-path check is identical to compose.server-ss.yml: the strongSwan
+# client pings 10.10.10.1 (the veepin server's TUN gateway) through the tunnel.
+name: veepin-interop-b-frag
+
+services:
+  veepin-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    sysctls:
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+      net.ipv4.ip_forward: "1"
+    environment:
+      PSK: "interop-test-psk"
+      SERVER_ID: "vpn.example.com"
+      POOL: "10.10.10.0/24"
+    volumes:
+      - ./veepin/server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  strongswan-client:
+    build:
+      context: strongswan
+    image: interop-strongswan
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+    depends_on: [veepin-server]
+    volumes:
+      - ./strongswan/swanctl-client-frag.conf:/etc/swanctl/swanctl.conf:ro
+      - ./strongswan/strongswan-frag.conf:/etc/strongswan.conf:ro
+      - ./strongswan/client-entrypoint.sh:/entrypoint.sh:ro
+    command: ["/bin/sh", "/entrypoint.sh"]

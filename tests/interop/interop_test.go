@@ -52,6 +52,15 @@ func TestInteropStrongswanClientVeepinServer(t *testing.T) {
 	runInteropBench(t, "compose.server-ss.yml", "strongswan-client", "veepin-server", "10.10.10.1")
 }
 
+// TestInteropStrongswanClientVeepinServerFragmented is Direction B with IKE
+// fragmentation forced (RFC 7383): the strongSwan initiator splits its IKE_AUTH
+// into SKF fragments (fragmentation=force + a small fragment_size), which the
+// veepin server must reassemble before it can authenticate the peer. A
+// successful in-tunnel ping proves the reassembled IKE_AUTH established the SA.
+func TestInteropStrongswanClientVeepinServerFragmented(t *testing.T) {
+	runInterop(t, "compose.server-ss-frag.yml", "strongswan-client", "10.10.10.1")
+}
+
 // TestInteropVeepinClientWireguardServer proves the WireGuard initiator against
 // the reference wireguard-go responder: the veepin client performs the
 // Noise_IKpsk2 handshake and transport data path, then pings 10.10.10.1 (the

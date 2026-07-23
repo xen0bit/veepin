@@ -84,6 +84,12 @@ type initiator struct {
 	saInitResp []byte
 	sendMsgID  uint32
 
+	// advertiseFrag makes doSAInit send IKE_FRAGMENTATION_SUPPORTED (RFC 7383);
+	// fragAck records whether the responder echoed it. Off by default so the
+	// existing tests exercise the unfragmented path unchanged.
+	advertiseFrag bool
+	fragAck       bool
+
 	// Child SA results.
 	assignedIP                net.IP
 	childOutSPI, childRespSPI uint32
@@ -136,6 +142,9 @@ func (it *initiator) doSAInit() {
 	b.Add(payload.TypeNotify, false, payload.MarshalNotify(payload.NotifyPayload{
 		Protocol: payload.ProtoNone, Type: payload.NATDetectionDestinationIP, Data: dstHash,
 	}))
+	if it.advertiseFrag {
+		addFragSupported(b)
+	}
 	chain := b.Bytes()
 
 	hdr := payload.Header{
@@ -158,6 +167,7 @@ func (it *initiator) doSAInit() {
 		it.tb.Fatalf("SA_INIT resp parse: %v", err)
 	}
 	it.spiR = msg.Header.ResponderSPI
+	it.fragAck = findFragSupported(msg.Payloads)
 
 	saPay := msg.Find(payload.TypeSA)
 	kePay := msg.Find(payload.TypeKE)
