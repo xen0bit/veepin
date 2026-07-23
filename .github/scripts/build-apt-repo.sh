@@ -96,9 +96,7 @@ cat > index.html <<'HTML'
 <h1>veepin APT repository</h1>
 <p>Signed repository carrying the latest <a href="https://github.com/xen0bit/veepin">veepin</a>
 release for Debian/Ubuntu on every Debian release architecture (amd64, arm64,
-armhf, armel, i386, ppc64el, riscv64, s390x). <code>veepin-nm</code> (the
-NetworkManager desktop integration) is amd64-only; skip it elsewhere. Older
-versions live on
+armhf, armel, i386, ppc64el, riscv64, s390x). Older versions live on
 <a href="https://github.com/xen0bit/veepin/releases">GitHub Releases</a>.</p>
 <pre>
 sudo curl -fsSL https://xen0bit.github.io/veepin/veepin-archive-keyring.gpg \

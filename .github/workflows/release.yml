@@ -39,17 +39,24 @@ jobs:
   # The NetworkManager plugin is a separate (nested, non-CGO-free) module whose
   # editor .so and auth-dialog are C linked against libnm/GTK, so it isn't part
   # of the GoReleaser pipeline. Build its .deb/.rpm here and attach them to the
-  # Release that GoReleaser just created. amd64 only: the C parts link against
-  # host libnm/GTK, and the desktop this targets is amd64.
+  # Release that GoReleaser just created. This job covers the architectures
+  # with native runners (amd64, arm64); nm-packages-cross below covers the
+  # rest.
   nm-packages:
     needs: goreleaser
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-22.04, pkg_arch: amd64 }
+          - { runner: ubuntu-22.04-arm, pkg_arch: arm64 }
     # Pin to the oldest supported LTS: the editor .so and auth-dialog link
     # against the host's GLib/GTK, and GLib symbols are NOT version-scoped, so a
     # binary built on a newer GLib can pull in symbols absent on older systems
     # (e.g. g_once_init_enter_pointer, GLib >= 2.80, which crashes the loader on
     # GLib 2.72 / Ubuntu 22.04 / Pop!_OS 22.04). Build on the baseline so the
     # released package loads everywhere from that GLib up.
-    runs-on: ubuntu-22.04
+    runs-on: ${{ matrix.runner }}
     defaults:
       run:
         working-directory: nm
@@ -73,7 +80,7 @@ jobs:
         run: |
           go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
           # Strip the leading "v" so the package version is bare semver.
-          make packages VERSION="${GITHUB_REF_NAME#v}" PKG_ARCH=amd64 \
+          make packages VERSION="${GITHUB_REF_NAME#v}" PKG_ARCH=${{ matrix.pkg_arch }} \
             NFPM="$(go env GOPATH)/bin/nfpm"
 
       - name: Attach packages to the release
@@ -82,13 +89,98 @@ jobs:
         run: |
           gh release upload "${GITHUB_REF_NAME}" bin/pkg/*.deb bin/pkg/*.rpm --clobber
 
+  # Cross-built veepin-nm for the Debian release architectures without native
+  # runners. The C parts (editor .so, auth-dialog) need the TARGET's libnm/GTK
+  # dev libraries, which no Ubuntu runner can provide for foreign arches —
+  # Debian's archive carries every release architecture in one repository, so a
+  # Debian container plus `dpkg --add-architecture` gives real cross toolchains
+  # AND target dev libs, no emulation. The Go service cross-compiles natively
+  # (CGO-free). Baseline: bookworm (GLib 2.74), so binaries load on Debian 12+
+  # / Ubuntu 24.04+; riscv64 builds on trixie only because riscv64 is not a
+  # bookworm release architecture (riscv64 users run trixie or newer anyway).
+  # Runs in parallel with goreleaser; the upload job below waits for both.
+  nm-packages-cross:
+    runs-on: ubuntu-latest
+    container: debian:${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: armhf, image: bookworm, pkg_arch: arm7, goarch: arm, goenv: "GOARM=7" }
+          - { arch: armel, image: bookworm, pkg_arch: arm5, goarch: arm, goenv: "GOARM=5" }
+          # GO386=softfloat: Debian's i386 baseline does not include SSE2,
+          # which Go's default GO386=sse2 would require.
+          - { arch: i386, image: bookworm, pkg_arch: "386", goarch: "386", goenv: "GO386=softfloat" }
+          - { arch: ppc64el, image: bookworm, pkg_arch: ppc64le, goarch: ppc64le, goenv: "" }
+          - { arch: s390x, image: bookworm, pkg_arch: s390x, goarch: s390x, goenv: "" }
+          - { arch: riscv64, image: trixie, pkg_arch: riscv64, goarch: riscv64, goenv: "" }
+    steps:
+      - name: Install cross toolchain and target dev libraries
+        run: |
+          dpkg --add-architecture ${{ matrix.arch }}
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            make dpkg-dev crossbuild-essential-${{ matrix.arch }} pkg-config \
+            ca-certificates git \
+            libnm-dev:${{ matrix.arch }} libnma-dev:${{ matrix.arch }} \
+            libgtk-3-dev:${{ matrix.arch }}
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: false # actions/cache needs zstd, absent in the container
+
+      - name: Build packages (.deb/.rpm)
+        working-directory: nm
+        run: |
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+          # Derive the GNU triplet (cross gcc prefix) and multiarch directory
+          # (target pkg-config path) from the Debian architecture name.
+          triplet="$(dpkg-architecture -a${{ matrix.arch }} -qDEB_HOST_GNU_TYPE 2>/dev/null)"
+          multiarch="$(dpkg-architecture -a${{ matrix.arch }} -qDEB_HOST_MULTIARCH 2>/dev/null)"
+          export GOARCH=${{ matrix.goarch }} ${{ matrix.goenv }}
+          export PKG_CONFIG_LIBDIR="/usr/lib/$multiarch/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig"
+          make packages VERSION="${GITHUB_REF_NAME#v}" PKG_ARCH=${{ matrix.pkg_arch }} \
+            CC="$triplet-gcc" NFPM="$(go env GOPATH)/bin/nfpm"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nm-${{ matrix.arch }}
+          path: |
+            nm/bin/pkg/*.deb
+            nm/bin/pkg/*.rpm
+
+  # Attach the cross-built packages to the release (the container jobs above
+  # have no gh CLI; a stock runner does).
+  nm-cross-upload:
+    needs: [goreleaser, nm-packages-cross]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download cross-built packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nm-*
+          merge-multiple: true
+          path: pkgs
+
+      - name: Attach packages to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "${GITHUB_REF_NAME}" pkgs/*.deb pkgs/*.rpm --clobber
+
   # Signed APT repository on GitHub Pages, so Debian/Ubuntu users can
   # `apt install veepin veepin-nm` and track releases with `apt upgrade`.
   # Stateless: rebuilt from this release's .debs only (older versions stay on
   # GitHub Releases). Needs the APT_SIGNING_KEY secret (armored GPG private
   # key) and Pages enabled; configure-pages creates the site on first run.
   apt-repo:
-    needs: [goreleaser, nm-packages]
+    needs: [goreleaser, nm-packages, nm-cross-upload]
     runs-on: ubuntu-latest
     permissions:
       contents: read

@@ -224,9 +224,9 @@ sudo apt update && sudo apt install veepin veepin-nm
 ```
 
 `veepin` is the CLI (server + client, no runtime dependencies); `veepin-nm`
-adds the NetworkManager desktop integration and is amd64-only (its editor
-plugin links against host libnm/GTK) — drop it from the command on other
-architectures. The repository signing
+adds the NetworkManager desktop integration (built for the same architectures;
+the amd64/arm64 builds load on Ubuntu 22.04+, the cross-built rest on
+Debian 12+ / Ubuntu 24.04+). The repository signing
 key's fingerprint is pinned in [packaging/apt-signing-key.asc](packaging/apt-signing-key.asc).
 The package ships a systemd template unit — drop arguments in
 `/etc/veepin/<name>.conf` and `systemctl enable --now veepin@<name>` (see
