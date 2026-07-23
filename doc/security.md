@@ -35,9 +35,11 @@ per tunnel — adding clients does not add parallelism. The crypto is not the li
 the `ESPCrypter` is safe to call concurrently and scales linearly with cores
 (`BenchmarkESPDecapParallel`), so it is *parallel-ready* even though the deployed
 path drives it from a single goroutine. The syscalls are batched to raise what
-that one core can do — inbound reads drain in `recvmmsg` batches, and on
+that one core can do — inbound reads drain in `recvmmsg` batches, on
 GSO-capable TUNs one read can carry a TCP super-frame that egresses as one
-batched send — without changing the boundary. Lifting the ceiling means adding
+batched send, and inbound bulk TCP coalesces back into super-frames written to
+the TUN once (GRO) — without changing the boundary. Lifting the ceiling means
+adding
 readers (multi-queue TUN outbound, `SO_REUSEPORT` inbound), which brings
 packet-reordering risk and lock contention that nothing here is currently asking
 for — the approach and its costs are sketched in

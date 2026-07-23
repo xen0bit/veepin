@@ -78,9 +78,15 @@ type Pump struct {
 
 	// vnet is true when tun is a GSO device (gsoTUN below): reads carry a
 	// virtio-net header and may be super-frames for Run to segment, and every
-	// write must be vnet-framed through vnetWrite.
-	vnet      bool
-	vnetWrite func(pkt []byte) (int, error)
+	// write must be vnet-framed through vnetWrite. vnetWriteGSO writes a
+	// GRO-coalesced super-frame with its own virtio-net header.
+	vnet         bool
+	vnetWrite    func(pkt []byte) (int, error)
+	vnetWriteGSO func(hdr, pkt []byte) (int, error)
+
+	// gro is the inbound-coalescing scratch (gro_linux.go), owned by the one
+	// goroutine that calls HandleInboundBatch, like every per-pump scratch.
+	gro groTable
 
 	mu     sync.RWMutex
 	byKey  map[uint32]Tunnel // inbound demux
@@ -94,11 +100,13 @@ type Pump struct {
 
 // gsoTUN is the optional GSO surface of the TUN device. *TUN provides it on
 // Linux; the in-memory devices tests substitute may, to exercise the vnet
-// path without a kernel.
+// path without a kernel. writeVnetGSO takes a pre-encoded virtio-net header so
+// this interface stays portable (the header codec is Linux-only).
 type gsoTUN interface {
 	tunIO
 	GSO() bool
 	writeVnet(pkt []byte) (int, error)
+	writeVnetGSO(hdr, pkt []byte) (int, error)
 }
 
 // NewPump creates a data-path pump over tun. send transmits encapsulated
@@ -118,6 +126,7 @@ func NewPump(tun tunIO, send Sender, demux Demux, logger *log.Logger) *Pump {
 	if g, ok := tun.(gsoTUN); ok && g.GSO() {
 		p.vnet = true
 		p.vnetWrite = g.writeVnet
+		p.vnetWriteGSO = g.writeVnetGSO
 	}
 	return p
 }
@@ -196,15 +205,52 @@ func (p *Pump) RemoveInboundKey(key uint32) {
 // valid ESP return address). Pass nil on a connected socket where the source is
 // implicit (client mode).
 func (p *Pump) HandleInbound(pkt []byte, from *net.UDPAddr) {
+	inner, ok := p.decapInbound(pkt, from)
+	if !ok {
+		return
+	}
+	if _, err := p.writeTUN(inner); err != nil {
+		if p.log != nil {
+			p.log.Printf("dataplane: TUN write failed: %v", err)
+		}
+	}
+}
+
+// HandleInboundBatch processes one read batch of inbound protected datagrams —
+// the same contract as HandleInbound per packet, with froms[i] as packet i's
+// source (froms may be nil for a connected socket). On a GSO device it also
+// coalesces consecutive same-flow TCP segments back into super-frames written
+// to the TUN once (gro_linux.go); the batch is the coalescing window, so
+// nothing is ever held past this call and idle traffic gains no latency.
+//
+// Like HandleInbound, it must be called from the transport's single inbound
+// goroutine.
+func (p *Pump) HandleInboundBatch(pkts [][]byte, froms []*net.UDPAddr) {
+	if p.vnet && p.handleInboundBatchGRO(pkts, froms) {
+		return
+	}
+	for i, pkt := range pkts {
+		var from *net.UDPAddr
+		if froms != nil {
+			from = froms[i]
+		}
+		p.HandleInbound(pkt, from)
+	}
+}
+
+// decapInbound demuxes and decapsulates one inbound protected datagram,
+// updating the tunnel's return address from from when given. It returns the
+// inner IP packet and whether there is one to deliver.
+func (p *Pump) decapInbound(pkt []byte, from *net.UDPAddr) ([]byte, bool) {
 	key, ok := p.demux(pkt)
 	if !ok {
-		return // no tunnel key in this packet
+		return nil, false // no tunnel key in this packet
 	}
 	p.mu.RLock()
 	t := p.byKey[key]
 	p.mu.RUnlock()
 	if t == nil {
-		return // unknown key
+		return nil, false // unknown key
 	}
 	if from != nil {
 		if u, ok := t.(interface{ SetPeerAddr(*net.UDPAddr) }); ok {
@@ -216,19 +262,15 @@ func (p *Pump) HandleInbound(pkt []byte, from *net.UDPAddr) {
 		if p.log != nil {
 			p.log.Printf("dataplane: decap key %#x failed: %v", key, err)
 		}
-		return
+		return nil, false
 	}
 	if len(inner) == 0 {
 		// An authenticated packet with no inner payload: a WireGuard keepalive.
 		// It kept the tunnel and any NAT binding alive by arriving; there is
 		// nothing to deliver to the TUN.
-		return
+		return nil, false
 	}
-	if _, err := p.writeTUN(inner); err != nil {
-		if p.log != nil {
-			p.log.Printf("dataplane: TUN write failed: %v", err)
-		}
-	}
+	return inner, true
 }
 
 // Run reads packets from the TUN device, routes each to the tunnel whose client

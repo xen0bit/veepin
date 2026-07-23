@@ -54,8 +54,10 @@ func (m *muxer) readLoop() {
 		bufs[i] = make([]byte, 65535)
 	}
 	sizes := make([]int, readBatch)
+	dataPkts := make([][]byte, 0, readBatch)
 	for {
 		n, err := bc.ReadBatch(bufs, sizes)
+		dataPkts = dataPkts[:0]
 		for i := range n {
 			pkt := bufs[i][:sizes[i]]
 			op, _, ok := wire.Opcode(pkt)
@@ -64,18 +66,22 @@ func (m *muxer) readLoop() {
 			}
 			switch {
 			case data.IsDataOpcode(op):
-				m.mu.Lock()
-				pump := m.pump
-				m.mu.Unlock()
-				if pump != nil {
-					// No copy: the pump decrypts in place and writes the TUN
-					// before returning; bufs[i] is not touched again until the
-					// next ReadBatch. The socket source is implicit on a
-					// connected client socket, so pass nil.
-					pump.HandleInbound(pkt, nil)
-				}
+				// Collected without a copy: the whole batch goes to the pump
+				// at once so inbound TCP can coalesce (GRO); the pump decrypts
+				// in place and writes the TUN before returning — bufs[i] is
+				// not touched again until the next ReadBatch. The socket
+				// source is implicit on a connected client socket.
+				dataPkts = append(dataPkts, pkt)
 			case wire.IsControl(op):
 				m.control.Deliver(pkt) // copies internally
+			}
+		}
+		if len(dataPkts) > 0 {
+			m.mu.Lock()
+			pump := m.pump
+			m.mu.Unlock()
+			if pump != nil {
+				pump.HandleInboundBatch(dataPkts, nil)
 			}
 		}
 		if err != nil {

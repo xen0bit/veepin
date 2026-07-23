@@ -145,13 +145,20 @@ var zeroVnetHdr [virtioNetHdrLen]byte
 // writeVnet writes one IP packet to a vnet-mode tunnel, prepending the zero
 // virtio-net header with writev so the packet is not copied.
 func (t *TUN) writeVnet(pkt []byte) (int, error) {
+	return t.writeVnetGSO(zeroVnetHdr[:], pkt)
+}
+
+// writeVnetGSO writes one frame to a vnet-mode tunnel under the given
+// virtio-net header — the GRO path's way of handing the kernel a coalesced
+// super-frame with its GSO metadata. writev keeps the frame uncopied.
+func (t *TUN) writeVnetGSO(hdr, pkt []byte) (int, error) {
 	for {
-		n, err := unix.Writev(t.fd, [][]byte{zeroVnetHdr[:], pkt})
+		n, err := unix.Writev(t.fd, [][]byte{hdr, pkt})
 		if err == unix.EINTR {
 			continue
 		}
-		if n >= virtioNetHdrLen {
-			n -= virtioNetHdrLen
+		if n >= len(hdr) {
+			n -= len(hdr)
 		}
 		return n, err
 	}

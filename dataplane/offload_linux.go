@@ -46,6 +46,15 @@ type virtioNetHdr struct {
 	csumOffset uint16
 }
 
+// putVirtioNetHdr encodes h into b, which must be at least virtioNetHdrLen.
+func putVirtioNetHdr(b []byte, h virtioNetHdr) {
+	b[0], b[1] = h.flags, h.gsoType
+	binary.LittleEndian.PutUint16(b[2:4], h.hdrLen)
+	binary.LittleEndian.PutUint16(b[4:6], h.gsoSize)
+	binary.LittleEndian.PutUint16(b[6:8], h.csumStart)
+	binary.LittleEndian.PutUint16(b[8:10], h.csumOffset)
+}
+
 func parseVirtioNetHdr(b []byte) virtioNetHdr {
 	return virtioNetHdr{
 		flags:      b[0],

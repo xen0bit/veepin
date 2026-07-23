@@ -141,7 +141,12 @@ func NewServer(cfg Config) (*Server, error) {
 		byRSPI:   make(map[uint64]*IKESA),
 		byRemote: make(map[string]*IKESA),
 	}
-	s.tr = &transport{conn500: dataplane.NewPacketConn(c500), conn4500: dataplane.NewPacketConn(c4500), onESP: s.handleESP}
+	s.tr = &transport{
+		conn500:    dataplane.NewPacketConn(c500),
+		conn4500:   dataplane.NewPacketConn(c4500),
+		onESP:      s.handleESP,
+		onESPBatch: s.handleESPBatch,
+	}
 	s.log.Printf("ikev2: listening on %s (IKE :%d, NAT-T/ESP :%d)",
 		cfg.ListenIP, cfg.Port500, cfg.Port4500)
 	return s, nil
@@ -194,8 +199,25 @@ func (s *Server) handleESP(esp []byte, from *net.UDPAddr) {
 	}
 }
 
+// handleESPBatch hands one read batch's ESP datagrams to the data path at
+// once, so it can coalesce inbound TCP (GRO); a data path without the batch
+// surface gets them one at a time.
+func (s *Server) handleESPBatch(esp [][]byte, froms []*net.UDPAddr) {
+	if dp, ok := s.cfg.DataPath.(espBatchReceiver); ok {
+		dp.HandleESPBatch(esp, froms)
+		return
+	}
+	for i, pkt := range esp {
+		s.handleESP(pkt, froms[i])
+	}
+}
+
 type espReceiver interface {
 	HandleESP(esp []byte, from *net.UDPAddr)
+}
+
+type espBatchReceiver interface {
+	HandleESPBatch(esp [][]byte, froms []*net.UDPAddr)
 }
 
 // SetDataPath attaches a data plane after construction (used by the daemon so

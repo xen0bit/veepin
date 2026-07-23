@@ -15,13 +15,19 @@ var nonESPMarker = []byte{0, 0, 0, 0}
 // non-ESP marker check). The bytes are the raw ESP packet (SPI first).
 type espSocketHandler func(esp []byte, from *net.UDPAddr)
 
+// espSocketBatchHandler is the batch form: every ESP datagram of one read
+// batch at once, so the data path can coalesce inbound TCP (GRO) with the
+// batch as its window. Preferred over espSocketHandler when set.
+type espSocketBatchHandler func(esp [][]byte, froms []*net.UDPAddr)
+
 // transport owns the two UDP sockets an IKEv2/NAT-T responder needs: port 500
 // for the initial exchange and port 4500 for post-NAT-detection traffic and
 // UDP-encapsulated ESP.
 type transport struct {
-	conn500  *dataplane.PacketConn
-	conn4500 *dataplane.PacketConn
-	onESP    espSocketHandler
+	conn500    *dataplane.PacketConn
+	conn4500   *dataplane.PacketConn
+	onESP      espSocketHandler
+	onESPBatch espSocketBatchHandler
 }
 
 // sendIKE transmits an IKE message to a peer. When the peer is on port 4500 the
@@ -84,8 +90,11 @@ func (t *transport) serve(handleIKE func(pkt []byte, from *net.UDPAddr, on4500 b
 		}
 		sizes := make([]int, espBatch)
 		froms := make([]*net.UDPAddr, espBatch)
+		esps := make([][]byte, 0, espBatch)
+		espFroms := make([]*net.UDPAddr, 0, espBatch)
 		for {
 			n, err := t.conn4500.ReadBatch(bufs, sizes, froms)
+			esps, espFroms = esps[:0], espFroms[:0]
 			for i := range n {
 				pkt, from := bufs[i][:sizes[i]], froms[i]
 				if len(pkt) >= 4 && pkt[0] == 0 && pkt[1] == 0 && pkt[2] == 0 && pkt[3] == 0 {
@@ -96,12 +105,22 @@ func (t *transport) serve(handleIKE func(pkt []byte, from *net.UDPAddr, on4500 b
 					handleIKE(ike, from, true)
 					continue
 				}
-				// ESP datagram (non-zero SPI). Handed over without a copy: the
-				// handler chain (PumpDataPath.HandleESP -> Pump.HandleInbound)
-				// decapsulates and writes the TUN before returning, and bufs[i]
-				// is not touched again until the next ReadBatch.
-				if t.onESP != nil {
-					t.onESP(pkt, from)
+				// ESP datagram (non-zero SPI). Collected without a copy: the
+				// whole batch is handed over at once so the data path can
+				// coalesce (GRO), and the handler chain decapsulates and
+				// writes the TUN before returning — bufs[i] is not touched
+				// again until the next ReadBatch.
+				esps = append(esps, pkt)
+				espFroms = append(espFroms, from)
+			}
+			if len(esps) > 0 {
+				switch {
+				case t.onESPBatch != nil:
+					t.onESPBatch(esps, espFroms)
+				case t.onESP != nil:
+					for i, esp := range esps {
+						t.onESP(esp, espFroms[i])
+					}
 				}
 			}
 			if err != nil {
