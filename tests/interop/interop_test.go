@@ -63,9 +63,10 @@ func TestInteropStrongswanClientVeepinServerFragmented(t *testing.T) {
 
 // TestInteropIKEv2ChildRekey proves proactive Child SA rekey (RFC 7296 2.8): the
 // veepin client rekeys its ESP SA every 2s (REKEY=2), and traffic survives the
-// SA swap. It waits until the client has actually rekeyed at least once, then
-// pings across the (now-rekeyed) tunnel — so the ping exercises a data path that
-// has been swapped onto fresh keys, not the SA the handshake set up.
+// SA swap. It waits until the server has accepted a client-driven
+// CREATE_CHILD_SA (the observable proof the client rekeyed — the client's own
+// session log is discarded on the CLI path), then pings across the now-rekeyed
+// tunnel so the ping exercises a data path swapped onto fresh keys.
 func TestInteropIKEv2ChildRekey(t *testing.T) {
 	requireDocker(t)
 	const composeFile = "compose.selftest-rekey.yml"
@@ -82,15 +83,15 @@ func TestInteropIKEv2ChildRekey(t *testing.T) {
 		_, _ = compose(t, composeFile, "down", "-v", "--timeout", "5")
 	})
 
-	// Wait until the client reports a completed rekey.
+	// Wait until the server has set up a client-driven CREATE_CHILD_SA rekey.
 	deadline := time.Now().Add(logDeadline)
 	rekeyed := false
 	var last string
 	for time.Now().Before(deadline) {
-		out, err := compose(t, composeFile, "logs", "--no-color", "client")
+		out, err := compose(t, composeFile, "logs", "--no-color", "server")
 		if err == nil {
 			last = out
-			if strings.Contains(out, "Child SA rekeyed") {
+			if strings.Contains(out, "CREATE_CHILD_SA up") {
 				rekeyed = true
 				break
 			}
@@ -98,7 +99,7 @@ func TestInteropIKEv2ChildRekey(t *testing.T) {
 		time.Sleep(2 * time.Second)
 	}
 	if !rekeyed {
-		t.Fatalf("client never logged a Child SA rekey within %s:\n%s", logDeadline, last)
+		t.Fatalf("server never accepted a client-driven Child SA rekey within %s:\n%s", logDeadline, last)
 	}
 	t.Log("client rekeyed the Child SA; pinging across the swapped data path")
 
