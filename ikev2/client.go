@@ -169,6 +169,12 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 		return nil, client.Result{}, err
 	}
 
+	// Switch the IKE client to post-handshake control mode: the data-path read
+	// loop below now owns the socket, so it delivers received IKE datagrams
+	// (DPD responses, rekey, peer deletes) to the client instead of the client
+	// reading them inline. This is what lets Probe run dead-peer detection.
+	c.Attach()
+
 	// 2. TUN.
 	tun, err := dataplane.OpenTUNGSO(cfg.TUNName)
 	if err != nil {
@@ -248,6 +254,15 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 			for i := range n {
 				pkt := bufs[i][:sizes[i]]
 				if len(pkt) >= 4 && pkt[0] == 0 && pkt[1] == 0 && pkt[2] == 0 && pkt[3] == 0 {
+					// Non-ESP: a NAT keepalive (single 0xFF, too short) or an IKE
+					// control message (DPD response, rekey, peer delete). Hand any
+					// IKE message to the control channel; drop keepalives. Copied
+					// out because the exchange may outlive this batch's buffer.
+					if len(pkt) > 4 {
+						ike := make([]byte, len(pkt)-4)
+						copy(ike, pkt[4:])
+						s.ike.Deliver(ike)
+					}
 					continue
 				}
 				// Collected without a copy: the whole batch goes to the pump
@@ -362,6 +377,24 @@ func (s *session) Roam() error {
 	s.conn.Store(newConn)
 	s.logger.Printf("ikev2: MOBIKE roamed to local %s", newConn.LocalAddr())
 	return nil
+}
+
+// ikeLivenessIdle is how much authenticated ESP silence must pass before a probe
+// runs a DPD exchange: recent inbound ESP is itself proof the peer is alive.
+const ikeLivenessIdle = 20 * time.Second
+
+// Probe implements client.Prober. Recent inbound ESP proves the peer is alive,
+// so while traffic is flowing the probe does nothing. Only after a stretch of
+// silence does it run one IKEv2 dead-peer-detection exchange (an empty
+// INFORMATIONAL the server must answer). The client-package liveness monitor
+// calls it on an interval and tears the session down after a run of failures,
+// so a black-holed ESP path — the socket still "up" while nothing crosses — is
+// noticed and re-dialled instead of hanging forever.
+func (s *session) Probe(ctx context.Context) error {
+	if s.pump.IdleFor() < ikeLivenessIdle {
+		return nil
+	}
+	return s.ike.SendDPD(ctx)
 }
 
 // Wait blocks until the session is closed or ctx is cancelled. It returns

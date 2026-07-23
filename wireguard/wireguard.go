@@ -398,6 +398,9 @@ type session struct {
 	// there is no dispatch to arbitrate.
 	hsMu    sync.Mutex
 	pending *pendingHandshake
+	// hsExchMu serializes whole handshake exchanges (periodic rekey vs. a
+	// liveness Probe) so only one runs at a time.
+	hsExchMu sync.Mutex
 
 	closeOnce sync.Once
 	closeErr  error
@@ -519,10 +522,9 @@ func (s *session) rekeyLoop() {
 	}
 }
 
-// rekey runs one handshake and installs its keypair as the tunnel's current one,
-// registering the new receiver index with the pump and retiring the keypair that
-// fell out. A failure leaves the existing keys in place: the next tick tries
-// again, and Encapsulate refuses only once the current key passes rejectAfterTime.
+// rekey runs one handshake and installs its keypair as the tunnel's current one.
+// A failure leaves the existing keys in place: the next tick tries again, and
+// Encapsulate refuses only once the current key passes rejectAfterTime.
 func (s *session) rekey() {
 	ctx, cancel := context.WithTimeout(context.Background(), rekeyAttemptTime)
 	defer cancel()
@@ -534,16 +536,28 @@ func (s *session) rekey() {
 		case <-ctx.Done():
 		}
 	}()
+	if err := s.handshakeOnce(ctx); err != nil {
+		s.logger.Printf("wireguard: rekey failed: %v", err)
+	}
+}
+
+// handshakeOnce runs a single handshake, installs the resulting keypair as the
+// tunnel's current one, registers the new receiver index with the pump and
+// retires the keypair that fell out. It is serialized (hsExchMu) so the periodic
+// rekey and a liveness Probe never drive two handshakes at once — both share
+// this one path, since in WireGuard a successful handshake is both the liveness
+// signal and a rekey.
+func (s *session) handshakeOnce(ctx context.Context) error {
+	s.hsExchMu.Lock()
+	defer s.hsExchMu.Unlock()
 
 	kp, err := s.doHandshake(ctx)
 	if err != nil {
-		s.logger.Printf("wireguard: rekey failed: %v", err)
-		return
+		return err
 	}
 	sess, err := transport.NewSession(kp.Send, kp.Recv, kp.Local, kp.Remote)
 	if err != nil {
-		s.logger.Printf("wireguard: rekey transport keys: %v", err)
-		return
+		return fmt.Errorf("transport keys: %w", err)
 	}
 	evicted := s.tunnel.install(sess)
 	s.pump.AddInboundKey(sess.LocalIndex(), s.tunnel)
@@ -554,6 +568,37 @@ func (s *session) rekey() {
 	// fresh keypair until it has received something under it.
 	s.sendKeepalive(s.tunnel)
 	s.logger.Printf("wireguard: rekeyed, session index %#x", sess.LocalIndex())
+	return nil
+}
+
+// wgLivenessIdle is how much authenticated silence must pass before a probe
+// bothers to handshake: below it, recent traffic (or the peer's keepalives) is
+// itself proof of life, so the probe is free.
+const wgLivenessIdle = 20 * time.Second
+
+// Probe implements client.Prober. Recent authenticated traffic is proof enough,
+// so a probe first consults the pump's idle clock and does nothing while the
+// tunnel is active — which keeps it out of the way of the data path entirely.
+// Only after a stretch of silence does it fall back to WireGuard's real liveness
+// check: a fresh handshake the peer must answer. A dead peer never responds and
+// doHandshake times out, tearing the tunnel down after the monitor's threshold;
+// a live-but-idle peer answers, so the probe doubles as a rekey.
+func (s *session) Probe(ctx context.Context) error {
+	if s.pump.IdleFor() < wgLivenessIdle {
+		return nil
+	}
+	return s.handshakeOnce(ctx)
+}
+
+// LivenessConfig implements client.LivenessTuner. A WireGuard probe may run a
+// full DH handshake, so it is spaced generously and given a longer per-probe
+// budget (doHandshake retransmits every rekeyTimeout until answered).
+func (s *session) LivenessConfig() client.LivenessConfig {
+	return client.LivenessConfig{
+		Interval:    30 * time.Second,
+		Timeout:     3 * rekeyTimeout,
+		MaxFailures: 2,
+	}
 }
 
 // doHandshake runs a rekey handshake dispatched through readLoop: it sends an

@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xen0bit/veepin/dataplane"
@@ -21,6 +22,10 @@ import (
 // typically a wrong PSK or EAP password. Callers can errors.Is-check it to
 // distinguish credential failures from transport/negotiation failures.
 var ErrAuthFailed = errors.New("authentication failed")
+
+// errNotAttached is returned by a control exchange (DPD, rekey) invoked before
+// Attach put the client into post-handshake control mode.
+var errNotAttached = errors.New("ike: client not attached for control exchanges")
 
 // ClientConfig configures an IKEv2 client (initiator).
 type ClientConfig struct {
@@ -101,6 +106,15 @@ type Client struct {
 
 	mu     sync.Mutex
 	closed bool
+
+	// Post-handshake control channel. Once the data path owns socket reads, it
+	// can no longer read IKE responses inline, so it delivers received IKE
+	// datagrams here and the control exchanges (DPD, rekey) read from inbox
+	// instead of the socket. exchMu serializes every initiator-driven exchange
+	// (DPD, rekey, MOBIKE roam) so their message IDs never interleave.
+	exchMu   sync.Mutex
+	attached atomic.Bool
+	inbox    chan []byte
 }
 
 // NewClient creates an IKEv2 client from cfg.
@@ -604,6 +618,10 @@ func (c *Client) MobikeEnabled() bool {
 // concurrently with itself. It leaves the new socket without a read deadline,
 // matching the socket state Connect leaves for the data path.
 func (c *Client) Roam() error {
+	// Serialize with DPD and rekey: all three consume initiator message IDs.
+	c.exchMu.Lock()
+	defer c.exchMu.Unlock()
+
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -715,10 +733,17 @@ func (c *Client) seal(ex payload.ExchangeType, msgID uint32, first payload.Paylo
 }
 
 func (c *Client) recvInners() ([]payload.RawPayload, error) {
+	return c.recvInnersFrom(c.readMessage)
+}
+
+// recvInnersFrom is recvInners with an explicit datagram source: the socket
+// (c.readMessage) during the handshake and MOBIKE roam, or the delivered-inbox
+// reader once the data path owns socket reads (DPD, rekey).
+func (c *Client) recvInnersFrom(read func() ([]byte, error)) ([]payload.RawPayload, error) {
 	// A fragmented response spans several datagrams (RFC 7383); loop reading and
 	// reassembling until one complete message is in hand.
 	for {
-		raw, err := c.readMessage()
+		raw, err := read()
 		if err != nil {
 			return nil, err
 		}

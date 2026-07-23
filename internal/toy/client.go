@@ -224,6 +224,12 @@ func StartClient(ctx context.Context, conn *net.UDPConn, tun *dataplane.TUN, cfg
 // inspect it.
 func (c *Client) Session() *Session { return c.session }
 
+// IdleFor reports how long since the last authenticated inbound datagram (data
+// or KEEPALIVE). Since the peer sends a KEEPALIVE every KeepaliveInterval, a
+// value well beyond that means the peer is gone — the basis for a liveness
+// probe.
+func (c *Client) IdleFor() time.Duration { return c.pump.IdleFor() }
+
 // readLoop carries inbound datagrams into the pump.
 func (c *Client) readLoop() {
 	buf := make([]byte, 65535)

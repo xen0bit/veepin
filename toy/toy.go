@@ -47,6 +47,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
@@ -213,6 +214,28 @@ func (s *Session) Wait(ctx context.Context) error {
 
 // Close tears the session down.
 func (s *Session) Close() error { return s.client.Close() }
+
+// Probe implements client.Prober. TOY's peer sends a KEEPALIVE every
+// KeepaliveInterval, so a stretch of authenticated silence far longer than that
+// means the peer is gone. This is the passive, pump-level liveness signal
+// (dataplane.Pump.IdleFor) rather than an active round-trip — appropriate for a
+// protocol whose peer keeps the path warm on its own.
+func (s *Session) Probe(_ context.Context) error {
+	if idle := s.client.IdleFor(); idle > toyLivenessDeadline {
+		return fmt.Errorf("toy: no authenticated packet for %v", idle.Round(time.Second))
+	}
+	return nil
+}
+
+// LivenessConfig implements client.LivenessTuner: probe on the keepalive cadence
+// and declare death only after several silent intervals (toyLivenessDeadline).
+func (s *Session) LivenessConfig() client.LivenessConfig {
+	return client.LivenessConfig{Interval: itoy.KeepaliveInterval, MaxFailures: 2}
+}
+
+// toyLivenessDeadline is how much authenticated silence means the peer is gone:
+// several KEEPALIVE intervals, tolerant of a couple of dropped keepalives.
+var toyLivenessDeadline = 4 * itoy.KeepaliveInterval
 
 // dialer adapts Config to the client registry.
 type dialer struct{ cfg Config }

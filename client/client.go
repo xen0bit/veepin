@@ -204,5 +204,13 @@ func Dial(ctx context.Context, protocol string, opts map[string]string) (Session
 	if err != nil {
 		return nil, Result{}, fmt.Errorf("client: %s: %w", protocol, err)
 	}
-	return dialer.Dial(ctx)
+	sess, res, err := dialer.Dial(ctx)
+	if err != nil {
+		return nil, res, err
+	}
+	// Wrap the session in a liveness monitor if the protocol exposes an active
+	// probe (Prober). This is where dead-peer detection becomes universal:
+	// every registry caller gets it without opting in, and a protocol on a
+	// reliable transport that needs none is simply returned unwrapped.
+	return monitor(sess), res, nil
 }

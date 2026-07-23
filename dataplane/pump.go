@@ -6,6 +6,8 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // Tunnel is the data-path view of one established security association. A
@@ -88,6 +90,14 @@ type Pump struct {
 	// goroutine that calls HandleInboundBatch, like every per-pump scratch.
 	gro groTable
 
+	// lastInbound is the unix-nanos time of the most recent *authenticated*
+	// inbound packet on any tunnel — data or keepalive. It is the pump-level
+	// liveness signal: a peer that has died stops producing authenticated
+	// packets (its periodic keepalives included), so IdleFor grows without
+	// bound. A protocol whose peer sends periodic keepalives turns this into a
+	// client.Prober with a few lines (see IdleFor).
+	lastInbound atomic.Int64
+
 	mu     sync.RWMutex
 	byKey  map[uint32]Tunnel // inbound demux
 	routes routeTable        // outbound, by longest-prefix match
@@ -123,6 +133,9 @@ func NewPump(tun tunIO, send Sender, demux Demux, logger *log.Logger) *Pump {
 		demux: demux,
 		byKey: make(map[uint32]Tunnel),
 	}
+	// Seed the liveness clock so a freshly-built tunnel does not read as idle
+	// before its first inbound packet arrives.
+	p.lastInbound.Store(time.Now().UnixNano())
 	if g, ok := tun.(gsoTUN); ok && g.GSO() {
 		p.vnet = true
 		p.vnetWrite = g.writeVnet
@@ -204,6 +217,16 @@ func (p *Pump) RemoveInboundKey(key uint32) {
 // sends ESP from a different port than IKE, so the IKE peer address is not a
 // valid ESP return address). Pass nil on a connected socket where the source is
 // implicit (client mode).
+// IdleFor reports how long it has been since the last authenticated inbound
+// packet (data or keepalive) on any tunnel. It is the raw material for a
+// liveness probe: for a protocol whose peer sends periodic keepalives, an
+// IdleFor beyond a few keepalive intervals means the peer is gone. It is
+// meaningful from the moment NewPump returns (seeded to construction time), so a
+// probe never reads a brand-new tunnel as dead.
+func (p *Pump) IdleFor() time.Duration {
+	return time.Since(time.Unix(0, p.lastInbound.Load()))
+}
+
 func (p *Pump) HandleInbound(pkt []byte, from *net.UDPAddr) {
 	inner, ok := p.decapInbound(pkt, from)
 	if !ok {
@@ -264,6 +287,9 @@ func (p *Pump) decapInbound(pkt []byte, from *net.UDPAddr) ([]byte, bool) {
 		}
 		return nil, false
 	}
+	// Authenticated inbound activity — record it for liveness before the
+	// keepalive short-circuit below, so a keepalive counts as proof of life.
+	p.lastInbound.Store(time.Now().UnixNano())
 	if len(inner) == 0 {
 		// An authenticated packet with no inner payload: a WireGuard keepalive.
 		// It kept the tunnel and any NAT binding alive by arriving; there is
