@@ -67,6 +67,12 @@ type Config struct {
 	// uses defaultRekeyInterval; negative disables proactive rekey.
 	RekeyInterval time.Duration
 
+	// IKERekeyInterval is the IKE SA soft lifetime: the client proactively
+	// rekeys the IKE SA itself (RFC 7296 2.18 — a fresh DH exchange for a new
+	// control channel, the Child SAs inherited unchanged, the old SA deleted)
+	// this often. Zero uses defaultIKERekeyInterval; negative disables it.
+	IKERekeyInterval time.Duration
+
 	// Logger receives progress logs; nil discards them.
 	Logger *log.Logger
 }
@@ -75,6 +81,12 @@ type Config struct {
 // is zero. IKEv2 does not negotiate lifetimes (RFC 7296), so this is local
 // policy; one hour is a conservative default well under common byte ceilings.
 const defaultRekeyInterval = time.Hour
+
+// defaultIKERekeyInterval is the IKE SA soft lifetime when
+// Config.IKERekeyInterval is zero. It is longer than the Child SA lifetime —
+// the IKE SA carries only control traffic, so it ages far more slowly — and
+// mirrors the common strongSwan default of a few hours.
+const defaultIKERekeyInterval = 4 * time.Hour
 
 // Option keys accepted by client.Dial(ctx, "ikev2", opts). They match the
 // NetworkManager plugin's connection settings, which is why the parsed names are
@@ -89,6 +101,7 @@ const (
 	OptPassword = "password"  // EAP-MSCHAPv2 password (optional)
 	OptTUNName  = "tun"       // desired TUN interface name (optional)
 	OptRekey    = "rekey"     // Child SA rekey interval in seconds (optional)
+	OptIKERekey = "ike-rekey" // IKE SA rekey interval in seconds (optional)
 )
 
 // parseOptions turns string-keyed options into a Dialer. It is what the registry
@@ -116,6 +129,13 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 			return nil, fmt.Errorf("bad %s %q: %w", OptRekey, r, err)
 		}
 		cfg.RekeyInterval = time.Duration(n) * time.Second
+	}
+	if r := opts[OptIKERekey]; r != "" {
+		n, err := strconv.Atoi(r)
+		if err != nil {
+			return nil, fmt.Errorf("bad %s %q: %w", OptIKERekey, r, err)
+		}
+		cfg.IKERekeyInterval = time.Duration(n) * time.Second
 	}
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -213,14 +233,15 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	dataConn := c.DataConn()
 
 	s := &session{
-		ike:        c,
-		tun:        tun,
-		logger:     logger,
-		tunnel:     tunnel,
-		childInSPI: res.InboundSPI,
-		done:       make(chan struct{}),
-		stopKA:     make(chan struct{}),
-		stopRekey:  make(chan struct{}),
+		ike:          c,
+		tun:          tun,
+		logger:       logger,
+		tunnel:       tunnel,
+		childInSPI:   res.InboundSPI,
+		done:         make(chan struct{}),
+		stopKA:       make(chan struct{}),
+		stopRekey:    make(chan struct{}),
+		stopIKERekey: make(chan struct{}),
 	}
 	// The ESP socket is held behind an atomic so MOBIKE Roam can swap it under
 	// the running data path (see session.Roam).
@@ -357,6 +378,32 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 		}()
 	}
 
+	// Proactive IKE SA rekey: rotate the control channel itself (fresh DH, new
+	// SK_* keys) before its soft lifetime, with the Child SAs inherited so the
+	// data path never pauses.
+	ikeRekeyEvery := cfg.IKERekeyInterval
+	if ikeRekeyEvery == 0 {
+		ikeRekeyEvery = defaultIKERekeyInterval
+	}
+	if ikeRekeyEvery > 0 {
+		go func() {
+			t := time.NewTicker(ikeRekeyEvery)
+			defer t.Stop()
+			for {
+				select {
+				case <-s.stopIKERekey:
+					return
+				case <-t.C:
+					if err := s.rekeyIKE(); err != nil {
+						// A failed IKE rekey leaves the current SA in place; the
+						// next tick retries. Liveness catches a truly dead peer.
+						logger.Printf("ikev2: IKE SA rekey failed: %v", err)
+					}
+				}
+			}
+		}()
+	}
+
 	out := client.Result{
 		TUNName:    tun.Name(),
 		AssignedIP: res.AssignedIP,
@@ -395,11 +442,12 @@ type session struct {
 	tunnel     dataplane.Tunnel
 	childInSPI uint32
 
-	closeOnce sync.Once
-	closeErr  error
-	done      chan struct{} // closed when the inbound loop exits (i.e. on Close)
-	stopKA    chan struct{} // stops the NAT-keepalive goroutine
-	stopRekey chan struct{} // stops the proactive-rekey goroutine
+	closeOnce    sync.Once
+	closeErr     error
+	done         chan struct{} // closed when the inbound loop exits (i.e. on Close)
+	stopKA       chan struct{} // stops the NAT-keepalive goroutine
+	stopRekey    chan struct{} // stops the proactive Child-SA-rekey goroutine
+	stopIKERekey chan struct{} // stops the proactive IKE-SA-rekey goroutine
 }
 
 // Roam relocates the tunnel to a fresh local address after the client's network
@@ -486,6 +534,30 @@ func (s *session) rekeyChild() error {
 	return nil
 }
 
+// rekeyIKE rotates the IKE SA (RFC 7296 2.18). Unlike a Child SA rekey it does
+// not touch the data path: the ESP Child SAs are inherited by the new IKE SA
+// unchanged, so no tunnel is swapped and no ESP packet is affected. Only the
+// control-channel SPIs and keys change, inside the ike.Client. It shares
+// rekeyMu with the Child rekey so the two never overlap: a Child rekey's
+// install-then-delete pair completes as a unit before the IKE SA can rotate,
+// and vice versa.
+func (s *session) rekeyIKE() error {
+	s.rekeyMu.Lock()
+	defer s.rekeyMu.Unlock()
+	if s.closing.Load() {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := s.ike.RekeyIKE(ctx); err != nil {
+		return err
+	}
+	s.logger.Printf("ikev2: IKE SA rekeyed")
+	return nil
+}
+
 // Probe implements client.Prober. Recent inbound ESP proves the peer is alive,
 // so while traffic is flowing the probe does nothing. Only after a stretch of
 // silence does it run one IKEv2 dead-peer-detection exchange (an empty
@@ -518,6 +590,7 @@ func (s *session) Close() error {
 		s.closing.Store(true)
 		close(s.stopKA)
 		close(s.stopRekey)
+		close(s.stopIKERekey)
 		if s.pump != nil {
 			s.pump.Close()
 		}

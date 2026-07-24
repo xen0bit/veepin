@@ -117,6 +117,63 @@ func TestInteropIKEv2ChildRekey(t *testing.T) {
 	t.Fatalf("ping across the rekeyed tunnel never succeeded within %s:\n%s", pingDeadline, last)
 }
 
+// TestInteropIKEv2IKERekey proves proactive IKE SA rekey (RFC 7296 2.18): the
+// veepin client rotates the IKE SA itself every 2s (IKE_REKEY=2) — a fresh DH
+// exchange for new control keys — while the inherited Child SA keeps carrying
+// traffic. It waits until the server has accepted a client-driven IKE SA rekey
+// (the server logs "IKE SA rekeyed"), then pings across the tunnel: success
+// proves the Child SA survived the control-channel rotation untouched.
+func TestInteropIKEv2IKERekey(t *testing.T) {
+	requireDocker(t)
+	const composeFile = "compose.selftest-ike-rekey.yml"
+
+	if out, err := compose(t, composeFile, "up", "--build", "-d"); err != nil {
+		t.Fatalf("compose up: %v\n%s", err, out)
+	}
+	t.Cleanup(func() {
+		if t.Failed() {
+			if logs, err := compose(t, composeFile, "logs", "--no-color"); err == nil {
+				t.Logf("--- compose logs (%s) ---\n%s", composeFile, logs)
+			}
+		}
+		_, _ = compose(t, composeFile, "down", "-v", "--timeout", "5")
+	})
+
+	// Wait until the server has accepted a client-driven IKE SA rekey.
+	deadline := time.Now().Add(logDeadline)
+	rekeyed := false
+	var last string
+	for time.Now().Before(deadline) {
+		out, err := compose(t, composeFile, "logs", "--no-color", "server")
+		if err == nil {
+			last = out
+			if strings.Contains(out, "IKE SA rekeyed") {
+				rekeyed = true
+				break
+			}
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if !rekeyed {
+		t.Fatalf("server never accepted a client-driven IKE SA rekey within %s:\n%s", logDeadline, last)
+	}
+	t.Log("client rekeyed the IKE SA; pinging across the inherited Child SA")
+
+	// Ping across the tunnel: success proves the Child SA survived the IKE SA
+	// rotation (its ESP keys are inherited, not re-derived).
+	pingDL := time.Now().Add(pingDeadline)
+	for time.Now().Before(pingDL) {
+		out, err := compose(t, composeFile, "exec", "-T", "client", "ping", "-c2", "-W2", "10.10.10.1")
+		if err == nil && strings.Contains(out, "0% packet loss") {
+			t.Log("ping across the IKE-rekeyed tunnel succeeded")
+			return
+		}
+		last = out
+		time.Sleep(3 * time.Second)
+	}
+	t.Fatalf("ping after IKE SA rekey never succeeded within %s:\n%s", pingDeadline, last)
+}
+
 // TestInteropVeepinClientWireguardServer proves the WireGuard initiator against
 // the reference wireguard-go responder: the veepin client performs the
 // Noise_IKpsk2 handshake and transport data path, then pings 10.10.10.1 (the

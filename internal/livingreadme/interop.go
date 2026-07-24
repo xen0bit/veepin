@@ -43,6 +43,7 @@ var interopMatrix = []interopRow{
 		Self: interopCell{Tests: []string{
 			"TestInteropSelf",
 			"TestInteropIKEv2ChildRekey",
+			"TestInteropIKEv2IKERekey",
 		}},
 	},
 	{

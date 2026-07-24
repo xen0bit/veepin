@@ -532,7 +532,7 @@ each a localized extension point, not a structural rework:
   reassembly (RFC 7383 — it negotiates and reassembles inbound SKF fragments but
   never fragments its own, always-small output) and the RFC 7296 §2.6 cookie
   exchange; every server bounds unauthenticated work through `dataplane.Gate`.
-- **Client liveness is unified; SA rekey is the remaining piece.** A
+- **Client liveness and SA rekey are unified across protocols.** A
   cross-protocol monitor (`client.Prober`, applied automatically by
   `client.Dial`) detects a dead peer and tears the tunnel down for a clean
   re-dial. IKEv2 runs RFC 7296 dead-peer detection (an empty `INFORMATIONAL` the
@@ -540,13 +540,13 @@ each a localized extension point, not a structural rework:
   rekey; pump-based protocols expose an authenticated-idle signal
   (`dataplane.Pump.IdleFor`), which TOY uses. Reliable-transport protocols
   (SSTP, SSH, AnyConnect, MASQUE, Fortinet) surface a dead peer through the
-  transport's own read failure, so they need no probe. IKEv2 also rekeys its
-  **Child SA** proactively before the soft lifetime — a `CREATE_CHILD_SA`
-  exchange whose fresh keys are swapped into the data path before the old SA is
-  deleted, so a long-lived tunnel never lets its ESP SA expire. What remains is
-  rekeying the **IKE SA** itself (the control SA); its lifetimes are long, so in
-  practice a very long-lived session re-dials the control channel rather than
-  rekeying it in place.
+  transport's own read failure, so they need no probe. IKEv2 also rekeys both
+  its SAs proactively before their soft lifetimes: the **Child SA** with a
+  `CREATE_CHILD_SA` whose fresh keys are swapped into the data path before the
+  old SA is deleted, and the **IKE SA** itself (RFC 7296 §2.18) with a fresh
+  Diffie-Hellman exchange for a new control channel — the Child SAs inherited
+  unchanged, so the data path never pauses. Neither lets a long-lived tunnel
+  expire in place.
 - **IPv4 tunneling; single IKE SA per Child.** IPv6 inner traffic is not
   forwarded; sufficient for road-warrior clients, not a site-to-site multi-SA
   gateway.

@@ -4,34 +4,152 @@ import (
 	"net"
 
 	"github.com/xen0bit/veepin/internal/ikev2/payload"
+	"github.com/xen0bit/veepin/internal/ikev2/transform"
 )
 
-// handleCreateChildSA processes a CREATE_CHILD_SA request. It supports
-// creating a new Child SA (the rekey-Child and rekey-IKE variants are
-// recognized via the REKEY_SA notify but treated as new-child creation for
-// this build).
+// handleRekeyIKE processes a CREATE_CHILD_SA that rekeys the IKE SA itself
+// (RFC 7296 2.18). It runs a fresh DH exchange, derives the new SA's control
+// keys from the old SA's SK_d, migrates every Child SA to the new IKE SA
+// unchanged (their ESP keys are not touched, so the data path never pauses),
+// and registers the replacement. The response is protected under the *old* SA;
+// the peer then deletes the old SA with an INFORMATIONAL. reqSA is the
+// already-parsed request SA payload (first proposal is Protocol=IKE).
 //
-//	HDR, SK{[N(REKEY_SA)], SA, Ni, [KEi], TSi, TSr} -->
-//	                    <-- HDR, SK{SA, Nr, [KEr], TSi, TSr}
-func (s *Server) handleCreateChildSA(sa *IKESA, hdr payload.Header, inners []payload.RawPayload, remote *net.UDPAddr) {
-	saPay := findInner(inners, payload.TypeSA)
+// Called with sa.mu held (from handleSecured).
+func (s *Server) handleRekeyIKE(sa *IKESA, hdr payload.Header, inners []payload.RawPayload, remote *net.UDPAddr, reqSA payload.SAPayload) {
 	noncePay := findInner(inners, payload.TypeNonce)
-	tsiPay := findInner(inners, payload.TypeTSi)
-	tsrPay := findInner(inners, payload.TypeTSr)
-
-	// Advance the responder message-ID window regardless of outcome.
-	sa.RecvMsgID = hdr.MessageID + 1
-
-	if saPay == nil || noncePay == nil || tsiPay == nil || tsrPay == nil {
+	kePay := findInner(inners, payload.TypeKE)
+	if noncePay == nil || kePay == nil {
 		s.respondEncryptedNotify(sa, payload.CREATE_CHILD_SA, hdr.MessageID, payload.InvalidSyntax, remote)
 		return
 	}
-
-	espSA, err := payload.ParseSA(saPay.Body)
+	if len(reqSA.Proposals[0].SPI) != 8 {
+		s.respondEncryptedNotify(sa, payload.CREATE_CHILD_SA, hdr.MessageID, payload.InvalidSyntax, remote)
+		return
+	}
+	suite, accepted, err := SelectIKESuite(reqSA)
+	if err != nil {
+		s.respondEncryptedNotify(sa, payload.CREATE_CHILD_SA, hdr.MessageID, payload.NoProposalChosen, remote)
+		return
+	}
+	ke, err := payload.ParseKE(kePay.Body)
 	if err != nil {
 		s.respondEncryptedNotify(sa, payload.CREATE_CHILD_SA, hdr.MessageID, payload.InvalidSyntax, remote)
 		return
 	}
+	if ke.Group != suite.DHID {
+		s.respondEncryptedNotify(sa, payload.CREATE_CHILD_SA, hdr.MessageID, payload.InvalidKEPayload, remote)
+		return
+	}
+
+	dh, err := transform.DH(suite.DHID)
+	if err != nil {
+		s.respondEncryptedNotify(sa, payload.CREATE_CHILD_SA, hdr.MessageID, payload.NoProposalChosen, remote)
+		return
+	}
+	ourPub, err := dh.Generate()
+	if err != nil {
+		s.log.Printf("ikev2: rekey-IKE DH generate: %v", err)
+		return
+	}
+	shared, err := dh.ComputeSecret(ke.KeyData)
+	if err != nil {
+		s.respondEncryptedNotify(sa, payload.CREATE_CHILD_SA, hdr.MessageID, payload.InvalidSyntax, remote)
+		return
+	}
+
+	newSPIi := beU64(reqSA.Proposals[0].SPI)
+	newSPIr := newIKESPI()
+	ni := payload.ParseNonce(noncePay.Body)
+	nr := randomNonce(suite.PRF.PreferredKeyLen)
+
+	newKeys := DeriveRekeyedIKEKeys(suite.PRF, sa.Keys.SKd, shared, ni, nr,
+		newSPIi, newSPIr, suite.encKeyLen(), suite.integKeyLen())
+
+	// Build the replacement IKE SA. It inherits the peer's transport state, the
+	// negotiated options, and — crucially — the Child SAs, moved across so the
+	// ESP data path is untouched. Message IDs reset: this CREATE_CHILD_SA is the
+	// last exchange on the old SA, the new SA starts at zero.
+	newSA := newIKESA()
+	newSA.InitiatorSPI = newSPIi
+	newSA.ResponderSPI = newSPIr
+	newSA.WeAreInitiator = false
+	newSA.Suite = suite
+	newSA.Keys = newKeys
+	newSA.State = StateEstablished
+	newSA.RemoteAddr = remote
+	newSA.OnPort4500 = sa.OnPort4500
+	newSA.NAT = sa.NAT
+	newSA.MobikeEnabled = sa.MobikeEnabled
+	newSA.fragEnabled = sa.fragEnabled
+	newSA.ClientIP = sa.ClientIP
+	newSA.PeerID = sa.PeerID
+	newSA.RecvMsgID = 0
+	newSA.SendMsgID = 0
+	newSA.Children = sa.Children
+
+	// Detach the migrated state from the old SA so its imminent deletion (the
+	// peer sends INFORMATIONAL{D(IKE)} next) neither tears down the inherited
+	// Child SA data paths nor releases the assigned address.
+	sa.Children = make(map[uint32]*ChildSA)
+	sa.ClientIP = nil
+	sa.State = StateDeleting
+
+	// Response under the OLD SA: SA (accepted proposal carrying our new
+	// responder SPI), Nr, KEr.
+	accepted.SPI = u64BE(newSPIr)
+	b := payload.NewBuilder()
+	b.Add(payload.TypeSA, false, payload.MarshalSA(payload.SAPayload{Proposals: []payload.Proposal{accepted}}))
+	b.Add(payload.TypeNonce, false, payload.MarshalNonce(nr))
+	b.Add(payload.TypeKE, false, payload.MarshalKE(payload.KEPayload{Group: suite.DHID, KeyData: ourPub}))
+	s.respondEncrypted(sa, payload.CREATE_CHILD_SA, hdr.MessageID, b.FirstType(), b.Bytes(), remote)
+
+	s.storeSA(newSA)
+	s.log.Printf("ikev2: IKE SA rekeyed with %s (old rSPI=%#x new rSPI=%#x, %d child(ren) migrated)",
+		remote, sa.ResponderSPI, newSPIr, len(newSA.Children))
+}
+
+// handleCreateChildSA processes a CREATE_CHILD_SA request. An ESP proposal
+// creates or rekeys a Child SA (a REKEY_SA notify names the SA being replaced,
+// but the negotiation is the same as a fresh child); an IKE proposal rekeys the
+// IKE SA itself and is dispatched to handleRekeyIKE.
+//
+//	HDR, SK{[N(REKEY_SA)], SA, Ni, [KEi], TSi, TSr} -->   (Child SA)
+//	                    <-- HDR, SK{SA, Nr, [KEr], TSi, TSr}
+//	HDR, SK{SA(IKE), Ni, KEi}                       -->   (IKE SA rekey)
+//	                    <-- HDR, SK{SA(IKE), Nr, KEr}
+func (s *Server) handleCreateChildSA(sa *IKESA, hdr payload.Header, inners []payload.RawPayload, remote *net.UDPAddr) {
+	saPay := findInner(inners, payload.TypeSA)
+
+	// Advance the responder message-ID window regardless of outcome.
+	sa.RecvMsgID = hdr.MessageID + 1
+
+	if saPay == nil {
+		s.respondEncryptedNotify(sa, payload.CREATE_CHILD_SA, hdr.MessageID, payload.InvalidSyntax, remote)
+		return
+	}
+	reqSA, err := payload.ParseSA(saPay.Body)
+	if err != nil {
+		s.respondEncryptedNotify(sa, payload.CREATE_CHILD_SA, hdr.MessageID, payload.InvalidSyntax, remote)
+		return
+	}
+
+	// An IKE proposal means the peer is rekeying the IKE SA itself (RFC 7296
+	// 2.18): a fresh DH exchange, the Child SAs inherited unchanged. An ESP
+	// proposal is a Child SA create/rekey and falls through below.
+	if len(reqSA.Proposals) > 0 && reqSA.Proposals[0].Protocol == payload.ProtoIKE {
+		s.handleRekeyIKE(sa, hdr, inners, remote, reqSA)
+		return
+	}
+
+	noncePay := findInner(inners, payload.TypeNonce)
+	tsiPay := findInner(inners, payload.TypeTSi)
+	tsrPay := findInner(inners, payload.TypeTSr)
+	if noncePay == nil || tsiPay == nil || tsrPay == nil {
+		s.respondEncryptedNotify(sa, payload.CREATE_CHILD_SA, hdr.MessageID, payload.InvalidSyntax, remote)
+		return
+	}
+	espSA := reqSA
 	es, accepted, err := SelectESPSuite(espSA)
 	if err != nil {
 		s.respondEncryptedNotify(sa, payload.CREATE_CHILD_SA, hdr.MessageID, payload.NoProposalChosen, remote)

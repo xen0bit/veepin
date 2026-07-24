@@ -125,6 +125,7 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 			pass     = fs.String("pass", "", "EAP-MSCHAPv2 password")
 			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
 			rekey    = fs.Int("rekey", 0, "Child SA rekey interval in seconds (0 = default 3600)")
+			ikeRekey = fs.Int("ike-rekey", 0, "IKE SA rekey interval in seconds (0 = default 14400)")
 		)
 		return func() map[string]string {
 			opts := map[string]string{
@@ -141,6 +142,9 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 			}
 			if *rekey != 0 {
 				opts[ikev2.OptRekey] = fmt.Sprint(*rekey)
+			}
+			if *ikeRekey != 0 {
+				opts[ikev2.OptIKERekey] = fmt.Sprint(*ikeRekey)
 			}
 			return opts
 		}, nil
