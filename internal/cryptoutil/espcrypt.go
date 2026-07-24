@@ -52,9 +52,23 @@ func NewAESGCMESPCrypter(keyBits int, encKey []byte) (ESPCrypter, error) {
 	if err != nil {
 		return nil, err
 	}
-	g := &espGCM{aead: aead}
-	copy(g.salt[:], encKey[kl:kl+4])
-	return g, nil
+	return newESPAEAD(aead, encKey[kl:kl+4]), nil
+}
+
+// NewChaCha20Poly1305ESPCrypter builds a prepared ChaCha20-Poly1305 ESP crypter
+// (RFC 7634). encKey is the 32-octet key followed by its 4-octet salt; the wire
+// framing (8-octet IV, 16-octet tag, salt||IV nonce) matches AES-GCM-16, so it
+// reuses the same prepared-AEAD crypter.
+func NewChaCha20Poly1305ESPCrypter(encKey []byte) (ESPCrypter, error) {
+	const kl = ChaCha20Poly1305KeySize
+	if len(encKey) < kl+4 {
+		return nil, fmt.Errorf("cryptoutil: ChaCha20 key too short (%d, need %d)", len(encKey), kl+4)
+	}
+	aead, err := NewChaCha20Poly1305(encKey[:kl])
+	if err != nil {
+		return nil, err
+	}
+	return newESPAEAD(aead, encKey[kl:kl+4]), nil
 }
 
 // NewAESCBCESPCrypter builds a prepared AES-CBC + HMAC (encrypt-then-MAC) ESP
@@ -78,18 +92,28 @@ func NewAESCBCESPCrypter(keyBits int, encKey []byte, integ *Integrity, integKey 
 	return &espCBC{block: block, integ: integ, integKey: integKey, mac: integ.newMAC(integKey)}, nil
 }
 
-// --- AES-GCM ESP crypter ---
+// --- Generic AEAD ESP crypter (AES-GCM, ChaCha20-Poly1305) ---
 
-type espGCM struct {
+// espAEAD is the prepared data-path crypter for any AEAD framed like AES-GCM-16
+// (RFC 4106) or ChaCha20-Poly1305 (RFC 7634): a 4-octet implicit salt, an
+// 8-octet explicit IV on the wire, and a 16-octet tag. It holds the keyed AEAD
+// built once, so the per-packet path constructs nothing.
+type espAEAD struct {
 	aead  cipher.AEAD
 	salt  [4]byte
 	nonce []byte // reused 12-octet nonce buffer (single-goroutine per direction)
 }
 
-func (g *espGCM) Overhead() int { return 8 + 16 } // explicit IV + tag
-func (g *espGCM) BlockLen() int { return 1 }
+func newESPAEAD(aead cipher.AEAD, salt []byte) *espAEAD {
+	g := &espAEAD{aead: aead}
+	copy(g.salt[:], salt)
+	return g
+}
 
-func (g *espGCM) Seal(dst, aad, plaintext []byte) ([]byte, error) {
+func (g *espAEAD) Overhead() int { return 8 + 16 } // explicit IV + tag
+func (g *espAEAD) BlockLen() int { return 1 }
+
+func (g *espAEAD) Seal(dst, aad, plaintext []byte) ([]byte, error) {
 	// nonce = salt(4) || explicit-iv(8). A reused heap buffer avoids the escape
 	// that passing a stack array through the AEAD interface would cause.
 	if g.nonce == nil {
@@ -106,9 +130,9 @@ func (g *espGCM) Seal(dst, aad, plaintext []byte) ([]byte, error) {
 	return dst, nil
 }
 
-func (g *espGCM) Open(dst, aad, ivCtIcv []byte) ([]byte, error) {
+func (g *espAEAD) Open(dst, aad, ivCtIcv []byte) ([]byte, error) {
 	if len(ivCtIcv) < 8+16 {
-		return nil, fmt.Errorf("cryptoutil: GCM payload too short")
+		return nil, fmt.Errorf("cryptoutil: AEAD payload too short")
 	}
 	if g.nonce == nil {
 		g.nonce = make([]byte, 12)

@@ -1,0 +1,38 @@
+# Direction A forcing ChaCha20-Poly1305 (RFC 7634): veepin client (ikev2) ->
+# strongSwan responder, whose proposals accept only chacha20poly1305, so veepin
+# must negotiate ChaCha20 for both the IKE and Child SAs. PSK auth. Data-path
+# check: the client pings 10.20.30.254 (a strongSwan-side address inside the
+# tunnel).
+name: veepin-interop-a-chacha
+
+services:
+  strongswan-server:
+    build:
+      context: strongswan
+    image: interop-strongswan
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+      net.ipv4.ip_forward: "1"
+    volumes:
+      - ./strongswan/swanctl-server-chacha.conf:/etc/swanctl/swanctl.conf:ro
+      - ./strongswan/server-entrypoint.sh:/entrypoint.sh:ro
+    command: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [strongswan-server]
+    environment:
+      SERVER: "strongswan-server"
+      PSK: "interop-test-psk"
+      CLIENT_ID: "client.example.com"
+      SERVER_ID: "vpn.example.com"
+    volumes:
+      - ./veepin/client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

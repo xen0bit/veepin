@@ -52,6 +52,15 @@ func TestInteropStrongswanClientVeepinServer(t *testing.T) {
 	runInteropBench(t, "compose.server-ss.yml", "strongswan-client", "veepin-server", "10.10.10.1")
 }
 
+// TestInteropVeepinClientStrongswanServerChaCha20 is Direction A with the
+// strongSwan responder forcing ChaCha20-Poly1305 (RFC 7634): the veepin client
+// must negotiate ChaCha20 for the IKE and Child SAs. A successful cross-tunnel
+// ping proves veepin's RFC 7634 framing interoperates byte-for-byte with
+// strongSwan's chacha20poly1305.
+func TestInteropVeepinClientStrongswanServerChaCha20(t *testing.T) {
+	runInterop(t, "compose.client-ss-chacha.yml", "veepin-client", "10.20.30.254")
+}
+
 // TestInteropVeepinClientStrongswanServerCert is Direction A with certificate
 // authentication: the veepin client authenticates to a strongSwan responder with
 // an ECDSA certificate (no PSK), each verifying the other's chain and RFC 7427

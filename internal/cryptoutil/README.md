@@ -48,12 +48,15 @@ flowchart TD
   expansion used to stretch a seed into arbitrary key material.
 - **Integrity** — `Integrity` via `NewHMACIntegrity(newHash, keyLen, icvLen)`;
   the truncated-HMAC ICV for the AES-CBC AEAD-by-composition suites.
-- **Handshake cipher** — `SKCipher` (`NewAESGCMSKCipher`, `NewAESCBCSKCipher`),
-  sealing/opening a complete IKE `SK` payload. Rebuilds its AEAD per call — fine
-  for the handshake, wrong for the data path (see caveats).
+- **Handshake cipher** — `SKCipher` (`NewAESGCMSKCipher`,
+  `NewChaCha20Poly1305SKCipher`, `NewAESCBCSKCipher`), sealing/opening a complete
+  IKE `SK` payload. Rebuilds its AEAD per call — fine for the handshake, wrong
+  for the data path (see caveats). AES-GCM and ChaCha20-Poly1305 (RFC 7634) share
+  one generic AEAD implementation: identical framing (4-octet salt, 8-octet IV,
+  16-octet tag), differing only in the AEAD constructor and key length.
 - **Data-path cipher** — `ESPCrypter` (`NewAESGCMESPCrypter`,
-  `NewAESCBCESPCrypter`): constructs its keyed AEAD **once**, then seals/opens by
-  appending into a caller-supplied buffer.
+  `NewChaCha20Poly1305ESPCrypter`, `NewAESCBCESPCrypter`): constructs its keyed
+  AEAD **once**, then seals/opens by appending into a caller-supplied buffer.
 - **AEAD constructors + hashes** — `NewChaCha20Poly1305`, `NewXChaCha20Poly1305`,
   `NewBLAKE2s`, `NewBLAKE2s128MAC`, `NewBLAKE2s256MAC` (for WireGuard/Nebula Noise).
 - **Constant-time compare** — `SecretEqual`.
