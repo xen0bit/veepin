@@ -40,11 +40,13 @@ var interopMatrix = []interopRow{
 			"TestInteropVeepinClientStrongswanServerCert",
 			"TestInteropVeepinClientStrongswanServerChaCha20",
 			"TestInteropVeepinClientStrongswanServerIPv6",
-		}, Label: "strongSwan (PSK + pubkey, AES-GCM + ChaCha20, dual-stack)"},
+			"TestInteropVeepinClientStrongswanServerV6Underlay",
+		}, Label: "strongSwan (PSK + pubkey, AES-GCM + ChaCha20, dual-stack, v6 underlay)"},
 		Server: interopCell{Tests: []string{
 			"TestInteropStrongswanClientVeepinServer",
 			"TestInteropStrongswanClientVeepinServerFragmented",
-		}, Label: "strongSwan (+ RFC 7383 frag)"},
+			"TestInteropStrongswanClientVeepinServerV6Underlay",
+		}, Label: "strongSwan (+ RFC 7383 frag, v6 underlay)"},
 		Self: interopCell{Tests: []string{
 			"TestInteropSelf",
 			"TestInteropIKEv2ChildRekey",

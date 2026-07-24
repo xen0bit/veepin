@@ -556,16 +556,19 @@ each a localized extension point, not a structural rework:
   Diffie-Hellman exchange for a new control channel — the Child SAs inherited
   unchanged, so the data path never pauses. Neither lets a long-lived tunnel
   expire in place.
-- **Dual-stack inner traffic over an IPv4 underlay; single IKE SA per Child.**
+- **Dual-stack inner traffic, IPv4 or IPv6 underlay; single IKE SA per Child.**
   IKEv2 carries both IPv4 and IPv6 inner traffic over one Child SA: the server
   assigns a v4 and a v6 address via config mode (`INTERNAL_IP4_*` and the
   `INTERNAL_IP6_ADDRESS` address+prefix, RFC 7296 3.15), offers v4+v6 traffic
   selectors, and the data path tags each packet with the ESP next-header its
   version implies (4 or 41); oversized inner v6 gets an ICMPv6 Packet Too Big,
   the v6 counterpart of the IPv4 fragmentation-needed path. The *outer* transport
-  is still IPv4 NAT-T/UDP-4500 — an IPv6 ESP underlay is future work — and this
-  is one IKE SA per Child, sufficient for road-warrior clients rather than a
-  site-to-site multi-SA gateway.
+  runs over either family too: the client dials a v4 or v6 server, and the server
+  binds the family of its `-listen` address (`0.0.0.0` for IPv4 by default, `::`
+  for an IPv6/dual-stack socket that serves both). Serving both families
+  simultaneously is what the one `::` dual-stack socket provides; separate v4+v6
+  sockets per port are not added. This is one IKE SA per Child, sufficient for
+  road-warrior clients rather than a site-to-site multi-SA gateway.
 - **AnyConnect's DTLS needs TLS 1.3 or Extended Master Secret** (RFC 7627) — Go's
   `crypto/tls` will not run the RFC 5705 exporter otherwise, so against such a
   peer the client stays on TLS. Only PSK-NEGOTIATE mode; auth is

@@ -35,6 +35,7 @@ type ClientRouter struct {
 	addedHost bool
 	addedDef  bool
 	addedDef6 bool
+	serverV6  bool // the server's outer address is IPv6 (host route uses `ip -6`)
 }
 
 // NewClientRouter creates a router for the given configuration.
@@ -46,9 +47,14 @@ func NewClientRouter(cfg ClientNetConfig) *ClientRouter {
 // to the VPN server via the existing default gateway, and (for a full tunnel)
 // replaces the default route to send everything through the TUN.
 func (r *ClientRouter) Apply() error {
+	// The server host route (and the default it is pinned through) must be in the
+	// same family as the server's OUTER address — an IPv6 underlay is reached via
+	// the IPv6 default gateway, not the IPv4 one.
+	r.serverV6 = r.cfg.ServerIP != nil && r.cfg.ServerIP.To4() == nil
+
 	// Record the current default route so we can (a) pin a host route to the
 	// server through it and (b) restore it on teardown.
-	gwIP, gwDev, err := defaultRoute()
+	gwIP, gwDev, err := defaultRoute(r.serverV6)
 	if err != nil {
 		return fmt.Errorf("read default route: %w", err)
 	}
@@ -79,9 +85,11 @@ func (r *ClientRouter) Apply() error {
 	r.installed = true
 
 	// Host route: reach the VPN server via the physical gateway, so that the
-	// encapsulated ESP packets are NOT themselves routed into the tunnel.
+	// encapsulated ESP packets are NOT themselves routed into the tunnel. The
+	// route family follows the server's outer address.
 	if r.cfg.ServerIP != nil && gwIP != "" {
-		if err := run([]string{"ip", "route", "add", r.cfg.ServerIP.String(), "via", gwIP, "dev", gwDev}); err != nil {
+		add := append(ipCmd(r.serverV6), "route", "add", r.cfg.ServerIP.String(), "via", gwIP, "dev", gwDev)
+		if err := run(add); err != nil {
 			// Non-fatal if it already exists.
 			if !strings.Contains(err.Error(), "File exists") {
 				return err
@@ -134,7 +142,8 @@ func (r *ClientRouter) Revert() error {
 		}
 	}
 	if r.addedHost && r.cfg.ServerIP != nil {
-		if err := run([]string{"ip", "route", "del", r.cfg.ServerIP.String()}); err != nil {
+		del := append(ipCmd(r.serverV6), "route", "del", r.cfg.ServerIP.String())
+		if err := run(del); err != nil {
 			errs = append(errs, err.Error())
 		}
 	}
@@ -149,9 +158,23 @@ func (r *ClientRouter) Revert() error {
 	return nil
 }
 
-// defaultRoute returns the current IPv4 default gateway IP and device.
-func defaultRoute() (gwIP, dev string, err error) {
-	out, err := exec.Command("ip", "-4", "route", "show", "default").CombinedOutput()
+// ipCmd is the iproute2 command prefix for the given family: `ip` for IPv4,
+// `ip -6` for IPv6. Callers append the route/addr subcommand and arguments.
+func ipCmd(v6 bool) []string {
+	if v6 {
+		return []string{"ip", "-6"}
+	}
+	return []string{"ip"}
+}
+
+// defaultRoute returns the current default gateway IP and device for the given
+// family (IPv4 by default, IPv6 when v6 is set).
+func defaultRoute(v6 bool) (gwIP, dev string, err error) {
+	fam := "-4"
+	if v6 {
+		fam = "-6"
+	}
+	out, err := exec.Command("ip", fam, "route", "show", "default").CombinedOutput()
 	if err != nil {
 		return "", "", fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
 	}

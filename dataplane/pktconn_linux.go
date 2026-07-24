@@ -60,6 +60,9 @@ type PacketConn struct {
 	// pktInfo is false when the socket option is unavailable, in which case
 	// this behaves exactly as the bare socket did.
 	pktInfo bool
+	// v6 is true when the socket is bound to an IPv6 (or dual-stack `::`) address,
+	// selecting the IPV6_PKTINFO family for source pinning; false for IPv4.
+	v6 bool
 
 	mu     sync.Mutex
 	locals map[netip.AddrPort]localEntry
@@ -94,9 +97,21 @@ func NewPacketConn(conn *net.UDPConn) *PacketConn {
 	}
 	p.lastGC = p.now()
 
+	// The socket's address family — not its bound address — selects the PKTINFO
+	// variant. Go's "udp" network binds an AF_INET6 (dual-stack) socket even for
+	// 0.0.0.0, and such a socket delivers IPV6_PKTINFO for every datagram, v4-
+	// mapped ones included; requesting IP_PKTINFO on it is silently inert. Only a
+	// socket opened as "udp4" is AF_INET. SO_DOMAIN reports which we have.
 	if raw, err := conn.SyscallConn(); err == nil {
 		_ = raw.Control(func(fd uintptr) {
-			if err := unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_PKTINFO, 1); err == nil {
+			if domain, derr := unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_DOMAIN); derr == nil && domain == unix.AF_INET6 {
+				p.v6 = true
+			}
+			level, opt := unix.IPPROTO_IP, unix.IP_PKTINFO
+			if p.v6 {
+				level, opt = unix.IPPROTO_IPV6, unix.IPV6_RECVPKTINFO
+			}
+			if err := unix.SetsockoptInt(int(fd), level, opt, 1); err == nil {
 				p.pktInfo = true
 			}
 		})
@@ -122,7 +137,7 @@ func (p *PacketConn) ReadFromUDP(b []byte) (int, *net.UDPAddr, error) {
 	if err != nil {
 		return n, from, err
 	}
-	if local := localFromControl(oob[:oobn]); local.IsValid() && from != nil {
+	if local := p.localFromControl(oob[:oobn]); local.IsValid() && from != nil {
 		p.remember(from, local)
 	}
 	return n, from, nil
@@ -165,7 +180,7 @@ func (p *PacketConn) ReadBatch(bufs [][]byte, sizes []int, froms []*net.UDPAddr)
 		from, _ := msgs[i].Addr.(*net.UDPAddr)
 		froms[i] = from
 		if p.pktInfo && from != nil {
-			if local := localFromControl(msgs[i].OOB[:msgs[i].NN]); local.IsValid() {
+			if local := p.localFromControl(msgs[i].OOB[:msgs[i].NN]); local.IsValid() {
 				p.remember(from, local)
 			}
 		}
@@ -189,9 +204,8 @@ func (p *PacketConn) WriteBatch(pkts [][]byte, to *net.UDPAddr) (int, error) {
 	}
 	var oob []byte
 	if p.pktInfo && to != nil {
-		if local, ok := p.lookup(to); ok && local.Is4() {
-			info := unix.Inet4Pktinfo{Spec_dst: local.As4()}
-			oob = unix.PktInfo4(&info)
+		if local, ok := p.lookup(to); ok {
+			oob = p.pktInfoOOB(local)
 		}
 	}
 	if cap(p.wbatchMsgs) < len(pkts) {
@@ -225,12 +239,33 @@ func (p *PacketConn) WriteToUDP(b []byte, to *net.UDPAddr) (int, error) {
 	}
 
 	local, ok := p.lookup(to)
-	if !ok || !local.Is4() {
+	if !ok {
 		return p.conn.WriteToUDP(b, to)
 	}
-	info := unix.Inet4Pktinfo{Spec_dst: local.As4()}
-	n, _, err := p.conn.WriteMsgUDP(b, unix.PktInfo4(&info), to)
+	oob := p.pktInfoOOB(local)
+	if oob == nil {
+		return p.conn.WriteToUDP(b, to)
+	}
+	n, _, err := p.conn.WriteMsgUDP(b, oob, to)
 	return n, err
+}
+
+// pktInfoOOB encodes local as the reply source in a PKTINFO control message of
+// the socket's family, or returns nil when local cannot serve as a source for
+// this family. For an IPv6 socket As16 covers both native v6 and v4-mapped
+// addresses, which the kernel resolves on a dual-stack socket.
+func (p *PacketConn) pktInfoOOB(local netip.Addr) []byte {
+	if !local.IsValid() {
+		return nil
+	}
+	if p.v6 {
+		a := local.As16()
+		return unix.PktInfo6(&unix.Inet6Pktinfo{Addr: a})
+	}
+	if local.Is4() {
+		return unix.PktInfo4(&unix.Inet4Pktinfo{Spec_dst: local.As4()})
+	}
+	return nil
 }
 
 // ReadFromUDPAddrPort and WriteToUDPAddrPort are the netip forms, for engines
@@ -323,19 +358,30 @@ func addrPortOf(a *net.UDPAddr) (netip.AddrPort, bool) {
 }
 
 // localFromControl extracts the destination address from a datagram's control
-// messages, returning the zero Addr when absent.
-func localFromControl(oob []byte) netip.Addr {
+// messages, returning the zero Addr when absent. It reads the PKTINFO variant of
+// the socket's family — decoding by offset rather than through unsafe, since the
+// layout is fixed by the kernel ABI and x/sys ships an encoder but no parser.
+func (p *PacketConn) localFromControl(oob []byte) netip.Addr {
 	msgs, err := unix.ParseSocketControlMessage(oob)
 	if err != nil {
 		return netip.Addr{}
 	}
 	for _, m := range msgs {
+		if p.v6 {
+			if m.Header.Level != unix.IPPROTO_IPV6 || m.Header.Type != unix.IPV6_PKTINFO {
+				continue
+			}
+			// struct in6_pktinfo is { in6_addr ipi6_addr; u32 ipi6_ifindex }: the
+			// 16-octet destination address is at offset 0.
+			if len(m.Data) < 16 {
+				continue
+			}
+			return netip.AddrFrom16([16]byte(m.Data[0:16]))
+		}
 		if m.Header.Level != unix.IPPROTO_IP || m.Header.Type != unix.IP_PKTINFO {
 			continue
 		}
-		// struct in_pktinfo is { int32 ifindex; be32 spec_dst; be32 addr },
-		// decoded by offset rather than through unsafe: the layout is fixed by
-		// the kernel ABI, and x/sys ships an encoder but no parser.
+		// struct in_pktinfo is { int32 ifindex; be32 spec_dst; be32 addr }.
 		if len(m.Data) < 12 {
 			continue
 		}

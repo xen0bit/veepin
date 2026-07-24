@@ -1,0 +1,51 @@
+# Direction A, IPv6 underlay: veepin client (ikev2) -> strongSwan responder, with
+# the OUTER ESP/IKE transport over IPv6. The veepin client dials strongSwan's IPv6
+# literal; the inner traffic stays IPv4 (ping 10.20.30.254) for a clean data-path
+# check independent of the inner-dual-stack feature. strongSwan's charon listens
+# on all addresses by default, so the base swanctl-server.conf is reused.
+name: veepin-interop-a-v6underlay
+
+networks:
+  underlay6:
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: 172.31.2.0/24
+        - subnet: fd00:11::/64
+
+services:
+  strongswan-server:
+    build:
+      context: strongswan
+    image: interop-strongswan
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+      net.ipv4.ip_forward: "1"
+    networks:
+      underlay6:
+        ipv6_address: fd00:11::10
+    volumes:
+      - ./strongswan/swanctl-server.conf:/etc/swanctl/swanctl.conf:ro
+      - ./strongswan/server-entrypoint.sh:/entrypoint.sh:ro
+    command: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [strongswan-server]
+    networks: [underlay6]
+    environment:
+      # IPv6 literal: the ESP/IKE transport runs over IPv6.
+      SERVER: "fd00:11::10"
+      PSK: "interop-test-psk"
+      CLIENT_ID: "client.example.com"
+      SERVER_ID: "vpn.example.com"
+    volumes:
+      - ./veepin/client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
