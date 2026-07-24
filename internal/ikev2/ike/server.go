@@ -286,7 +286,11 @@ func (s *Server) deleteSA(sa *IKESA) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.byRSPI, sa.ResponderSPI)
-	if sa.RemoteAddr != nil {
+	// Only drop the by-remote entry if it still points at this SA: an IKE SA
+	// rekey leaves the old and new SAs sharing one remote address, and the new
+	// SA has already claimed the slot, so deleting the retired old SA must not
+	// evict its successor.
+	if sa.RemoteAddr != nil && s.byRemote[sa.RemoteAddr.String()] == sa {
 		delete(s.byRemote, sa.RemoteAddr.String())
 	}
 	if s.cfg.ReleaseAddr != nil && sa.ClientIP != nil {

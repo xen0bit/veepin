@@ -115,4 +115,19 @@ stateDiagram-v2
   as a `ClientResult` the session swaps into the data path (new SA installed
   before the old is deleted, so no packet is ever without an SA). `exchMu`
   serializes DPD, rekey and MOBIKE roam so their message IDs never interleave.
-  Rekeying the IKE SA itself is not yet implemented.
+- **IKE SA rekey (RFC 7296 2.18) rotates the control channel itself.**
+  `RekeyIKE` runs a `CREATE_CHILD_SA` carrying an *IKE* proposal, a fresh
+  `KEi`/nonce and a new initiator SPI; unlike a Child rekey it does a full
+  Diffie-Hellman exchange, so the replacement SA's `SK_*` keys have forward
+  secrecy from the old ones (`SKEYSEED = prf(SK_d(old), g^ir(new) | Ni | Nr)`,
+  then the standard `prf+` over the new SPIs). The new IKE SA *inherits every
+  Child SA unchanged* — their ESP keys are not re-derived — so the data path
+  never pauses: only the IKE SPIs and control keys rotate, and message IDs reset
+  to zero on the new SA. The initiator installs the new SA, deletes the old one
+  with an `INFORMATIONAL{D(IKE)}`, then swaps its own SPIs/keys over; the
+  responder migrates the children across and empties the old SA (clearing its
+  `ClientIP` so the imminent delete neither tears down the inherited ESP data
+  paths nor releases the assigned address). Like DPD and Child rekey it holds
+  `exchMu`, so the whole make-before-break sequence is atomic against every
+  other initiator exchange. The `SAState` diagram's `ESTABLISHED -> ESTABLISHED`
+  self-loop now covers this rotation too, not just a MOBIKE address update.

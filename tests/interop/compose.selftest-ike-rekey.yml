@@ -1,0 +1,41 @@
+# IKE SA rekey (RFC 7296 2.18): veepin client <-> veepin server, with the client
+# set to rekey the IKE SA itself every 2s (IKE_REKEY=2). It proves the client
+# drives CREATE_CHILD_SA{SA(IKE),Ni,KEi} on a timer — a fresh DH exchange, new
+# control keys — and deletes the old IKE SA, while the inherited Child SA keeps
+# carrying traffic untouched: the ping across the tunnel succeeds *after* several
+# IKE SA rotations.
+name: veepin-selftest-ike-rekey
+
+services:
+  server:
+    image: veepin:interop
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      PSK: "interop-test-psk"
+      SERVER_ID: "vpn.example.com"
+      POOL: "10.10.10.0/24"
+    volumes:
+      - ./veepin/server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  client:
+    image: veepin:interop
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [server]
+    environment:
+      SERVER: "server"
+      PSK: "interop-test-psk"
+      CLIENT_ID: "client.example.com"
+      SERVER_ID: "vpn.example.com"
+      IKE_REKEY: "2"
+    volumes:
+      - ./veepin/client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

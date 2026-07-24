@@ -1,6 +1,7 @@
 package ike
 
 import (
+	"encoding/binary"
 	"net"
 
 	"github.com/xen0bit/veepin/internal/ikev2/eap"
@@ -389,3 +390,11 @@ func beU32(b []byte) uint32 {
 func u32BE(v uint32) []byte {
 	return []byte{byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)}
 }
+
+// u64BE / beU64 convert an 8-octet IKE SPI to and from its big-endian wire form.
+func u64BE(v uint64) []byte {
+	b := make([]byte, 8)
+	binary.BigEndian.PutUint64(b, v)
+	return b
+}
+func beU64(b []byte) uint64 { return binary.BigEndian.Uint64(b) }

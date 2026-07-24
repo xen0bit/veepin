@@ -30,6 +30,37 @@ func DeriveIKEKeys(prf *cryptoutil.PRF, sharedSecret, ni, nr []byte, spiI, spiR 
 
 	nonces := append(append([]byte(nil), ni...), nr...)
 	skeyseed = prf.Apply(nonces, sharedSecret)
+	return skeyseed, expandIKEKeys(prf, skeyseed, ni, nr, spiI, spiR, encKeyLen, integKeyLen)
+}
+
+// DeriveRekeyedIKEKeys computes the seven SK_* values for an IKE SA created by
+// rekeying an existing one (RFC 7296 section 2.18). It differs from the initial
+// derivation only in how SKEYSEED is seeded — from the old SA's SK_d and the
+// fresh DH secret rather than from the nonces alone:
+//
+//	SKEYSEED = prf(SK_d (old), g^ir (new) | Ni | Nr)
+//	{SK_d | SK_ai | SK_ar | SK_ei | SK_er | SK_pi | SK_pr}
+//	    = prf+(SKEYSEED, Ni | Nr | SPIi | SPIr)
+//
+// prf and the key lengths are the new SA's negotiated PRF and per-direction key
+// lengths; oldSKd is SK_d from the SA being replaced. Ni/Nr and SPIi/SPIr are
+// the new exchange's nonces and IKE SPIs.
+func DeriveRekeyedIKEKeys(prf *cryptoutil.PRF, oldSKd, dhSecret, ni, nr []byte,
+	spiI, spiR uint64, encKeyLen, integKeyLen int) SAKeys {
+
+	seed := make([]byte, 0, len(dhSecret)+len(ni)+len(nr))
+	seed = append(seed, dhSecret...)
+	seed = append(seed, ni...)
+	seed = append(seed, nr...)
+	skeyseed := prf.Apply(oldSKd, seed)
+	return expandIKEKeys(prf, skeyseed, ni, nr, spiI, spiR, encKeyLen, integKeyLen)
+}
+
+// expandIKEKeys runs the prf+ expansion shared by the initial and rekeyed IKE
+// key derivations: {SK_d | SK_ai | SK_ar | SK_ei | SK_er | SK_pi | SK_pr}
+// = prf+(SKEYSEED, Ni | Nr | SPIi | SPIr).
+func expandIKEKeys(prf *cryptoutil.PRF, skeyseed, ni, nr []byte, spiI, spiR uint64,
+	encKeyLen, integKeyLen int) SAKeys {
 
 	seed := make([]byte, 0, len(ni)+len(nr)+16)
 	seed = append(seed, ni...)
@@ -49,6 +80,7 @@ func DeriveIKEKeys(prf *cryptoutil.PRF, sharedSecret, ni, nr []byte, spiI, spiR 
 		off += n
 		return b
 	}
+	var keys SAKeys
 	keys.SKd = take(prf.Size)
 	keys.SKai = take(integKeyLen)
 	keys.SKar = take(integKeyLen)
@@ -56,7 +88,7 @@ func DeriveIKEKeys(prf *cryptoutil.PRF, sharedSecret, ni, nr []byte, spiI, spiR 
 	keys.SKer = take(encKeyLen)
 	keys.SKpi = take(prf.Size)
 	keys.SKpr = take(prf.Size)
-	return skeyseed, keys
+	return keys
 }
 
 // DeriveChildKeys computes the Child SA keying material (RFC 7296 2.17):
