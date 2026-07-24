@@ -64,13 +64,15 @@ real protocol; see [The example protocol](#the-example-protocol).
 |----------|-----------|
 | DH groups | Curve25519 (31), ECP-256/384/521 (19/20/21), MODP-2048 (14) |
 | PRF | HMAC-SHA1, HMAC-SHA2-256/384/512 |
-| IKE/ESP ciphers | AES-GCM-16 (AEAD, RFC 5282), AES-CBC + HMAC-SHA2 (encrypt-then-MAC) |
+| IKE/ESP ciphers | AES-GCM-16 (AEAD, RFC 5282), ChaCha20-Poly1305 (AEAD, RFC 7634), AES-CBC + HMAC-SHA2 (encrypt-then-MAC) |
 | Integrity | HMAC-SHA1-96, HMAC-SHA2-256-128/384-192/512-256 |
 
-All from the standard library. (ChaCha20-Poly1305's transform ID is defined but
-not yet wired in for IKEv2. The cipher itself now lives in `cryptoutil` — see
-below — so wiring it is one case in `internal/ikev2/transform`: the negotiated
-transform ID selects the algorithm, so nothing else has to change.)
+AES from the standard library; ChaCha20-Poly1305 from `x/crypto` (the same AEAD
+WireGuard already pulls in). ChaCha20-Poly1305 for IKEv2/ESP shares AES-GCM-16's
+exact framing — a 4-octet implicit salt, an 8-octet explicit IV and a 16-octet
+tag — so both run through one generic AEAD path in `cryptoutil`, and it is
+offered after AES-GCM (which is faster where the CPU has AES-NI) and ahead of
+AES-CBC.
 
 ### Dependencies
 
@@ -78,11 +80,13 @@ The module depends only on the pure-Go `golang.org/x` modules: `x/crypto`,
 `x/net` (for QUIC), and `x/sys` and `x/text` that those pull in. Nothing outside
 the `golang.org/x` namespace, and no cgo.
 
-`x/crypto` exists for one reason: **WireGuard fixes its crypto and does not
+`x/crypto` exists first for **WireGuard, which fixes its crypto and does not
 negotiate it.** It mandates ChaCha20-Poly1305 and BLAKE2s, and Go ships neither
-in the standard library, so — unlike IKEv2, which negotiates algorithms and
-happens to negotiate ones `crypto/aes` and `crypto/sha256` cover — WireGuard
-cannot be built on stdlib alone.
+in the standard library, so WireGuard cannot be built on stdlib alone. IKEv2
+reaches the same `x/crypto` ChaCha20-Poly1305 for its own RFC 7634 suite — an
+AEAD Go's standard library still omits — but everything else IKEv2 negotiates is
+covered by `crypto/aes` and `crypto/sha256`, so that one AEAD is the whole of
+its dependency beyond stdlib.
 
 `x/net` exists for a second: **MASQUE runs over HTTP/3, and Go ships no QUIC.**
 `x/net/quic` is the Go team's own pure-Go implementation, so the alternative —

@@ -29,6 +29,8 @@ func Cipher(encrID uint16, keyBits int) (cryptoutil.SKCipher, error) {
 	switch encrID {
 	case payload.ENCR_AES_GCM_16:
 		return cryptoutil.NewAESGCMSKCipher(keyBits)
+	case payload.ENCR_CHACHA20_P:
+		return cryptoutil.NewChaCha20Poly1305SKCipher()
 	case payload.ENCR_AES_CBC:
 		return cryptoutil.NewAESCBCSKCipher(keyBits)
 	default:
@@ -43,6 +45,8 @@ func ESPCrypter(encrID uint16, keyBits int, encKey []byte, integID uint16, integ
 	switch encrID {
 	case payload.ENCR_AES_GCM_16:
 		return cryptoutil.NewAESGCMESPCrypter(keyBits, encKey)
+	case payload.ENCR_CHACHA20_P:
+		return cryptoutil.NewChaCha20Poly1305ESPCrypter(encKey)
 	case payload.ENCR_AES_CBC:
 		integ, err := Integrity(integID)
 		if err != nil {

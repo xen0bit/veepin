@@ -37,6 +37,10 @@ func DefaultIKEProposal() payload.Proposal {
 		Transforms: []payload.Transform{
 			{Type: payload.TransformENCR, ID: payload.ENCR_AES_GCM_16, KeyLen: 256},
 			{Type: payload.TransformENCR, ID: payload.ENCR_AES_GCM_16, KeyLen: 128},
+			// ChaCha20-Poly1305 (RFC 7634) carries no key-length attribute (the
+			// key is always 256-bit), hence KeyLen 0. Offered after AES-GCM, which
+			// is faster where the CPU has AES-NI, and ahead of AES-CBC.
+			{Type: payload.TransformENCR, ID: payload.ENCR_CHACHA20_P},
 			{Type: payload.TransformENCR, ID: payload.ENCR_AES_CBC, KeyLen: 256},
 			{Type: payload.TransformPRF, ID: payload.PRF_HMAC_SHA2_256},
 			{Type: payload.TransformPRF, ID: payload.PRF_HMAC_SHA2_384},
@@ -63,6 +67,8 @@ func DefaultESPProposal(spi []byte) payload.Proposal {
 		Transforms: []payload.Transform{
 			{Type: payload.TransformENCR, ID: payload.ENCR_AES_GCM_16, KeyLen: 256},
 			{Type: payload.TransformENCR, ID: payload.ENCR_AES_GCM_16, KeyLen: 128},
+			// ChaCha20-Poly1305 (RFC 7634): AEAD, no key-length attribute.
+			{Type: payload.TransformENCR, ID: payload.ENCR_CHACHA20_P},
 			{Type: payload.TransformENCR, ID: payload.ENCR_AES_CBC, KeyLen: 256},
 			{Type: payload.TransformINTEG, ID: payload.AUTH_HMAC_SHA2_256_128},
 			{Type: payload.TransformESN, ID: payload.ESN_NONE},
@@ -83,7 +89,7 @@ func isAEAD(encrID uint16) bool {
 
 // supportedENCR / supportedPRF / etc. gate what we will accept from a peer.
 func supportedENCR(id uint16) bool {
-	return id == payload.ENCR_AES_GCM_16 || id == payload.ENCR_AES_CBC
+	return id == payload.ENCR_AES_GCM_16 || id == payload.ENCR_CHACHA20_P || id == payload.ENCR_AES_CBC
 }
 func supportedPRF(id uint16) bool {
 	switch id {

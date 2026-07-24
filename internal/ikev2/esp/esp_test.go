@@ -30,6 +30,16 @@ func gcmTransform(t *testing.T, key byte) Transform {
 	}
 }
 
+func chachaTransform(t *testing.T, key byte) Transform {
+	t.Helper()
+	// AEAD (RFC 7634): no integrity transform, no key-length attribute. EncKey is
+	// the 32-octet key plus the 4-octet salt, which KeyLen accounts for.
+	return Transform{
+		EncrID: payload.ENCR_CHACHA20_P,
+		EncKey: bytes.Repeat([]byte{key}, keyLen(t, payload.ENCR_CHACHA20_P, 0)),
+	}
+}
+
 func cbcTransform(t *testing.T, ek, ik byte) Transform {
 	t.Helper()
 	integ, err := transform.Integrity(payload.AUTH_HMAC_SHA2_256_128)
@@ -120,6 +130,65 @@ func TestESPRoundTripGCM(t *testing.T) {
 	}
 	if nh != 4 || !bytes.Equal(got, msg) {
 		t.Fatalf("gcm esp round trip: nh=%d got=%q", nh, got)
+	}
+}
+
+func TestESPRoundTripChaCha20(t *testing.T) {
+	kOut := chachaTransform(t, 0x11)
+	kIn := chachaTransform(t, 0x22)
+
+	sender := &SA{SPIOut: 0xaaaa, SPIIn: 0xbbbb, Out: kOut, In: kIn}
+	receiver := &SA{SPIOut: 0xbbbb, SPIIn: 0xaaaa, Out: kIn, In: kOut}
+
+	msg := []byte("inner IP packet over ChaCha20-Poly1305")
+	pkt, err := sender.Encapsulate(msg, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, nh, err := receiver.Decapsulate(pkt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nh != 4 || !bytes.Equal(got, msg) {
+		t.Fatalf("chacha esp round trip: nh=%d got=%q", nh, got)
+	}
+}
+
+// TestDataPathAllocationsChaCha20 guards the ChaCha20-Poly1305 hot path the same
+// way TestDataPathAllocationsGCM guards AES-GCM: encap and decap must each
+// allocate at most once (the returned buffer).
+func TestDataPathAllocationsChaCha20(t *testing.T) {
+	if raceEnabled {
+		t.Skip("allocation counts are perturbed by the race detector")
+	}
+	kOut := chachaTransform(t, 0x11)
+	kIn := chachaTransform(t, 0x22)
+	sender := &SA{SPIOut: 0xaaaa, SPIIn: 0xbbbb, Out: kOut, In: kIn}
+	receiver := &SA{SPIOut: 0xbbbb, SPIIn: 0xaaaa, Out: kIn, In: kOut}
+	msg := bytes.Repeat([]byte{0xab}, 1400)
+
+	if _, err := sender.Encapsulate(msg, 4); err != nil {
+		t.Fatal(err)
+	}
+	if n := testing.AllocsPerRun(200, func() {
+		if _, err := sender.Encapsulate(msg, 4); err != nil {
+			t.Fatal(err)
+		}
+	}); n > 1 {
+		t.Errorf("Encapsulate allocs/op = %v, want <= 1", n)
+	}
+
+	pkt, err := sender.Encapsulate(msg, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := testing.AllocsPerRun(200, func() {
+		receiver.ResetReplayWindow()
+		if _, _, derr := receiver.Decapsulate(pkt); derr != nil {
+			t.Fatal(derr)
+		}
+	}); n > 1 {
+		t.Errorf("Decapsulate allocs/op = %v, want <= 1", n)
 	}
 }
 

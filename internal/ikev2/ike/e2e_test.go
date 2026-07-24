@@ -1,6 +1,7 @@
 package ike
 
 import (
+	"bytes"
 	"io"
 	"log"
 	"net"
@@ -68,6 +69,86 @@ func TestEndToEndHandshake(t *testing.T) {
 	it.doLiveness()
 }
 
+// TestEndToEndHandshakeChaCha20 drives a full handshake with the initiator
+// offering only ChaCha20-Poly1305 (RFC 7634) for both the IKE SA and the Child
+// SA, proving the responder negotiates it and both sides derive identical
+// 36-octet (32 key + 4 salt) Child keys. The ESP data path over those keys is
+// covered by the esp package's ChaCha20 round-trip and allocation tests.
+func TestEndToEndHandshakeChaCha20(t *testing.T) {
+	psk := []byte("chacha handshake psk")
+	p500 := freeUDPPort(t)
+	p4500 := freeUDPPort(t)
+
+	childCh := make(chan *ChildSA, 1)
+	srv, err := NewServer(Config{
+		ListenIP: "127.0.0.1", Port500: p500, Port4500: p4500,
+		PSK:       psk,
+		LocalID:   FQDNIdentity("responder.test"),
+		Logger:    log.New(io.Discard, "", 0),
+		OnChildSA: func(sa *IKESA, c *ChildSA) { childCh <- c },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	defer srv.Close()
+	time.Sleep(50 * time.Millisecond)
+
+	cli, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: p500})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cli.Close()
+	_ = cli.SetReadDeadline(time.Now().Add(3 * time.Second))
+
+	// ChaCha20-only proposals: no key-length attribute (RFC 7634).
+	ikeProp := payload.Proposal{
+		Num: 1, Protocol: payload.ProtoIKE,
+		Transforms: []payload.Transform{
+			{Type: payload.TransformENCR, ID: payload.ENCR_CHACHA20_P},
+			{Type: payload.TransformPRF, ID: payload.PRF_HMAC_SHA2_256},
+			{Type: payload.TransformDH, ID: payload.DH_CURVE25519},
+		},
+	}
+	espProp := payload.Proposal{
+		Num: 1, Protocol: payload.ProtoESP,
+		Transforms: []payload.Transform{
+			{Type: payload.TransformENCR, ID: payload.ENCR_CHACHA20_P},
+			{Type: payload.TransformESN, ID: payload.ESN_NONE},
+		},
+	}
+
+	it := &initiator{
+		tb: t, conn: cli, psk: psk, id: FQDNIdentity("initiator.test"),
+		ikeProposal: &ikeProp, espProposal: &espProp,
+	}
+	it.doSAInit()
+	it.doAuth()
+
+	if it.suite.EncrID != payload.ENCR_CHACHA20_P {
+		t.Fatalf("negotiated IKE cipher = %d, want ChaCha20 (%d)", it.suite.EncrID, payload.ENCR_CHACHA20_P)
+	}
+	if it.childES.EncrID != payload.ENCR_CHACHA20_P {
+		t.Fatalf("negotiated ESP cipher = %d, want ChaCha20 (%d)", it.childES.EncrID, payload.ENCR_CHACHA20_P)
+	}
+	// 32-octet key + 4-octet salt per direction.
+	if len(it.childEncI) != 36 || len(it.childEncR) != 36 {
+		t.Fatalf("ChaCha20 child key lengths = %d/%d, want 36/36", len(it.childEncI), len(it.childEncR))
+	}
+
+	select {
+	case child := <-childCh:
+		if !bytes.Equal(child.EncrIn, it.childEncI) {
+			t.Fatal("server inbound key != initiator i->r key (ChaCha20 key disagreement)")
+		}
+		if !bytes.Equal(child.EncrOut, it.childEncR) {
+			t.Fatal("server outbound key != initiator r->i key (ChaCha20 key disagreement)")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no Child SA established")
+	}
+}
+
 // initiator is a minimal IKEv2 initiator used only for testing.
 type initiator struct {
 	tb   testing.TB
@@ -89,6 +170,12 @@ type initiator struct {
 	// existing tests exercise the unfragmented path unchanged.
 	advertiseFrag bool
 	fragAck       bool
+
+	// ikeProposal / espProposal override the default proposals when set, so a
+	// test can pin a specific cipher (e.g. ChaCha20-only). espProposal's SPI is
+	// filled in per handshake.
+	ikeProposal *payload.Proposal
+	espProposal *payload.Proposal
 
 	// Child SA results.
 	assignedIP                net.IP
@@ -127,6 +214,9 @@ func (it *initiator) doSAInit() {
 	it.ni = randomNonce(32)
 
 	prop := DefaultIKEProposal()
+	if it.ikeProposal != nil {
+		prop = *it.ikeProposal
+	}
 	b := payload.NewBuilder()
 	b.Add(payload.TypeSA, false, payload.MarshalSA(payload.SAPayload{Proposals: []payload.Proposal{prop}}))
 	b.Add(payload.TypeKE, false, payload.MarshalKE(payload.KEPayload{Group: payload.DH_CURVE25519, KeyData: pub}))
@@ -219,9 +309,14 @@ func (it *initiator) doAuth() {
 	b.Add(payload.TypeAUTH, false, payload.MarshalAuth(payload.AuthPayload{
 		Method: payload.AuthSharedKeyMIC, Data: authData,
 	}))
+	espProp := DefaultESPProposal(espSPI)
+	if it.espProposal != nil {
+		espProp = *it.espProposal
+		espProp.SPI = espSPI
+	}
 	b.Add(payload.TypeCP, false, payload.MarshalCP(cpReq))
 	b.Add(payload.TypeSA, false, payload.MarshalSA(payload.SAPayload{
-		Proposals: []payload.Proposal{DefaultESPProposal(espSPI)},
+		Proposals: []payload.Proposal{espProp},
 	}))
 	b.Add(payload.TypeTSi, false, payload.MarshalTS(tsAll))
 	b.Add(payload.TypeTSr, false, payload.MarshalTS(tsAll))

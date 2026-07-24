@@ -67,7 +67,25 @@ func NewAESGCMSKCipher(keyBits int) (SKCipher, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &gcmCipher{keyLen: kl}, nil
+	return &aeadCipher{keyLen: kl, mkAEAD: newGCMAEAD}, nil
+}
+
+// NewChaCha20Poly1305SKCipher returns a ChaCha20-Poly1305 SK cipher (RFC 7634).
+// Its wire framing is identical to AES-GCM-16 — a 4-octet salt in the trailing
+// key material, an 8-octet explicit IV and a 16-octet tag — so it shares the
+// generic AEAD implementation; only the key is fixed at 256 bits and there is no
+// key-length attribute to negotiate.
+func NewChaCha20Poly1305SKCipher() (SKCipher, error) {
+	return &aeadCipher{keyLen: ChaCha20Poly1305KeySize, mkAEAD: NewChaCha20Poly1305}, nil
+}
+
+// newGCMAEAD builds an AES-GCM AEAD from a bare AES key (no salt).
+func newGCMAEAD(key []byte) (cipher.AEAD, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(block)
 }
 
 // NewAESCBCSKCipher returns an AES-CBC SK cipher for the given key length in
@@ -81,31 +99,36 @@ func NewAESCBCSKCipher(keyBits int) (SKCipher, error) {
 	return &cbcCipher{keyLen: kl}, nil
 }
 
-// --- AES-GCM (RFC 5282) ---
+// --- Generic AEAD SK cipher (AES-GCM RFC 5282, ChaCha20-Poly1305 RFC 7634) ---
 
-type gcmCipher struct{ keyLen int }
+// aeadCipher is the SK cipher for any AEAD framed like AES-GCM-16: the trailing
+// 4 octets of the SK_e material are an implicit salt, the 8-octet explicit IV is
+// on the wire, and the salt||IV form the 12-octet nonce. mkAEAD builds the AEAD
+// from the leading keyLen octets, so AES-GCM and ChaCha20-Poly1305 differ only
+// in that constructor and their key length.
+type aeadCipher struct {
+	keyLen int
+	mkAEAD func(key []byte) (cipher.AEAD, error)
+}
 
-func (c *gcmCipher) KeyLen() int   { return c.keyLen + 4 } // + 4-octet salt
-func (c *gcmCipher) IVLen() int    { return 8 }            // explicit nonce
-func (c *gcmCipher) ICVLen() int   { return 16 }
-func (c *gcmCipher) BlockLen() int { return 1 }
-func (c *gcmCipher) AEAD() bool    { return true }
+func (c *aeadCipher) KeyLen() int   { return c.keyLen + 4 } // + 4-octet salt
+func (c *aeadCipher) IVLen() int    { return 8 }            // explicit nonce
+func (c *aeadCipher) ICVLen() int   { return 16 }
+func (c *aeadCipher) BlockLen() int { return 1 }
+func (c *aeadCipher) AEAD() bool    { return true }
 
-func (c *gcmCipher) aead(key []byte) (cipher.AEAD, []byte, error) {
-	// The last 4 octets of the SK_e material are the salt (RFC 5282 4).
-	salt := key[len(key)-4:]
-	block, err := aes.NewCipher(key[:c.keyLen])
-	if err != nil {
-		return nil, nil, err
-	}
-	a, err := cipher.NewGCM(block)
+func (c *aeadCipher) aead(key []byte) (cipher.AEAD, []byte, error) {
+	// The last 4 octets of the SK_e material are the salt (RFC 5282 §4,
+	// RFC 7634 §2).
+	salt := key[c.keyLen : c.keyLen+4]
+	a, err := c.mkAEAD(key[:c.keyLen])
 	if err != nil {
 		return nil, nil, err
 	}
 	return a, salt, nil
 }
 
-func (c *gcmCipher) Seal(encKey, _ /*integ*/, aad, plaintext []byte) ([]byte, error) {
+func (c *aeadCipher) Seal(encKey, _ /*integ*/, aad, plaintext []byte) ([]byte, error) {
 	a, salt, err := c.aead(encKey)
 	if err != nil {
 		return nil, err
@@ -120,9 +143,9 @@ func (c *gcmCipher) Seal(encKey, _ /*integ*/, aad, plaintext []byte) ([]byte, er
 	return out, nil
 }
 
-func (c *gcmCipher) Open(encKey, _ /*integ*/, aad, ivCtIcv []byte) ([]byte, error) {
+func (c *aeadCipher) Open(encKey, _ /*integ*/, aad, ivCtIcv []byte) ([]byte, error) {
 	if len(ivCtIcv) < c.IVLen()+c.ICVLen() {
-		return nil, fmt.Errorf("cryptoutil: GCM payload too short")
+		return nil, fmt.Errorf("cryptoutil: AEAD payload too short")
 	}
 	a, salt, err := c.aead(encKey)
 	if err != nil {
