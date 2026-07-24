@@ -52,6 +52,23 @@ func TestInteropStrongswanClientVeepinServer(t *testing.T) {
 	runInteropBench(t, "compose.server-ss.yml", "strongswan-client", "veepin-server", "10.10.10.1")
 }
 
+// TestInteropVeepinClientStrongswanServerV6Underlay is Direction A with the OUTER
+// ESP/IKE transport over IPv6: the veepin client dials strongSwan at an IPv6
+// literal and the handshake and ESP ride UDP/IPv6. The inner ping stays IPv4, so
+// a successful cross-tunnel ping isolates the underlay. Proves veepin's client
+// socket path and outer host-route work over an IPv6 underlay against strongSwan.
+func TestInteropVeepinClientStrongswanServerV6Underlay(t *testing.T) {
+	runInterop(t, "compose.client-ss-v6underlay.yml", "veepin-client", "10.20.30.254")
+}
+
+// TestInteropStrongswanClientVeepinServerV6Underlay is Direction B over an IPv6
+// underlay: a strongSwan initiator dials the veepin server (`veepin serve ikev2
+// -listen ::`) at its IPv6 address. Exercises the server's dual-stack bind and
+// the pktconn IPv6 source-pinning path; the inner ping to the TUN gateway is IPv4.
+func TestInteropStrongswanClientVeepinServerV6Underlay(t *testing.T) {
+	runInterop(t, "compose.server-ss-v6underlay.yml", "strongswan-client", "10.10.10.1")
+}
+
 // TestInteropVeepinClientStrongswanServerChaCha20 is Direction A with the
 // strongSwan responder forcing ChaCha20-Poly1305 (RFC 7634): the veepin client
 // must negotiate ChaCha20 for the IKE and Child SAs. A successful cross-tunnel

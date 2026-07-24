@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -167,7 +168,9 @@ func NewClient(cfg ClientConfig) *Client {
 // Connect performs IKE_SA_INIT and IKE_AUTH (PSK or EAP), returning the
 // negotiated configuration and Child SA on success.
 func (c *Client) Connect() (*ClientResult, error) {
-	raddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", c.cfg.ServerHost, c.cfg.ServerPort))
+	// JoinHostPort brackets an IPv6 literal, which a bare "%s:%d" would render
+	// ambiguously (e.g. fd00::10:500).
+	raddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(c.cfg.ServerHost, strconv.Itoa(c.cfg.ServerPort)))
 	if err != nil {
 		return nil, fmt.Errorf("resolve server: %w", err)
 	}

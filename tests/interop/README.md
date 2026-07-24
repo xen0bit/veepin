@@ -21,7 +21,9 @@ dependency. Tests skip cleanly if Docker is unavailable.
 | `TestInteropSelf` | `veepin connect ikev2` | `veepin serve ikev2` | `10.10.10.1` |
 | `TestInteropVeepinClientStrongswanServer` (A) | `veepin connect ikev2` | strongSwan | `10.20.30.254` |
 | `TestInteropVeepinClientStrongswanServerIPv6` (A, dual-stack) | `veepin connect ikev2` | strongSwan (v4 + v6 pools) | `10.20.30.254`, `fd00:20:30::254` |
+| `TestInteropVeepinClientStrongswanServerV6Underlay` (A, v6 underlay) | `veepin connect ikev2` (dials v6) | strongSwan | `10.20.30.254` |
 | `TestInteropStrongswanClientVeepinServer` (B) | strongSwan | `veepin serve ikev2` | `10.10.10.1` |
+| `TestInteropStrongswanClientVeepinServerV6Underlay` (B, v6 underlay) | strongSwan (dials v6) | `veepin serve ikev2 -listen ::` | `10.10.10.1` |
 | `TestInteropVeepinClientWireguardServer` | `veepin connect wireguard` | wireguard-go | `10.10.10.1` |
 | `TestInteropWireguardClientVeepinServer` | wireguard-go | `veepin serve wireguard` | `10.10.10.1` |
 | `TestInteropWireguardSelf` | `veepin connect wireguard` | `veepin serve wireguard` | `10.10.10.1` |

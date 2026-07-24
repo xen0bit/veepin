@@ -105,6 +105,13 @@ stateDiagram-v2
 - **NAT-T floats to UDP/4500 and forces UDP-encap of ESP.** The non-ESP marker
   disambiguates IKE from ESP on the shared 4500 socket; the [`esp`](../esp) path
   assumes this encapsulation.
+- **The outer transport is family-agnostic (IPv4 or IPv6 underlay).** The client
+  dials whatever family its server host resolves to (`net.ResolveUDPAddr`); the
+  server binds the family of its `-listen` address, where `::` gives a dual-stack
+  socket serving both. The NAT-detection hash already covers the 16-octet address
+  (`nat.go`), the batch I/O rides `recvmmsg`/`sendmmsg` regardless of family, and
+  [`dataplane.PacketConn`](../../../dataplane) selects the `IP_PKTINFO` vs
+  `IPV6_PKTINFO` source-pinning variant from the socket's `SO_DOMAIN`.
 - **`BuildESPSA` builds the data-path `ESPCrypter` once per SA** — never per
   packet. Reuse the returned `*esp.SA`; rebuilding it would reintroduce the
   per-packet allocations the data-plane benchmarks were tuned to remove.

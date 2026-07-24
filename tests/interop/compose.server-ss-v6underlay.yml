@@ -1,0 +1,56 @@
+# Direction B, IPv6 underlay: strongSwan client (initiator) -> veepin server
+# (`veepin serve ikev2 -listen ::`), with the OUTER ESP/IKE transport over IPv6.
+# strongSwan dials the veepin server's IPv6 literal; the inner traffic stays IPv4
+# (ping 10.10.10.1, the veepin server's TUN gateway). Exercises the veepin
+# server's `::` bind and the pktconn IPv6 source-pinning path.
+name: veepin-interop-b-v6underlay
+
+networks:
+  underlay6:
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: 172.31.3.0/24
+        - subnet: fd00:12::/64
+
+services:
+  veepin-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    sysctls:
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+      net.ipv4.ip_forward: "1"
+    networks:
+      underlay6:
+        ipv6_address: fd00:12::10
+    environment:
+      # LISTEN :: binds a dual-stack socket; PUBLIC is the v6 address strongSwan
+      # dials, used for NAT detection.
+      LISTEN: "::"
+      PUBLIC: "fd00:12::10"
+      PSK: "interop-test-psk"
+      SERVER_ID: "vpn.example.com"
+      POOL: "10.10.10.0/24"
+    volumes:
+      - ./veepin/server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  strongswan-client:
+    build:
+      context: strongswan
+    image: interop-strongswan
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+    depends_on: [veepin-server]
+    networks: [underlay6]
+    volumes:
+      - ./strongswan/swanctl-client-v6underlay.conf:/etc/swanctl/swanctl.conf:ro
+      - ./strongswan/client-entrypoint.sh:/entrypoint.sh:ro
+    command: ["/bin/sh", "/entrypoint.sh"]

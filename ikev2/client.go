@@ -677,9 +677,16 @@ func serverGateway(res *ike.ClientResult, host string) net.IP {
 		return ip
 	}
 	if ips, err := net.LookupIP(host); err == nil {
+		// Prefer an IPv4 address (the common underlay), but fall back to IPv6 so a
+		// host that only resolves to AAAA still yields a host-route target.
 		for _, ip := range ips {
 			if v4 := ip.To4(); v4 != nil {
 				return v4
+			}
+		}
+		for _, ip := range ips {
+			if ip.To16() != nil {
+				return ip
 			}
 		}
 	}
