@@ -1,0 +1,37 @@
+# Reference OpenVPN client -> veepin OpenVPN server, with --tls-crypt on both
+# sides.
+#
+# Two things this proves that the plain cell cannot. First, that a tls-crypt
+# client can talk to the veepin server at all: the wrapping is not negotiated,
+# so before the server could unwrap one, this configuration simply failed.
+# Second, that the server's opener authentication accepts a genuinely wrapped
+# packet -- the same check that silently drops one from a peer without the key,
+# which is what denies an active prober the hard-reset-plus-certificate reply it
+# is looking for.
+name: veepin-interop-openvpn-server-tls-crypt
+
+services:
+  veepin-ovpn-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    volumes:
+      - ./openvpn/pki:/pki:ro
+      - ./veepin/openvpn-server-tls-crypt-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  openvpn-client:
+    build:
+      context: openvpn
+    image: interop-openvpn
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-ovpn-server]
+    volumes:
+      - ./openvpn/pki:/pki:ro
+      - ./openvpn/client-tls-crypt.conf:/client.conf:ro
+      - ./openvpn/client-entrypoint.sh:/client-entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/client-entrypoint.sh"]

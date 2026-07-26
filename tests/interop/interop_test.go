@@ -393,6 +393,27 @@ func TestInteropOpenVPNClientVeepinServer(t *testing.T) {
 	runInteropBench(t, "compose.openvpn-server.yml", "openvpn-client", "veepin-ovpn-server", "10.8.0.1")
 }
 
+// TestInteropOpenVPNClientVeepinServerTLSCrypt is the mirror of the tls-crypt
+// client cell: a real OpenVPN client with --tls-crypt against the veepin
+// *server*.
+//
+// It proves two things the plain server cell cannot. The wrapping is not
+// negotiated, so before the server could unwrap a control packet this
+// configuration could not connect at all. And a successful tunnel means the
+// server's opener authentication accepted a genuinely wrapped hard reset --
+// the same check that silently drops one from a peer without the static key,
+// which is what denies an active prober the hard-reset-and-certificate reply
+// that the OpenVPN fingerprinting work (USENIX Security 2022) relies on.
+func TestInteropOpenVPNClientVeepinServerTLSCrypt(t *testing.T) {
+	requireDocker(t)
+	pkiDir := filepath.Join("openvpn", "pki")
+	if err := generateOpenVPNPKI(pkiDir); err != nil {
+		t.Fatalf("generate PKI: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
+	runInterop(t, "compose.openvpn-server-tls-crypt.yml", "openvpn-client", "10.8.0.1")
+}
+
 // TestInteropOpenVPNSelf is the veepin<->veepin OpenVPN sanity check: the veepin
 // client and server over a real socket and TUNs, isolating a veepin break from
 // an interop break.

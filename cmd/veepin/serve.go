@@ -167,16 +167,24 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			pool     = fs.String("pool", "10.8.0.0/24", "internal address pool handed to clients")
 			dns      = fs.String("dns", "", "comma-separated DNS servers pushed to clients")
 			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+			tlsAuth  = fs.String("tls-auth", "", "static key adding an HMAC to every control packet (must match the client's --tls-auth)")
+			tlsCrypt = fs.String("tls-crypt", "", "static key encrypting and authenticating every control packet; drops an unauthenticated opener silently (must match the client's --tls-crypt)")
+			auth     = fs.String("auth", "", "HMAC digest for -tls-auth: SHA1 (default) or SHA256")
+			keyDir   = fs.Int("key-direction", -1, "the client's --key-direction for -tls-auth: 0, 1, or -1 for a bidirectional key")
 		)
 		return func() map[string]string {
 			opts := map[string]string{
-				openvpn.OptServerCA:       *ca,
-				openvpn.OptServerCert:     *cert,
-				openvpn.OptServerKey:      *key,
-				openvpn.OptServerListenIP: *listenIP,
-				openvpn.OptServerPool:     *pool,
-				openvpn.OptServerDNS:      *dns,
-				openvpn.OptServerTUN:      *tun,
+				openvpn.OptServerCA:           *ca,
+				openvpn.OptServerCert:         *cert,
+				openvpn.OptServerKey:          *key,
+				openvpn.OptServerTLSAuth:      *tlsAuth,
+				openvpn.OptServerTLSCrypt:     *tlsCrypt,
+				openvpn.OptServerAuth:         *auth,
+				openvpn.OptServerKeyDirection: fmt.Sprint(*keyDir),
+				openvpn.OptServerListenIP:     *listenIP,
+				openvpn.OptServerPool:         *pool,
+				openvpn.OptServerDNS:          *dns,
+				openvpn.OptServerTUN:          *tun,
 			}
 			if *port != 0 {
 				opts[openvpn.OptServerListenPort] = fmt.Sprint(*port)

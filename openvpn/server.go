@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,6 +21,7 @@ import (
 	"github.com/xen0bit/veepin/internal/openvpn/control"
 	"github.com/xen0bit/veepin/internal/openvpn/data"
 	"github.com/xen0bit/veepin/internal/openvpn/keys"
+	"github.com/xen0bit/veepin/internal/openvpn/tlswrap"
 	"github.com/xen0bit/veepin/internal/openvpn/wire"
 )
 
@@ -47,6 +49,30 @@ type ServerConfig struct {
 	// MTU pushed to clients as tun-mtu (0 uses the default).
 	MTU int
 
+	// TLSCrypt and TLSAuth are an OpenVPN static key (the "OpenVPN Static key
+	// V1" format) protecting the control channel, matching the client's
+	// --tls-crypt / --tls-auth. TLSCrypt takes precedence. Both are optional and
+	// neither changes the data channel.
+	//
+	// Setting one is what makes the server unanswerable to a peer that does not
+	// hold the key: without it, a bare P_CONTROL_HARD_RESET_CLIENT_V2 from any
+	// source is answered with a server hard reset and then the full certificate
+	// flight, which is the active-probe stage of the OpenVPN fingerprinting work
+	// (Xue et al., USENIX Security 2022). With one, an opener that fails the
+	// HMAC is dropped before any session state exists.
+	//
+	// A client configured with --tls-crypt also cannot talk to a server without
+	// this: the wrapping is not negotiated, so the two sides must agree.
+	TLSCrypt []byte
+	TLSAuth  []byte
+	// Auth is the --auth digest for TLSAuth's HMAC (default SHA1). It is unused
+	// with TLSCrypt, which fixes its own construction.
+	Auth string
+	// KeyDirection is the client's --key-direction for TLSAuth: 0 or 1, or -1
+	// (the default) for a bidirectional key. The server takes the opposite
+	// direction to the client automatically.
+	KeyDirection int
+
 	// TUNName is the desired TUN interface name; empty lets the kernel pick.
 	TUNName string
 	// Logger receives progress logs; nil discards them.
@@ -59,8 +85,59 @@ func (c *ServerConfig) validate() error {
 		return errors.New("openvpn: server CA is required")
 	case len(c.Cert) == 0 || len(c.Key) == 0:
 		return errors.New("openvpn: server certificate and key are required")
+	case len(c.TLSCrypt) > 0 && len(c.TLSAuth) > 0:
+		return errors.New("openvpn: tls-crypt and tls-auth are mutually exclusive")
 	}
 	return nil
+}
+
+// serverWrapperFactory returns a function that mints one control-channel
+// wrapper, or nil for the plain profile.
+//
+// It is a factory rather than a single shared Wrapper because each wrapper owns
+// a send counter and an anti-replay window, and those are per-connection: one
+// window shared across clients would reject the second client's packet ID 1 as
+// a replay of the first's.
+//
+// The server takes the direction opposite the client's. tls-crypt fixes the
+// client at Inverse, so the server is Normal; tls-auth follows the client's
+// --key-direction, which the caller passes through unchanged.
+func serverWrapperFactory(cfg *ServerConfig) (func() (control.Wrapper, error), error) {
+	switch {
+	case len(cfg.TLSCrypt) > 0:
+		key, err := tlswrap.ParseStaticKey(cfg.TLSCrypt)
+		if err != nil {
+			return nil, fmt.Errorf("openvpn: tls-crypt key: %w", err)
+		}
+		return func() (control.Wrapper, error) { return tlswrap.NewCrypt(key, tlswrap.Normal) }, nil
+	case len(cfg.TLSAuth) > 0:
+		key, err := tlswrap.ParseStaticKey(cfg.TLSAuth)
+		if err != nil {
+			return nil, fmt.Errorf("openvpn: tls-auth key: %w", err)
+		}
+		digest, err := tlswrap.ParseDigest(cfg.Auth)
+		if err != nil {
+			return nil, fmt.Errorf("openvpn: tls-auth: %w", err)
+		}
+		dir := serverAuthDirection(cfg.KeyDirection)
+		return func() (control.Wrapper, error) { return tlswrap.NewAuth(key, dir, digest), nil }, nil
+	default:
+		return nil, nil
+	}
+}
+
+// serverAuthDirection mirrors authDirection: the server takes the slot pair the
+// client does not. A bidirectional key (--key-direction unset) uses slot 0 both
+// ways on both sides, so it is its own opposite.
+func serverAuthDirection(keyDirection int) tlswrap.Direction {
+	switch keyDirection {
+	case 0:
+		return tlswrap.Inverse
+	case 1:
+		return tlswrap.Normal
+	default:
+		return tlswrap.Bidirectional
+	}
 }
 
 // Server is a running OpenVPN responder: one UDP socket serving many clients, a
@@ -68,13 +145,16 @@ func (c *ServerConfig) validate() error {
 // does not configure host networking — Gateway and Network report what a caller
 // needs to do that itself.
 type Server struct {
-	tlsCfg  *tls.Config
-	pool    *dataplane.AddrPool
-	gateway net.IP
-	dns     []net.IP
-	mtu     int
-	logger  *log.Logger
-	gate    *dataplane.Gate
+	tlsCfg *tls.Config
+	// newWrapper mints a per-client control-channel wrapper, or is nil for the
+	// plain profile. See serverWrapperFactory for why it is a factory.
+	newWrapper func() (control.Wrapper, error)
+	pool       *dataplane.AddrPool
+	gateway    net.IP
+	dns        []net.IP
+	mtu        int
+	logger     *log.Logger
+	gate       *dataplane.Gate
 
 	listenAddr *net.UDPAddr
 	tun        *dataplane.TUN
@@ -100,6 +180,10 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	tlsCfg, err := serverTLSConfig(&cfg)
 	if err != nil {
 		return nil, fmt.Errorf("openvpn: %w", err)
+	}
+	newWrapper, err := serverWrapperFactory(&cfg)
+	if err != nil {
+		return nil, err
 	}
 
 	poolCIDR := cfg.Pool
@@ -141,6 +225,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 
 	return &Server{
 		tlsCfg:     tlsCfg,
+		newWrapper: newWrapper,
 		gate:       dataplane.NewGate(dataplane.AdmissionConfig{}),
 		pool:       pool,
 		gateway:    gateway,
@@ -259,6 +344,17 @@ func (s *Server) handleControl(op, keyID uint8, pkt []byte, from *net.UDPAddr) {
 			s.mu.Unlock()
 			return // not a known session and not a new-connection opener
 		}
+		// With a protected control channel, prove the opener holds the static
+		// key before anything is created for it. This has to happen here rather
+		// than inside the Channel, because constructing a Channel queues the
+		// server hard reset immediately — so by the time Unwrap could reject the
+		// packet, the reply an active prober is looking for has already gone out.
+		//
+		// Failing here costs the prober a datagram and yields silence.
+		if !s.authenticateOpener(pkt) {
+			s.mu.Unlock()
+			return
+		}
 		// A new session means a TLS handshake and the key exchange behind it,
 		// all for an unauthenticated peer on a spoofable UDP source.
 		if r := s.gate.Admit(from); r != dataplane.Admitted {
@@ -289,6 +385,27 @@ func (s *Server) handleControl(op, keyID uint8, pkt []byte, from *net.UDPAddr) {
 	cl.ch.Deliver(pkt)
 }
 
+// authenticateOpener reports whether a would-be new client's first datagram
+// carries a valid control-channel wrapping. It always passes on the plain
+// profile, which has nothing to check.
+//
+// The wrapper it builds is thrown away: its only job is to answer the question,
+// and the session gets a fresh one whose anti-replay window has not yet seen
+// this packet. That costs one extra HMAC per connection attempt — per
+// connection, never per packet — and keeps the check from having to reach into
+// the Channel's state.
+func (s *Server) authenticateOpener(pkt []byte) bool {
+	if s.newWrapper == nil {
+		return true
+	}
+	w, err := s.newWrapper()
+	if err != nil {
+		return false
+	}
+	_, err = w.Unwrap(pkt)
+	return err == nil
+}
+
 // newClient builds the control channel for a freshly-seen client. Its send
 // closure targets the client's current address on the shared socket.
 func (s *Server) newClient(from *net.UDPAddr, keyID uint8) (*serverClient, error) {
@@ -297,7 +414,14 @@ func (s *Server) newClient(from *net.UDPAddr, keyID uint8) (*serverClient, error
 		_, err := s.conn.WriteToUDP(b, &dst)
 		return err
 	}
-	ch, err := control.NewServer(send, keyID, controlTimeout, nil)
+	var wrap control.Wrapper
+	if s.newWrapper != nil {
+		var err error
+		if wrap, err = s.newWrapper(); err != nil {
+			return nil, fmt.Errorf("control channel wrapper: %w", err)
+		}
+	}
+	ch, err := control.NewServer(send, keyID, controlTimeout, wrap)
 	if err != nil {
 		return nil, fmt.Errorf("control channel: %w", err)
 	}
@@ -591,6 +715,11 @@ const (
 	OptServerPool       = "pool"
 	OptServerDNS        = "dns"
 	OptServerTUN        = "tun"
+	// Control-channel protection, matching the client options of the same name.
+	OptServerTLSAuth      = "tls-auth"
+	OptServerTLSCrypt     = "tls-crypt"
+	OptServerAuth         = "auth"
+	OptServerKeyDirection = "key-direction"
 )
 
 // serverDataDemux extracts the P_DATA_V2 peer-id (bytes 1..3) as the pump's
@@ -631,6 +760,28 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 			return nil, perr
 		}
 		cfg.ListenPort = p
+	}
+	// Both wrappings are optional, so an absent option is not an error — unlike
+	// the CA/cert/key above, which readFileOpt treats as required. The CLI always
+	// puts a key in the map, empty when the flag was not given.
+	if v := opts[OptServerTLSAuth]; v != "" {
+		if cfg.TLSAuth, err = os.ReadFile(v); err != nil {
+			return nil, fmt.Errorf("openvpn: tls-auth: %w", err)
+		}
+	}
+	if v := opts[OptServerTLSCrypt]; v != "" {
+		if cfg.TLSCrypt, err = os.ReadFile(v); err != nil {
+			return nil, fmt.Errorf("openvpn: tls-crypt: %w", err)
+		}
+	}
+	cfg.Auth = opts[OptServerAuth]
+	cfg.KeyDirection = -1
+	if v := opts[OptServerKeyDirection]; v != "" {
+		d, derr := strconv.Atoi(v)
+		if derr != nil || d < -1 || d > 1 {
+			return nil, fmt.Errorf("openvpn: invalid %s %q", OptServerKeyDirection, v)
+		}
+		cfg.KeyDirection = d
 	}
 	cfg.DNS = append(cfg.DNS, splitCommaIPs(opts[OptServerDNS])...)
 	return NewServer(cfg)
