@@ -100,6 +100,25 @@ func (s *SA) ResetReplayWindow() {
 // nextHeader is the IP protocol number of the inner payload (e.g. 4 for
 // IPv4-in-IPv4, or the transport protocol for transport mode).
 func (s *SA) Encapsulate(inner []byte, nextHeader uint8) ([]byte, error) {
+	return s.encapsulate(inner, nextHeader, 0)
+}
+
+// EncapsulatePadded is Encapsulate with traffic-flow-confidentiality padding
+// (RFC 4303 §2.7): the payload is extended to at least minInner octets before
+// the ESP trailer, so the packet's size on the wire says less about the packet
+// inside it. dataplane.Shaper decides when and how far.
+//
+// The filler sits *inside* the payload rather than in the ESP Pad field, for
+// two reasons: Pad Length is a single octet, so alignment padding alone caps at
+// 255; and §2.7 defines TFC padding in exactly these terms, with the receiver
+// delimiting the real packet by the inner IP header's own length. That is what
+// makes it safe against a peer that never negotiated anything — the extra
+// octets are inert to any conforming receiver.
+func (s *SA) EncapsulatePadded(inner []byte, nextHeader uint8, minInner int) ([]byte, error) {
+	return s.encapsulate(inner, nextHeader, minInner)
+}
+
+func (s *SA) encapsulate(inner []byte, nextHeader uint8, minInner int) ([]byte, error) {
 	if err := s.prepare(); err != nil {
 		return nil, err
 	}
@@ -110,7 +129,7 @@ func (s *SA) Encapsulate(inner []byte, nextHeader uint8) ([]byte, error) {
 	s.mu.Unlock()
 
 	block := max(s.outCrypter.BlockLen(), 1)
-	payloadLen := len(inner)
+	payloadLen := max(len(inner), minInner)
 	padLen := (block - (payloadLen+2)%block) % block
 
 	// Assemble the plaintext (inner || pad || padLen || nextHeader) in one
@@ -133,6 +152,9 @@ func (s *SA) Encapsulate(inner []byte, nextHeader uint8) ([]byte, error) {
 		pt = pt[:ptLen]
 	}
 	copy(pt, inner)
+	// Zero the TFC region explicitly: the scratch comes from a pool and still
+	// holds a previous packet's bytes, which must not be shipped as filler.
+	clear(pt[len(inner):payloadLen])
 	for i := 0; i < padLen; i++ {
 		pt[payloadLen+i] = byte(i + 1)
 	}
@@ -191,6 +213,11 @@ func (s *SA) Decapsulate(pkt []byte) (inner []byte, nextHeader uint8, err error)
 		return nil, 0, errBadPadLength
 	}
 	inner = plaintext[:len(plaintext)-padLen-2]
+
+	// Note that inner may still carry traffic-flow-confidentiality padding
+	// (RFC 4303 §2.7), which no ESP field delimits — only the inner packet's own
+	// header does. Stripping it therefore belongs to whoever knows what
+	// nextHeader means, not here; the ike package's espTunnel does it.
 
 	s.mu.Lock()
 	s.window.advance(seq)

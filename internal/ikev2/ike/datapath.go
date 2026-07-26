@@ -1,6 +1,7 @@
 package ike
 
 import (
+	"errors"
 	"net"
 	"net/netip"
 	"sync"
@@ -8,6 +9,14 @@ import (
 
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/ikev2/esp"
+)
+
+// Inbound drop sentinels. Like the esp package's, these are pre-built rather
+// than formatted per packet: they are returned on the data path's hot reject
+// route, where a flood of stray datagrams must create no garbage.
+var (
+	errDummyPacket = errors.New("ike: ESP dummy packet (next-header 59)")
+	errBadInner    = errors.New("ike: inner packet does not match its declared length")
 )
 
 // hostRoute expresses one assigned IPv4 address as a single-host /32 route. It
@@ -84,18 +93,46 @@ func (t *espTunnel) SetPeerAddr(a *net.UDPAddr) {
 // packet's own version nibble sets the ESP next-header — IPv4 (4) or IPv6 (41) —
 // so one dual-stack Child SA carries both families.
 func (t *espTunnel) Encapsulate(ipPacket []byte) ([]byte, error) {
-	nextHeader := byte(4) // IPv4
-	if len(ipPacket) > 0 && ipPacket[0]>>4 == 6 {
-		nextHeader = 41 // IPv6
-	}
-	return t.espSA.Encapsulate(ipPacket, nextHeader)
+	return t.espSA.Encapsulate(ipPacket, espNextHeader(ipPacket))
 }
 
-// Decapsulate opens an ESP packet back to the inner IP datagram. The inner
-// packet is self-describing, so the discarded next-header need not be consulted.
+// EncapsulatePadded is Encapsulate with RFC 4303 §2.7 traffic-flow-
+// confidentiality padding, implementing dataplane.PaddingTunnel.
+func (t *espTunnel) EncapsulatePadded(ipPacket []byte, minInner int) ([]byte, error) {
+	return t.espSA.EncapsulatePadded(ipPacket, espNextHeader(ipPacket), minInner)
+}
+
+// espNextHeader picks the ESP next-header for an inner packet from its own
+// version nibble — IPv4 (4) or IPv6 (41) — so one dual-stack Child SA carries
+// both families.
+func espNextHeader(ipPacket []byte) byte {
+	if len(ipPacket) > 0 && ipPacket[0]>>4 == 6 {
+		return 41
+	}
+	return 4
+}
+
+// Decapsulate opens an ESP packet back to the inner IP datagram, stripping any
+// traffic-flow-confidentiality padding (RFC 4303 §2.7) the sender added.
+//
+// No ESP field delimits TFC padding — only the inner packet's own header does,
+// which is exactly what lets a sender pad without the receiver having agreed to
+// anything. So the trim happens here, where the next-header value is
+// interpreted, rather than in the esp codec which only carries it.
 func (t *espTunnel) Decapsulate(espPkt []byte) ([]byte, error) {
-	inner, _, err := t.espSA.Decapsulate(espPkt)
-	return inner, err
+	inner, nextHeader, err := t.espSA.Decapsulate(espPkt)
+	if err != nil {
+		return nil, err
+	}
+	switch nextHeader {
+	case 59: // NoNextHeader: a pure filler packet, with nothing inside at all.
+		return nil, errDummyPacket
+	case 4, 41: // Tunnel mode, either family.
+		if inner = dataplane.TrimToIP(inner); inner == nil {
+			return nil, errBadInner
+		}
+	}
+	return inner, nil
 }
 
 // PumpDataPath connects the IKE layer's Child SA lifecycle to a dataplane.Pump.

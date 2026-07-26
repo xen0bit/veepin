@@ -93,6 +93,7 @@ const (
 	OptAllowedIPs   = "allowed-ips"          // inner destinations for the peer
 	OptKeepalive    = "persistent-keepalive" // keepalive seconds
 	OptTUNName      = "tun"                  // desired TUN interface name
+	OptShape        = "shape"                // per-flow shaping budget in bytes (0 = off)
 )
 
 // parseOptions turns string-keyed options into a Dialer: it loads the -config
@@ -290,6 +291,10 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	// Outbound TUN traffic is routed to the peer by longest-prefix match over its
 	// AllowedIPs; inbound transport packets demux on our receiver index.
 	pump := dataplane.NewPump(tun, send, wire.Demux, logger)
+	if cfg.Shape > 0 {
+		pump.SetShaper(dataplane.NewShaper(dataplane.ShapeConfig{Bytes: cfg.Shape}))
+		logger.Printf("wireguard: outbound shaping on, %d bytes per flow", cfg.Shape)
+	}
 	// GSO bursts flush with one sendmmsg on the connected socket. This
 	// BatchConn is the pump goroutine's own; readLoop has another.
 	sendBC := dataplane.NewBatchConn(conn)

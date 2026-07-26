@@ -109,6 +109,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			cert     = fs.String("cert", "", "server certificate PEM (enables certificate auth instead of PSK)")
 			key      = fs.String("key", "", "server private-key PEM (with -cert)")
 			clientCA = fs.String("client-ca", "", "CA bundle PEM enabling client certificate auth (optional)")
+			shape    = fs.Int("shape", 0, "per-flow downstream shaping budget in bytes: pads each inner flow's first N bytes to the tunnel MTU, hiding an inner TLS handshake's size pattern (0 = off, 16384 recommended)")
 		)
 		return func() map[string]string {
 			return map[string]string{
@@ -123,6 +124,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 				ikev2.OptServerCert:     *cert,
 				ikev2.OptServerKey:      *key,
 				ikev2.OptServerClientCA: *clientCA,
+				ikev2.OptServerShape:    fmt.Sprint(*shape),
 			}
 		}, nil
 	case "wireguard":
@@ -137,6 +139,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			peerPub    = fs.String("peer-public-key", "", "a single peer's static public key, base64 (adds one peer)")
 			peerPSK    = fs.String("peer-preshared-key", "", "the -peer-public-key peer's preshared key, base64 (optional)")
 			peerIPs    = fs.String("peer-allowed-ips", "", "the -peer-public-key peer's allowed IPs, comma-separated CIDRs")
+			shape      = fs.Int("shape", 0, "per-flow downstream shaping budget in bytes: pads each inner flow's first N bytes to the tunnel MTU, hiding an inner TLS handshake's size pattern (0 = off, 16384 recommended)")
 		)
 		return func() map[string]string {
 			opts := map[string]string{
@@ -155,6 +158,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			if *mtu != 0 {
 				opts[wireguard.OptServerMTU] = fmt.Sprint(*mtu)
 			}
+			opts[wireguard.OptServerShape] = fmt.Sprint(*shape)
 			return opts
 		}, nil
 	case "openvpn":

@@ -52,6 +52,21 @@ func TestInteropStrongswanClientVeepinServer(t *testing.T) {
 	runInteropBench(t, "compose.server-ss.yml", "strongswan-client", "veepin-server", "10.10.10.1")
 }
 
+// TestInteropStrongswanClientVeepinServerShaped is Direction B with downstream
+// flow shaping on: the veepin server pads outbound ESP with RFC 4303 2.7
+// traffic-flow-confidentiality padding, and a real strongSwan initiator has to
+// cope with it.
+//
+// This is the cell that gates the -shape default. The filler is delimited only
+// by the inner IP header's own length, so a successful ping proves two things a
+// unit test cannot: that strongSwan accepts the padded packets at all, and that
+// it trims them by the header rather than by the ESP payload length -- a
+// receiver doing the latter would hand its stack a packet with garbage attached
+// and could not answer.
+func TestInteropStrongswanClientVeepinServerShaped(t *testing.T) {
+	runInterop(t, "compose.server-ss-shaped.yml", "strongswan-client", "10.10.10.1")
+}
+
 // TestInteropVeepinClientStrongswanServerV6Underlay is Direction A with the OUTER
 // ESP/IKE transport over IPv6: the veepin client dials strongSwan at an IPv6
 // literal and the handshake and ESP ride UDP/IPv6. The inner ping stays IPv4, so
@@ -236,6 +251,15 @@ func TestInteropVeepinClientWireguardServer(t *testing.T) {
 // cryptokey routing — against a client veepin shares no code with.
 func TestInteropWireguardClientVeepinServer(t *testing.T) {
 	runInteropBench(t, "compose.wireguard-server.yml", "wg-client", "veepin-wg-server", "10.10.10.1")
+}
+
+// TestInteropWireguardClientVeepinServerShaped is the WireGuard half of the
+// shaping proof: the veepin server pads transport messages far past the
+// protocol's mandatory 16-octet alignment, and a real wireguard-go client must
+// still recover the inner packet -- which it can only do by trimming to the
+// inner IP header's declared length.
+func TestInteropWireguardClientVeepinServerShaped(t *testing.T) {
+	runInterop(t, "compose.wireguard-server-shaped.yml", "wg-client", "10.10.10.1")
 }
 
 // TestInteropWireguardSelf is the veepin<->veepin WireGuard sanity check: the

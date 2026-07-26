@@ -4,7 +4,12 @@
 # TUN and (via -setup-nat) assigns the gateway address so the kernel answers
 # pings to it. No -wan is given, so no MASQUERADE is installed — the harness only
 # pings the server's own tunnel address, which needs no forwarding.
+# SHAPE is the per-flow downstream shaping budget in bytes (0, the default, is
+# off). A non-zero value pads outbound transport messages past the mandatory
+# 16-octet alignment, which the peer must tolerate.
 set -u
+
+SHAPE="${SHAPE:-0}"
 
 mkdir -p /etc/wireguard
 cat > /etc/wireguard/wg0.conf <<EOF
@@ -19,5 +24,5 @@ PresharedKey = ${PSK}
 AllowedIPs = ${CLIENT_TUN_IP}/32
 EOF
 
-echo "veepin-wg-server: serving on :51820, gateway ${SERVER_TUN_IP}"
-exec veepin serve wireguard -config /etc/wireguard/wg0.conf -tun tun0 -setup-nat
+echo "veepin-wg-server: serving on :51820, gateway ${SERVER_TUN_IP}, shape ${SHAPE}"
+exec veepin serve wireguard -config /etc/wireguard/wg0.conf -tun tun0 -shape "$SHAPE" -setup-nat

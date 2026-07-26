@@ -114,6 +114,14 @@ func (t *wgTunnel) SetPeerAddr(a *net.UDPAddr) {
 // it is past rejectAfterTime — a peer would reject a packet under a dead key, so
 // dropping it here (and letting the rekey loop re-establish) is the honest thing.
 func (t *wgTunnel) Encapsulate(p []byte) ([]byte, error) {
+	return t.EncapsulatePadded(p, 0)
+}
+
+// EncapsulatePadded is Encapsulate with the plaintext padded out to minInner
+// octets, implementing dataplane.PaddingTunnel. WireGuard needs nothing
+// negotiated for this: the inner packet is delimited by its own IP header, so
+// the filler is inert to any conforming receiver.
+func (t *wgTunnel) EncapsulatePadded(p []byte, minInner int) ([]byte, error) {
 	t.mu.RLock()
 	sess := t.current
 	expired := sess != nil && time.Since(t.established) >= rejectAfterTime
@@ -124,7 +132,7 @@ func (t *wgTunnel) Encapsulate(p []byte) ([]byte, error) {
 	if expired {
 		return nil, errSessionExpired
 	}
-	return sess.Seal(p)
+	return sess.SealPadded(p, minInner)
 }
 
 // Decapsulate opens an inbound transport packet with whichever keypair its

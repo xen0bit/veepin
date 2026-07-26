@@ -20,6 +20,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/cryptoutil"
 	"github.com/xen0bit/veepin/internal/wireguard/wire"
 )
@@ -91,6 +92,24 @@ const nonceLen = 12
 // empty inner packet produces a keepalive: a message with an empty payload,
 // which the peer authenticates and then discards.
 func (s *Session) Seal(inner []byte) ([]byte, error) {
+	return s.seal(inner, 0)
+}
+
+// SealPadded is Seal with the plaintext padded out to at least minInner octets
+// instead of just to the next 16-octet boundary, so the message's size on the
+// wire says less about the packet inside it (dataplane.Shaper drives this).
+//
+// It needs no negotiation and no peer support: WireGuard's inner packet is
+// delimited by its own IP header, which is exactly why Open trims by that
+// header, so the extra octets are inert to any conforming receiver — the
+// official clients included.
+//
+// A keepalive is never padded. Its emptiness is what marks it as one.
+func (s *Session) SealPadded(inner []byte, minInner int) ([]byte, error) {
+	return s.seal(inner, minInner)
+}
+
+func (s *Session) seal(inner []byte, minInner int) ([]byte, error) {
 	// Reserve this packet's counter. Add returns the post-increment value, so
 	// the first packet uses counter 0.
 	counter := s.counter.Add(1) - 1
@@ -98,7 +117,7 @@ func (s *Session) Seal(inner []byte) ([]byte, error) {
 		return nil, ErrExhausted
 	}
 
-	padded := paddedLen(len(inner))
+	padded := paddedLen(len(inner), minInner)
 	msgLen := wire.TransportHeaderLen + padded + wire.TagSize
 	// One allocation for the whole packet: the header, the padded plaintext, the
 	// tag, and a 12-octet nonce scratch at the tail. The plaintext is laid down
@@ -161,51 +180,31 @@ func (s *Session) Open(pkt []byte) ([]byte, error) {
 	if !fresh {
 		return nil, ErrReplay
 	}
-	return trimToIP(plain), nil
+	return dataplane.TrimToIP(plain), nil
 }
 
 // paddedLen rounds a plaintext length up to a 16-octet boundary, as WireGuard
 // requires so that packet lengths leak less about their contents (protocol
-// paper §5.4.6). An empty packet stays empty — a keepalive carries no padding.
-func paddedLen(n int) int {
+// paper §5.4.6). minInner raises the floor first, which is how the shaper asks
+// for more than alignment. An empty packet stays empty — a keepalive carries no
+// padding, because being empty is what identifies it.
+func paddedLen(n, minInner int) int {
 	const boundary = 16
 	if n == 0 {
 		return 0
+	}
+	if minInner > n {
+		// Round the *target* down to the boundary before taking it. Rounding it
+		// up instead would push the packet past the size the shaper chose it
+		// against — the inner MTU — and the few octets over would be paid for
+		// by fragmentation of the outer datagram.
+		if aligned := minInner - minInner%boundary; aligned > n {
+			n = aligned
+		}
 	}
 	rem := n % boundary
 	if rem == 0 {
 		return n
 	}
 	return n + boundary - rem
-}
-
-// trimToIP trims a decrypted payload to the length its own IP header declares,
-// discarding the zero padding pad added on the far side. WireGuard carries no
-// length field of its own for this — the inner packet is self-describing, and a
-// payload that is not a well-formed IP packet is dropped (returned as nil).
-func trimToIP(plain []byte) []byte {
-	if len(plain) == 0 {
-		return nil // keepalive
-	}
-	switch plain[0] >> 4 {
-	case 4:
-		if len(plain) < 20 {
-			return nil
-		}
-		total := int(binary.BigEndian.Uint16(plain[2:4]))
-		if total < 20 || total > len(plain) {
-			return nil
-		}
-		return plain[:total]
-	case 6:
-		if len(plain) < 40 {
-			return nil
-		}
-		total := 40 + int(binary.BigEndian.Uint16(plain[4:6]))
-		if total > len(plain) {
-			return nil
-		}
-		return plain[:total]
-	}
-	return nil
 }
