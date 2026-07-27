@@ -43,6 +43,18 @@ type ServerConfig struct {
 	// Users maps a username to its password for MS-CHAPv2 authentication.
 	Users map[string]string
 
+	// Shape enables downstream traffic shaping: the number of bytes of each
+	// inner flow whose packets are padded to the tunnel MTU before shaping
+	// stops for that flow. Zero, the default, disables it.
+	//
+	// It hides the size pattern of an inner TLS handshake, which otherwise
+	// shows through as the size of the TLS record carrying it (see
+	// dataplane/shape.go). Clients need no support for it — the padding is
+	// RFC 1661 §5.1 PPP padding, which every conforming peer trims by the inner
+	// IP header — so a stock Windows SSTP client benefits unmodified.
+	// dataplane.DefaultShapeBytes is a reasonable value.
+	Shape int
+
 	// TUNName is the desired TUN interface name; empty lets the kernel pick.
 	TUNName string
 	// Logger receives progress logs; nil discards them.
@@ -76,6 +88,13 @@ type Server struct {
 	users         map[string]string
 	logger        *log.Logger
 	gate          *dataplane.Gate
+	// shaper pads outbound PPP frames so the TLS record carrying them says less
+	// about the packet inside; nil disables shaping.
+	//
+	// One Shaper is safe to share across clients here precisely because tunLoop
+	// is the single goroutine that consults it — the same single-owner rule the
+	// pump relies on. Hanging one off each client would race.
+	shaper *dataplane.Shaper
 
 	listenAddr *net.TCPAddr
 	tun        *dataplane.TUN
@@ -136,9 +155,16 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("sstp: open TUN: %w", err)
 	}
 
+	var shaper *dataplane.Shaper
+	if cfg.Shape > 0 {
+		shaper = dataplane.NewShaper(dataplane.ShapeConfig{Bytes: cfg.Shape})
+		logger.Printf("sstp: downstream shaping on, %d bytes per flow", cfg.Shape)
+	}
+
 	return &Server{
 		tlsCfg:        tlsCfg,
 		gate:          dataplane.NewGate(dataplane.AdmissionConfig{}),
+		shaper:        shaper,
 		serverCertDER: cert.Certificate[0],
 		pool:          pool,
 		gateway:       gateway,
@@ -215,7 +241,7 @@ func (s *Server) tunLoop() {
 		cl := s.clients[dst]
 		s.mu.Unlock()
 		if cl != nil {
-			cl.sendIP(buf[:n])
+			cl.sendIP(buf[:n], s.shaper.Target(buf[:n], defaultShapeMTU))
 		}
 	}
 }
@@ -335,9 +361,12 @@ func (c *sstpClient) SendPPP(frame []byte) error {
 	return c.write(pkt)
 }
 
-// sendIP frames an outbound IP packet as PPP in an SSTP data packet.
-func (c *sstpClient) sendIP(ipPacket []byte) {
-	pkt, err := wire.EncodeData(ppp.EncapsulateIP(ipPacket))
+// sendIP frames one inner packet as PPP inside an SSTP data packet. A non-zero
+// padTo pads the PPP Information field out to that size, so the TLS record this
+// becomes is the same size whatever the packet was (dataplane/shape.go).
+func (c *sstpClient) sendIP(ipPacket []byte, padTo int) {
+	frame := ppp.EncapsulateIPPadded(ipPacket, padTo)
+	pkt, err := wire.EncodeData(frame)
 	if err != nil {
 		return
 	}
@@ -492,6 +521,11 @@ func ipv4Dst(pkt []byte) (uint32, bool) {
 	return binary.BigEndian.Uint32(pkt[16:20]), true
 }
 
+// defaultShapeMTU is the inner size downstream shaping pads towards. It matches
+// the MTU this package reports to a client (client.DefaultTunnelMTU), so a
+// padded packet is exactly the size a genuine full one would have been.
+const defaultShapeMTU = client.DefaultTunnelMTU
+
 // Server option keys for client.NewServer("sstp", opts).
 const (
 	OptServerCert     = "cert"
@@ -503,6 +537,7 @@ const (
 	OptServerUser     = "user"
 	OptServerPassword = "password"
 	OptServerTUN      = "tun"
+	OptServerShape    = "shape" // per-flow downstream shaping budget in bytes (0 = off)
 )
 
 func init() { client.RegisterServer("sstp", parseServerOptions) }
@@ -540,6 +575,13 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 				cfg.DNS = append(cfg.DNS, ip)
 			}
 		}
+	}
+	if v := opts[OptServerShape]; v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("sstp: invalid %s %q", OptServerShape, v)
+		}
+		cfg.Shape = n
 	}
 	return NewServer(cfg)
 }

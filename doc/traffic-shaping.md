@@ -1,15 +1,16 @@
 # Downstream flow shaping
 
-Status: **implemented for IKEv2/ESP and WireGuard, off by default.** The shaper
-itself (`dataplane/shape.go`) is protocol-agnostic and drives any tunnel that
-implements `dataplane.PaddingTunnel`; two do. Enabled with `-shape <bytes>` on
-`veepin serve ikev2|wireguard`, or the `shape` key through the registry.
+Status: **implemented for IKEv2/ESP, WireGuard, SSTP, Fortinet and AnyConnect;
+off by default.** The shaper itself (`dataplane/shape.go`) is protocol-agnostic.
+Enabled with `-shape <bytes>` on `veepin serve ikev2|wireguard|sstp|fortinet|anyconnect`,
+or the `shape` key through the registry.
 
-The interop cells that exercise a shaped server against **strongSwan** and
-**wireguard-go** both pass, so two independent third-party receivers accept the
-padding and trim it correctly. The default is still off, because those are Linux
-userspace stacks and the clients this is meant to protect — Windows, macOS, iOS —
-are untested. See [Risk](#the-risk-worth-naming).
+Five interop cells exercise a shaped server against an independent receiver —
+**strongSwan**, **wireguard-go**, **sstpc/pppd** and **openconnect** twice (its
+AnyConnect and Fortinet data paths) — and all pass, so five third-party stacks
+accept the padding and trim it correctly. The default is still off, because
+those are all Linux userspace stacks and the clients this is meant to protect —
+Windows, macOS, iOS — are untested. See [Risk](#the-risk-worth-naming).
 
 ## The problem
 
@@ -96,12 +97,43 @@ every protocol having a vehicle for it.
 |---|---|---|
 | **IKEv2/ESP** | Traffic-flow-confidentiality padding, [RFC 4303][rfc4303] §2.7 — filler inside the payload, before the ESP trailer | None |
 | **WireGuard** | Trailing octets of the transport message, generalising the alignment padding the protocol paper §5.4.6 already mandates | None |
+| **SSTP**, **Fortinet** | The PPP Information field, [RFC 1661][rfc1661] §5.1 — "MAY be padded with an arbitrary number of octets up to the MRU" | None |
+| **AnyConnect** | Trailing octets of the CSTP (or DTLS-channel) data payload, which the 16-bit length field already delimits | None |
 
-Neither needs negotiation, and that is not an accident: **in both protocols the
+None of them needs negotiation, and that is not an accident: **in every one the
 inner packet is delimited by its own IP header**, so filler appended past its end
 is inert to any conforming receiver. `dataplane.TrimToIP` is the receiving half —
-one implementation, shared by both, cutting a decapsulated plaintext back to the
-length its header declares.
+one implementation, shared by all of them, cutting a decapsulated plaintext back
+to the length its header declares.
+
+RFC 1661 §5.1 makes this explicit for PPP: padding is allowed and "it is the
+responsibility of each protocol to distinguish padding octets from real
+information", which IP does with Total Length. CSTP has no such provision — its
+length field simply says how many octets follow — so AnyConnect padding rests on
+the receiver trimming by the IP header. That is not a gamble: every IP stack must
+do it already, because Ethernet pads frames shorter than 60 octets and the IP
+layer has always had to cut back to Total Length. The openconnect interop cell is
+what turns that argument into a tested fact.
+
+[rfc1661]: https://www.rfc-editor.org/rfc/rfc1661#section-5.1
+
+### Datagram protocols and stream protocols take different routes
+
+For the datagram protocols the shaper runs inside `dataplane.Pump`, which owns
+the TUN reader and dispatches to a `Tunnel`. The stream protocols do not use
+`Pump` — each is connection-oriented and runs its own TUN loop, one goroutine
+serving every client — so each calls `Shaper.Target` there directly and hands the
+target to its own framing (`ppp.EncapsulateIPPadded`, `anyconnect.padPayload`).
+That single TUN goroutine is also what makes one unsynchronised `Shaper` per
+server safe, the same argument as for `Pump`.
+
+The observable differs too. For a datagram protocol the outer datagram size *is*
+what a censor measures. For a TLS-carried protocol it is the TLS record size —
+but each of these servers turns one inner packet into exactly one `Write` on the
+`tls.Conn`, so one padded packet is one record of the padded size, and padding
+the payload is sufficient. What is *not* implemented is coalescing several inner
+packets into one record, which would additionally hide the packet count; that
+remains open, below.
 
 ESP's Pad Length field is a single octet, so the ESP *alignment* pad caps at 255
 bytes and cannot carry this on its own; §2.7 padding going inside the payload is
@@ -157,26 +189,28 @@ is the kind of thing a reader might otherwise assume is covered.
 RFC 4303 §2.7 specifies TFC padding and requires receivers to handle it, but
 *"the RFC says MUST"* and *"this vendor's stack was tested against it"* are
 different claims, and the second is the one that matters for a stock client.
-WireGuard is the safer of the two — its receivers have always had to trim by the
-inner header for the mandatory 16-octet alignment padding — but ESP receivers
-vary.
+WireGuard is the safest — its receivers have always had to trim by the inner
+header for the mandatory 16-octet alignment padding — and PPP is close behind,
+since RFC 1661 §5.1 names padding outright. CSTP is the weakest of the four: it
+specifies no padding at all, so AnyConnect leans entirely on the receiver
+trimming by the IP header. ESP receivers, meanwhile, vary.
 
-Two receivers are now known good:
-`TestInteropStrongswanClientVeepinServerShaped` and
-`TestInteropWireguardClientVeepinServerShaped` both pass, and each proves more
-than acceptance: the ping *reply* can only be produced by a receiver that
-trimmed the filler by the inner IP header rather than by the payload length, so
-a stack that merely tolerated the padding without stripping it would fail the
-cell rather than pass it quietly.
+Five receivers are now known good — strongSwan, wireguard-go, pppd (behind
+sstpc), and openconnect on both its AnyConnect and its Fortinet data path — and
+each cell proves more than acceptance: the ping *reply* can only be produced by
+a receiver that trimmed the filler by the inner IP header rather than by the
+payload length, so a stack that merely tolerated the padding without stripping
+it would fail the cell rather than pass it quietly.
 
 What is still untested is the set of clients that motivated the whole design —
-the Windows, macOS and iOS IPsec stacks. strongSwan is genuine independent
-evidence, not veepin talking to itself, but it is not a vendor OS stack, and no
-containerised one exists to test against. **Verifying those means a manual run
-against a real device**, which is why the default stays off. If a vendor stack
-rejects padded ESP, the honest outcome is that shaping stays opt-in for IKEv2 —
-not that the padding is quietly weakened to something that no longer hides the
-size pattern.
+the Windows, macOS and iOS IPsec stacks, the Windows SSTP client, FortiClient,
+Cisco's own AnyConnect. Every receiver above is genuine independent evidence,
+not veepin talking to itself, but they are all Linux userspace, and no
+containerised vendor stack exists to test against. **Verifying those means a
+manual run against a real device**, which is why the default stays off. If one
+of them rejects padded packets, the honest outcome is that shaping stays opt-in
+for that protocol — not that the padding is quietly weakened to something that
+no longer hides the size pattern.
 
 ## Next
 
@@ -184,20 +218,23 @@ Ordered by value, not by ease:
 
 1. **A manual check against a stock Windows / macOS / iOS client**, which is what
    would justify changing the default.
-2. **Stream-carried protocols** (SSTP, AnyConnect, Fortinet, OpenVPN-TCP, SSH).
-   Their observable is the TLS *record* size, not the datagram size, so the
-   mechanism is different — coalescing writes and emitting discardable filler
-   frames, for which each protocol already has a vehicle (PPP LCP Echo, CSTP
-   keepalive, `SSH_MSG_IGNORE`, an unregistered MASQUE capsule type). Additive:
-   `PaddingTunnel` does not fit them and they will want a sibling interface.
-3. **Padding the handshake itself.** The shaper only sees packets on the data
+2. **The protocols still unshaped**: OpenVPN, SSH, MASQUE, Nebula, L2TP/IPsec.
+   Each has a plausible vehicle (an OpenVPN data-channel payload is
+   length-delimited, `SSH_MSG_IGNORE` exists for exactly this, a MASQUE capsule
+   type can be unregistered-and-skipped, and L2TP rides the same PPP padding as
+   SSTP), so this is mostly plumbing rather than design.
+3. **Coalescing on the stream protocols.** Padding hides each record's size;
+   merging several inner packets into one record would additionally hide how many
+   there were, which is the half of the fingerprint padding cannot touch.
+4. **Padding the handshake itself.** The shaper only sees packets on the data
    path, so the tunnel's *own* handshake — which has a fixed, per-protocol size
    signature of its own — is untouched by this work.
 
 ## Interaction with parallelisation
 
-`Shaper` carries no lock. It is owned by the single goroutine that runs
-`Pump.Run`, the same single-owner argument that leaves `groTable` unlocked.
+`Shaper` carries no lock. It is owned by the single goroutine that reads the TUN
+— `Pump.Run` for the datagram protocols, each stream server's own TUN loop
+otherwise — the same single-owner argument that leaves `groTable` unlocked.
 [`scaling-the-data-path.md`](scaling-the-data-path.md) enumerates the assumptions
 a naive parallelisation would break; this adds one. Splitting the egress path
 across cores requires either a `Shaper` per worker — which weakens the flow

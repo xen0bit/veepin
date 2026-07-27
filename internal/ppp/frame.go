@@ -30,16 +30,26 @@ const (
 	hdlcControl = 0x03
 )
 
+// frameHeaderLen is the address/control pair plus the 16-bit protocol number
+// that opens every frame encodeFrame writes.
+const frameHeaderLen = 4
+
+// putFrameHeader writes the fixed prefix of a PPP frame into the front of b,
+// which must have room for frameHeaderLen octets.
+func putFrameHeader(b []byte, protocol uint16) {
+	b[0] = hdlcAddress
+	b[1] = hdlcControl
+	b[2] = byte(protocol >> 8)
+	b[3] = byte(protocol)
+}
+
 // encodeFrame builds a PPP frame: the HDLC address/control octets, the 16-bit
 // protocol number, then the payload. The address/control pair is always sent
 // (we never negotiate ACFC), which every server accepts.
 func encodeFrame(protocol uint16, payload []byte) []byte {
-	out := make([]byte, 4+len(payload))
-	out[0] = hdlcAddress
-	out[1] = hdlcControl
-	out[2] = byte(protocol >> 8)
-	out[3] = byte(protocol)
-	copy(out[4:], payload)
+	out := make([]byte, frameHeaderLen+len(payload))
+	putFrameHeader(out, protocol)
+	copy(out[frameHeaderLen:], payload)
 	return out
 }
 

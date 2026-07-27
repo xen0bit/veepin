@@ -46,3 +46,25 @@ its packets are relayed over PPP. The server binds the same port number on UDP
 for the DTLS data channel and advertises it; the certificate must carry an ECDSA
 key for that (an RSA gateway serves the TLS tunnel only). `-no-dtls` leaves the
 UDP port unbound.
+
+## Downstream flow shaping
+
+`-shape <bytes>` pads the first N bytes of each inner flow out to the tunnel
+MTU, so the size pattern of a TLS handshake made *inside* the tunnel does not
+survive encapsulation:
+
+```sh
+sudo ./veepin serve fortinet -shape 16384 ...
+```
+
+The filler goes in the PPP Information field, which RFC 1661 §5.1 explicitly
+allows to be padded — the carried protocol distinguishes padding from data, and
+IP does so with its Total Length. So **the client needs no support for it**; it
+is verified in Docker against `openconnect --protocol=fortinet`, whose ping replies could not come back from a
+mis-trimmed packet.
+
+Because the fingerprint it defends against targets handshakes, the budget is
+spent per flow rather than per byte and bulk throughput is unaffected. It is off
+by default and shapes the server's downstream direction only. See
+[`doc/traffic-shaping.md`](../traffic-shaping.md) for what it does and does not
+hide.

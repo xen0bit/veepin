@@ -43,6 +43,7 @@ const (
 	OptServerNoDTLS = "no-dtls" // "true" to serve the TLS tunnel only
 	OptServerTOTP   = "totp"    // base32 TOTP secret; set it to require a second factor
 	OptServerTUN    = "tun"     // TUN interface name
+	OptServerShape  = "shape"   // per-flow downstream shaping budget in bytes (0 = off)
 )
 
 // ServerConfig configures a Fortinet SSL VPN server.
@@ -60,7 +61,20 @@ type ServerConfig struct {
 	// must pass a second factor after its password.
 	TOTPSecrets map[string]string
 	TUNName     string
-	Logger      *log.Logger
+
+	// Shape enables downstream traffic shaping: the number of bytes of each
+	// inner flow whose packets are padded to the tunnel MTU before shaping
+	// stops for that flow. Zero, the default, disables it.
+	//
+	// It hides the size pattern of an inner TLS handshake, which otherwise
+	// shows through as the size of the TLS record carrying it (see
+	// dataplane/shape.go). Clients need no support for it — the padding is
+	// RFC 1661 §5.1 PPP padding, which every conforming peer trims by the inner
+	// IP header — so a stock FortiClient or openconnect benefits unmodified.
+	// dataplane.DefaultShapeBytes is a reasonable value.
+	Shape int
+
+	Logger *log.Logger
 }
 
 // Server is a Fortinet SSL VPN server.
@@ -119,6 +133,8 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		DNS:         cfg.DNS,
 		Logger:      cfg.Logger,
 		TOTPSecrets: cfg.TOTPSecrets,
+		Shape:       cfg.Shape,
+		MTU:         client.DefaultTunnelMTU,
 	}
 	// The DTLS channel is ECDHE-ECDSA, so an RSA gateway keypair cannot serve it.
 	// That is a reason to run TLS-only, not to refuse to start: the TLS tunnel is
@@ -264,6 +280,13 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 			return nil, fmt.Errorf("fortinet: invalid port %q", v)
 		}
 		cfg.Port = p
+	}
+	if v := opts[OptServerShape]; v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("fortinet: invalid shape %q", v)
+		}
+		cfg.Shape = n
 	}
 	for _, d := range strings.Split(opts[OptServerDNS], ",") {
 		if d = strings.TrimSpace(d); d != "" {
