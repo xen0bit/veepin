@@ -587,8 +587,11 @@ each a localized extension point, not a structural rework:
   direction unless the client is also veepin, and is not probe resistance.
   Interop cells prove strongSwan, wireguard-go, `openvpn`, pppd and openconnect
   all accept the padding *and* trim it correctly; it stays off by default
-  because the vendor OS stacks it is meant to protect are untested. See
-  [`doc/traffic-shaping.md`](doc/traffic-shaping.md).
+  because the vendor OS stacks it is meant to protect are untested —
+  [`doc/verifying-shaping.md`](doc/verifying-shaping.md) is the procedure for
+  changing that, and it needs a person with a device rather than more code. See
+  [`doc/traffic-shaping.md`](doc/traffic-shaping.md) for the design and for what
+  it does not hide.
 - **AnyConnect's DTLS needs TLS 1.3 or Extended Master Secret** (RFC 7627) — Go's
   `crypto/tls` will not run the RFC 5705 exporter otherwise, so against such a
   peer the client stays on TLS. Only PSK-NEGOTIATE mode; auth is

@@ -56,8 +56,10 @@ const sweepEvery = 1024
 // ShapeConfig configures downstream flow shaping. The zero value disables it,
 // which is the behaviour from before it existed.
 type ShapeConfig struct {
-	// Bytes is how much of each inner flow is padded before shaping stops for
-	// that flow. Zero disables shaping entirely.
+	// Bytes is how much padded output each inner flow is given before shaping
+	// stops for that flow — so it bounds what shaping costs, and a flow gets
+	// Bytes/mtu shaped packets whatever sizes it carries. Zero disables shaping
+	// entirely.
 	Bytes int
 	// Idle re-arms a flow's budget after this much silence, so a reused
 	// connection carrying a second handshake is shaped again.
@@ -95,7 +97,7 @@ type flowKey struct {
 // flowState is stored by value: updating an existing flow is a plain map
 // assignment, which allocates nothing once the table has grown.
 type flowState struct {
-	remaining int   // shaping budget left, in bytes of inner payload
+	remaining int   // shaping budget left, in bytes of padded output
 	lastSeen  int64 // unix nanos, for idle expiry and re-arm
 }
 
@@ -156,7 +158,14 @@ func (s *Shaper) Target(pkt []byte, mtu int) int {
 	st.lastSeen = now
 	shape := st.remaining > 0
 	if shape {
-		st.remaining -= len(pkt)
+		// Charge the budget what this packet will *emit*, not what it carries.
+		// Charging the inner length instead let a flow of small packets run far
+		// past the budget's apparent cost: at 60-octet packets a 16 KiB budget
+		// shaped 273 of them and put 382 KiB on the wire. Charging the emitted
+		// size makes Bytes bound what shaping actually costs, and makes the
+		// number of shaped packets a flow gets deterministic — Bytes/mtu — which
+		// is what lets the count be normalised rather than merely bounded.
+		st.remaining -= max(len(pkt), mtu)
 	}
 	s.store(key, st)
 

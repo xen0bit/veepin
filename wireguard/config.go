@@ -45,10 +45,10 @@ type Config struct {
 	// from a flag.
 	TUNName string
 
-	// Shape enables shaping of this peer's outbound traffic: the number of
-	// bytes of each inner flow whose packets are padded to the tunnel MTU
-	// before shaping stops for that flow. 0 disables it. It has no wg-quick
-	// equivalent (see dataplane/shape.go).
+	// Shape enables shaping of this peer's outbound traffic: how much padded
+	// output each inner flow is given before shaping stops for that flow, so it
+	// bounds what shaping costs. 0 disables it. It has no wg-quick equivalent
+	// (see dataplane/shape.go).
 	Shape int
 
 	// Logger receives progress logs; nil discards them. It has no wg-quick
