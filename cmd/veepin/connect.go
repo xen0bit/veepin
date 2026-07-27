@@ -214,6 +214,7 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 			user     = fs.String("username", "", "auth-user-pass username (optional)")
 			pass     = fs.String("password", "", "auth-user-pass password (optional)")
 			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+			shape    = fs.Int("shape", 0, "per-flow upstream shaping budget in bytes: pads each inner flow's first N bytes to the tunnel MTU (0 = off; the server shapes downstream independently)")
 		)
 		return func() map[string]string {
 			opts := map[string]string{
@@ -226,6 +227,7 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 				openvpn.OptAuth:     *auth,
 				openvpn.OptTLSAuth:  *tlsAuth,
 				openvpn.OptTLSCrypt: *tlsCrypt,
+				openvpn.OptShape:    fmt.Sprint(*shape),
 				openvpn.OptUsername: *user,
 				openvpn.OptPassword: *pass,
 				openvpn.OptTUNName:  *tun,

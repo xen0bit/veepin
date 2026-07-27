@@ -141,10 +141,51 @@ func newGCM(key []byte) (cipher.AEAD, error) {
 // pings, so it keeps no shared scratch: the nonce is built into unused tail bytes
 // of the output buffer, and the tag reordering is in place.
 func (c *Cipher) Seal(plaintext []byte) ([]byte, error) {
+	return c.seal(plaintext, 0)
+}
+
+// SealPadded is Seal with the plaintext extended to minInner octets of zero
+// filler, which downstream flow shaping uses to hide an inner packet's size
+// (dataplane/shape.go). The data channel length-delimits its payload, so the
+// filler is delimited only by the inner IP header's own length — every
+// conforming receiver trims to that, which is what makes it inert.
+func (c *Cipher) SealPadded(plaintext []byte, minInner int) ([]byte, error) {
+	return c.seal(plaintext, minInner)
+}
+
+// ptPool holds plaintext scratch for the padded path. A padded plaintext cannot
+// be assembled inside the output buffer: crypto/cipher forbids the AEAD's
+// destination capacity from overlapping the plaintext, and the destination here
+// is the output buffer's AAD prefix, whose capacity spans the whole allocation.
+// A pool keeps the padded path to the same one allocation as the plain one.
+var ptPool = sync.Pool{New: func() any { b := make([]byte, 0, 2048); return &b }}
+
+func (c *Cipher) seal(plaintext []byte, minInner int) ([]byte, error) {
 	id := c.counter.Add(1)
 	if id == 0 {
 		return nil, errCounterExhausted
 	}
+	if minInner > len(plaintext) {
+		ptp := ptPool.Get().(*[]byte)
+		pt := *ptp
+		if cap(pt) < minInner {
+			pt = make([]byte, minInner)
+		} else {
+			pt = pt[:minInner]
+		}
+		copy(pt, plaintext)
+		// The scratch comes from a pool and still holds a previous packet's
+		// bytes, which must not be shipped as filler.
+		clear(pt[len(plaintext):])
+		out, err := c.sealExact(pt, id)
+		*ptp = pt
+		ptPool.Put(ptp)
+		return out, err
+	}
+	return c.sealExact(plaintext, id)
+}
+
+func (c *Cipher) sealExact(plaintext []byte, id uint32) ([]byte, error) {
 	n := len(plaintext)
 	// One allocation: the wire packet plus nonceLen scratch bytes at the tail.
 	// The scratch holds the nonce, so it needs no separate heap allocation (the

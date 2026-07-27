@@ -74,7 +74,8 @@ var interopMatrix = []interopRow{
 		Server: interopCell{Tests: []string{
 			"TestInteropOpenVPNClientVeepinServer",
 			"TestInteropOpenVPNClientVeepinServerTLSCrypt",
-		}, Label: "`openvpn` (+ tls-crypt)"},
+			"TestInteropOpenVPNClientVeepinServerShaped",
+		}, Label: "`openvpn` (+ tls-crypt, padded)"},
 		Self: interopCell{Tests: []string{"TestInteropOpenVPNSelf"}},
 	},
 	{
@@ -95,8 +96,11 @@ var interopMatrix = []interopRow{
 	{
 		Protocol: "L2TP/IPsec",
 		Client:   interopCell{Tests: []string{"TestInteropVeepinClientL2TPServer"}, Label: "strongSwan + xl2tpd"},
-		Server:   interopCell{Tests: []string{"TestInteropL2TPClientVeepinServer"}, Label: "strongSwan + xl2tpd"},
-		Self:     interopCell{Tests: []string{"TestInteropL2TPSelf"}},
+		Server: interopCell{Tests: []string{
+			"TestInteropL2TPClientVeepinServer",
+			"TestInteropL2TPClientVeepinServerShaped",
+		}, Label: "strongSwan + xl2tpd (+ PPP-padded)"},
+		Self: interopCell{Tests: []string{"TestInteropL2TPSelf"}},
 	},
 	{
 		Protocol: "AnyConnect",

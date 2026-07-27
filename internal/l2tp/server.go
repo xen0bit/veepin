@@ -26,8 +26,19 @@ type ServerConfig struct {
 	Pool     *dataplane.AddrPool // inner address pool
 	Gateway  net.IP              // server's inner address (pool's first host)
 	DNS      []net.IP
-	Logger   *log.Logger
+	// Shape is the per-flow downstream shaping budget in bytes; 0 disables it.
+	// See dataplane/shape.go. MTU is the inner size shaping pads towards, and
+	// defaults to the PPP MRU this package negotiates.
+	Shape  int
+	MTU    int
+	Logger *log.Logger
 }
+
+// defaultShapeMTU is the inner size shaping pads towards when ServerConfig.MTU
+// is unset. RFC 1661 5.1 caps PPP padding at the MRU, and the MRU this package
+// negotiates is ppp.DefaultMRU, so that is both the correct ceiling and the size
+// a genuine full packet would have been.
+const defaultShapeMTU = ppp.DefaultMRU
 
 // Server is a running L2TP/IPsec responder. It binds two sockets — the IKE port
 // for Main Mode and the NAT-T port for everything after the float — and gives
@@ -48,6 +59,12 @@ type Server struct {
 	gateway  net.IP
 	logger   *log.Logger
 	gate     *dataplane.Gate
+	// shaper pads outbound PPP frames so the ESP packet carrying them says less
+	// about the inner packet (dataplane/shape.go); nil disables shaping.
+	//
+	// One Shaper is safe to share across peers because tunLoop is the single
+	// goroutine that consults it — the same single-owner rule the pump relies on.
+	shaper *dataplane.Shaper
 
 	mu       sync.Mutex
 	byCookie map[[8]byte]*serverPeer // initiator cookie -> peer, for IKE
@@ -66,8 +83,14 @@ func NewServer(rawIKE, rawNATT *net.UDPConn, tun tunIO, cfg ServerConfig) *Serve
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)
 	}
+	var shaper *dataplane.Shaper
+	if cfg.Shape > 0 {
+		shaper = dataplane.NewShaper(dataplane.ShapeConfig{Bytes: cfg.Shape})
+		logger.Printf("l2tp: downstream shaping on, %d bytes per flow", cfg.Shape)
+	}
 	return &Server{
 		cfg:      cfg,
+		shaper:   shaper,
 		ikeConn:  ikeConn,
 		nattConn: nattConn,
 		tun:      tun,
@@ -80,6 +103,14 @@ func NewServer(rawIKE, rawNATT *net.UDPConn, tun tunIO, cfg ServerConfig) *Serve
 		byIP:     map[uint32]*serverPeer{},
 		done:     make(chan struct{}),
 	}
+}
+
+// mtu is the inner size shaping pads towards.
+func (s *Server) mtu() int {
+	if s.cfg.MTU <= 0 {
+		return defaultShapeMTU
+	}
+	return s.cfg.MTU
 }
 
 // Serve runs the data path until Close. It blocks.
@@ -308,7 +339,11 @@ func (s *Server) tunLoop() {
 		t := p.tunnel
 		p.mu.Unlock()
 		if t != nil {
-			_ = t.SendPPP(ppp.EncapsulateIP(append([]byte(nil), buf[:n]...)))
+			// A non-zero target pads the PPP Information field out to it, so the
+			// ESP packet this becomes is the same size whatever the inner packet
+			// was. RFC 1661 5.1 sanctions the padding; ppp.IsIP trims it back.
+			pkt := append([]byte(nil), buf[:n]...)
+			_ = t.SendPPP(ppp.EncapsulateIPPadded(pkt, s.shaper.Target(pkt, s.mtu())))
 		}
 	}
 }

@@ -36,3 +36,26 @@ path is a userspace UDP socket with no raw-ESP fallback. A peer that never
 advertises NAT-T is therefore rejected during Main Mode rather than left to fail
 silently later. Both directions are verified in Docker against strongSwan +
 xl2tpd.
+
+## Downstream flow shaping
+
+`-shape <bytes>` pads the first N bytes of each inner flow out to the tunnel
+MTU, so the size pattern of a TLS handshake made *inside* the tunnel does not
+survive encapsulation:
+
+```sh
+sudo ./veepin serve l2tp -shape 16384 ...
+```
+
+L2TP/IPsec nests PPP inside L2TP inside ESP, and the filler goes in the
+innermost of those — the PPP Information field, which RFC 1661 §5.1 explicitly
+allows to be padded up to the MRU and leaves the carried protocol to delimit (IP
+does that with Total Length). Padding there rather than with ESP's own TFC
+padding is what keeps the shaper reading the inner 5-tuple. **The client needs
+no support for it**; it is verified in Docker against strongSwan + xl2tpd +
+pppd, whose ping replies could not come back from a mis-trimmed packet.
+
+Because the fingerprint it defends against targets handshakes, the budget is
+spent per flow rather than per byte and bulk throughput is unaffected. It is off
+by default. See [`doc/traffic-shaping.md`](../traffic-shaping.md) for what it
+does and does not hide.

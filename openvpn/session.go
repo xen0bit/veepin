@@ -100,10 +100,18 @@ func (m *muxer) Close() {
 	})
 }
 
+// errNotIP reports a decrypted data packet that is not a well-formed IP packet.
+// The data channel carries only IP and keepalive pings, so anything else is a
+// broken or hostile peer rather than something to hand the TUN.
+var errNotIP = errors.New("openvpn: data packet is not a well-formed IP packet")
+
 // dataCipher is the data-channel crypto the tunnel drives: either the AES-256-GCM
 // Cipher or the AES-256-CBC CBCCipher, chosen by the negotiated cipher.
 type dataCipher interface {
 	Seal(plaintext []byte) ([]byte, error)
+	// SealPadded is Seal with the plaintext extended to minInner octets, the
+	// vehicle downstream flow shaping uses (dataplane/shape.go).
+	SealPadded(plaintext []byte, minInner int) ([]byte, error)
 	Open(pkt []byte) ([]byte, error)
 }
 
@@ -121,6 +129,13 @@ func (t *tunnel) Routes() []netip.Prefix               { return t.routes }
 func (t *tunnel) PeerAddr() *net.UDPAddr               { return t.peer.Load() }
 func (t *tunnel) Encapsulate(p []byte) ([]byte, error) { return t.cipher.Seal(p) }
 
+// EncapsulatePadded implements dataplane.PaddingTunnel. The data channel
+// length-delimits its payload, so filler past the inner IP packet is delimited
+// by that packet's own header and is inert to any conforming receiver.
+func (t *tunnel) EncapsulatePadded(p []byte, minInner int) ([]byte, error) {
+	return t.cipher.SealPadded(p, minInner)
+}
+
 func (t *tunnel) Decapsulate(pkt []byte) ([]byte, error) {
 	pt, err := t.cipher.Open(pkt)
 	if err != nil {
@@ -129,7 +144,13 @@ func (t *tunnel) Decapsulate(pkt []byte) ([]byte, error) {
 	if data.IsPing(pt) {
 		return nil, nil // keepalive: authenticated but nothing to deliver
 	}
-	return pt, nil
+	// Trim any shaping filler past the inner packet; the data channel delimits
+	// its payload by length, so only the IP header says where the packet ends.
+	inner := dataplane.TrimToIP(pt)
+	if inner == nil {
+		return nil, errNotIP
+	}
+	return inner, nil
 }
 
 // session is a running OpenVPN tunnel. It implements client.Session.

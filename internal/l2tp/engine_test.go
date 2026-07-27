@@ -48,7 +48,18 @@ func makeIPv4(src, dst net.IP) []byte {
 	return p
 }
 
-func TestClientServerLoopback(t *testing.T) {
+func TestClientServerLoopback(t *testing.T) { runClientServerLoopback(t, 0) }
+
+// TestClientServerLoopbackShaped is the same exchange with downstream shaping
+// on: the server pads the PPP Information field of every downstream packet out
+// to the MRU. The assertion is unchanged — what reaches the client TUN must
+// still be byte-identical to what the server read — so the trim on receive is
+// under test as much as the padding.
+func TestClientServerLoopbackShaped(t *testing.T) {
+	runClientServerLoopback(t, dataplane.DefaultShapeBytes)
+}
+
+func runClientServerLoopback(t *testing.T, shape int) {
 	pool, gateway, err := dataplane.NewAddrPool("10.20.0.0/24")
 	if err != nil {
 		t.Fatal(err)
@@ -72,6 +83,7 @@ func TestClientServerLoopback(t *testing.T) {
 		Users:   map[string]string{"alice": "password"},
 		Pool:    pool,
 		Gateway: gateway,
+		Shape:   shape,
 	})
 	go func() { _ = server.Serve() }()
 	defer server.Close()

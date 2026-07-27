@@ -75,6 +75,23 @@ type ServerConfig struct {
 
 	// TUNName is the desired TUN interface name; empty lets the kernel pick.
 	TUNName string
+
+	// Shape enables downstream traffic shaping: the number of bytes of each
+	// inner flow whose packets are padded to the tunnel MTU before shaping stops
+	// for that flow. Zero, the default, disables it.
+	//
+	// It hides the size pattern of an inner TLS handshake, which otherwise shows
+	// through as the size of the data packet carrying it (see
+	// dataplane/shape.go). Clients need no support for it: the data channel
+	// length-delimits its payload, so filler past the inner IP packet is
+	// delimited by that packet's own header and a stock `openvpn` trims it.
+	// dataplane.DefaultShapeBytes is a reasonable value.
+	//
+	// This is a different defence from TLSCrypt above: that one hides the
+	// tunnel's own handshake from an active probe, this one hides the size
+	// pattern of what the tunnel carries.
+	Shape int
+
 	// Logger receives progress logs; nil discards them.
 	Logger *log.Logger
 }
@@ -153,6 +170,7 @@ type Server struct {
 	gateway    net.IP
 	dns        []net.IP
 	mtu        int
+	shape      int
 	logger     *log.Logger
 	gate       *dataplane.Gate
 
@@ -231,6 +249,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		gateway:    gateway,
 		dns:        cfg.DNS,
 		mtu:        mtu,
+		shape:      cfg.Shape,
 		logger:     logger,
 		listenAddr: &net.UDPAddr{IP: listenIP, Port: port},
 		tun:        tun,
@@ -279,6 +298,10 @@ func (s *Server) ListenAndServe() error {
 		}
 	})
 	s.pump.SetInnerMTU(s.mtu)
+	if s.shape > 0 {
+		s.pump.SetShaper(dataplane.NewShaper(dataplane.ShapeConfig{Bytes: s.shape}))
+		s.logger.Printf("openvpn: downstream shaping on, %d bytes per flow", s.shape)
+	}
 	go s.pump.Run()
 
 	s.logger.Printf("openvpn: listening on %s, gateway %s", s.listenAddr, s.gateway)
@@ -607,6 +630,13 @@ func (t *serverTunnel) Routes() []netip.Prefix               { return t.routes }
 func (t *serverTunnel) PeerAddr() *net.UDPAddr               { return t.peer.Load() }
 func (t *serverTunnel) Encapsulate(p []byte) ([]byte, error) { return t.cipher.Seal(p) }
 
+// EncapsulatePadded implements dataplane.PaddingTunnel. The data channel
+// length-delimits its payload, so filler past the inner IP packet is delimited
+// by that packet's own header and is inert to any conforming receiver.
+func (t *serverTunnel) EncapsulatePadded(p []byte, minInner int) ([]byte, error) {
+	return t.cipher.SealPadded(p, minInner)
+}
+
 func (t *serverTunnel) Decapsulate(pkt []byte) ([]byte, error) {
 	pt, err := t.cipher.Open(pkt)
 	if err != nil {
@@ -615,7 +645,13 @@ func (t *serverTunnel) Decapsulate(pkt []byte) ([]byte, error) {
 	if data.IsPing(pt) {
 		return nil, nil // keepalive: authenticated but nothing to deliver
 	}
-	return pt, nil
+	// Trim any shaping filler past the inner packet; the data channel delimits
+	// its payload by length, so only the IP header says where the packet ends.
+	inner := dataplane.TrimToIP(pt)
+	if inner == nil {
+		return nil, errNotIP
+	}
+	return inner, nil
 }
 
 // serverTLSConfig builds the mutual-TLS config for the responder: the server's
@@ -720,6 +756,8 @@ const (
 	OptServerTLSCrypt     = "tls-crypt"
 	OptServerAuth         = "auth"
 	OptServerKeyDirection = "key-direction"
+	// OptServerShape is the per-flow downstream shaping budget in bytes (0 = off).
+	OptServerShape = "shape"
 )
 
 // serverDataDemux extracts the P_DATA_V2 peer-id (bytes 1..3) as the pump's
@@ -782,6 +820,13 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 			return nil, fmt.Errorf("openvpn: invalid %s %q", OptServerKeyDirection, v)
 		}
 		cfg.KeyDirection = d
+	}
+	if v := opts[OptServerShape]; v != "" {
+		n, nerr := strconv.Atoi(v)
+		if nerr != nil || n < 0 {
+			return nil, fmt.Errorf("openvpn: invalid %s %q", OptServerShape, v)
+		}
+		cfg.Shape = n
 	}
 	cfg.DNS = append(cfg.DNS, splitCommaIPs(opts[OptServerDNS])...)
 	return NewServer(cfg)

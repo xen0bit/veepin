@@ -574,20 +574,20 @@ each a localized extension point, not a structural rework:
   One inner packet becomes one outer datagram, so the size pattern of an inner
   TLS handshake otherwise survives encapsulation — the fingerprint of
   [USENIX Security '24](https://www.usenix.org/conference/usenixsecurity24/presentation/xue-fingerprinting),
-  which byte-level obfuscation does not address. `veepin serve
-  ikev2|wireguard|sstp|fortinet|anyconnect -shape <bytes>` pads the first N
-  bytes of each inner flow out to the tunnel MTU — RFC 4303 §2.7 TFC padding for
-  ESP, trailing octets for WireGuard, the RFC 1661 §5.1 PPP Information field for
-  SSTP and Fortinet, and the length-delimited data payload for AnyConnect. All
-  are inert to a conforming receiver, which delimits the real packet by the
-  inner IP header, so **stock clients benefit unmodified**; and because the
-  attack targets handshakes, the cost is per-flow rather than per-byte, leaving
-  bulk throughput untouched. It does not shape packet counts or timing (that
-  would need constant-rate padding), does not cover the upstream direction
-  unless the client is also veepin, and is not probe resistance. Interop cells
-  prove strongSwan, wireguard-go, pppd and openconnect all accept the padding
-  *and* trim it correctly; it stays off by default because the vendor OS stacks
-  it is meant to protect are untested. See
+  which byte-level obfuscation does not address. `veepin serve <protocol> -shape
+  <bytes>` pads the first N bytes of each inner flow out to the tunnel MTU on
+  seven of the nine protocols — RFC 4303 §2.7 TFC padding for ESP, trailing
+  octets for WireGuard, the RFC 1661 §5.1 PPP Information field for SSTP,
+  Fortinet and L2TP/IPsec, and the length-delimited data payload for AnyConnect
+  and OpenVPN. All are inert to a conforming receiver, which delimits the real
+  packet by the inner IP header, so **stock clients benefit unmodified**; and
+  because the attack targets handshakes, the cost is per-flow rather than
+  per-byte, leaving bulk throughput untouched. It does not shape packet counts
+  or timing (that would need constant-rate padding), does not cover the upstream
+  direction unless the client is also veepin, and is not probe resistance.
+  Interop cells prove strongSwan, wireguard-go, `openvpn`, pppd and openconnect
+  all accept the padding *and* trim it correctly; it stays off by default
+  because the vendor OS stacks it is meant to protect are untested. See
   [`doc/traffic-shaping.md`](doc/traffic-shaping.md).
 - **AnyConnect's DTLS needs TLS 1.3 or Extended Master Secret** (RFC 7627) — Go's
   `crypto/tls` will not run the RFC 5705 exporter otherwise, so against such a

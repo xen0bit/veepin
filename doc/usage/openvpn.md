@@ -84,3 +84,32 @@ That closes the *active* half of that paper's method. The passive half — the
 cleartext opcode byte and OpenVPN's distinctive ACK pattern and packet sizes —
 is unaffected, because `tls-crypt` leaves the opcode, session ID, packet ID and
 timestamp in the clear by design.
+
+## Downstream flow shaping
+
+`-shape <bytes>` pads the first N bytes of each inner flow out to the tunnel
+MTU, so the size pattern of a TLS handshake made *inside* the tunnel does not
+survive encapsulation:
+
+```sh
+sudo ./veepin serve openvpn -shape 16384 ...
+```
+
+The filler goes after the inner IP packet in the data-channel payload, which is
+length-delimited; the receiver cuts back to the length the inner IP header
+declares. On the AES-256-CBC channel it sits before the PKCS#7 trailer, so that
+trailer stays valid. **The client needs no support for it** — it is verified in
+Docker against a stock `openvpn`, whose ping replies could not come back from a
+mis-trimmed packet.
+
+`veepin connect openvpn -shape` covers the upstream direction when both ends are
+veepin; a stock server accepts the padding but does not reciprocate.
+
+This is a different defence from `-tls-crypt`: that one hides the tunnel's own
+handshake from an active probe, this one hides the size pattern of what the
+tunnel carries.
+
+Because the fingerprint it defends against targets handshakes, the budget is
+spent per flow rather than per byte and bulk throughput is unaffected. It is off
+by default. See [`doc/traffic-shaping.md`](../traffic-shaping.md) for what it
+does and does not hide.
