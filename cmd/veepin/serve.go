@@ -175,6 +175,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			tlsCrypt = fs.String("tls-crypt", "", "static key encrypting and authenticating every control packet; drops an unauthenticated opener silently (must match the client's --tls-crypt)")
 			auth     = fs.String("auth", "", "HMAC digest for -tls-auth: SHA1 (default) or SHA256")
 			keyDir   = fs.Int("key-direction", -1, "the client's --key-direction for -tls-auth: 0, 1, or -1 for a bidirectional key")
+			shape    = fs.Int("shape", 0, "per-flow downstream shaping budget in bytes: pads each inner flow's first N bytes to the tunnel MTU, hiding an inner TLS handshake's size pattern (0 = off, 16384 recommended)")
 		)
 		return func() map[string]string {
 			opts := map[string]string{
@@ -189,6 +190,9 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 				openvpn.OptServerPool:         *pool,
 				openvpn.OptServerDNS:          *dns,
 				openvpn.OptServerTUN:          *tun,
+			}
+			if *shape != 0 {
+				opts[openvpn.OptServerShape] = fmt.Sprint(*shape)
 			}
 			if *port != 0 {
 				opts[openvpn.OptServerListenPort] = fmt.Sprint(*port)
@@ -302,6 +306,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			user     = fs.String("user", "", "MS-CHAPv2 username to accept (required)")
 			pass     = fs.String("pass", "", "the user's password (required)")
 			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+			shape    = fs.Int("shape", 0, "per-flow downstream shaping budget in bytes: pads each inner flow's first N bytes to the tunnel MTU, hiding an inner TLS handshake's size pattern (0 = off, 16384 recommended)")
 		)
 		return func() map[string]string {
 			opts := map[string]string{
@@ -313,6 +318,9 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 				l2tp.OptServerUser:     *user,
 				l2tp.OptServerPassword: *pass,
 				l2tp.OptServerTUN:      *tun,
+			}
+			if *shape != 0 {
+				opts[l2tp.OptServerShape] = fmt.Sprint(*shape)
 			}
 			if *port != 0 {
 				opts[l2tp.OptServerPort] = fmt.Sprint(*port)

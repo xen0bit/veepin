@@ -1,0 +1,41 @@
+# Reference OpenVPN client -> veepin OpenVPN server, with downstream flow
+# shaping on (`veepin serve openvpn -shape`).
+#
+# The server pads the AES-256-GCM data-channel payload past the inner IP packet.
+# The data channel length-delimits its payload and says nothing about padding, so
+# the filler is inert only because the receiver delimits the real packet by the
+# inner IP header's Total Length. A ping reply proves a real `openvpn` does
+# exactly that: a mis-trimmed packet could not produce a valid reply.
+#
+# OpenVPN is the protocol with the most published fingerprinting work against it
+# (Xue et al., USENIX Security 2022), which is why this cell is worth having even
+# though the mechanism is shared with the other protocols.
+name: veepin-interop-openvpn-server-shaped
+
+services:
+  veepin-ovpn-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      SHAPE: "16384"
+    volumes:
+      - ./openvpn/pki:/pki:ro
+      - ./veepin/openvpn-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  openvpn-client:
+    build:
+      context: openvpn
+    image: interop-openvpn
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-ovpn-server]
+    volumes:
+      - ./openvpn/pki:/pki:ro
+      - ./openvpn/client.conf:/client.conf:ro
+      - ./openvpn/client-entrypoint.sh:/client-entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/client-entrypoint.sh"]

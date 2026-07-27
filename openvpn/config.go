@@ -55,6 +55,14 @@ type Config struct {
 	// TUNName is the desired interface name; empty lets the kernel pick.
 	TUNName string
 
+	// Shape enables upstream traffic shaping: the number of bytes of each inner
+	// flow whose packets are padded to the tunnel MTU before shaping stops for
+	// that flow. Zero, the default, disables it. It is only useful against a
+	// veepin server, which shapes downstream independently; a stock `openvpn`
+	// server accepts the padding but does not reciprocate. See
+	// dataplane/shape.go.
+	Shape int
+
 	// Logger receives progress logs; nil discards them.
 	Logger *log.Logger
 }
@@ -76,6 +84,7 @@ const (
 	OptUsername     = "username"      // auth-user-pass username
 	OptPassword     = "password"      // auth-user-pass password
 	OptTUNName      = "tun"           // desired TUN interface name
+	OptShape        = "shape"         // per-flow upstream shaping budget in bytes (0 = off)
 )
 
 // Data ciphers this client implements. AES-256-GCM is the default and preferred
@@ -309,6 +318,13 @@ func (c *Config) applyOverrides(opts map[string]string) error {
 	}
 	if v := opts[OptCipher]; v != "" {
 		c.Cipher = v
+	}
+	if v := opts[OptShape]; v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return fmt.Errorf("%s: invalid value %q", OptShape, v)
+		}
+		c.Shape = n
 	}
 	if v := opts[OptUsername]; v != "" {
 		c.Username = v

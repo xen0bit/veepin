@@ -189,6 +189,10 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 		}
 	})
 	pump.SetInnerMTU(result.MTU)
+	if cfg.Shape > 0 {
+		pump.SetShaper(dataplane.NewShaper(dataplane.ShapeConfig{Bytes: cfg.Shape}))
+		logger.Printf("openvpn: upstream shaping on, %d bytes per flow", cfg.Shape)
+	}
 	pump.AddTunnel(tunnel)
 	m.setPump(pump)
 	go pump.Run()

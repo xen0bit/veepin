@@ -153,3 +153,59 @@ func TestPKCS7Unpad(t *testing.T) {
 		t.Errorf("zero pad: %v, want errShort", err)
 	}
 }
+
+// TestCBCSealPaddedRoundTrip covers the shaper's vehicle on the CBC data
+// channel. The filler sits between the inner packet and the PKCS#7 trailer, so
+// the trailer stays valid and the real packet is still delimited by the inner IP
+// header — which is what the receiver trims by.
+func TestCBCSealPaddedRoundTrip(t *testing.T) {
+	client, server := cbcPair(t, sha1.New, sha1.Size)
+	for _, size := range []int{20, 64, 576} {
+		msg := ipv4(size)
+		sealed, err := client.SealPadded(msg, 1400)
+		if err != nil {
+			t.Fatalf("size %d: %v", size, err)
+		}
+		// A padded small packet must be the same size on the wire as a genuine
+		// full one. CBC rounds both up to the same block boundary.
+		full, err := client.Seal(ipv4(1400))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(sealed) != len(full) {
+			t.Errorf("size %d: padded %d != genuine full %d", size, len(sealed), len(full))
+		}
+		got, err := server.Open(sealed)
+		if err != nil {
+			t.Fatalf("size %d: open: %v", size, err)
+		}
+		if len(got) != 1400 {
+			t.Errorf("size %d: opened %d octets, want 1400", size, len(got))
+		}
+		if !bytes.Equal(got[:size], msg) {
+			t.Errorf("size %d: inner packet corrupted", size)
+		}
+		for i, b := range got[size:] {
+			if b != 0 {
+				t.Fatalf("size %d: filler byte %d = %#x, want 0", size, i+size, b)
+			}
+		}
+	}
+}
+
+// A target at or below the packet's own size must leave it alone.
+func TestCBCSealPaddedIsAFloor(t *testing.T) {
+	client, _ := cbcPair(t, sha1.New, sha1.Size)
+	msg := ipv4(1400)
+	padded, err := client.SealPadded(msg, 576)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := client.Seal(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(padded) != len(plain) {
+		t.Errorf("padded %d != plain %d (a target below the packet must not change it)", len(padded), len(plain))
+	}
+}

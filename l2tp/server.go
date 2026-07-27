@@ -26,6 +26,7 @@ const (
 	OptServerPool     = "pool"
 	OptServerDNS      = "dns"
 	OptServerTUN      = "tun"
+	OptServerShape    = "shape" // per-flow downstream shaping budget in bytes (0 = off)
 )
 
 const defaultPool = "10.20.0.0/24"
@@ -51,7 +52,20 @@ type ServerConfig struct {
 	DNS []net.IP
 	// TUNName is the desired TUN interface name; empty lets the kernel pick.
 	TUNName string
-	Logger  *log.Logger
+
+	// Shape enables downstream traffic shaping: the number of bytes of each
+	// inner flow whose packets are padded to the tunnel MTU before shaping stops
+	// for that flow. Zero, the default, disables it.
+	//
+	// It hides the size pattern of an inner TLS handshake, which otherwise shows
+	// through as the size of the ESP packet carrying it (see dataplane/shape.go).
+	// Clients need no support for it — the padding is RFC 1661 §5.1 PPP padding,
+	// which every conforming peer trims by the inner IP header — so a stock
+	// Windows or macOS L2TP/IPsec client benefits unmodified.
+	// dataplane.DefaultShapeBytes is a reasonable value.
+	Shape int
+
+	Logger *log.Logger
 }
 
 // Server is a running L2TP/IPsec responder. It owns the TUN and the UDP socket
@@ -119,6 +133,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		Pool:     pool,
 		Gateway:  gateway,
 		DNS:      cfg.DNS,
+		Shape:    cfg.Shape,
 		Logger:   logger,
 	})
 	return &Server{eng: eng, tun: tun, pool: pool, gateway: gateway}, nil
@@ -155,6 +170,13 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 	}
 	if cfg.ListenIP == "" {
 		cfg.ListenIP = "0.0.0.0"
+	}
+	if v := opts[OptServerShape]; v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("l2tp: invalid %s %q", OptServerShape, v)
+		}
+		cfg.Shape = n
 	}
 	if v := opts[OptServerPort]; v != "" {
 		p, err := strconv.Atoi(v)

@@ -71,13 +71,27 @@ func NewCBC(k keys.CBCKeys, newHash func() hash.Hash, hashSize int, peerID uint3
 // Seal encrypts one plaintext into a wire CBC data packet: header || HMAC || IV
 // || AES-256-CBC(packet_id || plaintext).
 func (c *CBCCipher) Seal(plaintext []byte) ([]byte, error) {
+	return c.seal(plaintext, 0)
+}
+
+// SealPadded is Seal with the plaintext extended to minInner octets of zero
+// filler, which downstream flow shaping uses to hide an inner packet's size
+// (dataplane/shape.go). The filler sits between the inner packet and the PKCS#7
+// trailer, so the trailer stays valid and the receiver still delimits the real
+// packet by the inner IP header's own length.
+func (c *CBCCipher) SealPadded(plaintext []byte, minInner int) ([]byte, error) {
+	return c.seal(plaintext, minInner)
+}
+
+func (c *CBCCipher) seal(plaintext []byte, minInner int) ([]byte, error) {
 	id := c.counter.Add(1)
 	if id == 0 {
 		return nil, errCounterExhausted
 	}
 
-	// work = packet_id(4) || plaintext, PKCS#7 padded up to a full block.
-	plainLen := packetIDLen + len(plaintext)
+	// work = packet_id(4) || plaintext || shaping filler, PKCS#7 padded up to a
+	// full block. work is freshly allocated, so the filler is already zero.
+	plainLen := packetIDLen + max(len(plaintext), minInner)
 	pad := aes.BlockSize - plainLen%aes.BlockSize // 1..BlockSize
 	work := make([]byte, plainLen+pad)
 	binary.BigEndian.PutUint32(work[:packetIDLen], id)

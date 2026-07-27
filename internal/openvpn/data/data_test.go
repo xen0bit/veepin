@@ -218,3 +218,68 @@ func TestReplayWindowTooOld(t *testing.T) {
 		t.Error("packet ID 0 accepted")
 	}
 }
+
+// TestSealPaddedRoundTrip covers the shaper's OpenVPN vehicle. The data channel
+// length-delimits its payload, so filler past the inner packet is delimited only
+// by that packet's own IP header — the receiver has to trim by it, which is what
+// makes the padding inert.
+func TestSealPaddedRoundTrip(t *testing.T) {
+	client, server := cipherPair(t)
+	for _, size := range []int{20, 64, 576} {
+		msg := ipv4(size)
+		sealed, err := client.SealPadded(msg, 1400)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := 1400 + Overhead; len(sealed) != want {
+			t.Errorf("size %d: sealed len = %d, want %d", size, len(sealed), want)
+		}
+		// A padded small packet must be indistinguishable on the wire from a
+		// genuine full one — that is the whole point.
+		if full, ferr := client.Seal(ipv4(1400)); ferr != nil {
+			t.Fatal(ferr)
+		} else if len(sealed) != len(full) {
+			t.Errorf("size %d: padded %d != genuine full %d", size, len(sealed), len(full))
+		}
+		got, err := server.Open(sealed)
+		if err != nil {
+			t.Fatalf("size %d: open: %v", size, err)
+		}
+		if !bytes.Equal(got[:size], msg) {
+			t.Errorf("size %d: inner packet corrupted", size)
+		}
+		for i, b := range got[size:] {
+			if b != 0 {
+				t.Fatalf("size %d: filler byte %d = %#x, want 0 — pooled scratch leaked", size, i+size, b)
+			}
+		}
+	}
+}
+
+// A target at or below the packet's own size must leave it alone.
+func TestSealPaddedIsAFloor(t *testing.T) {
+	client, _ := cipherPair(t)
+	msg := ipv4(1400)
+	padded, err := client.SealPadded(msg, 576)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := len(msg) + Overhead; len(padded) != want {
+		t.Errorf("padded len = %d, want %d (a target below the packet must not change it)", len(padded), want)
+	}
+}
+
+// TestPaddedDataPathAllocations holds the padded path to the same single
+// allocation as the plain one: the pooled plaintext scratch exists precisely so
+// shaping does not add one.
+func TestPaddedDataPathAllocations(t *testing.T) {
+	client, _ := cipherPair(t)
+	inner := ipv4(64)
+	if n := testing.AllocsPerRun(100, func() {
+		if _, err := client.SealPadded(inner, 1400); err != nil {
+			t.Fatal(err)
+		}
+	}); n > 1 {
+		t.Errorf("SealPadded allocates %.0f times per packet, want 1", n)
+	}
+}

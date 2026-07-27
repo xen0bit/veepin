@@ -32,9 +32,12 @@ const (
 // protocol number followed by the MS-CHAPv2 algorithm identifier.
 var authMSCHAPv2 = []byte{0xc2, 0x23, 0x81}
 
-// defaultMRU is the maximum receive unit the client advertises, comfortably
+// DefaultMRU is the maximum receive unit this package advertises, comfortably
 // inside a TLS record over a typical path.
-const defaultMRU = 1400
+const DefaultMRU = 1400
+
+// defaultMRU is the unexported spelling the session code uses.
+const defaultMRU = DefaultMRU
 
 // IPConfig is the network configuration IPCP assigns the client. PeerIP is the
 // server's own inner address (from its IPCP Configure-Request); the tunnel uses

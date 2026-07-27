@@ -436,6 +436,26 @@ func TestInteropOpenVPNClientVeepinServer(t *testing.T) {
 	runInteropBench(t, "compose.openvpn-server.yml", "openvpn-client", "veepin-ovpn-server", "10.8.0.1")
 }
 
+// TestInteropOpenVPNClientVeepinServerShaped is the same cell with downstream
+// flow shaping on: the veepin server pads the data-channel payload past the
+// inner IP packet.
+//
+// The data channel length-delimits its payload and says nothing about padding,
+// so the filler is inert only because the receiver delimits the real packet by
+// the inner IP header's Total Length. A ping reply is what turns that into a
+// tested fact -- a mis-trimmed packet could not produce a valid reply. OpenVPN
+// carries the most published fingerprinting work of any protocol here (Xue et
+// al., USENIX Security 2022), which is why the cell earns its runtime.
+func TestInteropOpenVPNClientVeepinServerShaped(t *testing.T) {
+	requireDocker(t)
+	pkiDir := filepath.Join("openvpn", "pki")
+	if err := generateOpenVPNPKI(pkiDir); err != nil {
+		t.Fatalf("generate PKI: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
+	runInterop(t, "compose.openvpn-server-shaped.yml", "openvpn-client", "10.8.0.1")
+}
+
 // TestInteropOpenVPNClientVeepinServerTLSCrypt is the mirror of the tls-crypt
 // client cell: a real OpenVPN client with --tls-crypt against the veepin
 // *server*.
@@ -603,6 +623,19 @@ func TestInteropVeepinClientL2TPServer(t *testing.T) {
 // veepin server's tunnel gateway.
 func TestInteropL2TPClientVeepinServer(t *testing.T) {
 	runInteropBench(t, "compose.l2tp-server.yml", "l2tp-client", "veepin-l2tp-server", "10.20.0.1")
+}
+
+// TestInteropL2TPClientVeepinServerShaped is the same cell with downstream flow
+// shaping on. L2TP/IPsec stacks PPP inside L2TP inside ESP, and the padding goes
+// in the innermost of those -- the PPP Information field, which RFC 1661 5.1
+// allows to be padded and leaves the carried protocol to delimit. Padding there
+// rather than with ESP's own TFC padding keeps the shaper reading the inner
+// 5-tuple, the only place it is still visible.
+//
+// A ping reply proves pppd trims the filler by the inner IP header rather than
+// merely tolerating it, since a mis-trimmed packet could not produce one.
+func TestInteropL2TPClientVeepinServerShaped(t *testing.T) {
+	runInterop(t, "compose.l2tp-server-shaped.yml", "l2tp-client", "10.20.0.1")
 }
 
 // TestInteropL2TPSelf is the veepin<->veepin L2TP/IPsec sanity check, and the

@@ -1,16 +1,17 @@
 # Downstream flow shaping
 
-Status: **implemented for IKEv2/ESP, WireGuard, SSTP, Fortinet and AnyConnect;
-off by default.** The shaper itself (`dataplane/shape.go`) is protocol-agnostic.
-Enabled with `-shape <bytes>` on `veepin serve ikev2|wireguard|sstp|fortinet|anyconnect`,
-or the `shape` key through the registry.
+Status: **implemented for IKEv2/ESP, WireGuard, OpenVPN, SSTP, Fortinet,
+AnyConnect and L2TP/IPsec; off by default.** The shaper itself
+(`dataplane/shape.go`) is protocol-agnostic. Enabled with `-shape <bytes>` on
+`veepin serve`, or the `shape` key through the registry.
 
-Five interop cells exercise a shaped server against an independent receiver —
-**strongSwan**, **wireguard-go**, **sstpc/pppd** and **openconnect** twice (its
-AnyConnect and Fortinet data paths) — and all pass, so five third-party stacks
-accept the padding and trim it correctly. The default is still off, because
-those are all Linux userspace stacks and the clients this is meant to protect —
-Windows, macOS, iOS — are untested. See [Risk](#the-risk-worth-naming).
+Seven interop cells exercise a shaped server against an independent receiver —
+**strongSwan**, **wireguard-go**, **`openvpn`**, **sstpc/pppd**, **openconnect**
+twice (its AnyConnect and Fortinet data paths) and **strongSwan + xl2tpd** — and
+all pass, so every third-party stack tested accepts the padding and trims it
+correctly. The default is still off, because those are all Linux userspace
+stacks and the clients this is meant to protect — Windows, macOS, iOS — are
+untested. See [Risk](#the-risk-worth-naming).
 
 ## The problem
 
@@ -97,8 +98,9 @@ every protocol having a vehicle for it.
 |---|---|---|
 | **IKEv2/ESP** | Traffic-flow-confidentiality padding, [RFC 4303][rfc4303] §2.7 — filler inside the payload, before the ESP trailer | None |
 | **WireGuard** | Trailing octets of the transport message, generalising the alignment padding the protocol paper §5.4.6 already mandates | None |
-| **SSTP**, **Fortinet** | The PPP Information field, [RFC 1661][rfc1661] §5.1 — "MAY be padded with an arbitrary number of octets up to the MRU" | None |
+| **SSTP**, **Fortinet**, **L2TP/IPsec** | The PPP Information field, [RFC 1661][rfc1661] §5.1 — "MAY be padded with an arbitrary number of octets up to the MRU" | None |
 | **AnyConnect** | Trailing octets of the CSTP (or DTLS-channel) data payload, which the 16-bit length field already delimits | None |
+| **OpenVPN** | Trailing octets of the data-channel payload; on the CBC channel the filler goes before the PKCS#7 trailer so the trailer stays valid | None |
 
 None of them needs negotiation, and that is not an accident: **in every one the
 inner packet is delimited by its own IP header**, so filler appended past its end
@@ -116,6 +118,12 @@ layer has always had to cut back to Total Length. The openconnect interop cell i
 what turns that argument into a tested fact.
 
 [rfc1661]: https://www.rfc-editor.org/rfc/rfc1661#section-5.1
+
+L2TP/IPsec is the one stack with a choice of vehicle: it nests PPP inside L2TP
+inside ESP, so either the PPP padding or ESP's own §2.7 TFC padding would work.
+It uses the PPP one, because the shaper keys on the inner 5-tuple and that is
+only visible above the L2TP wrapping — padding at the ESP layer would mean
+either re-parsing the inner packet back out or shaping every flow identically.
 
 ### Datagram protocols and stream protocols take different routes
 
@@ -195,16 +203,16 @@ since RFC 1661 §5.1 names padding outright. CSTP is the weakest of the four: it
 specifies no padding at all, so AnyConnect leans entirely on the receiver
 trimming by the IP header. ESP receivers, meanwhile, vary.
 
-Five receivers are now known good — strongSwan, wireguard-go, pppd (behind
-sstpc), and openconnect on both its AnyConnect and its Fortinet data path — and
-each cell proves more than acceptance: the ping *reply* can only be produced by
+Seven receivers are now known good — strongSwan, wireguard-go, `openvpn`, pppd
+(behind sstpc and again behind xl2tpd), and openconnect on both its AnyConnect
+and its Fortinet data path — and each cell proves more than acceptance: the ping *reply* can only be produced by
 a receiver that trimmed the filler by the inner IP header rather than by the
 payload length, so a stack that merely tolerated the padding without stripping
 it would fail the cell rather than pass it quietly.
 
 What is still untested is the set of clients that motivated the whole design —
-the Windows, macOS and iOS IPsec stacks, the Windows SSTP client, FortiClient,
-Cisco's own AnyConnect. Every receiver above is genuine independent evidence,
+the Windows, macOS and iOS IPsec stacks, the Windows SSTP and L2TP clients,
+FortiClient, Cisco's own AnyConnect. Every receiver above is genuine independent evidence,
 not veepin talking to itself, but they are all Linux userspace, and no
 containerised vendor stack exists to test against. **Verifying those means a
 manual run against a real device**, which is why the default stays off. If one
@@ -218,11 +226,10 @@ Ordered by value, not by ease:
 
 1. **A manual check against a stock Windows / macOS / iOS client**, which is what
    would justify changing the default.
-2. **The protocols still unshaped**: OpenVPN, SSH, MASQUE, Nebula, L2TP/IPsec.
-   Each has a plausible vehicle (an OpenVPN data-channel payload is
-   length-delimited, `SSH_MSG_IGNORE` exists for exactly this, a MASQUE capsule
-   type can be unregistered-and-skipped, and L2TP rides the same PPP padding as
-   SSTP), so this is mostly plumbing rather than design.
+2. **The protocols still unshaped**: SSH, MASQUE and Nebula. Each has a
+   plausible vehicle (`SSH_MSG_IGNORE` exists for exactly this, a MASQUE capsule
+   type can be unregistered-and-skipped, Nebula's payload is length-delimited),
+   so this is mostly plumbing rather than design.
 3. **Coalescing on the stream protocols.** Padding hides each record's size;
    merging several inner packets into one record would additionally hide how many
    there were, which is the half of the fingerprint padding cannot touch.
