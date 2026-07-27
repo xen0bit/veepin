@@ -251,3 +251,97 @@ func TestReplayWindow(t *testing.T) {
 		t.Fatal("seq 5 should still be acceptable")
 	}
 }
+
+// TestEncapsulatePaddedSize covers the shaper's ESP vehicle: RFC 4303 §2.7
+// traffic-flow-confidentiality padding extends the payload before the trailer,
+// so a small packet leaves at the size of a large one.
+//
+// The trim back to the real packet is the ike package's job (only it knows what
+// the next-header value means), so what is checked here is the wire size and
+// that the original bytes survive as a prefix.
+func TestEncapsulatePaddedSize(t *testing.T) {
+	kOut := gcmTransform(t, 0x11)
+	kIn := gcmTransform(t, 0x22)
+	sender := &SA{SPIOut: 0xaaaa, SPIIn: 0xbbbb, Out: kOut, In: kIn}
+	receiver := &SA{SPIOut: 0xbbbb, SPIIn: 0xaaaa, Out: kIn, In: kOut}
+
+	small := bytes.Repeat([]byte{0xab}, 64)
+	plain, err := sender.Encapsulate(small, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	padded, err := sender.EncapsulatePadded(small, 4, 1400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(padded) <= len(plain) {
+		t.Fatalf("padded packet is %d bytes, not larger than the unpadded %d", len(padded), len(plain))
+	}
+	// A 1400-octet payload padded and a genuine 1400-octet payload must be
+	// indistinguishable by size — that is the whole point.
+	full, err := sender.Encapsulate(bytes.Repeat([]byte{0xcd}, 1400), 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(padded) != len(full) {
+		t.Errorf("padded small packet = %d bytes, genuine full packet = %d; sizes must match", len(padded), len(full))
+	}
+
+	inner, nextHeader, err := receiver.Decapsulate(padded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nextHeader != 4 {
+		t.Errorf("nextHeader = %d, want 4", nextHeader)
+	}
+	if len(inner) != 1400 {
+		t.Errorf("decapsulated payload = %d bytes, want 1400 (filler still attached at this layer)", len(inner))
+	}
+	if !bytes.Equal(inner[:len(small)], small) {
+		t.Error("the original packet must survive as a prefix of the padded payload")
+	}
+	// Filler must be zeros, not whatever the pooled scratch last held.
+	for i, b := range inner[len(small):] {
+		if b != 0 {
+			t.Fatalf("filler octet %d = %#x, want 0 (pooled scratch leaked)", i, b)
+		}
+	}
+}
+
+// A target at or below the packet's own size must not shrink or grow it.
+func TestEncapsulatePaddedIsAFloor(t *testing.T) {
+	sa := &SA{SPIOut: 1, SPIIn: 2, Out: gcmTransform(t, 0x11), In: gcmTransform(t, 0x22)}
+	msg := bytes.Repeat([]byte{0xab}, 1400)
+	plain, err := sa.Encapsulate(msg, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	padded, err := sa.EncapsulatePadded(msg, 4, 576)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(padded) != len(plain) {
+		t.Errorf("padded = %d bytes, want %d (a target below the packet must not change it)", len(padded), len(plain))
+	}
+}
+
+// TestPaddedDataPathAllocations holds the padded path to the same budget as the
+// plain one: the filler is written into buffers that already exist, so padding
+// must cost no extra allocation per packet.
+func TestPaddedDataPathAllocations(t *testing.T) {
+	if raceEnabled {
+		t.Skip("allocation counts are perturbed by the race detector")
+	}
+	sa := &SA{SPIOut: 1, SPIIn: 2, Out: gcmTransform(t, 0x11), In: gcmTransform(t, 0x22)}
+	msg := bytes.Repeat([]byte{0xab}, 64)
+	if _, err := sa.EncapsulatePadded(msg, 4, 1400); err != nil {
+		t.Fatal(err) // warm the crypter and the scratch pool
+	}
+	if n := testing.AllocsPerRun(200, func() {
+		if _, err := sa.EncapsulatePadded(msg, 4, 1400); err != nil {
+			t.Fatal(err)
+		}
+	}); n > 1 {
+		t.Errorf("EncapsulatePadded allocs/op = %v, want <= 1", n)
+	}
+}

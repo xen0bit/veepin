@@ -60,3 +60,21 @@ veepin client rekeys on its own — re-running the handshake roughly every two
 minutes and rotating the new keypair in without dropping traffic — so a tunnel
 stays up indefinitely; see the note under
 [What it does](../../README.md#what-it-does).
+
+## Downstream flow shaping
+
+`-shape <bytes>` pads the first N bytes of each inner flow out to the tunnel
+MTU, so the size pattern of a TLS handshake made *inside* the tunnel does not
+survive encapsulation:
+
+```sh
+sudo ./veepin serve wireguard -shape 16384
+```
+
+It uses the transport message's trailing octets, which a conforming
+receiver ignores, so **stock OS clients need no support for it**. Because the
+fingerprint it defends against targets handshakes, the budget is spent per flow
+rather than per byte and bulk throughput is unaffected. It is off by default;
+`veepin connect wireguard -shape` covers the upstream direction when both
+ends are veepin. See [`doc/traffic-shaping.md`](../traffic-shaping.md) for what
+it does and does not hide.

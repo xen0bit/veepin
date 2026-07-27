@@ -155,3 +155,21 @@ and no privileges:
 ```
 
 It prints the internal address it was assigned and confirms the ESP data path.
+
+## Downstream flow shaping
+
+`-shape <bytes>` pads the first N bytes of each inner flow out to the tunnel
+MTU, so the size pattern of a TLS handshake made *inside* the tunnel does not
+survive encapsulation:
+
+```sh
+sudo ./veepin serve ikev2 -shape 16384
+```
+
+It uses RFC 4303 §2.7 traffic-flow-confidentiality padding, which a conforming
+receiver ignores, so **stock OS clients need no support for it**. Because the
+fingerprint it defends against targets handshakes, the budget is spent per flow
+rather than per byte and bulk throughput is unaffected. It is off by default;
+`veepin connect ikev2 -shape` covers the upstream direction when both
+ends are veepin. See [`doc/traffic-shaping.md`](../traffic-shaping.md) for what
+it does and does not hide.

@@ -46,7 +46,8 @@ var interopMatrix = []interopRow{
 			"TestInteropStrongswanClientVeepinServer",
 			"TestInteropStrongswanClientVeepinServerFragmented",
 			"TestInteropStrongswanClientVeepinServerV6Underlay",
-		}, Label: "strongSwan (+ RFC 7383 frag, v6 underlay)"},
+			"TestInteropStrongswanClientVeepinServerShaped",
+		}, Label: "strongSwan (+ RFC 7383 frag, v6 underlay, TFC-padded)"},
 		Self: interopCell{Tests: []string{
 			"TestInteropSelf",
 			"TestInteropIKEv2ChildRekey",
@@ -56,8 +57,11 @@ var interopMatrix = []interopRow{
 	{
 		Protocol: "WireGuard",
 		Client:   interopCell{Tests: []string{"TestInteropVeepinClientWireguardServer"}, Label: "wireguard-go"},
-		Server:   interopCell{Tests: []string{"TestInteropWireguardClientVeepinServer"}, Label: "wireguard-go"},
-		Self:     interopCell{Tests: []string{"TestInteropWireguardSelf", "TestInteropWireguardRekey"}},
+		Server: interopCell{Tests: []string{
+			"TestInteropWireguardClientVeepinServer",
+			"TestInteropWireguardClientVeepinServerShaped",
+		}, Label: "wireguard-go (+ padded)"},
+		Self: interopCell{Tests: []string{"TestInteropWireguardSelf", "TestInteropWireguardRekey"}},
 	},
 	{
 		Protocol: "OpenVPN",

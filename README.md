@@ -155,6 +155,7 @@ toy                      public TOY entry point: Dial + NewServer — an INSECUR
 
 dataplane                TUN device, address pool, packet pump (demux + routing), client routing
                          admission control, ICMP/PMTU, MTU derivation, source-preserving PacketConn
+                         downstream flow shaping (padding away the inner traffic's size pattern)
 internal/cryptoutil      DH, PRF + prf+, integrity, SK/ESP ciphers, ChaCha20-Poly1305, BLAKE2s
 internal/replay          the anti-replay window shared by nebula and toy
 
@@ -569,6 +570,22 @@ each a localized extension point, not a structural rework:
   simultaneously is what the one `::` dual-stack socket provides; separate v4+v6
   sockets per port are not added. This is one IKE SA per Child, sufficient for
   road-warrior clients rather than a site-to-site multi-SA gateway.
+- **Downstream flow shaping is opt-in, and covers sizes rather than timing.**
+  One inner packet becomes one outer datagram, so the size pattern of an inner
+  TLS handshake otherwise survives encapsulation — the fingerprint of
+  [USENIX Security '24](https://www.usenix.org/conference/usenixsecurity24/presentation/xue-fingerprinting),
+  which byte-level obfuscation does not address. `veepin serve ikev2|wireguard
+  -shape <bytes>` pads the first N bytes of each inner flow out to the tunnel
+  MTU, using RFC 4303 §2.7 TFC padding and WireGuard's trailing octets
+  respectively. Both are inert to a conforming receiver, so **stock OS clients
+  benefit unmodified**; and because the attack targets handshakes, the cost is
+  per-flow rather than per-byte, leaving bulk throughput untouched. It does not
+  shape packet counts or timing (that would need constant-rate padding), does
+  not cover the upstream direction unless the client is also veepin, and is not
+  probe resistance. Interop cells prove strongSwan and wireguard-go both accept
+  the padding *and* trim it correctly; it stays off by default because the
+  vendor OS stacks it is meant to protect are untested. See
+  [`doc/traffic-shaping.md`](doc/traffic-shaping.md).
 - **AnyConnect's DTLS needs TLS 1.3 or Extended Master Secret** (RFC 7627) — Go's
   `crypto/tls` will not run the RFC 5705 exporter otherwise, so against such a
   peer the client stays on TLS. Only PSK-NEGOTIATE mode; auth is

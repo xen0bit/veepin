@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/xen0bit/veepin/client"
@@ -59,6 +60,17 @@ type ServerConfig struct {
 	CertFile     string
 	KeyFile      string
 	ClientCAFile string
+
+	// Shape enables downstream traffic shaping: the number of bytes of each
+	// inner flow whose packets are padded to the tunnel MTU before shaping
+	// stops for that flow. Zero, the default, disables it.
+	//
+	// It hides the size pattern of an inner TLS handshake, which otherwise
+	// survives encapsulation (see dataplane/shape.go). Clients need no support
+	// for it — the padding is inert to any conforming ESP receiver — so a stock
+	// Windows, macOS, iOS or Android client benefits unmodified.
+	// dataplane.DefaultShapeBytes is a reasonable value.
+	Shape int
 
 	// Logger receives progress logs; nil discards them.
 	Logger *log.Logger
@@ -198,6 +210,10 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	// hands it inbound ESP — hence SetDataPath after both exist.
 	pump := dataplane.NewPump(tun, srv.SendESP, dataplane.SPIDemux, logger)
 	pump.SetBatchSender(srv.SendESPBatch)
+	if cfg.Shape > 0 {
+		pump.SetShaper(dataplane.NewShaper(dataplane.ShapeConfig{Bytes: cfg.Shape}))
+		logger.Printf("ikev2: downstream shaping on, %d bytes per flow", cfg.Shape)
+	}
 	srv.SetDataPath(ike.NewPumpDataPath(pump))
 
 	return &Server{
@@ -250,6 +266,7 @@ const (
 	OptServerCert     = "cert"      // server certificate PEM (enables certificate auth)
 	OptServerKey      = "key"       // server private-key PEM
 	OptServerClientCA = "client-ca" // CA bundle PEM enabling client certificate auth
+	OptServerShape    = "shape"     // per-flow downstream shaping budget in bytes (0 = off)
 )
 
 func init() { client.RegisterServer("ikev2", parseServerOptions) }
@@ -285,6 +302,13 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 	}
 	if v := opts[OptServerDNS]; v != "" {
 		cfg.DNS = parseIPList(v)
+	}
+	if v := opts[OptServerShape]; v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("ikev2: invalid %s %q", OptServerShape, v)
+		}
+		cfg.Shape = n
 	}
 	return NewServer(cfg)
 }

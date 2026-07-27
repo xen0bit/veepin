@@ -39,6 +39,25 @@ type Tunnel interface {
 	Decapsulate(pkt []byte) ([]byte, error)
 }
 
+// PaddingTunnel is an optional Tunnel capability: encapsulating a packet whose
+// plaintext has been padded out to a requested size, as filler the peer
+// authenticates and then discards.
+//
+// It is separate from Tunnel because the padding has to live inside each
+// protocol's own wire format — ESP's traffic-flow-confidentiality padding
+// (RFC 4303 §2.7), the trailing octets of a WireGuard transport message — and
+// because a protocol without such a vehicle must still work. The pump discovers
+// it by type assertion, the way it discovers SetPeerAddr, and a Tunnel that
+// does not implement it is simply sent unpadded: the shaper degrades to a
+// no-op rather than to an error.
+//
+// minInner is a floor, not an exact size. An implementation that cannot reach
+// it must still return a valid packet.
+type PaddingTunnel interface {
+	Tunnel
+	EncapsulatePadded(ipPacket []byte, minInner int) ([]byte, error)
+}
+
 // Sender writes an encapsulated datagram to a peer. Any protocol-specific
 // framing (IKEv2's non-ESP marker, for instance) is the sender's business.
 type Sender func(pkt []byte, to *net.UDPAddr)
@@ -89,6 +108,12 @@ type Pump struct {
 	// gro is the inbound-coalescing scratch (gro_linux.go), owned by the one
 	// goroutine that calls HandleInboundBatch, like every per-pump scratch.
 	gro groTable
+
+	// shaper, when set (SetShaper), pads outbound packets so the inner
+	// traffic's size pattern does not survive encapsulation (shape.go). Like
+	// gro it is owned by the single TUN-reader goroutine and carries no lock.
+	// Nil means no shaping, which is the default.
+	shaper *Shaper
 
 	// lastInbound is the unix-nanos time of the most recent *authenticated*
 	// inbound packet on any tunnel — data or keepalive. It is the pump-level
@@ -151,6 +176,28 @@ func NewPump(tun tunIO, send Sender, demux Demux, logger *log.Logger) *Pump {
 // batch-capable transport simply never calls this and loses nothing else.
 func (p *Pump) SetBatchSender(f func(pkts [][]byte, to *net.UDPAddr)) {
 	p.batchSend = f
+}
+
+// SetShaper installs downstream flow shaping (shape.go). A nil shaper, which is
+// the default, sends every packet at its natural size.
+//
+// It must be called before Run, and only from the goroutine that will run the
+// pump: the Shaper is unlocked scratch owned by the TUN reader.
+func (p *Pump) SetShaper(s *Shaper) {
+	p.shaper = s
+}
+
+// encap encapsulates one inner packet, padding it when the shaper asks for a
+// size and the tunnel can produce one. A tunnel that implements no padding, or
+// a shaper that wants none, takes the plain path with one type assertion of
+// overhead.
+func (p *Pump) encap(t Tunnel, pkt []byte, mtu int) ([]byte, error) {
+	if target := p.shaper.Target(pkt, mtu); target > 0 {
+		if pt, ok := t.(PaddingTunnel); ok {
+			return pt.EncapsulatePadded(pkt, target)
+		}
+	}
+	return t.Encapsulate(pkt)
 }
 
 // writeTUN writes one inner IP packet to the TUN, vnet-framed when the device
@@ -356,7 +403,8 @@ func (p *Pump) routeOutbound(pkt []byte) {
 	// is waiting to be told the path MTU, and an ICMP fragmentation-needed
 	// written back to the TUN is how it learns. Without it the tunnel comes up,
 	// small packets work, and anything large hangs forever with no diagnostic.
-	if mtu := p.innerMTU(); mtu > 0 && NeedsFragmentation(pkt, mtu) {
+	mtu := p.innerMTU()
+	if mtu > 0 && NeedsFragmentation(pkt, mtu) {
 		if reply := FragNeeded(pkt, mtu); reply != nil {
 			if _, err := p.writeTUN(reply); err != nil && p.log != nil {
 				p.log.Printf("dataplane: writing ICMP frag-needed: %v", err)
@@ -367,7 +415,7 @@ func (p *Pump) routeOutbound(pkt []byte) {
 
 	// Encapsulate copies the inner packet into its own plaintext buffer, so
 	// passing the read buffer slice directly is safe and avoids a copy.
-	out, err := t.Encapsulate(pkt)
+	out, err := p.encap(t, pkt, mtu)
 	if err != nil {
 		if p.log != nil {
 			p.log.Printf("dataplane: encap failed: %v", err)

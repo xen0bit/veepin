@@ -44,6 +44,17 @@ type ServerConfig struct {
 	// TUNName is the desired TUN interface name; empty lets the kernel pick.
 	TUNName string
 	// Logger receives progress logs; nil discards them.
+	// Shape enables downstream traffic shaping: the number of bytes of each
+	// inner flow whose packets are padded to the tunnel MTU before shaping
+	// stops for that flow. Zero, the default, disables it.
+	//
+	// It hides the size pattern of an inner TLS handshake, which otherwise
+	// survives encapsulation (see dataplane/shape.go). Peers need no support
+	// for it — WireGuard's inner packet delimits itself, so the filler is inert
+	// to any conforming receiver, the official clients included.
+	// dataplane.DefaultShapeBytes is a reasonable value.
+	Shape int
+
 	Logger *log.Logger
 }
 
@@ -67,6 +78,7 @@ const (
 	OptServerPeerPublicKey    = "peer-public-key"    // a single peer's static public key, base64
 	OptServerPeerPresharedKey = "peer-preshared-key" // that peer's preshared key, base64 (optional)
 	OptServerPeerAllowedIPs   = "peer-allowed-ips"   // that peer's allowed IPs, comma-separated CIDRs
+	OptServerShape            = "shape"              // per-flow downstream shaping budget in bytes (0 = off)
 )
 
 func init() { client.RegisterServer("wireguard", parseServerOptions) }
@@ -111,6 +123,13 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 	}
 	if v := opts[OptServerTUN]; v != "" {
 		sc.TUNName = v
+	}
+	if v := opts[OptServerShape]; v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("wireguard: invalid %s %q", OptServerShape, v)
+		}
+		sc.Shape = n
 	}
 	if v := opts[OptServerPeerPublicKey]; v != "" {
 		sc.Peers = append(sc.Peers, ServerPeer{
@@ -169,6 +188,7 @@ type Server struct {
 	localStatic [keySize]byte
 	listenAddr  *net.UDPAddr
 	mtu         int
+	shape       int // per-flow downstream shaping budget; 0 disables it
 	gateway     net.IP
 	network     *net.IPNet
 
@@ -235,6 +255,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		localStatic: priv,
 		listenAddr:  &net.UDPAddr{IP: net.ParseIP(cfg.ListenIP), Port: cfg.ListenPort},
 		mtu:         mtu,
+		shape:       cfg.Shape,
 		gateway:     gwAddr,
 		network:     network,
 		logger:      logger,
@@ -318,6 +339,10 @@ func (s *Server) ListenAndServe() error {
 			s.logger.Printf("wireguard: batch send to %s: %v", to, werr)
 		}
 	})
+	if s.shape > 0 {
+		s.pump.SetShaper(dataplane.NewShaper(dataplane.ShapeConfig{Bytes: s.shape}))
+		s.logger.Printf("wireguard: downstream shaping on, %d bytes per flow", s.shape)
+	}
 	// Oversized inner packets are answered with ICMP rather than dropped, so a
 	// client learns the tunnel MTU instead of black-holing.
 	s.pump.SetInnerMTU(s.mtu)

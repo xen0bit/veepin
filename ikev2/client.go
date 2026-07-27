@@ -84,6 +84,16 @@ type Config struct {
 	// this often. Zero uses defaultIKERekeyInterval; negative disables it.
 	IKERekeyInterval time.Duration
 
+	// Shape enables shaping of this client's *upstream* traffic: the number of
+	// bytes of each inner flow whose packets are padded to the tunnel MTU
+	// before shaping stops for that flow. Zero, the default, disables it.
+	//
+	// The server shapes the downstream direction, which is where the larger
+	// half of an inner TLS handshake sits and which a stock client gets for
+	// free (see dataplane/shape.go). This covers the other half, and so only
+	// applies when both ends are veepin.
+	Shape int
+
 	// Logger receives progress logs; nil discards them.
 	Logger *log.Logger
 }
@@ -116,6 +126,7 @@ const (
 	OptCert     = "cert"      // client certificate PEM path (enables certificate auth)
 	OptKey      = "key"       // client private-key PEM path
 	OptCA       = "ca"        // CA bundle PEM path to verify the server (optional)
+	OptShape    = "shape"     // per-flow upstream shaping budget in bytes (0 = off)
 )
 
 // parseOptions turns string-keyed options into a Dialer. It is what the registry
@@ -153,6 +164,13 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 			return nil, fmt.Errorf("bad %s %q: %w", OptIKERekey, r, err)
 		}
 		cfg.IKERekeyInterval = time.Duration(n) * time.Second
+	}
+	if v := opts[OptShape]; v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("bad %s %q", OptShape, v)
+		}
+		cfg.Shape = n
 	}
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -292,6 +310,10 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	// The tunnel reports 0.0.0.0/0 as its route, so everything leaving the TUN is
 	// routed to the server; no separate default-route call is needed.
 	pump := dataplane.NewPump(tun, send, dataplane.SPIDemux, logger)
+	if cfg.Shape > 0 {
+		pump.SetShaper(dataplane.NewShaper(dataplane.ShapeConfig{Bytes: cfg.Shape}))
+		logger.Printf("ikev2: upstream shaping on, %d bytes per flow", cfg.Shape)
+	}
 	// GSO bursts flush with one sendmmsg on the connected socket, via the
 	// swappable BatchConn.
 	pump.SetBatchSender(func(pkts [][]byte, _ *net.UDPAddr) {

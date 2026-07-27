@@ -83,7 +83,8 @@ func (p *Pump) sendSegments(segs [][]byte, outs [][]byte) [][]byte {
 	// The kernel sizes segments to the interface MTU, but path MTU discovery
 	// may have learned a smaller inner MTU. One fragmentation-needed answers
 	// the whole super-frame — every segment is the same flow.
-	if mtu := p.innerMTU(); mtu > 0 && NeedsFragmentation(segs[0], mtu) {
+	mtu := p.innerMTU()
+	if mtu > 0 && NeedsFragmentation(segs[0], mtu) {
 		if reply := FragNeeded(segs[0], mtu); reply != nil {
 			if _, err := p.writeTUN(reply); err != nil && p.log != nil {
 				p.log.Printf("dataplane: writing ICMP frag-needed: %v", err)
@@ -96,7 +97,12 @@ func (p *Pump) sendSegments(segs [][]byte, outs [][]byte) [][]byte {
 	for _, seg := range segs {
 		// Encapsulate returns a freshly owned buffer (the data paths' one
 		// seal allocation), so the burst can hold every output at once.
-		out, err := t.Encapsulate(seg)
+		//
+		// Shaping is naturally inert here: the kernel only hands up a TSO
+		// super-frame for bulk transfer, and its segments already arrive at
+		// the MTU. That is the right outcome — a super-frame is never a
+		// handshake, so there is nothing for the shaper to hide.
+		out, err := p.encap(t, seg, mtu)
 		if err != nil {
 			if p.log != nil {
 				p.log.Printf("dataplane: encap failed: %v", err)

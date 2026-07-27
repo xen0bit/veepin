@@ -131,6 +131,7 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 			cert     = fs.String("cert", "", "client certificate PEM (enables certificate auth instead of PSK)")
 			key      = fs.String("key", "", "client private-key PEM (with -cert)")
 			ca       = fs.String("ca", "", "CA bundle PEM to verify the server (optional; default system roots)")
+			shape    = fs.Int("shape", 0, "per-flow upstream shaping budget in bytes: pads each inner flow's first N bytes to the tunnel MTU (0 = off; the server shapes downstream independently)")
 		)
 		return func() map[string]string {
 			opts := map[string]string{
@@ -144,6 +145,7 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 				ikev2.OptCert:     *cert,
 				ikev2.OptKey:      *key,
 				ikev2.OptCA:       *ca,
+				ikev2.OptShape:    fmt.Sprint(*shape),
 			}
 			if *port != 0 {
 				opts[ikev2.OptPort] = fmt.Sprint(*port)
@@ -170,6 +172,7 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 			keepalive = fs.Int("persistent-keepalive", 0, "keepalive interval in seconds (0 = off)")
 			rekey     = fs.Int("rekey-seconds", 0, "seconds between key refreshes (0 = protocol default, 120)")
 			tun       = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+			shape     = fs.Int("shape", 0, "per-flow upstream shaping budget in bytes: pads each inner flow's first N bytes to the tunnel MTU (0 = off; the server shapes downstream independently)")
 		)
 		return func() map[string]string {
 			opts := map[string]string{
@@ -182,6 +185,7 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 				wireguard.OptEndpoint:     *endpoint,
 				wireguard.OptAllowedIPs:   *allowed,
 				wireguard.OptTUNName:      *tun,
+				wireguard.OptShape:        fmt.Sprint(*shape),
 			}
 			if *mtu != 0 {
 				opts[wireguard.OptMTU] = fmt.Sprint(*mtu)

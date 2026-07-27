@@ -45,6 +45,12 @@ type Config struct {
 	// from a flag.
 	TUNName string
 
+	// Shape enables shaping of this peer's outbound traffic: the number of
+	// bytes of each inner flow whose packets are padded to the tunnel MTU
+	// before shaping stops for that flow. 0 disables it. It has no wg-quick
+	// equivalent (see dataplane/shape.go).
+	Shape int
+
 	// Logger receives progress logs; nil discards them. It has no wg-quick
 	// equivalent and is set by a Go caller.
 	Logger *log.Logger
@@ -253,6 +259,13 @@ func (c *Config) applyOverrides(opts map[string]string) error {
 			return fmt.Errorf("%s %q: %w", OptMTU, v, err)
 		}
 		c.MTU = n
+	}
+	if v := opts[OptShape]; v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return fmt.Errorf("%s %q: not a byte count", OptShape, v)
+		}
+		c.Shape = n
 	}
 	if v := opts[OptListenPort]; v != "" {
 		n, err := strconv.Atoi(v)

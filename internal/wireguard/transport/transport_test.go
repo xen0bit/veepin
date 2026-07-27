@@ -249,3 +249,75 @@ func TestDataPathAllocations(t *testing.T) {
 		t.Errorf("Open allocates %.0f times per packet, want 0", n)
 	}
 }
+
+// TestSealPaddedRoundTrip covers the shaper's vehicle: a small packet padded up
+// to a target size must come back byte-identical, because the receiver trims by
+// the inner IP header rather than by anything WireGuard puts on the wire. That
+// self-delimiting property is what makes the padding safe against a peer — the
+// official clients included — that negotiated nothing.
+func TestSealPaddedRoundTrip(t *testing.T) {
+	a, b := pair(t)
+	for _, size := range []int{21, 100, 576} {
+		inner := ipv4(size)
+		msg, err := a.SealPadded(inner, 1400)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// 1400 rounds *down* to 1392 so padding never exceeds the inner MTU.
+		wantWire := wire.TransportHeaderLen + 1392 + wire.TagSize
+		if len(msg) != wantWire {
+			t.Errorf("size %d: wire length = %d, want %d", size, len(msg), wantWire)
+		}
+		if len(msg) > wire.TransportHeaderLen+1400+wire.TagSize {
+			t.Errorf("size %d: padded past the MTU the target was sized against", size)
+		}
+		got, err := b.Open(msg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, inner) {
+			t.Errorf("size %d: recovered packet differs from the original", size)
+		}
+	}
+}
+
+// A packet already at or past the target keeps its natural size: padding is a
+// floor, never a truncation and never needless growth.
+func TestSealPaddedIsAFloor(t *testing.T) {
+	a, b := pair(t)
+	inner := ipv4(1400)
+	msg, err := a.SealPadded(inner, 576)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantWire := wire.TransportHeaderLen + 1408 + wire.TagSize // 1400 rounds to 1408
+	if len(msg) != wantWire {
+		t.Errorf("wire length = %d, want %d (target below the packet must not shrink it)", len(msg), wantWire)
+	}
+	got, err := b.Open(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, inner) {
+		t.Error("recovered packet differs from the original")
+	}
+}
+
+// A keepalive is identified by being empty, so it must never be padded.
+func TestSealPaddedLeavesKeepaliveEmpty(t *testing.T) {
+	a, b := pair(t)
+	msg, err := a.SealPadded(nil, 1400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := wire.TransportHeaderLen + wire.TagSize; len(msg) != want {
+		t.Errorf("keepalive wire length = %d, want %d", len(msg), want)
+	}
+	got, err := b.Open(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil {
+		t.Errorf("keepalive opened to %d bytes, want nil", len(got))
+	}
+}
