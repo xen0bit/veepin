@@ -44,10 +44,11 @@ var interopMatrix = []interopRow{
 		}, Label: "strongSwan (PSK + pubkey, AES-GCM + ChaCha20, dual-stack, v6 underlay)"},
 		Server: interopCell{Tests: []string{
 			"TestInteropStrongswanClientVeepinServer",
+			"TestInteropStrongswanClientVeepinServerEAP",
 			"TestInteropStrongswanClientVeepinServerFragmented",
 			"TestInteropStrongswanClientVeepinServerV6Underlay",
 			"TestInteropStrongswanClientVeepinServerShaped",
-		}, Label: "strongSwan (+ RFC 7383 frag, v6 underlay, TFC-padded)"},
+		}, Label: "strongSwan (+ EAP-MSCHAPv2, RFC 7383 frag, v6 underlay, TFC-padded)"},
 		Self: interopCell{Tests: []string{
 			"TestInteropSelf",
 			"TestInteropIKEv2ChildRekey",
@@ -108,8 +109,9 @@ var interopMatrix = []interopRow{
 		Client:   interopCell{Tests: []string{"TestInteropVeepinClientAnyConnectServer"}, Label: "ocserv"},
 		Server: interopCell{Tests: []string{
 			"TestInteropAnyConnectClientVeepinServer",
+			"TestInteropAnyConnectClientVeepinServerDTLS",
 			"TestInteropAnyConnectClientVeepinServerShaped",
-		}, Label: "openconnect (+ CSTP-padded)"},
+		}, Label: "openconnect (TLS, DTLS, CSTP-padded)"},
 		Self: interopCell{Tests: []string{"TestInteropAnyConnectSelf"}},
 	},
 	{

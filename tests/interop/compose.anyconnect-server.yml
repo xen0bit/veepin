@@ -30,6 +30,7 @@ services:
     devices: ["/dev/net/tun:/dev/net/tun"]
     depends_on: [veepin-anyconnect-server]
     environment:
+      NO_DTLS: "1"
       SERVER: "veepin-anyconnect-server"
       USER: "ocuser"
       PASS: "ocpass"

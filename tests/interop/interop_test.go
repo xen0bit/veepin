@@ -52,6 +52,22 @@ func TestInteropStrongswanClientVeepinServer(t *testing.T) {
 	runInteropBench(t, "compose.server-ss.yml", "strongswan-client", "veepin-server", "10.10.10.1")
 }
 
+// TestInteropStrongswanClientVeepinServerEAP is Direction B with the initiator
+// authenticating by EAP-MSCHAPv2 instead of the PSK.
+//
+// EAP-MSCHAPv2 is listed in the README beside PSK and X.509 and has had
+// -eap-users on the server for as long, but no interop cell ever exercised it:
+// an entire authentication path shipped without once being run against a real
+// peer. The asymmetry RFC 7296 §2.16 describes is what makes it worth its own
+// cell — the initiator omits its AUTH to request EAP, the responder still
+// authenticates with the PSK, and after EAP succeeds both sides compute a final
+// AUTH keyed by the EAP MSK rather than the PSK. A break anywhere in the
+// MSCHAPv2 arithmetic (NT hash, challenge response, MSK derivation) stops the
+// ping.
+func TestInteropStrongswanClientVeepinServerEAP(t *testing.T) {
+	runInterop(t, "compose.server-ss-eap.yml", "strongswan-client", "10.10.10.1")
+}
+
 // TestInteropStrongswanClientVeepinServerShaped is Direction B with downstream
 // flow shaping on: the veepin server pads outbound ESP with RFC 4303 2.7
 // traffic-flow-confidentiality padding, and a real strongSwan initiator has to
@@ -589,6 +605,27 @@ func TestInteropAnyConnectClientVeepinServer(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
 	runInteropBench(t, "compose.anyconnect-server.yml", "openconnect", "veepin-anyconnect-server", "10.11.0.1")
+}
+
+// TestInteropAnyConnectClientVeepinServerDTLS is the same cell with the UDP data
+// channel left on: openconnect brings the CSTP tunnel up, then attaches a
+// DTLS 1.2 session keyed by the RFC 5705 exporter and prefers it.
+//
+// It is a separate cell because openconnect falls back to TLS silently. This
+// used to be one cell with DTLS merely enabled, so a ping that crossed on TLS
+// proved the DTLS claim exactly as well as one that crossed on DTLS — which is
+// to say, not at all. The run now requires openconnect to report an established
+// DTLS connection, so a fallback fails the cell instead of passing as a false
+// green.
+func TestInteropAnyConnectClientVeepinServerDTLS(t *testing.T) {
+	requireDocker(t)
+	pkiDir := filepath.Join("anyconnect", "pki")
+	if err := generateAnyConnectServerCert(pkiDir); err != nil {
+		t.Fatalf("generate AnyConnect cert: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
+	runInteropRequiringLog(t, "compose.anyconnect-server-dtls.yml", "openconnect", "10.11.0.1",
+		"Established DTLS connection")
 }
 
 // TestInteropAnyConnectClientVeepinServerShaped is the same cell with downstream
