@@ -73,9 +73,10 @@ var interopMatrix = []interopRow{
 		}, Label: "`openvpn` (×4 variants)"},
 		Server: interopCell{Tests: []string{
 			"TestInteropOpenVPNClientVeepinServer",
+			"TestInteropOpenVPNClientVeepinServerTLSAuth",
 			"TestInteropOpenVPNClientVeepinServerTLSCrypt",
 			"TestInteropOpenVPNClientVeepinServerShaped",
-		}, Label: "`openvpn` (+ tls-crypt, padded)"},
+		}, Label: "`openvpn` (+ tls-auth, tls-crypt, padded)"},
 		Self: interopCell{Tests: []string{"TestInteropOpenVPNSelf"}},
 	},
 	{

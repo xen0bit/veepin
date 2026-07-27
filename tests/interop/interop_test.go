@@ -477,6 +477,27 @@ func TestInteropOpenVPNClientVeepinServerTLSCrypt(t *testing.T) {
 	runInterop(t, "compose.openvpn-server-tls-crypt.yml", "openvpn-client", "10.8.0.1")
 }
 
+// TestInteropOpenVPNClientVeepinServerTLSAuth is the mirror of the tls-auth
+// client cell, and the direction that exercises the harder half: here the veepin
+// server *verifies* an HMAC-SHA256 on every control packet rather than
+// generating one.
+//
+// tls-auth splits the static key into per-direction halves, so a server
+// verifying with its own half instead of the client's rejects every packet. The
+// tls-crypt cell cannot catch that — tls-crypt has no key direction — and the
+// client-side tls-auth cell only proves generation. The README claims tls-auth
+// in both roles; until this cell, only the client role was proven against a real
+// peer.
+func TestInteropOpenVPNClientVeepinServerTLSAuth(t *testing.T) {
+	requireDocker(t)
+	pkiDir := filepath.Join("openvpn", "pki")
+	if err := generateOpenVPNPKI(pkiDir); err != nil {
+		t.Fatalf("generate PKI: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
+	runInterop(t, "compose.openvpn-server-tls-auth.yml", "openvpn-client", "10.8.0.1")
+}
+
 // TestInteropOpenVPNSelf is the veepin<->veepin OpenVPN sanity check: the veepin
 // client and server over a real socket and TUNs, isolating a veepin break from
 // an interop break.
@@ -882,8 +903,12 @@ func runInteropBench(t *testing.T, composeFile, pingSvc, serverSvc, target strin
 // measureThroughput runs one iperf3 flow across an already-up tunnel: `iperf3 -s`
 // (one-shot) in serverSvc, `iperf3 -c target` in clientSvc, and logs the received
 // rate as a livingreadme marker that `go test -json` carries out to the
-// README-generation step. Any failure is logged and swallowed (see
-// runInteropBench).
+// README-generation step.
+//
+// A failure is still swallowed rather than failing the interop test — the ping is
+// the assertion, the rate is information (see runInteropBench). But it now logs a
+// failed marker, so the table can show that this cell was measured and broke
+// rather than leaving it indistinguishable from a cell iperf3 does not apply to.
 func measureThroughput(t *testing.T, composeFile, serverSvc, clientSvc, target string) {
 	t.Helper()
 
@@ -891,7 +916,8 @@ func measureThroughput(t *testing.T, composeFile, serverSvc, clientSvc, target s
 	// it listens on all interfaces including the tunnel one; the client reaches
 	// it by the tunnel-internal target address.
 	if out, err := compose(t, composeFile, "exec", "-d", serverSvc, "iperf3", "-s", "-1"); err != nil {
-		t.Logf("throughput: iperf3 server did not start in %s (skipped): %v\n%s", serverSvc, err, out)
+		t.Logf("throughput: iperf3 server did not start in %s: %v\n%s", serverSvc, err, out)
+		t.Log(livingreadme.IperfFailedLine(t.Name()))
 		return
 	}
 	time.Sleep(benchWarmup)
@@ -901,12 +927,14 @@ func measureThroughput(t *testing.T, composeFile, serverSvc, clientSvc, target s
 	out, err := compose(t, composeFile, "exec", "-T", clientSvc,
 		"iperf3", "-c", target, "-J", "-t", "4", "-O", "1", "--connect-timeout", "5000")
 	if err != nil {
-		t.Logf("throughput: iperf3 client %s -> %s failed (skipped): %v\n%s", clientSvc, target, err, out)
+		t.Logf("throughput: iperf3 client %s -> %s failed: %v\n%s", clientSvc, target, err, out)
+		t.Log(livingreadme.IperfFailedLine(t.Name()))
 		return
 	}
 	bps, err := parseIperfBits(out)
 	if err != nil {
-		t.Logf("throughput: could not read iperf3 result (skipped): %v", err)
+		t.Logf("throughput: could not read iperf3 result: %v", err)
+		t.Log(livingreadme.IperfFailedLine(t.Name()))
 		return
 	}
 	// The marker the interop-benchmark region is generated from, keyed by the

@@ -1,0 +1,37 @@
+# Reference OpenVPN client -> veepin OpenVPN server, with --tls-auth on both
+# sides.
+#
+# The mirror of the client-side tls-auth cell, and the direction that matters
+# more: here the veepin server *verifies* the HMAC on every control packet
+# rather than generating one. tls-auth splits the static key into per-direction
+# halves, so a server verifying with the wrong half rejects everything -- an
+# asymmetry the tls-crypt cell cannot catch, since tls-crypt has no key
+# direction. The README claims tls-auth in both roles; without this cell only
+# the client role was ever proven against a real peer.
+name: veepin-interop-openvpn-server-tls-auth
+
+services:
+  veepin-ovpn-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    volumes:
+      - ./openvpn/pki:/pki:ro
+      - ./veepin/openvpn-server-tls-auth-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  openvpn-client:
+    build:
+      context: openvpn
+    image: interop-openvpn
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-ovpn-server]
+    volumes:
+      - ./openvpn/pki:/pki:ro
+      - ./openvpn/client-tls-auth.conf:/client.conf:ro
+      - ./openvpn/client-entrypoint.sh:/client-entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/client-entrypoint.sh"]

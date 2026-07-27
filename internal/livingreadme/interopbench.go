@@ -14,6 +14,15 @@ import (
 // matrix (pass/fail) and the interop-benchmark table (speed).
 const iperfMarker = "livingreadme:iperf3"
 
+// iperfFailedMarker is logged instead when a test tried to measure and could
+// not. Distinguishing the two is the whole point: a cell that was never measured
+// and a cell whose measurement broke are different facts, and rendering both as
+// an em dash presented a broken measurement as a deliberate omission.
+//
+// Note it has iperfMarker as a prefix, so anything matching must test for this
+// one first.
+const iperfFailedMarker = "livingreadme:iperf3-failed"
+
 // IperfLine formats the marker line a test logs after measuring a tunnel. Keeping
 // the format in this package means the producer (the interop harness) and the
 // consumer (ParseThroughput) cannot drift apart.
@@ -21,9 +30,23 @@ func IperfLine(testName string, bitsPerSec float64) string {
 	return fmt.Sprintf("%s %s %.0f", iperfMarker, testName, bitsPerSec)
 }
 
-// Throughput maps an interop test name to its measured tunnel throughput in bits
-// per second.
-type Throughput map[string]float64
+// IperfFailedLine formats the marker a test logs when it attempted a measurement
+// that did not produce a number.
+func IperfFailedLine(testName string) string {
+	return fmt.Sprintf("%s %s", iperfFailedMarker, testName)
+}
+
+// Measurement is one cell's throughput outcome. The zero value means the test
+// never tried, which is different from Failed: the first is a cell iperf3 does
+// not apply to, the second is a cell where it applies and did not work.
+type Measurement struct {
+	BitsPerSec float64
+	Failed     bool
+}
+
+// Throughput maps an interop test name to its measurement outcome. A name absent
+// from the map was never measured at all.
+type Throughput map[string]Measurement
 
 // ParseThroughput reads `go test -json` output and extracts every iperf3 marker
 // a test logged. Markers arrive inside "output" events, prefixed by go test's
@@ -52,9 +75,26 @@ func ParseThroughput(jsonOut string) Throughput {
 }
 
 // recordMarker parses one text fragment for an iperf3 marker and, if found,
-// stores the highest value seen for that test (a test may measure once, but a
-// retry that logs twice should not lose the successful number to a later 0).
+// records it. A successful measurement keeps the highest value seen for that
+// test (a test may measure once, but a retry that logs twice should not lose the
+// successful number to a later 0), and a success always beats a failure for the
+// same reason — a retry that worked is the truth about the cell.
+//
+// The failed marker is matched first because the successful one is a prefix of
+// it.
 func recordMarker(out Throughput, text string) {
+	if _, after, found := strings.Cut(text, iperfFailedMarker); found {
+		fields := strings.Fields(after)
+		if len(fields) < 1 {
+			return
+		}
+		if prev, seen := out[fields[0]]; seen && prev.BitsPerSec > 0 {
+			return // a real measurement already stands for this cell
+		}
+		out[fields[0]] = Measurement{Failed: true}
+		return
+	}
+
 	_, after, found := strings.Cut(text, iperfMarker)
 	if !found {
 		return
@@ -67,23 +107,32 @@ func recordMarker(out Throughput, text string) {
 	if err != nil {
 		return
 	}
-	if bps > out[fields[0]] {
-		out[fields[0]] = bps
+	if bps > out[fields[0]].BitsPerSec {
+		out[fields[0]] = Measurement{BitsPerSec: bps}
 	}
 }
 
-// benchCell renders one interop-benchmark cell: the measured throughput of the
-// cell's primary test, or an em dash when the cell is untested-by-design or has
-// no measurement (e.g. a datagram-forwarding cell that iperf3 does not cover).
+// benchCell renders one interop-benchmark cell, distinguishing three states that
+// used to collapse into one em dash:
+//
+//   - "—" — iperf3 does not apply here. Either the cell has no test at all, or
+//     its test measures nothing (a datagram-forwarding cell, or a peer with no
+//     bindable tunnel address).
+//   - "✗" — it does apply, was attempted, and did not produce a number. A
+//     measurement that is broken rather than absent.
+//   - a rate — the measurement.
 func benchCell(c interopCell, tp Throughput) string {
 	if len(c.Tests) == 0 {
 		return "—"
 	}
-	bps, ok := tp[c.Tests[0]]
-	if !ok || bps <= 0 {
+	m, ok := tp[c.Tests[0]]
+	if !ok {
 		return "—"
 	}
-	return formatBits(bps)
+	if m.Failed || m.BitsPerSec <= 0 {
+		return "✗"
+	}
+	return formatBits(m.BitsPerSec)
 }
 
 // RenderInteropBench renders the interop throughput table: the same protocol ×
