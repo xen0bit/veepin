@@ -2,10 +2,10 @@
 // golang.org/x/crypto its only dependency (WireGuard mandates ChaCha20-Poly1305
 // and BLAKE2s, which the standard library does not ship).
 //
-// It speaks eight protocols, as both an initiator and a responder for every one:
-// IKEv2/ESP, WireGuard, OpenVPN, SSTP, SSH, L2TP/IPsec, AnyConnect and Nebula.
-// Each is verified in Docker against a real third-party implementation in both
-// directions, and against itself.
+// It speaks ten protocols, as both an initiator and a responder for every one:
+// IKEv2/ESP, WireGuard, OpenVPN, SSTP, SSH, L2TP/IPsec, AnyConnect, Nebula,
+// MASQUE and Fortinet. Each is verified in Docker against a real third-party
+// implementation in both directions, and against itself.
 //
 // The tree is arranged so a further protocol is a sibling rather than a rewrite:
 //
@@ -29,13 +29,17 @@
 //     from-scratch DTLS 1.2 PSK data channel.
 //   - nebula, internal/nebula — a mesh overlay: Noise IX, CA-issued host
 //     certificates, and lighthouse discovery.
+//   - masque, internal/masque — IP (CONNECT-IP) and UDP (CONNECT-UDP) over
+//     HTTP/3, on a from-scratch HTTP/3 layer over golang.org/x/net/quic.
+//   - fortinet, internal/fortinet — the FortiOS SSL VPN: PPP over TLS, with a
+//     certificate-based DTLS 1.2 channel alongside it.
 //
 // Two packages are shared by the PPP-carrying protocols: internal/ppp (LCP,
 // MS-CHAPv2, IPCP, both roles) and internal/mschap.
 //
 // # The example protocol
 //
-// toy and internal/toy implement TOY, which is NOT one of the eight above and
+// toy and internal/toy implement TOY, which is NOT one of the ten above and
 // PROVIDES NO SECURITY. It is a worked example of how a protocol is assembled
 // here — a handshake producing a client.Result, a dataplane.Pump data path, both
 // roles registered — with the cryptography replaced by deliberately worthless
