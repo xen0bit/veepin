@@ -457,10 +457,15 @@ The same matrix, but measured: during each interop run an `iperf3` flow is pushe
 across every tunnel that came up, and the received rate is committed back here on
 push to main. The numbers are relative — a shared CI runner, a short window, one
 TCP stream — so read them as an order-of-magnitude comparison between carriers,
-not a benchmark of the wire. A dash means iperf3 cannot measure that cell
-directly: a peer with no bindable tunnel address (SoftEther's SecureNAT gateway),
-the CONNECT-UDP datagram cells (which forward datagrams rather than route IP), or
-the untested Fortinet client.
+not a benchmark of the wire.
+
+A **dash** means iperf3 does not apply to that cell: a peer with no bindable
+tunnel address (SoftEther's SecureNAT gateway), the CONNECT-UDP datagram cells
+(which forward datagrams rather than route IP), or the untested Fortinet client.
+A **✗** means it does apply, was attempted across a tunnel that came up, and
+produced no number — a measurement that is broken rather than absent. The two
+used to render identically, which presented a broken measurement as a deliberate
+omission; the interop harness now logs the difference.
 
 <!-- livingreadme:interop-benchmark:start -->
 | Protocol   | veepin client ↔ real server | real client ↔ veepin server | veepin ↔ veepin (self) |
