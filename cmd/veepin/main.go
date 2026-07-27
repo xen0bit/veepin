@@ -6,9 +6,12 @@
 //	veepin serve   <protocol> [flags]   run a VPN server
 //	veepin probe   <protocol> [flags]   diagnostic: handshake and one data packet
 //
-// IKEv2 and WireGuard are the supported protocols. Creating a TUN device and
-// editing the routing table require CAP_NET_ADMIN — run as root, or grant the
-// binary the capability once:
+// Running it bare prints the protocols the registry holds, which is the
+// authoritative list — every protocol package registers itself, so the command
+// never carries a copy of it that can go stale.
+//
+// Creating a TUN device and editing the routing table require CAP_NET_ADMIN —
+// run as root, or grant the binary the capability once:
 //
 //	go build -o veepin ./cmd/veepin
 //	sudo setcap cap_net_admin+ep ./veepin

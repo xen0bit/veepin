@@ -3,10 +3,10 @@
 A **working userspace VPN in Go** — both server (responder) and client
 (initiator), written from scratch and depending only on the pure-Go
 `golang.org/x` modules (`x/crypto`, and `x/net` for QUIC), no cgo. It speaks
-**ten production protocols, client and server for every one** — IKEv2/ESP,
+**eleven production protocols, client and server for every one** — IKEv2/ESP,
 WireGuard, OpenVPN, SSTP, SSH, L2TP/IPsec, AnyConnect, Nebula, MASQUE (CONNECT-IP
-and CONNECT-UDP over HTTP/3) and Fortinet — each verified in Docker against a real
-third-party implementation and against itself.
+and CONNECT-UDP over HTTP/3), Fortinet and GlobalProtect — each verified in Docker
+against a real third-party implementation and against itself.
 
 Every layer is covered by tests, including full VPN integration tests:
 `TestFullVPNFlow` drives a client through the handshake and verifies a real IP
@@ -32,7 +32,7 @@ Deeper docs live under [`doc/`](doc/): per-protocol [usage](doc/usage/),
 
 ## What it does
 
-veepin speaks ten production protocols — **client and server for every one** —
+veepin speaks eleven production protocols — **client and server for every one** —
 plus one deliberately insecure teaching example. Each protocol is verified in
 Docker against a real third-party implementation *and* against itself (see the
 [Interoperability matrix](#interoperability-matrix)). The table is the summary;
@@ -51,10 +51,11 @@ wire detail, caveats and API surface.
 | **Nebula** | certificate PKI, per host | Noise IX mesh, AES-GCM / ChaCha20 | slackhq/nebula | [nebula](internal/nebula/README.md) |
 | **MASQUE** | proxy TLS | IP (CONNECT-IP) and UDP (CONNECT-UDP) over HTTP/3, capsule mode | aioquic | [masque](internal/masque/README.md) |
 | **Fortinet** | password, optional 2FA (TOTP) | PPP over TLS, with cert-based DTLS 1.2 fallback | openconnect | [fortinet](internal/fortinet/README.md) |
+| **GlobalProtect** | password | RFC 4303 ESP over UDP, keyed by the config document, with a framed layer-3 TLS tunnel as fallback | openconnect | [gp](internal/gp/README.md) |
 
 Both roles share one registry API (`client.Register`/`client.RegisterServer`),
 so `veepin connect <proto>` and `veepin serve <proto>` dispatch generically and
-adding a protocol changes no caller. An eleventh registered protocol, **TOY**,
+adding a protocol changes no caller. A twelfth registered protocol, **TOY**,
 provides **no security** — it is a worked example of the protocol shape, not a
 real protocol; see [The example protocol](#the-example-protocol).
 
@@ -290,6 +291,7 @@ formats, and what it interoperates with — has its own page:
 | Nebula | [doc/usage/nebula.md](doc/usage/nebula.md) |
 | MASQUE (CONNECT-IP + CONNECT-UDP) | [doc/usage/masque.md](doc/usage/masque.md) |
 | Fortinet | [doc/usage/fortinet.md](doc/usage/fortinet.md) |
+| GlobalProtect | [doc/usage/gp.md](doc/usage/gp.md) |
 
 To use veepin **as a client**, the
 [NetworkManager plugin](#desktop-integration-networkmanager) is the simplest path

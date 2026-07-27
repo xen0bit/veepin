@@ -842,6 +842,52 @@ func TestInteropOpenconnectFortinetDTLS(t *testing.T) {
 		"Established DTLS connection")
 }
 
+// GlobalProtect (Palo Alto Networks SSL VPN). The independent peer is the real
+// openconnect client (--protocol=gp), which implements both of the protocol's
+// data paths -- so these cells move packets and verify veepin's server-side
+// login, the positional jnlp document, the config XML including its keying
+// block, the 16-octet framing and the ESP path against a stack that shares none
+// of veepin's code. There is no open Palo Alto *gateway* to run the veepin
+// client against with a full data path, so that direction is covered by the self
+// cell and unit tests.
+
+// TestInteropOpenconnectGPClientVeepinServer runs the openconnect GlobalProtect
+// client against the veepin gateway on the SSL tunnel and pings 10.50.0.1, the
+// gateway.
+func TestInteropOpenconnectGPClientVeepinServer(t *testing.T) {
+	runInteropBench(t, "compose.gp.yml", "opnc-gp-client", "veepin-gp-server", "10.50.0.1")
+}
+
+// TestInteropOpenconnectGPClientVeepinServerESP is the same cell on the ESP data
+// path, which is the part of GlobalProtect nothing else here resembles: the
+// gateway generates both SPIs and all four keys and hands them over inside the
+// configuration XML, and the client wakes the path up with marker ICMP pings.
+// The ping alone would pass on a silent fallback to the SSL tunnel, so the run
+// additionally requires openconnect to report an established ESP session.
+func TestInteropOpenconnectGPClientVeepinServerESP(t *testing.T) {
+	runInteropRequiringLog(t, "compose.gp-esp.yml", "opnc-gp-client", "10.50.0.1",
+		"ESP session established with server")
+}
+
+// TestInteropOpenconnectGPClientVeepinServerShaped is the SSL-tunnel cell with
+// downstream flow shaping on. GlobalProtect's tunnel carries bare layer-3
+// packets, so the padding is trailing filler after the inner packet and the
+// receiver must trim it by the IP header's own Total Length -- which every IP
+// stack does. This proves openconnect's GlobalProtect receive path does too,
+// rather than handing the padded buffer to the interface whole.
+func TestInteropOpenconnectGPClientVeepinServerShaped(t *testing.T) {
+	runInterop(t, "compose.gp-shaped.yml", "opnc-gp-client", "10.50.0.1")
+}
+
+// TestInteropGPSelf is the veepin<->veepin sanity check. veepin's client prefers
+// the ESP path wherever the gateway hands out keys for one, so this also
+// exercises the activation exchange between the two veepin roles.
+func TestInteropGPSelf(t *testing.T) {
+	runInteropRequiringLog(t, "compose.gp-self.yml", "veepin-gp-client", "10.50.0.1",
+		"tunnel up over ESP")
+	measureThroughput(t, "compose.gp-self.yml", "veepin-gp-server", "veepin-gp-client", "10.50.0.1")
+}
+
 // TOY is the example protocol (internal/toy) and provides no security; these
 // cells prove the *specification*, not the cryptography. The peer they talk to
 // is an independent Python implementation written from internal/toy/SPEC.md

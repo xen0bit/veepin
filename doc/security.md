@@ -45,6 +45,29 @@ packet-reordering risk and lock contention that nothing here is currently asking
 for — the approach and its costs are sketched in
 [`doc/scaling-the-data-path.md`](scaling-the-data-path.md).
 
+## GlobalProtect has no key exchange and no forward secrecy
+
+This is the protocol's design, not veepin's implementation of it. A Palo Alto
+gateway generates both ESP SPIs and all four ESP keys itself and sends them to
+the client **inside the getconfig response**, protected only by the HTTPS session
+carrying it. Nothing is negotiated and no ephemeral key is involved.
+
+The consequences are worth stating plainly:
+
+- Anyone who can read one session's configuration document can decrypt that
+  session's traffic for its whole life. Recording the ciphertext and obtaining
+  the document later is enough; there is no forward secrecy to lose.
+- Compromise of the gateway's TLS private key retroactively exposes every session
+  whose control exchange was recorded, because that exchange *is* the key
+  exchange.
+- A rekey is another fetch of the same document over the same channel, so it
+  changes the keys but not this property.
+
+veepin implements the protocol faithfully because interoperating with real
+GlobalProtect gateways is the point. It is the weakest of the IPsec-carrying
+protocols in this tree, and IKEv2 or WireGuard should be preferred wherever the
+choice exists. See [`internal/gp/README.md`](../internal/gp/README.md).
+
 ## MASQUE carries every inner packet on one reliable QUIC stream
 
 Because `x/net/quic` has no QUIC DATAGRAM frames, CONNECT-IP runs in capsule

@@ -34,7 +34,7 @@ const DefaultProtocol = "ikev2"
 // agree. The insecure "toy" example protocol is intentionally excluded.
 var SupportedProtocols = []string{
 	"ikev2", "wireguard", "openvpn", "sstp", "ssh",
-	"anyconnect", "nebula", "masque", "fortinet", "l2tp",
+	"anyconnect", "nebula", "masque", "fortinet", "gp", "l2tp",
 }
 
 // Connection is the parsed, validated form of a VPN connection.
@@ -165,7 +165,7 @@ func requireKeys(protocol string, opts map[string]string) error {
 			return nil
 		}
 		return requirePresent(opts, KeyRemote)
-	case "sstp", "ssh", "anyconnect", "fortinet", "l2tp":
+	case "sstp", "ssh", "anyconnect", "fortinet", "gp", "l2tp":
 		// Connection-oriented gateways authenticated by a username (plus a password
 		// or, for SSH, an identity key).
 		return requirePresent(opts, KeyServer, KeyUser)
@@ -226,7 +226,7 @@ func secretMissing(protocol string, opts map[string]string) bool {
 		// Password only when a username is configured; certificate-only auth (or an
 		// .ovpn with embedded credentials) needs no NM-prompted secret.
 		return opts[KeyUsername] != "" && opts[KeyPassword] == ""
-	case "sstp", "anyconnect", "fortinet":
+	case "sstp", "anyconnect", "fortinet", "gp":
 		return opts[KeyPassword] == ""
 	case "ssh":
 		// A private-key identity file is an alternative to a password.
