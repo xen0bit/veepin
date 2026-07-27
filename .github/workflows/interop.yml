@@ -76,6 +76,12 @@ permissions:
 jobs:
   interop:
     runs-on: ubuntu-latest
+    # A backstop, not the suite's budget: that is `go test -timeout` below, which
+    # fails with a usable per-test panic. This only catches a hang that stops the
+    # test binary reporting at all — Docker wedged, an image pull never
+    # returning — so it is well clear of a normal run (~28 min) and exists to
+    # stop such a run burning the 6-hour default.
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -104,7 +110,18 @@ jobs:
           # (not tee's) fail the job, so the commit-back steps below run only when
           # every cell passed.
           set -o pipefail
-          go test -tags interop -json -count=1 -timeout 30m ./tests/interop/... | tee interop.json
+          # -timeout is the suite's wall clock, and it had almost none left. The
+          # cells run serially and each spends most of its time bringing Docker
+          # containers up and down, so the total tracks the cell count directly:
+          # 57 cells, ~29s each, 27.3 minutes against a 30-minute limit. The five
+          # shaped cells added recently were enough to make a slow runner tip it
+          # over, and it did — every cell passed and the suite was killed anyway,
+          # which reads as a protocol failure and is not one.
+          #
+          # 60m is headroom for roughly another 60 cells rather than another two.
+          # If the suite ever genuinely hangs, the job timeout below stops it long
+          # before this does.
+          go test -tags interop -json -count=1 -timeout 60m ./tests/interop/... | tee interop.json
 
       # One interop run feeds two regions: the pass/fail matrix and the iperf3
       # throughput table (both parsed from interop.json), refreshed in one commit.
