@@ -56,131 +56,131 @@ absolute.
 <!-- livingreadme:benchmark:start -->
 | Package | Benchmark | ns/op | Throughput | Allocs/op |
 |---------|-----------|------:|-----------:|----------:|
-| `dataplane` | `BenchmarkPumpInbound/1400B` | 831.9 | 1682.9 MB/s | 1 |
-|  | `BenchmarkPumpInbound/576B` | 455 | 1265.9 MB/s | 1 |
-|  | `BenchmarkPumpInbound/64B` | 240.1 | 266.5 MB/s | 1 |
-|  | `BenchmarkPumpOutbound/1400B` | 1079 | 1297.1 MB/s | 1 |
-|  | `BenchmarkPumpOutbound/576B` | 676.8 | 851 MB/s | 1 |
-|  | `BenchmarkPumpOutbound/64B` | 432.3 | 148 MB/s | 1 |
-|  | `BenchmarkUDPRecvBatch/batch-16` | 21125 | 1060.4 MB/s | 32 |
-|  | `BenchmarkUDPRecvBatch/batch-256` | 326675 | 1097.1 MB/s | 512 |
-|  | `BenchmarkUDPRecvBatch/batch-64` | 81818 | 1095.1 MB/s | 128 |
-|  | `BenchmarkUDPRecvBatch/batch-8` | 11155 | 1004 MB/s | 16 |
-|  | `BenchmarkUDPRecvSingle` | 1483 | 943.9 MB/s | 0 |
-|  | `BenchmarkUDPSendBatch/batch-16` | 76350 | 293.4 MB/s | 0 |
-|  | `BenchmarkUDPSendBatch/batch-256` | 1124392 | 318.8 MB/s | 0 |
-|  | `BenchmarkUDPSendBatch/batch-64` | 289129 | 309.9 MB/s | 0 |
-|  | `BenchmarkUDPSendBatch/batch-8` | 38202 | 293.2 MB/s | 0 |
-|  | `BenchmarkUDPSendSingle` | 6838 | 204.7 MB/s | 0 |
-| `internal/anyconnect` | `BenchmarkCSTPMarshal/1400` | 228.3 | 6131.1 MB/s | 1 |
-|  | `BenchmarkCSTPMarshal/576` | 134.7 | 4276.2 MB/s | 1 |
-|  | `BenchmarkCSTPMarshal/64` | 33.6 | 1904.8 MB/s | 1 |
+| `dataplane` | `BenchmarkPumpInbound/1400B` | 833.2 | 1680.2 MB/s | 1 |
+|  | `BenchmarkPumpInbound/576B` | 455.7 | 1263.9 MB/s | 1 |
+|  | `BenchmarkPumpInbound/64B` | 238.8 | 268 MB/s | 1 |
+|  | `BenchmarkPumpOutbound/1400B` | 1072 | 1306.5 MB/s | 1 |
+|  | `BenchmarkPumpOutbound/576B` | 677.3 | 850.4 MB/s | 1 |
+|  | `BenchmarkPumpOutbound/64B` | 432.1 | 148.1 MB/s | 1 |
+|  | `BenchmarkUDPRecvBatch/batch-16` | 21158 | 1058.7 MB/s | 32 |
+|  | `BenchmarkUDPRecvBatch/batch-256` | 325019 | 1102.7 MB/s | 512 |
+|  | `BenchmarkUDPRecvBatch/batch-64` | 81768 | 1095.8 MB/s | 128 |
+|  | `BenchmarkUDPRecvBatch/batch-8` | 11129 | 1006.4 MB/s | 16 |
+|  | `BenchmarkUDPRecvSingle` | 1515 | 923.8 MB/s | 0 |
+|  | `BenchmarkUDPSendBatch/batch-16` | 74394 | 301.1 MB/s | 0 |
+|  | `BenchmarkUDPSendBatch/batch-256` | 1148541 | 312.1 MB/s | 0 |
+|  | `BenchmarkUDPSendBatch/batch-64` | 288523 | 310.6 MB/s | 0 |
+|  | `BenchmarkUDPSendBatch/batch-8` | 38651 | 289.8 MB/s | 0 |
+|  | `BenchmarkUDPSendSingle` | 7152 | 195.7 MB/s | 0 |
+| `internal/anyconnect` | `BenchmarkCSTPMarshal/1400` | 233.6 | 5992.6 MB/s | 1 |
+|  | `BenchmarkCSTPMarshal/576` | 132.9 | 4335.1 MB/s | 1 |
+|  | `BenchmarkCSTPMarshal/64` | 33.8 | 1895 MB/s | 1 |
 |  | `BenchmarkCSTPParseHeader` | 2.8 | — | 0 |
-| `internal/cryptoutil` | `BenchmarkAEADSeal/AES256-GCM` | 569.5 | 2458.5 MB/s | 0 |
-|  | `BenchmarkAEADSeal/ChaCha20-Poly1305` | 720.9 | 1942 MB/s | 0 |
-|  | `BenchmarkCipherSeal/AES128-GCM` | 773.9 | 330.8 MB/s | 7 |
-|  | `BenchmarkCipherSeal/AES256-GCM` | 814.5 | 314.3 MB/s | 7 |
-|  | `BenchmarkDHComputeSecret/Curve25519` | 50760 | — | 3 |
-|  | `BenchmarkDHComputeSecret/ECP-256` | 60978 | — | 9 |
-|  | `BenchmarkDHComputeSecret/ECP-384` | 477324 | — | 15 |
-|  | `BenchmarkDHComputeSecret/MODP-2048` | 3454078 | — | 25 |
-|  | `BenchmarkDHGenerate/Curve25519` | 51077 | — | 7 |
-|  | `BenchmarkDHGenerate/ECP-256` | 15124 | — | 9 |
-|  | `BenchmarkDHGenerate/ECP-384` | 141236 | — | 12 |
-|  | `BenchmarkDHGenerate/MODP-2048` | 3446366 | — | 32 |
-|  | `BenchmarkPRFPlus/SHA1` | 2423 | — | 11 |
-|  | `BenchmarkPRFPlus/SHA256` | 1529 | — | 10 |
-|  | `BenchmarkPRFPlus/SHA512` | 2615 | — | 10 |
-| `internal/dtls` | `BenchmarkRecordOpen/1400` | 478.8 | 2923.7 MB/s | 0 |
-|  | `BenchmarkRecordOpen/576` | 231.4 | 2489.4 MB/s | 0 |
-|  | `BenchmarkRecordOpen/64` | 104.1 | 615 MB/s | 0 |
-|  | `BenchmarkRecordSeal/1400` | 712.8 | 1964 MB/s | 1 |
-|  | `BenchmarkRecordSeal/576` | 349.1 | 1649.8 MB/s | 1 |
-|  | `BenchmarkRecordSeal/64` | 149.6 | 427.9 MB/s | 1 |
-| `internal/fortinet` | `BenchmarkEncodeFrame/1400` | 227.1 | 6164.4 MB/s | 1 |
-|  | `BenchmarkEncodeFrame/576` | 146.2 | 3939.7 MB/s | 1 |
-|  | `BenchmarkEncodeFrame/64` | 31.9 | 2007.3 MB/s | 1 |
+| `internal/cryptoutil` | `BenchmarkAEADSeal/AES256-GCM` | 569 | 2460.3 MB/s | 0 |
+|  | `BenchmarkAEADSeal/ChaCha20-Poly1305` | 722.7 | 1937.1 MB/s | 0 |
+|  | `BenchmarkCipherSeal/AES128-GCM` | 778.2 | 329 MB/s | 7 |
+|  | `BenchmarkCipherSeal/AES256-GCM` | 807.3 | 317.1 MB/s | 7 |
+|  | `BenchmarkDHComputeSecret/Curve25519` | 50818 | — | 3 |
+|  | `BenchmarkDHComputeSecret/ECP-256` | 61136 | — | 9 |
+|  | `BenchmarkDHComputeSecret/ECP-384` | 477334 | — | 15 |
+|  | `BenchmarkDHComputeSecret/MODP-2048` | 3459321 | — | 25 |
+|  | `BenchmarkDHGenerate/Curve25519` | 51137 | — | 7 |
+|  | `BenchmarkDHGenerate/ECP-256` | 15150 | — | 9 |
+|  | `BenchmarkDHGenerate/ECP-384` | 140555 | — | 12 |
+|  | `BenchmarkDHGenerate/MODP-2048` | 3478480 | — | 32 |
+|  | `BenchmarkPRFPlus/SHA1` | 2414 | — | 11 |
+|  | `BenchmarkPRFPlus/SHA256` | 1512 | — | 10 |
+|  | `BenchmarkPRFPlus/SHA512` | 2596 | — | 10 |
+| `internal/dtls` | `BenchmarkRecordOpen/1400` | 473.6 | 2955.8 MB/s | 0 |
+|  | `BenchmarkRecordOpen/576` | 230.7 | 2496.7 MB/s | 0 |
+|  | `BenchmarkRecordOpen/64` | 105 | 609.4 MB/s | 0 |
+|  | `BenchmarkRecordSeal/1400` | 705.6 | 1984.2 MB/s | 1 |
+|  | `BenchmarkRecordSeal/576` | 349.7 | 1647.2 MB/s | 1 |
+|  | `BenchmarkRecordSeal/64` | 149.4 | 428.5 MB/s | 1 |
+| `internal/fortinet` | `BenchmarkEncodeFrame/1400` | 232.4 | 6023.6 MB/s | 1 |
+|  | `BenchmarkEncodeFrame/576` | 135.7 | 4244.2 MB/s | 1 |
+|  | `BenchmarkEncodeFrame/64` | 32.1 | 1994.1 MB/s | 1 |
 |  | `BenchmarkParseFrame` | 3.4 | — | 0 |
-| `internal/ikev1` | `BenchmarkDerivePhase1` | 3201 | — | 31 |
-|  | `BenchmarkFullHandshakePSK` | 14476676 | — | 674 |
-|  | `BenchmarkHashI` | 1077 | — | 7 |
-|  | `BenchmarkPhase1CBC/decrypt` | 323.1 | — | 3 |
-|  | `BenchmarkPhase1CBC/encrypt` | 347.4 | — | 3 |
-|  | `BenchmarkQuickModeKeymat` | 1339 | — | 16 |
-| `internal/ikev2/eap` | `BenchmarkDeriveMSK` | 792.3 | — | 5 |
-|  | `BenchmarkFullMSCHAPv2Auth` | 10803 | — | 53 |
-|  | `BenchmarkGenerateNTResponse` | 3611 | — | 11 |
-|  | `BenchmarkNTPasswordHash` | 228.6 | — | 2 |
-| `internal/ikev2/esp` | `BenchmarkESPDecapParallel` | 624.2 | 2242.9 MB/s | 1 |
-|  | `BenchmarkESPDecapsulate/AES128-GCM/1400B` | 697.5 | 2007.3 MB/s | 1 |
-|  | `BenchmarkESPDecapsulate/AES128-GCM/576B` | 345.6 | 1666.8 MB/s | 1 |
-|  | `BenchmarkESPDecapsulate/AES128-GCM/64B` | 151.7 | 421.9 MB/s | 1 |
-|  | `BenchmarkESPDecapsulate/AES256-CBC-SHA256/1400B` | 2970 | 471.4 MB/s | 3 |
-|  | `BenchmarkESPDecapsulate/AES256-CBC-SHA256/576B` | 1488 | 387 MB/s | 3 |
-|  | `BenchmarkESPDecapsulate/AES256-CBC-SHA256/64B` | 506.9 | 126.2 MB/s | 3 |
-|  | `BenchmarkESPDecapsulate/AES256-GCM/1400B` | 767.1 | 1825 MB/s | 1 |
-|  | `BenchmarkESPDecapsulate/AES256-GCM/576B` | 377.6 | 1525.3 MB/s | 1 |
-|  | `BenchmarkESPDecapsulate/AES256-GCM/64B` | 172.3 | 371.5 MB/s | 1 |
-|  | `BenchmarkESPEncapsulate/AES128-GCM/1400B` | 807.2 | 1734.3 MB/s | 1 |
-|  | `BenchmarkESPEncapsulate/AES128-GCM/576B` | 457.3 | 1259.6 MB/s | 1 |
-|  | `BenchmarkESPEncapsulate/AES128-GCM/64B` | 245.3 | 260.9 MB/s | 1 |
-|  | `BenchmarkESPEncapsulate/AES256-CBC-SHA256/1400B` | 3751 | 373.2 MB/s | 3 |
-|  | `BenchmarkESPEncapsulate/AES256-CBC-SHA256/576B` | 1823 | 316 MB/s | 3 |
-|  | `BenchmarkESPEncapsulate/AES256-CBC-SHA256/64B` | 637.5 | 100.4 MB/s | 3 |
-|  | `BenchmarkESPEncapsulate/AES256-GCM/1400B` | 886.6 | 1579.1 MB/s | 1 |
-|  | `BenchmarkESPEncapsulate/AES256-GCM/576B` | 494.9 | 1163.9 MB/s | 1 |
-|  | `BenchmarkESPEncapsulate/AES256-GCM/64B` | 265 | 241.5 MB/s | 1 |
-|  | `BenchmarkESPRoundTrip/AES256-GCM/1400B` | 1642 | 852.5 MB/s | 2 |
-|  | `BenchmarkESPRoundTrip/AES256-GCM/576B` | 892.4 | 645.5 MB/s | 2 |
-|  | `BenchmarkESPRoundTrip/AES256-GCM/64B` | 443.7 | 144.2 MB/s | 2 |
-| `internal/ikev2/ike` | `BenchmarkDeriveChildKeys` | 1419 | — | 12 |
-|  | `BenchmarkDeriveIKEKeys` | 2487 | — | 19 |
-|  | `BenchmarkSKOpen` | 556.4 | 106 MB/s | 5 |
-|  | `BenchmarkSKSeal` | 814.1 | 72.5 MB/s | 10 |
-| `internal/ikev2/payload` | `BenchmarkBuildMessage` | 576.7 | — | 17 |
-|  | `BenchmarkMarshalParseSA` | 400.9 | — | 14 |
-|  | `BenchmarkMarshalParseTS` | 174.6 | — | 7 |
-|  | `BenchmarkParseMessage` | 255.7 | 782.3 MB/s | 5 |
-| `internal/l2tp` | `BenchmarkMarshalData/1400` | 233.4 | 5997.2 MB/s | 1 |
-|  | `BenchmarkMarshalData/576` | 131.2 | 4391.4 MB/s | 1 |
-|  | `BenchmarkMarshalData/64` | 32 | 2001.2 MB/s | 1 |
-| `internal/masque` | `BenchmarkDatagramReceive` | 294.7 | 4750.7 MB/s | 3 |
-|  | `BenchmarkDatagramReceiveReused` | 54.7 | 25591.8 MB/s | 0 |
-|  | `BenchmarkDatagramSend` | 497.4 | 2814.4 MB/s | 4 |
-|  | `BenchmarkDatagramSendReused` | 33.9 | 41355.5 MB/s | 0 |
-| `internal/nebula` | `BenchmarkNebulaDecrypt/aesgcm/1400` | 613.5 | 2281.9 MB/s | 0 |
-|  | `BenchmarkNebulaDecrypt/aesgcm/576` | 331.3 | 1738.4 MB/s | 0 |
-|  | `BenchmarkNebulaDecrypt/aesgcm/64` | 192.7 | 332.1 MB/s | 0 |
-|  | `BenchmarkNebulaDecrypt/chachapoly/1400` | 811.3 | 1725.7 MB/s | 0 |
-|  | `BenchmarkNebulaDecrypt/chachapoly/576` | 546.6 | 1053.8 MB/s | 0 |
+| `internal/ikev1` | `BenchmarkDerivePhase1` | 3194 | — | 31 |
+|  | `BenchmarkFullHandshakePSK` | 14227803 | — | 674 |
+|  | `BenchmarkHashI` | 1093 | — | 7 |
+|  | `BenchmarkPhase1CBC/decrypt` | 339.2 | — | 3 |
+|  | `BenchmarkPhase1CBC/encrypt` | 350.2 | — | 3 |
+|  | `BenchmarkQuickModeKeymat` | 1347 | — | 16 |
+| `internal/ikev2/eap` | `BenchmarkDeriveMSK` | 787.6 | — | 5 |
+|  | `BenchmarkFullMSCHAPv2Auth` | 10918 | — | 53 |
+|  | `BenchmarkGenerateNTResponse` | 3612 | — | 11 |
+|  | `BenchmarkNTPasswordHash` | 228.9 | — | 2 |
+| `internal/ikev2/esp` | `BenchmarkESPDecapParallel` | 626.7 | 2234 MB/s | 1 |
+|  | `BenchmarkESPDecapsulate/AES128-GCM/1400B` | 704.2 | 1987.9 MB/s | 1 |
+|  | `BenchmarkESPDecapsulate/AES128-GCM/576B` | 342.7 | 1680.9 MB/s | 1 |
+|  | `BenchmarkESPDecapsulate/AES128-GCM/64B` | 152.6 | 419.3 MB/s | 1 |
+|  | `BenchmarkESPDecapsulate/AES256-CBC-SHA256/1400B` | 2909 | 481.2 MB/s | 3 |
+|  | `BenchmarkESPDecapsulate/AES256-CBC-SHA256/576B` | 1434 | 401.6 MB/s | 3 |
+|  | `BenchmarkESPDecapsulate/AES256-CBC-SHA256/64B` | 507.5 | 126.1 MB/s | 3 |
+|  | `BenchmarkESPDecapsulate/AES256-GCM/1400B` | 759.8 | 1842.5 MB/s | 1 |
+|  | `BenchmarkESPDecapsulate/AES256-GCM/576B` | 379.5 | 1517.7 MB/s | 1 |
+|  | `BenchmarkESPDecapsulate/AES256-GCM/64B` | 180.8 | 354 MB/s | 1 |
+|  | `BenchmarkESPEncapsulate/AES128-GCM/1400B` | 810 | 1728.3 MB/s | 1 |
+|  | `BenchmarkESPEncapsulate/AES128-GCM/576B` | 473.8 | 1215.7 MB/s | 1 |
+|  | `BenchmarkESPEncapsulate/AES128-GCM/64B` | 244.5 | 261.8 MB/s | 1 |
+|  | `BenchmarkESPEncapsulate/AES256-CBC-SHA256/1400B` | 3785 | 369.9 MB/s | 3 |
+|  | `BenchmarkESPEncapsulate/AES256-CBC-SHA256/576B` | 1814 | 317.5 MB/s | 3 |
+|  | `BenchmarkESPEncapsulate/AES256-CBC-SHA256/64B` | 637.4 | 100.4 MB/s | 3 |
+|  | `BenchmarkESPEncapsulate/AES256-GCM/1400B` | 894.9 | 1564.3 MB/s | 1 |
+|  | `BenchmarkESPEncapsulate/AES256-GCM/576B` | 496.1 | 1161 MB/s | 1 |
+|  | `BenchmarkESPEncapsulate/AES256-GCM/64B` | 264.7 | 241.8 MB/s | 1 |
+|  | `BenchmarkESPRoundTrip/AES256-GCM/1400B` | 1652 | 847.5 MB/s | 2 |
+|  | `BenchmarkESPRoundTrip/AES256-GCM/576B` | 938.6 | 613.7 MB/s | 2 |
+|  | `BenchmarkESPRoundTrip/AES256-GCM/64B` | 442.4 | 144.7 MB/s | 2 |
+| `internal/ikev2/ike` | `BenchmarkDeriveChildKeys` | 1356 | — | 12 |
+|  | `BenchmarkDeriveIKEKeys` | 2471 | — | 19 |
+|  | `BenchmarkSKOpen` | 552.6 | 106.8 MB/s | 5 |
+|  | `BenchmarkSKSeal` | 813.5 | 72.5 MB/s | 10 |
+| `internal/ikev2/payload` | `BenchmarkBuildMessage` | 582 | — | 17 |
+|  | `BenchmarkMarshalParseSA` | 402.1 | — | 14 |
+|  | `BenchmarkMarshalParseTS` | 179.1 | — | 7 |
+|  | `BenchmarkParseMessage` | 254.5 | 785.9 MB/s | 5 |
+| `internal/l2tp` | `BenchmarkMarshalData/1400` | 222.8 | 6282.8 MB/s | 1 |
+|  | `BenchmarkMarshalData/576` | 135.3 | 4258.3 MB/s | 1 |
+|  | `BenchmarkMarshalData/64` | 32.6 | 1964.3 MB/s | 1 |
+| `internal/masque` | `BenchmarkDatagramReceive` | 293.7 | 4766.7 MB/s | 3 |
+|  | `BenchmarkDatagramReceiveReused` | 55.3 | 25311.2 MB/s | 0 |
+|  | `BenchmarkDatagramSend` | 493.7 | 2835.5 MB/s | 4 |
+|  | `BenchmarkDatagramSendReused` | 34.3 | 40842 MB/s | 0 |
+| `internal/nebula` | `BenchmarkNebulaDecrypt/aesgcm/1400` | 593 | 2361 MB/s | 0 |
+|  | `BenchmarkNebulaDecrypt/aesgcm/576` | 331.6 | 1736.8 MB/s | 0 |
+|  | `BenchmarkNebulaDecrypt/aesgcm/64` | 192.3 | 332.7 MB/s | 0 |
+|  | `BenchmarkNebulaDecrypt/chachapoly/1400` | 781.6 | 1791.2 MB/s | 0 |
+|  | `BenchmarkNebulaDecrypt/chachapoly/576` | 545.3 | 1056.3 MB/s | 0 |
 |  | `BenchmarkNebulaDecrypt/chachapoly/64` | 258.9 | 247.2 MB/s | 0 |
-|  | `BenchmarkNebulaEncrypt/aesgcm/1400` | 763.1 | 1834.6 MB/s | 1 |
-|  | `BenchmarkNebulaEncrypt/aesgcm/576` | 380.8 | 1512.6 MB/s | 1 |
-|  | `BenchmarkNebulaEncrypt/aesgcm/64` | 171.9 | 372.4 MB/s | 1 |
-|  | `BenchmarkNebulaEncrypt/chachapoly/1400` | 973.3 | 1438.4 MB/s | 1 |
-|  | `BenchmarkNebulaEncrypt/chachapoly/576` | 493.3 | 1167.6 MB/s | 1 |
-|  | `BenchmarkNebulaEncrypt/chachapoly/64` | 214.5 | 298.4 MB/s | 1 |
-| `internal/openvpn/data` | `BenchmarkOpen/1400B` | 546.6 | 2561.2 MB/s | 0 |
-|  | `BenchmarkOpen/576B` | 282.6 | 2038.5 MB/s | 0 |
-|  | `BenchmarkOpen/64B` | 132.8 | 481.8 MB/s | 0 |
-|  | `BenchmarkSeal/1400B` | 812.1 | 1724 MB/s | 1 |
-|  | `BenchmarkSeal/576B` | 396.5 | 1452.8 MB/s | 1 |
-|  | `BenchmarkSeal/64B` | 169.4 | 377.9 MB/s | 1 |
+|  | `BenchmarkNebulaEncrypt/aesgcm/1400` | 766.2 | 1827.1 MB/s | 1 |
+|  | `BenchmarkNebulaEncrypt/aesgcm/576` | 382.3 | 1506.6 MB/s | 1 |
+|  | `BenchmarkNebulaEncrypt/aesgcm/64` | 172.4 | 371.3 MB/s | 1 |
+|  | `BenchmarkNebulaEncrypt/chachapoly/1400` | 1012 | 1383 MB/s | 1 |
+|  | `BenchmarkNebulaEncrypt/chachapoly/576` | 493.4 | 1167.5 MB/s | 1 |
+|  | `BenchmarkNebulaEncrypt/chachapoly/64` | 214.2 | 298.8 MB/s | 1 |
+| `internal/openvpn/data` | `BenchmarkOpen/1400B` | 560.1 | 2499.4 MB/s | 0 |
+|  | `BenchmarkOpen/576B` | 279.2 | 2062.9 MB/s | 0 |
+|  | `BenchmarkOpen/64B` | 132.3 | 483.6 MB/s | 0 |
+|  | `BenchmarkSeal/1400B` | 823.5 | 1700.1 MB/s | 1 |
+|  | `BenchmarkSeal/576B` | 390.2 | 1476.2 MB/s | 1 |
+|  | `BenchmarkSeal/64B` | 168.5 | 379.7 MB/s | 1 |
 | `internal/sshtun` | `BenchmarkDecode` | 0.3 | — | 0 |
-|  | `BenchmarkEncode/1400` | 229.1 | 6111.6 MB/s | 1 |
-|  | `BenchmarkEncode/576` | 132.2 | 4356.5 MB/s | 1 |
-|  | `BenchmarkEncode/64` | 31.9 | 2005.2 MB/s | 1 |
-| `internal/sstp/wire` | `BenchmarkEncodeData/1400` | 229.7 | 6095.8 MB/s | 1 |
-|  | `BenchmarkEncodeData/576` | 131.2 | 4390 MB/s | 1 |
-|  | `BenchmarkEncodeData/64` | 32 | 2000 MB/s | 1 |
-| `internal/wireguard/transport` | `BenchmarkOpen/1400B` | 694.7 | 2015.2 MB/s | 0 |
-|  | `BenchmarkOpen/576B` | 470.4 | 1224.6 MB/s | 0 |
-|  | `BenchmarkOpen/64B` | 185.7 | 344.7 MB/s | 0 |
-|  | `BenchmarkSeal/1400B` | 1001 | 1398.8 MB/s | 1 |
-|  | `BenchmarkSeal/576B` | 497.2 | 1158.6 MB/s | 1 |
-|  | `BenchmarkSeal/64B` | 205.1 | 312 MB/s | 1 |
+|  | `BenchmarkEncode/1400` | 224.3 | 6241.6 MB/s | 1 |
+|  | `BenchmarkEncode/576` | 132 | 4362.3 MB/s | 1 |
+|  | `BenchmarkEncode/64` | 31.6 | 2023.7 MB/s | 1 |
+| `internal/sstp/wire` | `BenchmarkEncodeData/1400` | 224 | 6250.8 MB/s | 1 |
+|  | `BenchmarkEncodeData/576` | 131 | 4395.8 MB/s | 1 |
+|  | `BenchmarkEncodeData/64` | 31.3 | 2043.6 MB/s | 1 |
+| `internal/wireguard/transport` | `BenchmarkOpen/1400B` | 704.4 | 1987.6 MB/s | 0 |
+|  | `BenchmarkOpen/576B` | 470 | 1225.5 MB/s | 0 |
+|  | `BenchmarkOpen/64B` | 181.4 | 352.8 MB/s | 0 |
+|  | `BenchmarkSeal/1400B` | 993.4 | 1409.3 MB/s | 1 |
+|  | `BenchmarkSeal/576B` | 497.2 | 1158.4 MB/s | 1 |
+|  | `BenchmarkSeal/64B` | 206.3 | 310.2 MB/s | 1 |
 
-_Generated by the `benchmark` workflow from `f016a8d` on 2026-07-27._
+_Generated by the `benchmark` workflow from `dea5e58` on 2026-07-27._
 <!-- livingreadme:benchmark:end -->
 
 ## Data-plane optimization
