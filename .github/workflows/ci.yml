@@ -123,11 +123,12 @@ jobs:
 
       # Every protocol parser here reads attacker-controlled bytes before
       # anything is authenticated, so a panic in one is a remote crash. This job
-      # runs a short budget per target on every push: enough to catch a
+      # runs a short budget per target when dispatched: enough to catch a
       # regression that a seed or a recent change makes reachable immediately,
       # not enough to find something deep. Long campaigns are run out of band
       # with a larger -fuzztime, and any crash found there is committed to
-      # testdata/fuzz as a seed so it is caught here forever after.
+      # testdata/fuzz as a seed — those seeds are replayed by the ordinary
+      # `go test` in the test job, which is what runs on every push.
       - name: Fuzz each target briefly
         run: |
           set -euo pipefail
@@ -135,7 +136,11 @@ jobs:
           ran=0
           # One target at a time: `go test -fuzz` accepts a single pattern, and
           # naming them explicitly means a new target must be added here too --
-          # which is the point, since a target nothing runs is not a test.
+          # which is the point, since a target nothing runs is not a test. That
+          # principle is enforced by TestFuzzTargetsAreAllListed in the root
+          # package, which reads this list and the tree and fails if either has
+          # something the other does not; the count assertion below only ever
+          # caught the heredoc being truncated.
           # The list is read on fd 3, not stdin. `go test` inherits the loop's
           # stdin, and a subprocess that reads it consumes the rest of the
           # heredoc -- which silently truncates the run after the first target

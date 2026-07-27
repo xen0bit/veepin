@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -617,6 +618,15 @@ func TestInteropAnyConnectClientVeepinServer(t *testing.T) {
 // to say, not at all. The run now requires openconnect to report an established
 // DTLS connection, so a fallback fails the cell instead of passing as a false
 // green.
+//
+// The TLS1.3 requirement is the precondition, not decoration. internal/anyconnect
+// documents that the DTLS PSK is derived through the RFC 5705 exporter, which
+// needs TLS 1.3 or Extended Master Secret — and that when neither is available a
+// silent fallback to the TLS tunnel is *correct*, not a failure. So demanding
+// DTLS is only legitimate while the CSTP session is known to offer the exporter.
+// Asserting that first means a session that ever stopped being TLS 1.3 fails
+// here, naming the reason, instead of failing on the DTLS line and reading as a
+// veepin bug.
 func TestInteropAnyConnectClientVeepinServerDTLS(t *testing.T) {
 	requireDocker(t)
 	pkiDir := filepath.Join("anyconnect", "pki")
@@ -625,7 +635,7 @@ func TestInteropAnyConnectClientVeepinServerDTLS(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
 	runInteropRequiringLog(t, "compose.anyconnect-server-dtls.yml", "openconnect", "10.11.0.1",
-		"Established DTLS connection")
+		"ciphersuite (TLS1.3)", "Established DTLS connection")
 }
 
 // TestInteropAnyConnectClientVeepinServerShaped is the same cell with downstream
@@ -1018,8 +1028,15 @@ func parseIperfBits(out string) (float64, error) {
 // alongside the TLS tunnel and may retry after a first attempt fails, so the
 // tunnel can be pingable seconds before the line appears -- reading once turns
 // "not yet" into "never".
-func runInteropRequiringLog(t *testing.T, composeFile, pingSvc, target, want string) {
+// Several wants may be given, and all must appear. That is how a cell states a
+// precondition alongside its outcome: requiring only the outcome makes a
+// legitimate degradation indistinguishable from a break, and the failure then
+// points at the wrong thing (see the AnyConnect DTLS cell).
+func runInteropRequiringLog(t *testing.T, composeFile, pingSvc, target string, wants ...string) {
 	t.Helper()
+	if len(wants) == 0 {
+		t.Fatal("runInteropRequiringLog needs at least one required log line")
+	}
 	runInterop(t, composeFile, pingSvc, target)
 
 	deadline := time.Now().Add(logDeadline)
@@ -1028,15 +1045,38 @@ func runInteropRequiringLog(t *testing.T, composeFile, pingSvc, target, want str
 		out, err := compose(t, composeFile, "logs", "--no-color", pingSvc)
 		if err == nil {
 			logs = out
-			if strings.Contains(logs, want) {
-				t.Logf("%s reported %q", pingSvc, want)
+			missing := false
+			for _, want := range wants {
+				if !strings.Contains(logs, want) {
+					missing = true
+					break
+				}
+			}
+			if !missing {
+				t.Logf("%s reported %s", pingSvc, quoteAll(wants))
 				return
 			}
 		}
 		time.Sleep(3 * time.Second)
 	}
-	t.Fatalf("the tunnel came up but %q never appeared in %s's logs within %s:\n%s",
-		want, pingSvc, logDeadline, logs)
+
+	var absent []string
+	for _, want := range wants {
+		if !strings.Contains(logs, want) {
+			absent = append(absent, want)
+		}
+	}
+	t.Fatalf("the tunnel came up but %s never appeared in %s's logs within %s:\n%s",
+		quoteAll(absent), pingSvc, logDeadline, logs)
+}
+
+// quoteAll renders a set of required log lines for a message: `"a" and "b"`.
+func quoteAll(wants []string) string {
+	quoted := make([]string, len(wants))
+	for i, w := range wants {
+		quoted[i] = strconv.Quote(w)
+	}
+	return strings.Join(quoted, " and ")
 }
 
 // runInteropUDPEcho brings up a CONNECT-UDP compose file, then sends a UDP
