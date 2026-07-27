@@ -1,6 +1,12 @@
 package livingreadme
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -108,6 +114,114 @@ func TestInteropMatrixTestsExist(t *testing.T) {
 				}
 				seen[name] = row.Protocol
 			}
+		}
+	}
+}
+
+// TestInteropShards checks the derived split covers the manifest exactly. The
+// shards are what CI runs, so a test missing from every shard never runs at all,
+// and a test that never runs is indistinguishable from one that passes.
+func TestInteropShards(t *testing.T) {
+	shards := InteropShards()
+	if len(shards) == 0 {
+		t.Fatal("no shards derived from the manifest")
+	}
+
+	names := map[string]bool{}
+	for _, s := range shards {
+		if s.Name == "" {
+			t.Errorf("shard with an empty name: %+v", s)
+		}
+		if names[s.Name] {
+			t.Errorf("duplicate shard name %q; artifacts would collide", s.Name)
+		}
+		names[s.Name] = true
+		for _, r := range s.Name {
+			if !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') && r != '-' {
+				t.Errorf("shard name %q contains %q, which is not safe for a job or "+
+					"artifact identifier", s.Name, r)
+			}
+		}
+	}
+
+	// Every manifest test must be selected by exactly one shard's regexp.
+	for _, row := range interopMatrix {
+		for _, c := range []interopCell{row.Client, row.Server, row.Self} {
+			for _, name := range c.Tests {
+				matched := 0
+				for _, s := range shards {
+					re, err := regexp.Compile(s.Run)
+					if err != nil {
+						t.Fatalf("shard %q has an invalid -run regexp %q: %v", s.Name, s.Run, err)
+					}
+					if re.MatchString(name) {
+						matched++
+					}
+				}
+				if matched != 1 {
+					t.Errorf("test %q is selected by %d shards, want exactly 1", name, matched)
+				}
+			}
+		}
+	}
+}
+
+// TestInteropMatrixMatchesTheTestFunctions is the other half of the contract the
+// manifest has always claimed but never checked: that it and
+// tests/interop/*_test.go name the same set of tests.
+//
+// It matters more now that CI shards by the manifest. A test function absent
+// from it is not merely missing from the README table — it is in no shard, so it
+// never runs, and nothing says so.
+func TestInteropMatrixMatchesTheTestFunctions(t *testing.T) {
+	const dir = "../../tests/interop"
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("reading %s: %v", dir, err)
+	}
+	fset := token.NewFileSet()
+	declared := map[string]bool{}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
+		if err != nil {
+			t.Fatalf("parsing %s/%s: %v", dir, name, err)
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv != nil || !strings.HasPrefix(fn.Name.Name, "TestInterop") {
+				continue
+			}
+			declared[fn.Name.Name] = true
+		}
+	}
+	if len(declared) == 0 {
+		t.Fatalf("found no TestInterop* functions in %s; this check covers nothing", dir)
+	}
+
+	listed := map[string]bool{}
+	for _, row := range interopMatrix {
+		for _, c := range []interopCell{row.Client, row.Server, row.Self} {
+			for _, name := range c.Tests {
+				listed[name] = true
+			}
+		}
+	}
+
+	for name := range listed {
+		if !declared[name] {
+			t.Errorf("the manifest lists %q, which no longer exists in %s: it reads as a "+
+				"permanent failure in the README matrix", name, dir)
+		}
+	}
+	for name := range declared {
+		if !listed[name] {
+			t.Errorf("%s declares %q but the manifest does not list it, so CI puts it in no "+
+				"shard and it never runs", dir, name)
 		}
 	}
 }
