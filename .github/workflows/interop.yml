@@ -74,15 +74,50 @@ permissions:
   contents: write
 
 jobs:
-  interop:
+  # The split is derived from internal/livingreadme's manifest, not written here:
+  # that manifest already maps every protocol row to the tests backing it, and a
+  # second copy in YAML would drift. A test in no shard never runs, and a test
+  # that never runs looks exactly like one that passes -- so TestInteropShards
+  # and TestInteropMatrixMatchesTheTestFunctions fail the ordinary CI job if the
+  # manifest and tests/interop ever disagree.
+  plan:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      shards: ${{ steps.derive.outputs.shards }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          # Full history so the commit-back step can rebase onto a main that may
-          # have moved (e.g. the benchmark workflow pushing its own region).
-          fetch-depth: 0
+          go-version: "1.25"
+          cache: true
+
+      - name: Derive the shard matrix from the interop manifest
+        id: derive
+        run: echo "shards=$(go run ./cmd/livingreadme -shards)" >> "$GITHUB_OUTPUT"
+
+  # One job per protocol. The cells are serial within a shard -- they contend for
+  # host ports and /dev/net/tun, so t.Parallel() inside one job is not an option
+  # -- but the suite is now bounded by its slowest protocol (IKEv2, ~12 cells)
+  # rather than the sum of all of them, which had reached 27.3 of a 30-minute
+  # budget and started failing with every cell passing.
+  shard:
+    needs: plan
+    name: interop (${{ matrix.shard.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      # One protocol's peer being broken should not hide the state of the rest;
+      # the whole point of sharding is that a failure names a protocol.
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -97,14 +132,61 @@ jobs:
           sudo modprobe esp4 xfrm_user af_key || true
           ls -l /dev/net/tun
 
-      - name: Run interop tests (vs strongSwan, over Docker)
+      - name: Run interop tests (vs real peers, over Docker)
         run: |
           # -json so the living-README tool can read the per-cell pass/fail; tee
           # keeps the raw stream in the log. pipefail makes go test's exit code
-          # (not tee's) fail the job, so the commit-back steps below run only when
-          # every cell passed.
+          # (not tee's) fail the job, so the report job below runs only when every
+          # cell passed.
           set -o pipefail
-          go test -tags interop -json -count=1 -timeout 30m ./tests/interop/... | tee interop.json
+          go test -tags interop -json -count=1 -timeout 25m \
+            -run '${{ matrix.shard.run }}' ./tests/interop/... \
+            | tee 'interop-${{ matrix.shard.name }}.json'
+
+      - name: Upload this shard's results
+        uses: actions/upload-artifact@v4
+        with:
+          name: interop-${{ matrix.shard.name }}
+          path: interop-${{ matrix.shard.name }}.json
+          if-no-files-found: error
+          retention-days: 7
+
+  # Keeps the historical check name, and is the only job that touches the README:
+  # both regions are rendered from one merged stream, so they stay one commit.
+  # It needs every shard, so a failing protocol leaves the tables untouched --
+  # the same rule as before the split.
+  interop:
+    needs: shard
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history so the commit-back step can rebase onto a main that may
+          # have moved (e.g. the benchmark workflow pushing its own region).
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Collect every shard's results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: interop-*
+          merge-multiple: true
+          path: shards
+
+      - name: Merge the shard streams
+        run: |
+          # go test -json is line-delimited, so concatenating the shards is a
+          # valid stream; the renderers key on the test name, not on ordering.
+          set -o pipefail
+          cat shards/interop-*.json > interop.json
+          echo "merged $(wc -l < interop.json) events from $(ls shards | wc -l) shards"
 
       # One interop run feeds two regions: the pass/fail matrix and the iperf3
       # throughput table (both parsed from interop.json), refreshed in one commit.

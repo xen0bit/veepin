@@ -15,6 +15,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -39,7 +40,20 @@ func run() error {
 	ref := flag.String("ref", "", "git ref for the provenance footer")
 	workflow := flag.String("workflow", "", "CI workflow name for the provenance footer")
 	check := flag.Bool("check", false, "do not write; exit 1 if the region would change")
+	shards := flag.Bool("shards", false, "print the interop suite's parallel split as JSON and exit")
 	flag.Parse()
+
+	// -shards reads nothing and writes no region: it exists so the interop
+	// workflow can build its job matrix from the same manifest that renders the
+	// table, rather than keeping a second list of tests in YAML.
+	if *shards {
+		out, err := json.Marshal(livingreadme.InteropShards())
+		if err != nil {
+			return fmt.Errorf("encoding shards: %w", err)
+		}
+		fmt.Println(string(out))
+		return nil
+	}
 
 	if *region == "" {
 		return fmt.Errorf("-region is required")

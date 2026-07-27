@@ -229,3 +229,57 @@ func RenderInterop(results TestResults, meta Meta) string {
 	b.WriteString(meta.footer())
 	return b.String()
 }
+
+// InteropShard is one parallel slice of the interop suite: a name usable as a
+// GitHub Actions job and artifact identifier, and the -run regexp that selects
+// exactly the tests backing one protocol's row.
+type InteropShard struct {
+	Name string `json:"name"`
+	Run  string `json:"run"`
+}
+
+// InteropShards derives the suite's parallel split from the manifest above, one
+// shard per protocol.
+//
+// Deriving the split rather than listing it separately is what keeps it honest.
+// Cells still run serially within a shard, so the suite is bounded by its
+// slowest protocol instead of the sum of all of them; but a hand-written shard
+// list that drifted from the manifest would quietly stop running whatever it had
+// missed, and a test that never runs is indistinguishable from one that passes.
+// Adding a protocol row here adds a shard, and there is no way to add one
+// without.
+//
+// A row whose cells are all empty — untested by design — yields no shard.
+func InteropShards() []InteropShard {
+	shards := make([]InteropShard, 0, len(interopMatrix))
+	for _, row := range interopMatrix {
+		var tests []string
+		for _, c := range []interopCell{row.Client, row.Server, row.Self} {
+			tests = append(tests, c.Tests...)
+		}
+		if len(tests) == 0 {
+			continue
+		}
+		shards = append(shards, InteropShard{
+			Name: shardName(row.Protocol),
+			Run:  "^(" + strings.Join(tests, "|") + ")$",
+		})
+	}
+	return shards
+}
+
+// shardName slugs a protocol name into an identifier a workflow can use for a
+// job label and an artifact file. "L2TP/IPsec" and "TOY*" are neither.
+func shardName(protocol string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(protocol) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			continue
+		}
+		if b.Len() > 0 && b.String()[b.Len()-1] != '-' {
+			b.WriteByte('-')
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
