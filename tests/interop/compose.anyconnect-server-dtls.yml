@@ -1,15 +1,15 @@
-# Reference AnyConnect client (openconnect) -> veepin AnyConnect server, with
-# downstream flow shaping on (`veepin serve anyconnect -shape`).
+# Reference AnyConnect client (openconnect) -> veepin server, over DTLS.
 #
-# The server pads the CSTP data payload past the inner IP packet. CSTP has no
-# padding provision of its own — the length field simply says how many octets
-# follow — so the filler is only inert because the receiver delimits the real
-# packet by the IP header's Total Length, as every IP stack must (Ethernet pads
-# short frames the same way). This cell is what turns that argument into a
-# tested fact: a ping reply proves both that openconnect accepted the padded
-# packets and that they were trimmed correctly, since a mis-trimmed packet
-# could not produce a valid reply.
-name: veepin-interop-anyconnect-server-shaped
+# The sibling of compose.anyconnect-server.yml with the UDP data channel left on.
+# openconnect brings the CSTP tunnel up, then attaches a DTLS 1.2 session keyed
+# by the RFC 5705 exporter over the TLS master secret, and prefers it.
+#
+# The two are separate cells because openconnect falls back to TLS silently when
+# DTLS does not come up. One cell covering both meant a ping that crossed on TLS
+# proved the DTLS claim just as well as one that crossed on DTLS -- which is to
+# say, not at all. The test for this file additionally requires openconnect to
+# report an established DTLS connection.
+name: veepin-interop-anyconnect-server-dtls
 
 services:
   veepin-anyconnect-server:
@@ -22,7 +22,6 @@ services:
     environment:
       USER: "ocuser"
       PASS: "ocpass"
-      SHAPE: "16384"
     volumes:
       - ./anyconnect/pki:/pki:ro
       - ./veepin/anyconnect-server-entrypoint.sh:/entrypoint.sh:ro
@@ -36,7 +35,6 @@ services:
     devices: ["/dev/net/tun:/dev/net/tun"]
     depends_on: [veepin-anyconnect-server]
     environment:
-      NO_DTLS: "1"
       SERVER: "veepin-anyconnect-server"
       USER: "ocuser"
       PASS: "ocpass"

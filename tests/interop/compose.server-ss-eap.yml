@@ -1,0 +1,44 @@
+# Direction B with EAP-MSCHAPv2: strongSwan client -> veepin server.
+#
+# The sibling of compose.server-ss.yml where the initiator authenticates with a
+# username and password instead of the PSK. The responder still uses the PSK for
+# its own AUTH, and once EAP succeeds both sides key the final AUTH from the EAP
+# MSK -- so this covers the whole MSCHAPv2 path (NT hash, challenge response, MSK
+# derivation) against a real peer for the first time.
+#
+# Data-path check: the strongSwan client pings 10.10.10.1 through the tunnel.
+name: veepin-interop-b-eap
+
+services:
+  veepin-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    sysctls:
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+      net.ipv4.ip_forward: "1"
+    environment:
+      PSK: "interop-test-psk"
+      SERVER_ID: "vpn.example.com"
+      POOL: "10.10.10.0/24"
+    volumes:
+      - ./veepin/server-entrypoint-eap.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  strongswan-client:
+    build:
+      context: strongswan
+    image: interop-strongswan
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+    depends_on: [veepin-server]
+    volumes:
+      - ./strongswan/swanctl-client-eap.conf:/etc/swanctl/swanctl.conf:ro
+      - ./strongswan/client-entrypoint.sh:/entrypoint.sh:ro
+    command: ["/bin/sh", "/entrypoint.sh"]
