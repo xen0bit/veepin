@@ -117,16 +117,20 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("fortinet: address pool %q: %w", poolCIDR, err)
 	}
-	tun, err := dataplane.OpenTUN(cfg.TUNName)
-	if err != nil {
-		return nil, fmt.Errorf("fortinet: opening TUN: %w", err)
-	}
-
+	// Validated before the TUN is opened, not after: it needs nothing from the
+	// TUN, and returning from between the open and the first close leaked the
+	// interface on a typo'd secret.
 	for user, secret := range cfg.TOTPSecrets {
 		if _, err := otp.DecodeSecret(secret); err != nil {
 			return nil, fmt.Errorf("fortinet: TOTP secret for %q: %w", user, err)
 		}
 	}
+
+	tun, err := dataplane.OpenTUN(cfg.TUNName)
+	if err != nil {
+		return nil, fmt.Errorf("fortinet: opening TUN: %w", err)
+	}
+
 	engineCfg := ifortinet.ServerConfig{
 		Users:       cfg.Users,
 		Pool:        pool,
