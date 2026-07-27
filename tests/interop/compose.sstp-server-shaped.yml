@@ -1,0 +1,42 @@
+# Reference SSTP client (sstpc/pppd) -> veepin SSTP server, with downstream flow
+# shaping on (`veepin serve sstp -shape`).
+#
+# The server pads the PPP Information field past the inner IP packet. RFC 1661
+# §5.1 sanctions exactly this — "the Information field MAY be padded with an
+# arbitrary number of octets up to the MRU", and it is each carried protocol's
+# job to tell padding from data, which IP does with its Total Length. This cell
+# proves pppd, the receiver that matters, actually does so: the client pings
+# 10.9.0.1 and a reply could not come back from a mis-trimmed packet.
+name: veepin-interop-sstp-server-shaped
+
+services:
+  veepin-sstp-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      USER: "sstpuser"
+      PASS: "sstppass"
+      SHAPE: "16384"
+    volumes:
+      - ./sstp/pki:/pki:ro
+      - ./veepin/sstp-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  sstp-client:
+    build:
+      context: sstp-client
+    image: interop-sstp-client
+    # sstpc drives pppd, which must set the PPP line discipline on its pty — that
+    # needs privileges beyond NET_ADMIN inside a container.
+    privileged: true
+    devices:
+      - "/dev/ppp:/dev/ppp"
+    depends_on: [veepin-sstp-server]
+    environment:
+      SERVER: "veepin-sstp-server"
+      USER: "sstpuser"
+      PASS: "sstppass"

@@ -345,6 +345,25 @@ func TestInteropSSTPClientVeepinServer(t *testing.T) {
 	runInteropBench(t, "compose.sstp-server.yml", "sstp-client", "veepin-sstp-server", "10.9.0.1")
 }
 
+// TestInteropSSTPClientVeepinServerShaped is the same cell with downstream flow
+// shaping on: the veepin server pads the PPP Information field past the inner IP
+// packet, as RFC 1661 5.1 allows, and a real pppd has to cope with it.
+//
+// The filler is delimited only by the inner IP header's own length, so a
+// successful ping proves two things a unit test cannot: that pppd accepts the
+// over-long frames at all, and that the IP layer behind it trims by the header
+// rather than trusting the frame size -- a receiver doing the latter would hand
+// its stack a packet with garbage attached and could not answer.
+func TestInteropSSTPClientVeepinServerShaped(t *testing.T) {
+	requireDocker(t)
+	pkiDir := filepath.Join("sstp", "pki")
+	if err := generateSSTPServerCert(pkiDir); err != nil {
+		t.Fatalf("generate SSTP cert: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
+	runInterop(t, "compose.sstp-server-shaped.yml", "sstp-client", "10.9.0.1")
+}
+
 // TestInteropSSHSelf is the veepin<->veepin SSH sanity check: the veepin client
 // and server over a real SSH/TCP connection and TUNs, forwarding IP through the
 // tun@openssh.com channel. It exercises the whole SSH VPN path — the SSH
@@ -510,6 +529,26 @@ func TestInteropAnyConnectClientVeepinServer(t *testing.T) {
 	runInteropBench(t, "compose.anyconnect-server.yml", "openconnect", "veepin-anyconnect-server", "10.11.0.1")
 }
 
+// TestInteropAnyConnectClientVeepinServerShaped is the same cell with downstream
+// flow shaping on: the veepin server pads the CSTP data payload past the inner
+// IP packet.
+//
+// This is the load-bearing cell for AnyConnect, because CSTP has no padding
+// provision of its own -- its length field just says how many octets follow.
+// The filler is inert only because the receiver delimits the real packet by the
+// IP header's Total Length, which every IP stack must do since Ethernet pads
+// short frames the same way. A successful ping is what turns that argument into
+// a tested fact, since a mis-trimmed packet could not produce a valid reply.
+func TestInteropAnyConnectClientVeepinServerShaped(t *testing.T) {
+	requireDocker(t)
+	pkiDir := filepath.Join("anyconnect", "pki")
+	if err := generateAnyConnectServerCert(pkiDir); err != nil {
+		t.Fatalf("generate AnyConnect cert: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
+	runInterop(t, "compose.anyconnect-server-shaped.yml", "openconnect", "10.11.0.1")
+}
+
 // TestInteropAnyConnectSelf is the veepin<->veepin AnyConnect sanity check: both
 // ends over a real TLS connection and TUNs, isolating a veepin break from an
 // interop break.
@@ -643,6 +682,16 @@ func TestInteropMasqueUDPSelf(t *testing.T) {
 // client against the veepin gateway and pings 10.40.0.1, the gateway.
 func TestInteropOpenconnectFortinetClientVeepinServer(t *testing.T) {
 	runInteropBench(t, "compose.fortinet.yml", "opnc-fortinet-client", "veepin-fortinet-server", "10.40.0.1")
+}
+
+// TestInteropOpenconnectFortinetClientVeepinServerShaped is the same cell with
+// downstream flow shaping on. The Fortinet data channel is PPP over TLS, so the
+// padding vehicle is the one RFC 1661 5.1 sanctions -- arbitrary filler after
+// the Information field, distinguished from data by the carried protocol -- and
+// this proves openconnect's Fortinet receive path actually trims it by the inner
+// IP header rather than passing the whole frame through.
+func TestInteropOpenconnectFortinetClientVeepinServerShaped(t *testing.T) {
+	runInterop(t, "compose.fortinet-shaped.yml", "opnc-fortinet-client", "10.40.0.1")
 }
 
 // TestInteropFortinetSelf is the veepin<->veepin sanity check. veepin's client

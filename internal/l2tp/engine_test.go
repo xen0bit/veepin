@@ -35,11 +35,14 @@ func (f *fakeTUN) Write(p []byte) (int, error) {
 }
 
 // makeIPv4 builds a minimal IPv4 packet (header only) from src to dst so the
-// server's TUN-egress routing can read the destination.
+// server's TUN-egress routing can read the destination. Total Length is set
+// because the receive path trims a packet to its declared length — a packet
+// claiming zero is not one the kernel would accept either.
 func makeIPv4(src, dst net.IP) []byte {
 	p := make([]byte, 20)
 	p[0] = 0x45
-	p[9] = 1 // protocol (ICMP-ish; irrelevant here)
+	p[2], p[3] = 0, 20 // Total Length
+	p[9] = 1           // protocol (ICMP-ish; irrelevant here)
 	copy(p[12:16], src.To4())
 	copy(p[16:20], dst.To4())
 	return p

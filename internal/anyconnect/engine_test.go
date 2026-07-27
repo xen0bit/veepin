@@ -41,11 +41,14 @@ func (f *fakeTUN) Write(p []byte) (int, error) {
 }
 
 // makeIPv4 builds a minimal IPv4 packet (header only) so the routing on both
-// ends can read its addresses.
+// ends can read its addresses. Total Length is set because the receive path
+// trims a packet to its declared length — one claiming zero is not a packet the
+// kernel would accept either.
 func makeIPv4(src, dst net.IP) []byte {
 	p := make([]byte, 20)
 	p[0] = 0x45
-	p[9] = 1 // protocol; irrelevant here
+	p[2], p[3] = 0, 20 // Total Length
+	p[9] = 1           // protocol; irrelevant here
 	copy(p[12:16], src.To4())
 	copy(p[16:20], dst.To4())
 	return p
@@ -75,7 +78,18 @@ func selfSignedCert(t *testing.T) tls.Certificate {
 // TestClientServerLoopback drives the whole protocol over a real TLS connection:
 // the XML credential exchange, the CONNECT that assigns addressing, and IP in
 // both directions through the CSTP framing.
-func TestClientServerLoopback(t *testing.T) {
+func TestClientServerLoopback(t *testing.T) { runClientServerLoopback(t, 0) }
+
+// TestClientServerLoopbackShaped is the same exchange with downstream shaping
+// on. The server pads every downstream packet out to the tunnel MTU, and the
+// assertion is unchanged — the packet that reaches the client TUN must still be
+// byte-identical to the one the server read — so it is the trim on receive that
+// is under test as much as the padding.
+func TestClientServerLoopbackShaped(t *testing.T) {
+	runClientServerLoopback(t, dataplane.DefaultShapeBytes)
+}
+
+func runClientServerLoopback(t *testing.T, shape int) {
 	pool, gateway, err := dataplane.NewAddrPool("10.11.0.0/24")
 	if err != nil {
 		t.Fatal(err)
@@ -86,6 +100,7 @@ func TestClientServerLoopback(t *testing.T) {
 		Pool:    pool,
 		Gateway: gateway,
 		DNS:     []net.IP{net.IPv4(1, 1, 1, 1)},
+		Shape:   shape,
 	})
 	srv.Start()
 	defer srv.Close()

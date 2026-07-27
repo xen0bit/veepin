@@ -77,8 +77,11 @@ var interopMatrix = []interopRow{
 	{
 		Protocol: "SSTP",
 		Client:   interopCell{Tests: []string{"TestInteropVeepinClientSSTPServer"}, Label: "SoftEther"},
-		Server:   interopCell{Tests: []string{"TestInteropSSTPClientVeepinServer"}, Label: "`sstpc`/pppd"},
-		Self:     interopCell{Tests: []string{"TestInteropSSTPSelf"}},
+		Server: interopCell{Tests: []string{
+			"TestInteropSSTPClientVeepinServer",
+			"TestInteropSSTPClientVeepinServerShaped",
+		}, Label: "`sstpc`/pppd (+ PPP-padded)"},
+		Self: interopCell{Tests: []string{"TestInteropSSTPSelf"}},
 	},
 	{
 		Protocol: "SSH",
@@ -95,8 +98,11 @@ var interopMatrix = []interopRow{
 	{
 		Protocol: "AnyConnect",
 		Client:   interopCell{Tests: []string{"TestInteropVeepinClientAnyConnectServer"}, Label: "ocserv"},
-		Server:   interopCell{Tests: []string{"TestInteropAnyConnectClientVeepinServer"}, Label: "openconnect"},
-		Self:     interopCell{Tests: []string{"TestInteropAnyConnectSelf"}},
+		Server: interopCell{Tests: []string{
+			"TestInteropAnyConnectClientVeepinServer",
+			"TestInteropAnyConnectClientVeepinServerShaped",
+		}, Label: "openconnect (+ CSTP-padded)"},
+		Self: interopCell{Tests: []string{"TestInteropAnyConnectSelf"}},
 	},
 	{
 		Protocol: "Nebula",
@@ -123,7 +129,8 @@ var interopMatrix = []interopRow{
 			"TestInteropOpenconnectFortinetClientVeepinServer",
 			"TestInteropOpenconnectFortinetDTLS",
 			"TestInteropOpenconnectFortinet2FA",
-		}, Label: "openconnect (TLS, DTLS, 2FA)"},
+			"TestInteropOpenconnectFortinetClientVeepinServerShaped",
+		}, Label: "openconnect (TLS, DTLS, 2FA, PPP-padded)"},
 		Self: interopCell{Tests: []string{"TestInteropFortinetSelf"}, Label: "(over DTLS)"},
 	},
 	{

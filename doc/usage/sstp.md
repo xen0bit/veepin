@@ -43,3 +43,25 @@ The certificate is what the crypto binding hashes, so it must be the one clients
 connect to (a real deployment terminates TLS here directly, not behind a proxy).
 It is verified in Docker against both the sstp-client `sstpc`/pppd reference and
 the veepin client.
+
+## Downstream flow shaping
+
+`-shape <bytes>` pads the first N bytes of each inner flow out to the tunnel
+MTU, so the size pattern of a TLS handshake made *inside* the tunnel does not
+survive encapsulation:
+
+```sh
+sudo ./veepin serve sstp -shape 16384 ...
+```
+
+The filler goes in the PPP Information field, which RFC 1661 §5.1 explicitly
+allows to be padded — the carried protocol distinguishes padding from data, and
+IP does so with its Total Length. So **the client needs no support for it**; it
+is verified in Docker against the `sstpc`/pppd reference client, whose ping replies could not come back from a
+mis-trimmed packet.
+
+Because the fingerprint it defends against targets handshakes, the budget is
+spent per flow rather than per byte and bulk throughput is unaffected. It is off
+by default and shapes the server's downstream direction only. See
+[`doc/traffic-shaping.md`](../traffic-shaping.md) for what it does and does not
+hide.

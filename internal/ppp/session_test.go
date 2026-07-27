@@ -240,9 +240,23 @@ func TestLCPRejectDropsMagic(t *testing.T) {
 	}
 }
 
+// testIPv4 builds a well-formed IPv4 packet of total length n, with a
+// distinguishable payload so a bad trim is visible rather than merely the wrong
+// length.
+func testIPv4(n int) []byte {
+	p := make([]byte, n)
+	p[0] = 0x45
+	p[2], p[3] = byte(n>>8), byte(n)
+	p[9] = 1
+	for i := 20; i < n; i++ {
+		p[i] = byte(i)
+	}
+	return p
+}
+
 // TestIPFrameHelpers checks the IP encapsulation round-trips.
 func TestIPFrameHelpers(t *testing.T) {
-	pkt := []byte{0x45, 0, 0, 20, 1, 2, 3, 4}
+	pkt := testIPv4(28)
 	frame := EncapsulateIP(pkt)
 	got, ok := IsIP(frame)
 	if !ok {
@@ -253,5 +267,58 @@ func TestIPFrameHelpers(t *testing.T) {
 	}
 	if _, ok := IsIP(encodeFrame(ProtocolLCP, []byte{1, 2})); ok {
 		t.Error("IsIP matched an LCP frame")
+	}
+}
+
+// TestEncapsulateIPPaddedRoundTrip covers the shaper's PPP vehicle: RFC 1661
+// §5.1 padding, which needs no negotiation because IP delimits itself and a
+// conforming receiver therefore has to trim by the header regardless.
+func TestEncapsulateIPPaddedRoundTrip(t *testing.T) {
+	for _, size := range []int{20, 28, 576} {
+		pkt := testIPv4(size)
+		frame := EncapsulateIPPadded(pkt, 1400)
+		if want := frameHeaderLen + 1400; len(frame) != want {
+			t.Errorf("size %d: frame = %d octets, want %d", size, len(frame), want)
+		}
+		// A padded small packet must be the same size on the wire as a genuine
+		// full one — that is the whole point.
+		if full := EncapsulateIP(testIPv4(1400)); len(frame) != len(full) {
+			t.Errorf("size %d: padded frame %d != genuine full frame %d", size, len(frame), len(full))
+		}
+		got, ok := IsIP(frame)
+		if !ok {
+			t.Fatalf("size %d: IsIP rejected a padded frame", size)
+		}
+		if string(got) != string(pkt) {
+			t.Errorf("size %d: recovered %x, want %x", size, got, pkt)
+		}
+	}
+}
+
+// A target at or below the packet's own size must leave it alone.
+func TestEncapsulateIPPaddedIsAFloor(t *testing.T) {
+	pkt := testIPv4(1400)
+	if padded, plain := EncapsulateIPPadded(pkt, 576), EncapsulateIP(pkt); len(padded) != len(plain) {
+		t.Errorf("padded = %d octets, want %d (a target below the packet must not change it)", len(padded), len(plain))
+	}
+}
+
+// A frame whose IP header does not describe its contents is not an IP frame.
+// The receive path must reject it rather than hand the TUN something malformed.
+func TestIsIPRejectsMalformed(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		payload []byte
+	}{
+		{"declared length overruns the frame", []byte{0x45, 0, 0, 20, 1, 2, 3, 4}},
+		{"zero total length", []byte{0x45, 0, 0, 0, 1, 2, 3, 4}},
+		{"not an IP packet at all", []byte{0xff, 0xff}},
+		{"empty", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, ok := IsIP(encodeFrame(ProtocolIP, tc.payload)); ok {
+				t.Error("IsIP accepted a malformed IP frame")
+			}
+		})
 	}
 }

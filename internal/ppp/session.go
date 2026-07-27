@@ -7,6 +7,7 @@ import (
 	"net"
 	"sync"
 
+	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/mschap"
 )
 
@@ -159,17 +160,48 @@ func (s *Session) Receive(frame []byte) {
 // IsIP reports whether a received PPP frame carries an IP packet, and returns
 // it. The SSTP tunnel uses this to split inbound data between the TUN and the
 // PPP control machinery once the link is up.
+//
+// The packet is trimmed to the length its own header declares, which discards
+// any padding the peer added. RFC 1661 §5.1 allows a sender to pad the
+// Information field up to the MRU and makes distinguishing padding from data
+// the carried protocol's business — IP does that with its Total Length — so a
+// conforming PPP receiver has to trim here whether or not it ever pads itself.
 func IsIP(frame []byte) ([]byte, bool) {
 	protocol, payload, ok := decodeFrame(frame)
 	if !ok || protocol != ProtocolIP {
 		return nil, false
 	}
-	return payload, true
+	trimmed := dataplane.TrimToIP(payload)
+	if trimmed == nil {
+		return nil, false // not a well-formed IP packet
+	}
+	return trimmed, true
 }
 
 // EncapsulateIP frames an outbound IP packet as a PPP frame for a data packet.
 func EncapsulateIP(ipPacket []byte) []byte {
 	return encodeFrame(ProtocolIP, ipPacket)
+}
+
+// EncapsulateIPPadded is EncapsulateIP with the Information field padded out to
+// at least minInner octets, so the frame's size on the wire — and with it the
+// TLS record a stream-carried protocol writes it into — says less about the
+// packet inside. dataplane.Shaper decides when and how far.
+//
+// This is RFC 1661 §5.1 padding, so it needs no negotiation and no peer
+// support: the padding octets are past the end of the IP packet's own declared
+// length, and every conforming receiver delimits by that.
+func EncapsulateIPPadded(ipPacket []byte, minInner int) []byte {
+	if minInner <= len(ipPacket) {
+		return encodeFrame(ProtocolIP, ipPacket)
+	}
+	// One allocation: build the padded Information field directly inside the
+	// frame rather than padding a copy and then framing it.
+	out := make([]byte, frameHeaderLen+minInner)
+	putFrameHeader(out, ProtocolIP)
+	copy(out[frameHeaderLen:], ipPacket)
+	// The tail stays zero from make — that is the padding.
+	return out
 }
 
 func (s *Session) send(protocol uint16, payload []byte) {
