@@ -187,9 +187,9 @@ is the kind of thing a reader might otherwise assume is covered.
   certificate flight, and their timing, are untouched. The shaper never delays
   or reorders a packet.
 
-  The count leak is worth stating precisely, because it is sharper than it
-  looks and it rules out the obvious fix. With shaping on, every downstream
-  packet in the window emits exactly one MTU, so
+  The count leak is worth stating precisely, because two plausible fixes do not
+  work and the reason rules out a whole family of them. With shaping on, every
+  downstream packet in the window emits exactly one MTU, so
 
   ```
   downstream_bytes = N × MTU        (N = downstream packet count)
@@ -200,16 +200,28 @@ is the kind of thing a reader might otherwise assume is covered.
   therefore cannot hide the count** — it re-chunks the same total. Only emitting
   bytes that are not real packets breaks the relation, which means filler.
 
-  The affordable form of that is *count normalisation* rather than constant-rate
-  shaping: since the budget already permits `ShapeBytes/MTU` packets, a shaped
-  flow can be topped up with discardable filler to exactly that count once it
-  goes quiet. Real packets still leave immediately, so it costs no latency —
-  only the bandwidth the budget already allowed. Each protocol has a vehicle
-  for the filler (OpenVPN's keepalive ping, AnyConnect's `typeKeepalive`, and
-  for the PPP-carried protocols an IPv4 packet to 192.0.2.0/24, which any
-  non-forwarding host drops silently — unlike an LCP Echo or a closed port,
-  which would draw a *reply* and put traffic on the upstream direction the
-  server cannot shape). It is not implemented yet; see [Next](#next).
+  But **appending filler does not hide the count either**, and this is the part
+  that matters. "The flow has gone quiet" can only be *detected* by waiting, so
+  any scheme that adds no latency necessarily emits its filler after a gap —
+  and the gap marks exactly where the real packets stopped:
+
+  ```
+  real    t₀, t₀+ε, t₀+2ε, t₀+3ε, t₀+4ε      5 packets, back to back
+  filler  t₀+250ms …                          7 packets, after the idle timer
+          └─ observer counts 5 before the gap ─┘
+  ```
+
+  Emitting filler with no such gap means emitting on a schedule that does not
+  reveal which packets were real — constant rate — which delays real packets to
+  the tick boundary by construction.
+
+  So **the count leak and the timing leak are one leak.** Neither can be closed
+  without the other, and closing them costs handshake latency. That is a real
+  option (a bounded constant-rate window, affordable because the budget already
+  caps it at `ShapeBytes/MTU` packets) but it is not a free one, and it is the
+  opposite of the trade this design has made everywhere else. See
+  [Next](#next).
+
 - **Upstream is unshaped unless the client is also veepin.** That is inherent to
   the stock-client constraint: the server cannot change what a client it did not
   write puts on the wire. `veepin connect -shape` covers the other direction
@@ -261,14 +273,24 @@ Ordered by value, not by ease:
    plausible vehicle (`SSH_MSG_IGNORE` exists for exactly this, a MASQUE capsule
    type can be unregistered-and-skipped, Nebula's payload is length-delimited),
    so this is mostly plumbing rather than design.
-3. **Count normalisation.** Top a shaped flow up with discardable filler to
-   exactly `ShapeBytes/MTU` packets once it goes quiet, so the packet count stops
-   being recoverable from downstream volume. Costs no latency and no bandwidth
-   the budget did not already permit. The obstacle is mechanical rather than
-   conceptual: the top-up needs a timer, and the stream servers all block in
-   `tun.Read`, so each TUN loop has to read in its own goroutine and select on a
-   tick — or `Shaper` has to take a lock, giving up the single-owner property the
-   rest of the design leans on.
+3. **A bounded constant-rate window**, if the count and timing leaks are judged
+   worth paying for. Within a flow's shaped window, emit one MTU-sized packet per
+   tick — a real one when queued, discardable filler when not — so the two are
+   indistinguishable. The budget already caps this at `ShapeBytes/MTU` packets, so
+   the cost is bounded: one tick of added latency per packet during the window,
+   and no more bandwidth than shaping already spends.
+
+   Every protocol has a filler vehicle (OpenVPN's keepalive ping, AnyConnect's
+   `typeKeepalive`, and for the PPP-carried protocols an IPv4 packet to
+   192.0.2.0/24, which any non-forwarding host drops silently — unlike an LCP
+   Echo or a closed port, which would draw a *reply* and put traffic on the
+   upstream direction the server cannot shape).
+
+   This is deliberately not built. It reverses the trade the rest of the design
+   makes — never delay a packet — and it taxes the handshake, which is both the
+   most latency-sensitive moment and the one the whole feature exists to protect.
+   It should be a separate opt-in knob if it is built at all, not a change to
+   what `-shape` means.
 4. **Padding the handshake itself.** The shaper only sees packets on the data
    path, so the tunnel's *own* handshake — which has a fixed, per-protocol size
    signature of its own — is untouched by this work.
