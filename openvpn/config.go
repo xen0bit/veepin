@@ -55,9 +55,9 @@ type Config struct {
 	// TUNName is the desired interface name; empty lets the kernel pick.
 	TUNName string
 
-	// Shape enables upstream traffic shaping: the number of bytes of each inner
-	// flow whose packets are padded to the tunnel MTU before shaping stops for
-	// that flow. Zero, the default, disables it. It is only useful against a
+	// Shape enables upstream traffic shaping: how much padded output each inner
+	// flow is given before shaping stops for that flow, so it bounds what
+	// shaping costs. Zero, the default, disables it. It is only useful against a
 	// veepin server, which shapes downstream independently; a stock `openvpn`
 	// server accepts the padding but does not reciprocate. See
 	// dataplane/shape.go.

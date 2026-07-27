@@ -67,6 +67,15 @@ this packet's plaintext be padded to?*
 - While a flow has budget, the target is the **full inner MTU**. Quantising to a
   ladder of smaller size classes would be cheaper, but every class left standing
   is signal a classifier can still use.
+- The budget is charged what each packet **emits**, not what it carries, so
+  `ShapeBytes` bounds what shaping costs and a flow gets `ShapeBytes/MTU` padded
+  packets whatever sizes it is carrying. Charging the inner length instead — as
+  this did originally — let a flow of small packets run far past the budget's
+  apparent cost: at 60-octet packets a 16 KiB budget shaped 273 of them and put
+  382 KiB on the wire, which made the affordability argument above untrue for
+  exactly the traffic that needs shaping most. The bound is the budget plus at
+  most one MTU, because a flow with any budget left shapes the next packet in
+  full rather than refusing it.
 - When the budget is spent, the target is zero and the flow costs nothing —
   one map lookup and a comparison — forever after.
 - A flow idle for `ShapeIdle` (default 30s) has its budget re-armed, so a reused
@@ -175,10 +184,32 @@ is the kind of thing a reader might otherwise assume is covered.
 
 - **Packet counts and inter-arrival times still leak.** Padding removes the size
   signal inside the shaped window; the *number* of downstream packets in a
-  certificate flight, and their timing, are untouched. Closing that needs
-  constant-rate shaping, which taxes exactly the moment that is most
-  latency-sensitive — the handshake — and is deliberately out of scope. The
-  shaper never delays or reorders a packet.
+  certificate flight, and their timing, are untouched. The shaper never delays
+  or reorders a packet.
+
+  The count leak is worth stating precisely, because it is sharper than it
+  looks and it rules out the obvious fix. With shaping on, every downstream
+  packet in the window emits exactly one MTU, so
+
+  ```
+  downstream_bytes = N × MTU        (N = downstream packet count)
+  ```
+
+  and an observer recovers `N = bytes / MTU` however those bytes are chunked
+  into records or segments. **Coalescing several inner packets into one record
+  therefore cannot hide the count** — it re-chunks the same total. Only emitting
+  bytes that are not real packets breaks the relation, which means filler.
+
+  The affordable form of that is *count normalisation* rather than constant-rate
+  shaping: since the budget already permits `ShapeBytes/MTU` packets, a shaped
+  flow can be topped up with discardable filler to exactly that count once it
+  goes quiet. Real packets still leave immediately, so it costs no latency —
+  only the bandwidth the budget already allowed. Each protocol has a vehicle
+  for the filler (OpenVPN's keepalive ping, AnyConnect's `typeKeepalive`, and
+  for the PPP-carried protocols an IPv4 packet to 192.0.2.0/24, which any
+  non-forwarding host drops silently — unlike an LCP Echo or a closed port,
+  which would draw a *reply* and put traffic on the upstream direction the
+  server cannot shape). It is not implemented yet; see [Next](#next).
 - **Upstream is unshaped unless the client is also veepin.** That is inherent to
   the stock-client constraint: the server cannot change what a client it did not
   write puts on the wire. `veepin connect -shape` covers the other direction
@@ -230,9 +261,14 @@ Ordered by value, not by ease:
    plausible vehicle (`SSH_MSG_IGNORE` exists for exactly this, a MASQUE capsule
    type can be unregistered-and-skipped, Nebula's payload is length-delimited),
    so this is mostly plumbing rather than design.
-3. **Coalescing on the stream protocols.** Padding hides each record's size;
-   merging several inner packets into one record would additionally hide how many
-   there were, which is the half of the fingerprint padding cannot touch.
+3. **Count normalisation.** Top a shaped flow up with discardable filler to
+   exactly `ShapeBytes/MTU` packets once it goes quiet, so the packet count stops
+   being recoverable from downstream volume. Costs no latency and no bandwidth
+   the budget did not already permit. The obstacle is mechanical rather than
+   conceptual: the top-up needs a timer, and the stream servers all block in
+   `tun.Read`, so each TUN loop has to read in its own goroutine and select on a
+   tick — or `Shaper` has to take a lock, giving up the single-owner property the
+   rest of the design leans on.
 4. **Padding the handshake itself.** The shaper only sees packets on the data
    path, so the tunnel's *own* handshake — which has a fixed, per-protocol size
    signature of its own — is untouched by this work.

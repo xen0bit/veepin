@@ -43,9 +43,10 @@ type ServerConfig struct {
 	// Users maps a username to its password for MS-CHAPv2 authentication.
 	Users map[string]string
 
-	// Shape enables downstream traffic shaping: the number of bytes of each
-	// inner flow whose packets are padded to the tunnel MTU before shaping
-	// stops for that flow. Zero, the default, disables it.
+	// Shape enables downstream traffic shaping: how much padded output each
+	// inner flow is given before shaping stops for that flow, so it bounds what
+	// shaping costs. A flow gets Shape/MTU padded packets whatever sizes it
+	// carries. Zero, the default, disables it.
 	//
 	// It hides the size pattern of an inner TLS handshake, which otherwise
 	// shows through as the size of the TLS record carrying it (see

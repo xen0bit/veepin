@@ -38,9 +38,10 @@ type ServerConfig struct {
 	Gateway net.IP // the server's inner address (the pool's first host)
 	DNS     []net.IP
 	MTU     int
-	// Shape enables downstream traffic shaping: the number of bytes of each
-	// inner flow whose packets are padded to the tunnel MTU before shaping
-	// stops for that flow. Zero, the default, disables it. See dataplane/shape.go.
+	// Shape enables downstream traffic shaping: how much padded output each
+	// inner flow is given before shaping stops for that flow, so it bounds what
+	// shaping costs. A flow gets Shape/MTU padded packets whatever sizes it
+	// carries. Zero, the default, disables it. See dataplane/shape.go.
 	Shape int
 	// DTLSConn is the UDP socket offering the DTLS data channel. Nil serves TLS
 	// only, which is a complete tunnel — the protocol treats TLS as the fallback

@@ -56,8 +56,10 @@ func (c *fakeClock) now() time.Time          { return c.t }
 func (c *fakeClock) advance(d time.Duration) { c.t = c.t.Add(d) }
 
 func TestShaperPadsYoungFlowThenStops(t *testing.T) {
-	// Budget of 300 over 100-byte packets: three shaped, then free forever.
-	s := NewShaper(ShapeConfig{Bytes: 300})
+	// The budget is charged what each packet *emits*, not what it carries, so a
+	// budget of three MTUs buys exactly three shaped packets whatever size they
+	// are — then the flow is free forever.
+	s := NewShaper(ShapeConfig{Bytes: 3 * testMTU})
 	pkt := v4TCP(t, 100, 1234, 443)
 
 	for i := range 3 {
@@ -68,6 +70,53 @@ func TestShaperPadsYoungFlowThenStops(t *testing.T) {
 	for i := range 5 {
 		if got := s.Target(pkt, testMTU); got != 0 {
 			t.Fatalf("packet %d past budget: Target = %d, want 0", i+3, got)
+		}
+	}
+}
+
+// TestShaperBudgetBoundsEmittedBytes is the property the budget is supposed to
+// have and did not: it must bound what shaping puts on the wire, not what the
+// flow carries. Charging the inner length let a flow of small packets run far
+// past the budget's apparent cost — at 60-octet packets a 16 KiB budget shaped
+// 273 of them and emitted 382 KiB — which made the design's affordability
+// argument untrue for exactly the traffic that needs the most shaping.
+//
+// The bound is the budget plus at most one MTU: a flow with any budget left
+// shapes the next packet in full rather than refusing it, so that a budget
+// below one MTU still buys one shaped packet instead of none.
+func TestShaperBudgetBoundsEmittedBytes(t *testing.T) {
+	const budget = 16384
+	for _, size := range []int{60, 100, 576, testMTU - 1} {
+		s := NewShaper(ShapeConfig{Bytes: budget})
+		pkt := v4TCP(t, size, 1234, 443)
+
+		emitted, shaped := 0, 0
+		for range 1000 {
+			target := s.Target(pkt, testMTU)
+			if target == 0 {
+				break
+			}
+			emitted += target
+			shaped++
+		}
+		if emitted > budget+testMTU {
+			t.Errorf("%d-octet packets: emitted %d bytes for a %d budget", size, emitted, budget)
+		}
+		// The count is the same whatever the packet size, which is what lets it
+		// be normalised rather than merely bounded.
+		if want := (budget + testMTU - 1) / testMTU; shaped != want {
+			t.Errorf("%d-octet packets: %d shaped packets, want %d", size, shaped, want)
+		}
+	}
+}
+
+// A packet already at the MTU is never padded, so it costs the budget nothing
+// it would not have spent anyway — bulk transfer stays free.
+func TestShaperAtMTUPacketIsNeverPadded(t *testing.T) {
+	s := NewShaper(ShapeConfig{Bytes: 1 << 20})
+	for range 10 {
+		if got := s.Target(v4TCP(t, testMTU, 1234, 443), testMTU); got != 0 {
+			t.Fatalf("at-MTU packet: Target = %d, want 0", got)
 		}
 	}
 }

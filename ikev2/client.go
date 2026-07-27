@@ -84,9 +84,9 @@ type Config struct {
 	// this often. Zero uses defaultIKERekeyInterval; negative disables it.
 	IKERekeyInterval time.Duration
 
-	// Shape enables shaping of this client's *upstream* traffic: the number of
-	// bytes of each inner flow whose packets are padded to the tunnel MTU
-	// before shaping stops for that flow. Zero, the default, disables it.
+	// Shape enables shaping of this client's *upstream* traffic: how much padded
+	// output each inner flow is given before shaping stops for that flow, so it
+	// bounds what shaping costs. Zero, the default, disables it.
 	//
 	// The server shapes the downstream direction, which is where the larger
 	// half of an inner TLS handshake sits and which a stock client gets for
