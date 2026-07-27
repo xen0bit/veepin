@@ -137,7 +137,8 @@ func TestInteropShards(t *testing.T) {
 		}
 		names[s.Name] = true
 		for _, r := range s.Name {
-			if !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') && r != '-' {
+			safe := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-'
+			if !safe {
 				t.Errorf("shard name %q contains %q, which is not safe for a job or "+
 					"artifact identifier", s.Name, r)
 			}
