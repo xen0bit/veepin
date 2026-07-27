@@ -5,7 +5,10 @@
 set -eu
 
 BIN="${1:-./bin/nm-veepin-auth-dialog}"
-SVC=org.freedesktop.NetworkManager.veepin
+# Every veepin VPN type is its own service, and all of them name this one helper,
+# so the service passed here is a per-protocol name rather than a bare prefix.
+PREFIX=org.freedesktop.NetworkManager.veepin
+SVC="$PREFIX.ikev2"
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
 # 1. PSK-only, saved secret -> emits psk value, no password.
@@ -25,7 +28,7 @@ echo "ok: eap"
 
 # 3. WireGuard, saved private key -> emits private-key, and never psk/password.
 out=$(printf 'DATA_KEY=protocol\nDATA_VAL=wireguard\nSECRET_KEY=private-key\nSECRET_VAL=mypriv\nDONE\n' \
-        | timeout 5 "$BIN" -s "$SVC")
+        | timeout 5 "$BIN" -s "$PREFIX.wireguard")
 echo "$out" | grep -qx private-key || fail "no private-key key for wireguard"
 echo "$out" | grep -qx mypriv      || fail "no private-key value for wireguard"
 echo "$out" | grep -qx psk      && fail "psk emitted for a wireguard connection"
@@ -37,5 +40,23 @@ if printf 'DONE\n' | timeout 5 "$BIN" -s org.freedesktop.NetworkManager.other; t
     fail "accepted a foreign service"
 fi
 echo "ok: foreign-service refused"
+
+# 5. A name that merely shares the prefix's spelling is NOT one of ours. This is
+#    what stops the prefix check from being "starts with", which would hand every
+#    org.freedesktop.NetworkManager.veepinsomethingelse to this helper.
+if printf 'DONE\n' | timeout 5 "$BIN" -s "${PREFIX}X"; then
+    fail "accepted a service that only shares the prefix spelling"
+fi
+echo "ok: prefix look-alike refused"
+
+# 6. Every shipped protocol's service is accepted. Guards the case where the
+#    prefix check and the generated .name files disagree: NM would run this
+#    helper and it would refuse, so an unsaved secret could never be prompted for.
+for p in ikev2 wireguard openvpn sstp ssh anyconnect nebula masque fortinet l2tp; do
+    printf 'DATA_KEY=gateway\nDATA_VAL=g\nSECRET_KEY=psk\nSECRET_VAL=s\nDONE\n' \
+        | timeout 5 "$BIN" -s "$PREFIX.$p" >/dev/null \
+        || fail "refused its own service $PREFIX.$p"
+done
+echo "ok: all per-protocol services accepted"
 
 echo "PASS: auth-dialog non-interactive paths OK"
