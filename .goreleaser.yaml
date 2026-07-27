@@ -109,11 +109,16 @@ changelog:
   sort: asc
   use: github
   filters:
+    # Each type must also match its scoped form — the commits these are meant to
+    # drop are almost all scoped. "^docs:" missed every "docs(readme): refresh
+    # benchmark table from CI" the living-README workflow commits, so past
+    # releases listed dozens of them under Others; "^test:" likewise missed
+    # "test(interop): ...". Same shape as the groups' regexps below.
     exclude:
-      - "^docs:"
-      - "^test:"
-      - "^chore:"
-      - "^ci:"
+      - '^docs(\(.+\))?!?:'
+      - '^test(\(.+\))?!?:'
+      - '^chore(\(.+\))?!?:'
+      - '^ci(\(.+\))?!?:'
       - "Merge pull request"
       - "Merge branch"
   groups:
