@@ -55,5 +55,10 @@ ordering the tunnelled traffic never asked for.
 - **Capsule mode is the current reality, not a choice** — revisit only when
   `x/net/quic` gains RFC 9221 datagram frames. The earlier framing of capsule mode
   as "the perf lever" was misleading; the real win was the allocation work above.
-- Capsule and HTTP-Datagram parsers read proxied bytes and are fuzzed
-  (`FuzzParseCP`, …).
+- **Every parser that reads peer bytes is fuzzed.** `FuzzReadCapsule`,
+  `FuzzParseAddresses`, `FuzzParseRoutes` and `FuzzDecodeDatagramPayload` cover
+  the tunnel stream; `FuzzParseConnectUDPTarget` covers the request path, which
+  any client can send before it is anyone's peer. The [`http3`](./http3)
+  substrate adds `FuzzConsumeVarint`, `FuzzParseSettings` and
+  `FuzzDecodeFieldSection`. All eight are in the fuzz job's target list, and a
+  test fails if that list and these packages ever disagree.
