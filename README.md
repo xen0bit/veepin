@@ -3,7 +3,7 @@
 A **working userspace VPN in Go** — both server (responder) and client
 (initiator), written from scratch and depending only on the pure-Go
 `golang.org/x` modules (`x/crypto`, and `x/net` for QUIC), no cgo. It speaks
-**nine production protocols, client and server for every one** — IKEv2/ESP,
+**ten production protocols, client and server for every one** — IKEv2/ESP,
 WireGuard, OpenVPN, SSTP, SSH, L2TP/IPsec, AnyConnect, Nebula, MASQUE (CONNECT-IP
 and CONNECT-UDP over HTTP/3) and Fortinet — each verified in Docker against a real
 third-party implementation and against itself.
@@ -32,7 +32,7 @@ Deeper docs live under [`doc/`](doc/): per-protocol [usage](doc/usage/),
 
 ## What it does
 
-veepin speaks nine production protocols — **client and server for every one** —
+veepin speaks ten production protocols — **client and server for every one** —
 plus one deliberately insecure teaching example. Each protocol is verified in
 Docker against a real third-party implementation *and* against itself (see the
 [Interoperability matrix](#interoperability-matrix)). The table is the summary;
@@ -54,7 +54,7 @@ wire detail, caveats and API surface.
 
 Both roles share one registry API (`client.Register`/`client.RegisterServer`),
 so `veepin connect <proto>` and `veepin serve <proto>` dispatch generically and
-adding a protocol changes no caller. A tenth registered protocol, **TOY**,
+adding a protocol changes no caller. An eleventh registered protocol, **TOY**,
 provides **no security** — it is a worked example of the protocol shape, not a
 real protocol; see [The example protocol](#the-example-protocol).
 
@@ -94,7 +94,7 @@ hand-rolling a QUIC stack or vendoring a third-party one — is avoided the same
 way `x/crypto` avoids hand-rolling ChaCha20. (`x/net/http3` is *not* used: its
 public surface exports nothing and it has no CONNECT/datagram/capsule support,
 so the HTTP/3 layer MASQUE needs is built from scratch on the `quic` package —
-see `internal/masque/http3`.) Only MASQUE imports it; the other eight protocols
+see `internal/masque/http3`.) Only MASQUE imports it; the other nine protocols
 still reach no further than `x/crypto`.
 
 The alternative was hand-rolling both. That was rejected: `x/crypto` is the Go
@@ -303,7 +303,7 @@ Android, strongSwan) can also connect to the veepin IKEv2 server directly — se
 
 **TOY provides no security** — its "encryption" is a repeating XOR pad and its
 "authentication" is a hash-table hash, so anyone who can see the traffic can read
-and forge it. It is not one of the nine real protocols; it is the *shape* of a
+and forge it. It is not one of the ten real protocols; it is the *shape* of a
 veepin protocol with the cryptography replaced by placeholders simple enough to
 read in one sitting — a handshake producing a `client.Result`, a `dataplane.Pump`
 data path, and both roles on the client registry. Its interop cells talk to an
