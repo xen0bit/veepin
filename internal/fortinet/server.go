@@ -55,7 +55,19 @@ type ServerConfig struct {
 	// TOTP parameters the second factor. The zero value is what authenticator
 	// apps assume: SHA1, 6 digits, a 30-second step, one step of drift allowed.
 	TOTP otp.Config
+	// Shape is the per-flow downstream shaping budget in bytes; 0 disables it.
+	// See dataplane/shape.go. MTU is the inner size shaping pads towards, and
+	// defaults to defaultTunnelMTU.
+	Shape int
+	MTU   int
 }
+
+// defaultTunnelMTU mirrors client.DefaultTunnelMTU, which this engine does not
+// import — the registry is the public fortinet package's business, not the
+// engine's. It is only the size shaping pads towards, so a caller reporting a
+// different MTU to its clients should set ServerConfig.MTU to match; the public
+// package does.
+const defaultTunnelMTU = 1400
 
 // Server is a running Fortinet SSL VPN server. It satisfies http.Handler for the
 // control and tunnel endpoints, and RunTUN drives the shared TUN's egress.
@@ -64,6 +76,13 @@ type Server struct {
 	tun  io.ReadWriteCloser
 	gate *dataplane.Gate
 	log  *log.Logger
+	// shaper pads outbound PPP frames so the TLS record carrying them says less
+	// about the packet inside (dataplane/shape.go); nil disables shaping.
+	//
+	// One Shaper is safe to share here precisely because RunTUN is the single
+	// goroutine that reads it — the same single-owner rule the pump relies on.
+	// It would not be safe hung off each pppLink, which is why it lives here.
+	shaper *dataplane.Shaper
 
 	mu         sync.Mutex
 	dtls       *udpmux.Mux                // the UDP data channel, once ServeDTLS runs
@@ -93,11 +112,20 @@ func NewServer(cfg ServerConfig, tun io.ReadWriteCloser) (*Server, error) {
 	if gate == nil {
 		gate = dataplane.NewGate(dataplane.AdmissionConfig{})
 	}
+	var shaper *dataplane.Shaper
+	if cfg.Shape > 0 {
+		if cfg.MTU <= 0 {
+			cfg.MTU = defaultTunnelMTU
+		}
+		shaper = dataplane.NewShaper(dataplane.ShapeConfig{Bytes: cfg.Shape})
+		logger.Printf("fortinet: downstream shaping on, %d bytes per flow, MTU %d", cfg.Shape, cfg.MTU)
+	}
 	return &Server{
 		cfg:        cfg,
 		tun:        tun,
 		gate:       gate,
 		log:        logger,
+		shaper:     shaper,
 		pending:    map[string]net.IP{},
 		pending2FA: map[string]*challengeState{},
 		links:      map[netip.Addr]*pppLink{},
@@ -392,7 +420,10 @@ func (s *Server) RunTUN() {
 		}
 		pkt := make([]byte, n)
 		copy(pkt, buf[:n])
-		if err := link.SendPPP(ppp.EncapsulateIP(pkt)); err != nil {
+		// A non-zero target pads the PPP Information field out to it, so the TLS
+		// record this becomes is the same size whatever the packet was.
+		frame := ppp.EncapsulateIPPadded(pkt, s.shaper.Target(pkt, s.cfg.MTU))
+		if err := link.SendPPP(frame); err != nil {
 			s.log.Printf("fortinet: send to %s: %v", dst, err)
 		}
 	}

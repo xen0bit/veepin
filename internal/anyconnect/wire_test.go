@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/xen0bit/veepin/dataplane"
 )
 
 func TestMarshalParseRoundTrip(t *testing.T) {
@@ -181,4 +183,46 @@ func parseIP(t *testing.T, s string) net.IP {
 		t.Fatalf("bad test IP %q", s)
 	}
 	return ip
+}
+
+// TestPadPayload covers the shaping padder: it must extend a packet with zeroes
+// to the target, leave a packet already at or past the target alone, refuse a
+// target the scratch buffer cannot hold, and — the one that matters for a shared
+// TUN — clear the tail so no earlier packet's bytes ride along.
+func TestPadPayload(t *testing.T) {
+	buf := make([]byte, 64)
+	for i := range buf {
+		buf[i] = 0xff // a previous, longer packet
+	}
+
+	pkt := makeIPv4(net.IPv4(10, 11, 0, 1), net.IPv4(10, 11, 0, 2))
+	got := padPayload(buf, pkt, 32)
+	if len(got) != 32 {
+		t.Fatalf("len = %d, want 32", len(got))
+	}
+	if string(got[:len(pkt)]) != string(pkt) {
+		t.Errorf("packet corrupted: % x", got[:len(pkt)])
+	}
+	for i, b := range got[len(pkt):] {
+		if b != 0 {
+			t.Fatalf("filler byte %d = %#x, want 0 — an earlier packet leaked", i+len(pkt), b)
+		}
+	}
+	// The padded payload must still be trimmable back to the original packet,
+	// which is the whole reason the filler is inert.
+	if trimmed := dataplane.TrimToIP(got); string(trimmed) != string(pkt) {
+		t.Errorf("TrimToIP(padded) = % x, want % x", trimmed, pkt)
+	}
+
+	// A target that does not exceed the packet is a no-op, not a truncation.
+	for _, target := range []int{0, len(pkt) - 1, len(pkt)} {
+		if got := padPayload(buf, pkt, target); len(got) != len(pkt) {
+			t.Errorf("target %d: len = %d, want %d", target, len(got), len(pkt))
+		}
+	}
+	// So is a target the scratch cannot hold: dropping a packet would be worse
+	// than sending it unshaped.
+	if got := padPayload(buf, pkt, len(buf)+1); len(got) != len(pkt) {
+		t.Errorf("oversized target: len = %d, want %d", len(got), len(pkt))
+	}
 }

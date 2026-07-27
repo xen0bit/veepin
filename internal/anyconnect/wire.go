@@ -62,6 +62,28 @@ func marshal(typ byte, payload []byte) []byte {
 	return out
 }
 
+// padPayload writes pkt into buf followed by target-len(pkt) zero octets and
+// returns the padded payload, which shares buf's backing array. A target that
+// does not exceed the packet, or that overflows buf, leaves pkt untouched.
+//
+// This is the downstream shaper's padding vehicle (dataplane/shape.go). Both
+// framings length-delimit their payload — CSTP by its 16-bit length field, the
+// DTLS channel by the datagram — so the filler needs nothing negotiated: the
+// receiver delimits the real packet by the inner IP header's Total Length, as
+// every IP stack must, Ethernet having padded short frames since forever.
+//
+// The tail is cleared on every call rather than only when it grows: a server's
+// TUN is shared by every client, so filler left over from an earlier packet
+// would send one client's bytes to another.
+func padPayload(buf, pkt []byte, target int) []byte {
+	if target <= len(pkt) || target > len(buf) {
+		return pkt
+	}
+	copy(buf, pkt)
+	clear(buf[len(pkt):target])
+	return buf[:target]
+}
+
 // parseHeader validates a packet header and reports the type and payload length
 // that follow it.
 func parseHeader(hdr []byte) (typ byte, length int, err error) {

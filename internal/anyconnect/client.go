@@ -12,6 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/xen0bit/veepin/dataplane"
 )
 
 // tunIO is the userspace TUN the data path reads IP from and writes IP to.
@@ -147,7 +149,13 @@ func (c *Client) dtlsReadLoop(ch *dtlsChannel) {
 		}
 		switch typ {
 		case typeData:
-			if _, err := c.tun.Write(payload); err != nil {
+			// Trim the server's downstream shaping padding, if any: the packet
+			// the TUN gets is the one the IP header declares.
+			inner := dataplane.TrimToIP(payload)
+			if inner == nil {
+				continue
+			}
+			if _, err := c.tun.Write(inner); err != nil {
 				c.noteDrop(err)
 			}
 		case typeDPDReq:
@@ -305,7 +313,13 @@ func (c *Client) readLoop() {
 			// Linux answers a write to a down TUN with EIO. Treating that as fatal
 			// tore the whole session down over one early inbound packet, which is
 			// how a slower machine turned a routine race into a dead VPN.
-			if _, err := c.tun.Write(payload); err != nil {
+			//
+			// TrimToIP drops the server's downstream shaping padding, if any.
+			inner := dataplane.TrimToIP(payload)
+			if inner == nil {
+				continue
+			}
+			if _, err := c.tun.Write(inner); err != nil {
 				c.noteDrop(err)
 				continue
 			}

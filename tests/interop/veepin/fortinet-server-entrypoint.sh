@@ -5,7 +5,12 @@
 # matching the container name so the openconnect client can verify it by pinning
 # its fingerprint. -setup-nat brings the TUN up with the gateway address and
 # installs forwarding/NAT so the assigned client addresses are reachable.
+#
+# SHAPE is the per-flow downstream shaping budget in bytes (0, the default, is
+# off). A non-zero value pads the PPP information field past the inner IP packet
+# (RFC 1661 §5.1), which the peer must trim by the IP header's own length.
 set -eu
+SHAPE="${SHAPE:-0}"
 
 [ -c /dev/net/tun ] || { mkdir -p /dev/net; mknod /dev/net/tun c 10 200; }
 
@@ -24,7 +29,7 @@ if [ -n "${TOTP_SECRET:-}" ]; then
     echo "veepin-fortinet-server: requiring a second factor from ${USER}"
 fi
 
-echo "veepin-fortinet-server: starting on 0.0.0.0:${PORT:-443}, pool ${POOL}"
+echo "veepin-fortinet-server: starting on 0.0.0.0:${PORT:-443}, pool ${POOL}, shape ${SHAPE}"
 # shellcheck disable=SC2086 # TOTP_FLAG is deliberately word-split into two args
 exec veepin serve fortinet \
     $TOTP_FLAG \
@@ -34,4 +39,5 @@ exec veepin serve fortinet \
     -cert /certs/cert.pem -key /certs/key.pem \
     -user "$USER" -pass "$PASSWORD" \
     -tun fortinet0 \
+    -shape "$SHAPE" \
     -setup-nat -wan eth0

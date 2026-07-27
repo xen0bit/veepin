@@ -206,6 +206,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			user     = fs.String("user", "", "MS-CHAPv2 username to accept (required)")
 			pass     = fs.String("pass", "", "the user's password (required)")
 			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+			shape    = fs.Int("shape", 0, "per-flow downstream shaping budget in bytes: pads each inner flow's first N bytes to the tunnel MTU, hiding an inner TLS handshake's size pattern (0 = off, 16384 recommended)")
 		)
 		return func() map[string]string {
 			opts := map[string]string{
@@ -217,6 +218,9 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 				sstp.OptServerUser:     *user,
 				sstp.OptServerPassword: *pass,
 				sstp.OptServerTUN:      *tun,
+			}
+			if *shape != 0 {
+				opts[sstp.OptServerShape] = fmt.Sprint(*shape)
 			}
 			if *port != 0 {
 				opts[sstp.OptServerPort] = fmt.Sprint(*port)
@@ -236,6 +240,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			noDTLS   = fs.Bool("no-dtls", false, "serve the TLS tunnel only, leaving the UDP port unbound")
 			totp     = fs.String("totp", "", "base32 TOTP secret; set it to require a second factor from the user")
 			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+			shape    = fs.Int("shape", 0, "per-flow downstream shaping budget in bytes: pads each inner flow's first N bytes to the tunnel MTU, hiding an inner TLS handshake's size pattern (0 = off, 16384 recommended)")
 		)
 		return func() map[string]string {
 			opts := map[string]string{
@@ -248,6 +253,9 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 				fortinet.OptServerPass:   *pass,
 				fortinet.OptServerTOTP:   *totp,
 				fortinet.OptServerTUN:    *tun,
+			}
+			if *shape != 0 {
+				opts[fortinet.OptServerShape] = fmt.Sprint(*shape)
 			}
 			if *port != 0 {
 				opts[fortinet.OptServerPort] = fmt.Sprint(*port)
@@ -381,6 +389,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			user     = fs.String("user", "", "username to accept (required)")
 			pass     = fs.String("pass", "", "the user's password (required)")
 			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+			shape    = fs.Int("shape", 0, "per-flow downstream shaping budget in bytes: pads each inner flow's first N bytes to the tunnel MTU, hiding an inner TLS handshake's size pattern (0 = off, 16384 recommended)")
 		)
 		return func() map[string]string {
 			opts := map[string]string{
@@ -392,6 +401,9 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 				anyconnect.OptServerUser:     *user,
 				anyconnect.OptServerPassword: *pass,
 				anyconnect.OptServerTUN:      *tun,
+			}
+			if *shape != 0 {
+				opts[anyconnect.OptServerShape] = fmt.Sprint(*shape)
 			}
 			if *port != 0 {
 				opts[anyconnect.OptServerPort] = fmt.Sprint(*port)

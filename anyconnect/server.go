@@ -29,6 +29,7 @@ const (
 	OptServerDNS      = "dns"
 	OptServerTUN      = "tun"
 	OptServerNoDTLS   = "no-dtls"
+	OptServerShape    = "shape" // per-flow downstream shaping budget in bytes (0 = off)
 )
 
 const defaultPool = "10.11.0.0/24"
@@ -54,6 +55,18 @@ type ServerConfig struct {
 	TUNName string
 	// NoDTLS serves the TLS data channel only, without binding a UDP socket.
 	NoDTLS bool
+
+	// Shape enables downstream traffic shaping: the number of bytes of each
+	// inner flow whose packets are padded to the tunnel MTU before shaping
+	// stops for that flow. Zero, the default, disables it.
+	//
+	// It hides the size pattern of an inner TLS handshake, which otherwise shows
+	// through as the size of the CSTP packet carrying it (see dataplane/shape.go).
+	// Clients need no support for it: CSTP length-delimits its payload, so the
+	// filler after the inner packet is trimmed by the IP header's Total Length,
+	// as every IP stack must. dataplane.DefaultShapeBytes is a reasonable value.
+	Shape int
+
 	Logger *log.Logger
 }
 
@@ -141,6 +154,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		Gateway:  gateway,
 		DNS:      cfg.DNS,
 		DTLSConn: udpConn,
+		Shape:    cfg.Shape,
 		Logger:   logger,
 	})
 	return &Server{
@@ -214,6 +228,13 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 			return nil, fmt.Errorf("anyconnect: read key: %w", err)
 		}
 		cfg.Key = pem
+	}
+	if v := opts[OptServerShape]; v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("anyconnect: invalid shape %q", v)
+		}
+		cfg.Shape = n
 	}
 	if v := opts[OptServerPort]; v != "" {
 		p, err := strconv.Atoi(v)

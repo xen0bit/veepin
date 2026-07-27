@@ -38,6 +38,10 @@ type ServerConfig struct {
 	Gateway net.IP // the server's inner address (the pool's first host)
 	DNS     []net.IP
 	MTU     int
+	// Shape enables downstream traffic shaping: the number of bytes of each
+	// inner flow whose packets are padded to the tunnel MTU before shaping
+	// stops for that flow. Zero, the default, disables it. See dataplane/shape.go.
+	Shape int
 	// DTLSConn is the UDP socket offering the DTLS data channel. Nil serves TLS
 	// only, which is a complete tunnel — the protocol treats TLS as the fallback
 	// whenever UDP is unavailable.
@@ -62,6 +66,11 @@ type Server struct {
 
 	dtls *dtlsListener
 
+	// shaper decides which outbound packets are padded to the tunnel MTU. It is
+	// unsynchronised, which is safe because tunLoop is the one goroutine that
+	// touches it — every client's downstream traffic leaves through there.
+	shaper *dataplane.Shaper
+
 	done      chan struct{}
 	closeOnce sync.Once
 }
@@ -84,6 +93,10 @@ func NewServer(tun tunIO, cfg ServerConfig) *Server {
 	}
 	if cfg.DTLSConn != nil {
 		s.dtls = newDTLSListener(cfg.DTLSConn, logger)
+	}
+	if cfg.Shape > 0 {
+		s.shaper = dataplane.NewShaper(dataplane.ShapeConfig{Bytes: cfg.Shape})
+		logger.Printf("anyconnect: downstream shaping on, %d bytes per flow", cfg.Shape)
 	}
 	return s
 }
@@ -226,10 +239,7 @@ func (s *Server) serveConnect(conn net.Conn, br *bufio.Reader, cookie string) (*
 		return nil, fmt.Errorf("address pool exhausted: %w", err)
 	}
 
-	mtu := s.cfg.MTU
-	if mtu == 0 {
-		mtu = defaultMTU
-	}
+	mtu := s.mtu()
 	cfg := TunnelConfig{
 		Address: ip,
 		Netmask: net.IP(s.pool.Network().Mask),
@@ -315,9 +325,20 @@ func (s *Server) clientByIP(ip net.IP) *serverClient {
 	return s.clients[binary.BigEndian.Uint32(v4)]
 }
 
+// mtu is the inner MTU offered to clients, and the size shaped packets are
+// padded to.
+func (s *Server) mtu() int {
+	if s.cfg.MTU == 0 {
+		return defaultMTU
+	}
+	return s.cfg.MTU
+}
+
 // tunLoop routes TUN egress to the client owning the inner destination address.
 func (s *Server) tunLoop() {
 	buf := make([]byte, maxPayload)
+	mtu := s.mtu()
+	pad := make([]byte, mtu) // scratch for shaped packets; see padPayload
 	for {
 		n, err := s.tun.Read(buf)
 		if err != nil {
@@ -331,10 +352,11 @@ func (s *Server) tunLoop() {
 		if c == nil {
 			continue
 		}
+		pkt := padPayload(pad, buf[:n], s.shaper.Target(buf[:n], mtu))
 		// Prefer the UDP channel. A send failure on it demotes the channel, not
 		// the client, and the packet goes out over TLS instead.
 		if ch := c.dtls.Load(); ch != nil && ch.up.Load() {
-			if err := ch.send(typeData, buf[:n]); err == nil {
+			if err := ch.send(typeData, pkt); err == nil {
 				continue
 			}
 			if ch.up.Swap(false) {
@@ -342,7 +364,7 @@ func (s *Server) tunLoop() {
 				ch.close()
 			}
 		}
-		_ = c.send(typeData, buf[:n])
+		_ = c.send(typeData, pkt)
 	}
 }
 
@@ -375,7 +397,13 @@ func (c *serverClient) readLoop() {
 			if src := ipv4Src(payload); src == nil || !src.Equal(c.innerIP) {
 				continue
 			}
-			if _, err := c.srv.tun.Write(payload); err != nil {
+			// Trim any padding the peer added past the inner packet; a veepin
+			// client shapes its upstream the same way this server shapes down.
+			inner := dataplane.TrimToIP(payload)
+			if inner == nil {
+				continue
+			}
+			if _, err := c.srv.tun.Write(inner); err != nil {
 				return
 			}
 		case typeDPDReq:
@@ -542,7 +570,9 @@ func (c *serverClient) dtlsReadLoop(ch *dtlsChannel) {
 			if src := ipv4Src(payload); src == nil || !src.Equal(c.innerIP) {
 				continue
 			}
-			_, _ = c.srv.tun.Write(payload)
+			if inner := dataplane.TrimToIP(payload); inner != nil {
+				_, _ = c.srv.tun.Write(inner)
+			}
 		case typeDPDReq:
 			_ = ch.send(typeDPDResp, payload)
 		}
