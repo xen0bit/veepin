@@ -248,17 +248,32 @@ trimming by the IP header. ESP receivers, meanwhile, vary.
 
 Seven receivers are now known good — strongSwan, wireguard-go, `openvpn`, pppd
 (behind sstpc and again behind xl2tpd), and openconnect on both its AnyConnect
-and its Fortinet data path — and each cell proves more than acceptance: the ping *reply* can only be produced by
-a receiver that trimmed the filler by the inner IP header rather than by the
-payload length, so a stack that merely tolerated the padding without stripping
-it would fail the cell rather than pass it quietly.
+and its Fortinet data path.
+
+Be precise about what a passing cell proves, because it is easy to overstate.
+The ping *reply* proves the padded packet was **accepted and the inner packet
+recovered intact end to end** — the peer did not reject the over-long frame,
+truncate it, or mangle it. It does *not* prove the peer's own code did the
+trimming: a receiver that passed all 1400 octets to its TUN would still work,
+because the kernel's IP layer trims to Total Length on ingress anyway (the same
+behaviour that has always been needed for Ethernet's 60-octet minimum frame).
+
+That distinction does not matter operationally — either way the user's traffic
+is correct — but it matters for knowing what has been tested. What the cells
+rule out is the failure that would actually break a deployment: a peer that
+refuses or corrupts a padded packet. What they cannot rule out is a peer whose
+*own* trim is absent but whose kernel covers for it, which would surface only
+on a stack that hands frames somewhere other than an IP interface.
 
 What is still untested is the set of clients that motivated the whole design —
 the Windows, macOS and iOS IPsec stacks, the Windows SSTP and L2TP clients,
 FortiClient, Cisco's own AnyConnect. Every receiver above is genuine independent evidence,
 not veepin talking to itself, but they are all Linux userspace, and no
 containerised vendor stack exists to test against. **Verifying those means a
-manual run against a real device**, which is why the default stays off. If one
+manual run against a real device**, which is why the default stays off.
+[`verifying-shaping.md`](verifying-shaping.md) is the procedure — the server
+invocation per client, and `scripts/verify-shaping.sh` to run on the device — so
+that it is a twenty-minute job rather than an afternoon. If one
 of them rejects padded packets, the honest outcome is that shaping stays opt-in
 for that protocol — not that the padding is quietly weakened to something that
 no longer hides the size pattern.
@@ -268,7 +283,10 @@ no longer hides the size pattern.
 Ordered by value, not by ease:
 
 1. **A manual check against a stock Windows / macOS / iOS client**, which is what
-   would justify changing the default.
+   would justify changing the default. This is now a scripted procedure rather
+   than an open question: see [`verifying-shaping.md`](verifying-shaping.md). It
+   is the highest-value item on this list by a distance, because until it is done
+   the feature is off and everything else here is dormant.
 2. **The protocols still unshaped**: SSH, MASQUE and Nebula. Each has a
    plausible vehicle (`SSH_MSG_IGNORE` exists for exactly this, a MASQUE capsule
    type can be unregistered-and-skipped, Nebula's payload is length-delimited),
@@ -291,9 +309,28 @@ Ordered by value, not by ease:
    most latency-sensitive moment and the one the whole feature exists to protect.
    It should be a separate opt-in knob if it is built at all, not a change to
    what `-shape` means.
-4. **Padding the handshake itself.** The shaper only sees packets on the data
-   path, so the tunnel's *own* handshake — which has a fixed, per-protocol size
-   signature of its own — is untouched by this work.
+4. ~~**Padding the handshake itself.**~~ Investigated and dropped, for two
+   independent reasons.
+
+   It is *impossible* for WireGuard: handshake messages are exact-size checked
+   (`internal/wireguard/wire/wire.go`, and identically in wireguard-go), so a
+   padded initiation or response is dropped rather than tolerated. Unlike the
+   data path, there is no self-delimiting inner packet to hide behind.
+
+   And where it is possible it buys almost nothing, because **a censor
+   identifies a handshake by structure, not by size**: WireGuard's type byte and
+   fixed length, IKEv2's header version and exchange type on udp/500, OpenVPN's
+   opcode byte — the primary feature in the USENIX '22 work — and the
+   distinctive HTTP request lines of the TLS-carried protocols. Padding a size
+   does not touch any of those. Worse, every one of them is emitted by the
+   *stock client*, so they cannot be changed at all without giving up the
+   constraint that makes this whole design worth having. See
+   [`stock-client-constraint`](#what-this-does-not-defend-against).
+
+   The general lesson, which is why it is recorded rather than deleted: size
+   shaping helps where a protocol is *already* structurally indistinguishable
+   and only its sizes give it away. That describes obfs4 and Shadowsocks. It
+   does not describe a VPN speaking a published protocol to a stock client.
 
 ## Interaction with parallelisation
 
