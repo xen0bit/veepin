@@ -11,13 +11,22 @@
  * Go. It is built separately (see ../Makefile) and never linked into any Go
  * binary, so the core veepin binaries stay CGO-free.
  *
- * A protocol chooser at the top switches between one field set per protocol. The
- * field sets are data-driven: each protocol is a row in the `protocols` table
- * below listing its fields (label, vpn key, and whether the key is a required
- * data item, an optional data item, or a secret). Adding or changing a protocol
- * is a table edit here — the widget building, validation and (de)serialisation
- * are generic. The keys must match nm/internal/nmconfig's requireKeys /
- * secretMissing switches (and each protocol package's Opt* constants).
+ * ONE PROTOCOL PER BUILD. This file is compiled once per protocol, with
+ * -DVEEPIN_PROTOCOL="ikev2" and so on, producing one .so per protocol; each is
+ * named by its own .name descriptor so every veepin protocol is a separate entry
+ * in the OS's "Add VPN" list. That is forced by libnm, not chosen: it refuses to
+ * load a plugin whose reported service does not match the .name file's, and
+ * nm_vpn_editor_plugin_factory() takes no service argument, so a shared library
+ * can answer to exactly one service name. The alternative — one entry that opens
+ * a second dialog to pick the protocol — is what this replaced.
+ *
+ * The field sets are data-driven: each protocol is a row in the `protocols`
+ * table below listing its fields (label, vpn key, and whether the key is a
+ * required data item, an optional data item, or a secret). Adding or changing a
+ * protocol is a table edit here plus a line in the Makefile's VEEPIN_PROTOCOLS —
+ * the widget building, validation and (de)serialisation are generic. The keys
+ * must match nm/internal/nmconfig's requireKeys / secretMissing switches (and
+ * each protocol package's Opt* constants).
  */
 
 #include <gtk/gtk.h>
@@ -25,7 +34,14 @@
 #include <libnm/nm-vpn-editor-plugin.h>
 #include <libnm/nm-vpn-editor.h>
 
-#define VEEPIN_SERVICE "org.freedesktop.NetworkManager.veepin"
+#ifndef VEEPIN_PROTOCOL
+#error "VEEPIN_PROTOCOL must be defined, e.g. -DVEEPIN_PROTOCOL=\\\"ikev2\\\" (see ../Makefile)"
+#endif
+
+/* The D-Bus service this build backs. It must match, byte for byte, the
+ * service= of the .name descriptor that points at this .so — libnm checks. */
+#define VEEPIN_SERVICE_BASE "org.freedesktop.NetworkManager.veepin"
+#define VEEPIN_SERVICE      VEEPIN_SERVICE_BASE "." VEEPIN_PROTOCOL
 
 /* Data / secret keys (kept in sync with nm/internal/nmconfig). */
 #define KEY_PROTOCOL      "protocol"
@@ -83,8 +99,8 @@ typedef struct {
 } FieldDef;
 
 typedef struct {
-    const char     *id;    /* vpn.data "protocol" value */
-    const char     *label; /* combo display text */
+    const char     *id;    /* vpn.data "protocol" value, and the service suffix */
+    const char     *label; /* display name, e.g. "IKEv2" */
     const FieldDef *fields;
     guint           n_fields;
 } ProtocolDef;
@@ -190,6 +206,21 @@ static const ProtocolDef protocols[] = {
 
 #define N_PROTOCOLS G_N_ELEMENTS(protocols)
 
+/* this_protocol returns the row this .so was built for, or NULL if
+ * VEEPIN_PROTOCOL names a protocol with no table above. The mismatch is
+ * possible only by editing the Makefile's list without adding the table, so it
+ * is reported through the factory's GError rather than aborting a GUI process;
+ * editor_smoketest turns it into a build failure in CI. */
+static const ProtocolDef *
+this_protocol(void)
+{
+    for (guint i = 0; i < N_PROTOCOLS; i++) {
+        if (g_strcmp0(VEEPIN_PROTOCOL, protocols[i].id) == 0)
+            return &protocols[i];
+    }
+    return NULL;
+}
+
 /*****************************************************************************/
 /* Editor widget                                                             */
 /*****************************************************************************/
@@ -198,12 +229,9 @@ typedef struct {
     GObject parent;
     GtkWidget *widget; /* top-level container returned by get_widget */
 
-    GtkWidget *protocol; /* combo selecting the protocol */
-
-    /* One field-set box per protocol, shown one at a time, and the entry
-     * widgets inside it — entries[i][j] is field j of protocols[i]. */
-    GtkWidget  *boxes[N_PROTOCOLS];
-    GtkWidget **entries[N_PROTOCOLS];
+    /* The entry widgets of this protocol's field set — entries[j] is field j of
+     * this_protocol()->fields. */
+    GtkWidget **entries;
 
     /* Common. */
     GtkWidget *full_tunnel;
@@ -240,47 +268,18 @@ field_changed(GtkWidget *w, gpointer user_data)
     g_signal_emit_by_name(NM_VPN_EDITOR(user_data), "changed");
 }
 
-/* selected_index returns the index into protocols[] of the chosen protocol,
- * defaulting to 0 (ikev2, which is also nmconfig's default). */
-static guint
-selected_index(VeepinEditor *self)
-{
-    const char *id = gtk_combo_box_get_active_id(GTK_COMBO_BOX(self->protocol));
-    if (id) {
-        for (guint i = 0; i < N_PROTOCOLS; i++)
-            if (g_strcmp0(id, protocols[i].id) == 0)
-                return i;
-    }
-    return 0;
-}
-
-/* first_secret_key returns the key of a protocol's first secret field, or NULL
- * if it has none — used to reflect the stored save-secrets flag in the checkbox. */
+/* first_secret_key returns the key of this protocol's first secret field, or
+ * NULL if it has none — used to reflect the stored save-secrets flag in the
+ * checkbox. */
 static const char *
-first_secret_key(guint idx)
+first_secret_key(void)
 {
-    const ProtocolDef *p = &protocols[idx];
-    for (guint j = 0; j < p->n_fields; j++)
+    const ProtocolDef *p = this_protocol();
+    for (guint j = 0; j < p->n_fields; j++) {
         if (p->fields[j].kind == F_SECRET)
             return p->fields[j].key;
+    }
     return NULL;
-}
-
-/* update_visibility shows only the selected protocol's field box. */
-static void
-update_visibility(VeepinEditor *self)
-{
-    guint sel = selected_index(self);
-    for (guint i = 0; i < N_PROTOCOLS; i++)
-        gtk_widget_set_visible(self->boxes[i], i == sel);
-}
-
-static void
-protocol_changed(GtkWidget *w, gpointer user_data)
-{
-    VeepinEditor *self = VEEPIN_EDITOR(user_data);
-    update_visibility(self);
-    field_changed(w, user_data);
 }
 
 /* require reads an entry and fails with a missing-property error if it is empty.
@@ -321,13 +320,16 @@ add_secret(NMSettingVpn *vpn, GtkWidget *entry, const char *key, NMSettingSecret
 static gboolean
 update_connection(NMVpnEditor *editor, NMConnection *connection, GError **error)
 {
-    VeepinEditor *self = VEEPIN_EDITOR(editor);
-    guint sel = selected_index(self);
-    const ProtocolDef *p = &protocols[sel];
-    NMSettingVpn *vpn;
+    VeepinEditor      *self = VEEPIN_EDITOR(editor);
+    const ProtocolDef *p    = this_protocol();
+    NMSettingVpn      *vpn;
 
     vpn = NM_SETTING_VPN(nm_setting_vpn_new());
     g_object_set(vpn, NM_SETTING_VPN_SERVICE_TYPE, VEEPIN_SERVICE, NULL);
+    /* The service name already identifies the protocol, but the key is written
+     * anyway: nmconfig on the Go side reads it, which keeps the service's
+     * parsing identical however the connection was created (GUI, nmcli, or a
+     * hand-written keyfile). */
     nm_setting_vpn_add_data_item(vpn, KEY_PROTOCOL, p->id);
 
     /* Secret storage: NONE means "the system saves this secret with the
@@ -340,7 +342,7 @@ update_connection(NMVpnEditor *editor, NMConnection *connection, GError **error)
 
     for (guint j = 0; j < p->n_fields; j++) {
         const FieldDef *f = &p->fields[j];
-        GtkWidget *entry = self->entries[sel][j];
+        GtkWidget *entry = self->entries[j];
         switch (f->kind) {
         case F_REQUIRED:
             if (!require(vpn, entry, f->key, f->label, error)) {
@@ -425,41 +427,29 @@ connect_changed(VeepinEditor *self, GtkWidget *entry)
 static void
 build_ui(VeepinEditor *self, NMConnection *connection)
 {
-    NMSettingVpn *vpn = connection ? nm_connection_get_setting_vpn(connection) : NULL;
-    GtkWidget *box;
-    GtkGrid *top;
+    NMSettingVpn      *vpn = connection ? nm_connection_get_setting_vpn(connection) : NULL;
+    const ProtocolDef *p   = this_protocol();
+    GtkWidget         *box;
 
     box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
     gtk_container_set_border_width(GTK_CONTAINER(box), 12);
 
-    /* Protocol chooser. */
-    top = new_grid();
-    self->protocol = gtk_combo_box_text_new();
-    for (guint i = 0; i < N_PROTOCOLS; i++)
-        gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(self->protocol),
-                                  protocols[i].id, protocols[i].label);
-    add_row(top, 0, "Protocol", self->protocol);
-    gtk_box_pack_start(GTK_BOX(box), GTK_WIDGET(top), FALSE, FALSE, 0);
-
-    /* One field box per protocol, built and pre-filled from its table. */
-    for (guint i = 0; i < N_PROTOCOLS; i++) {
-        const ProtocolDef *p = &protocols[i];
-        GtkGrid *grid = new_grid();
-        self->entries[i] = g_new0(GtkWidget *, p->n_fields);
-        for (guint j = 0; j < p->n_fields; j++) {
-            const FieldDef *f = &p->fields[j];
-            GtkWidget *e = make_entry(f->kind == F_SECRET);
-            add_row(grid, (int) j, f->label, e);
-            self->entries[i][j] = e;
-            connect_changed(self, e);
-            if (f->kind == F_SECRET)
-                set_entry_from_secret(e, vpn, f->key);
-            else
-                set_entry_from_data(e, vpn, f->key);
-        }
-        self->boxes[i] = GTK_WIDGET(grid);
-        gtk_box_pack_start(GTK_BOX(box), self->boxes[i], FALSE, FALSE, 0);
+    /* This protocol's field set, built and pre-filled from its table. There is
+     * no protocol chooser: the user already chose by picking this VPN type. */
+    GtkGrid *grid = new_grid();
+    self->entries = g_new0(GtkWidget *, p->n_fields);
+    for (guint j = 0; j < p->n_fields; j++) {
+        const FieldDef *f = &p->fields[j];
+        GtkWidget *e = make_entry(f->kind == F_SECRET);
+        add_row(grid, (int) j, f->label, e);
+        self->entries[j] = e;
+        connect_changed(self, e);
+        if (f->kind == F_SECRET)
+            set_entry_from_secret(e, vpn, f->key);
+        else
+            set_entry_from_data(e, vpn, f->key);
     }
+    gtk_box_pack_start(GTK_BOX(box), GTK_WIDGET(grid), FALSE, FALSE, 0);
 
     /* Common fields. */
     GtkGrid *common = new_grid();
@@ -474,20 +464,15 @@ build_ui(VeepinEditor *self, NMConnection *connection)
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(self->save_secrets), TRUE);
     gtk_box_pack_start(GTK_BOX(box), self->save_secrets, FALSE, FALSE, 0);
 
-    /* Select the connection's protocol (default ikev2) and pre-fill the commons. */
-    const char *proto = vpn ? nm_setting_vpn_get_data_item(vpn, KEY_PROTOCOL) : NULL;
-    gtk_combo_box_set_active_id(GTK_COMBO_BOX(self->protocol),
-                                proto ? proto : protocols[0].id);
-
     set_entry_from_data(self->mtu, vpn, KEY_MTU);
     if (vpn) {
         const char *ft = nm_setting_vpn_get_data_item(vpn, KEY_FULL_TUNNEL);
         if (ft)
             gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(self->full_tunnel),
                                          g_strcmp0(ft, "no") != 0);
-        /* Reflect the stored secret flag (from the selected protocol's first
-         * secret) in the checkbox; protocols with no secret keep the default. */
-        const char *skey = first_secret_key(selected_index(self));
+        /* Reflect the stored secret flag (from this protocol's first secret) in
+         * the checkbox; protocols with no secret keep the default. */
+        const char *skey = first_secret_key();
         if (skey) {
             NMSettingSecretFlags fl = NM_SETTING_SECRET_FLAG_NONE;
             nm_setting_get_secret_flags(NM_SETTING(vpn), skey, &fl, NULL);
@@ -497,15 +482,12 @@ build_ui(VeepinEditor *self, NMConnection *connection)
     }
 
     /* Re-validate on any edit. */
-    g_signal_connect(self->protocol, "changed", G_CALLBACK(protocol_changed), self);
     connect_changed(self, self->mtu);
     g_signal_connect(self->full_tunnel, "toggled", G_CALLBACK(field_changed), self);
     g_signal_connect(self->save_secrets, "toggled", G_CALLBACK(field_changed), self);
 
     self->widget = g_object_ref_sink(box);
     gtk_widget_show_all(self->widget);
-    /* Show only the selected protocol's fields (after show_all). */
-    update_visibility(self);
 }
 
 static void
@@ -518,8 +500,7 @@ static void
 veepin_editor_dispose(GObject *object)
 {
     VeepinEditor *self = VEEPIN_EDITOR(object);
-    for (guint i = 0; i < N_PROTOCOLS; i++)
-        g_clear_pointer(&self->entries[i], g_free); /* frees the array, not the widgets */
+    g_clear_pointer(&self->entries, g_free); /* frees the array, not the widgets */
     g_clear_object(&self->widget);
     G_OBJECT_CLASS(veepin_editor_parent_class)->dispose(object);
 }
@@ -589,15 +570,18 @@ get_capabilities(NMVpnEditorPlugin *plugin)
 static void
 plugin_get_property(GObject *object, guint prop_id, GValue *value, GParamSpec *pspec)
 {
+    const ProtocolDef *p = this_protocol();
+
     (void) object;
     switch (prop_id) {
     case PROP_NAME:
-        g_value_set_string(value, "veepin VPN");
+        /* Kept identical to the .name descriptor's name=, because which of the
+         * two a given GUI displays is not something the plugin can observe. */
+        g_value_take_string(value, g_strdup_printf("veepin %s", p->label));
         break;
     case PROP_DESC:
-        g_value_set_string(value,
-                           "Connect via the veepin VPN backend (IKEv2, WireGuard, OpenVPN, "
-                           "SSTP, SSH, AnyConnect, Nebula, MASQUE, Fortinet, L2TP/IPsec).");
+        g_value_take_string(value,
+                            g_strdup_printf("Connect to a veepin server over %s.", p->label));
         break;
     case PROP_SERVICE:
         g_value_set_string(value, VEEPIN_SERVICE);
@@ -638,6 +622,12 @@ veepin_editor_plugin_interface_init(NMVpnEditorPluginInterface *iface)
 G_MODULE_EXPORT NMVpnEditorPlugin *
 nm_vpn_editor_plugin_factory(GError **error)
 {
-    (void) error;
+    if (!this_protocol()) {
+        g_set_error(error, NM_CONNECTION_ERROR, NM_CONNECTION_ERROR_FAILED,
+                    "veepin: built for protocol \"%s\", which has no field table "
+                    "in veepin-editor.c",
+                    VEEPIN_PROTOCOL);
+        return NULL;
+    }
     return g_object_new(VEEPIN_TYPE_EDITOR_PLUGIN, NULL);
 }

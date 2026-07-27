@@ -72,19 +72,56 @@ func settings(data, secrets map[string]string) nmconfig.Settings {
 	}
 }
 
+// testBusName is one protocol's well-known name — the shape NetworkManager
+// actually passes as --bus-name, rather than the bare prefix.
+var testBusName = BusNameFor("ikev2")
+
 func exportTestPlugin(t *testing.T, server *dbus.Conn) *Plugin {
 	t.Helper()
-	p := New(server, log.New(io.Discard, "", 0))
+	p := New(server, testBusName, log.New(io.Discard, "", 0))
 	if err := p.Export(); err != nil {
 		t.Fatalf("export: %v", err)
 	}
 	return p
 }
 
+// TestExportClaimsTheRequestedName guards the flag NetworkManager relies on to
+// tell one binary which VPN type it was spawned for: claiming a fixed name
+// instead would leave NM waiting for a service that never appears on every
+// protocol but one.
+func TestExportClaimsTheRequestedName(t *testing.T) {
+	server, caller := newTestBus(t)
+	p := New(server, BusNameFor("wireguard"), log.New(io.Discard, "", 0))
+	if err := p.Export(); err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if got := p.BusName(); got != "org.freedesktop.NetworkManager.veepin.wireguard" {
+		t.Errorf("BusName() = %q", got)
+	}
+
+	var has bool
+	if err := caller.BusObject().Call("org.freedesktop.DBus.NameHasOwner", 0,
+		p.BusName()).Store(&has); err != nil {
+		t.Fatalf("NameHasOwner: %v", err)
+	}
+	if !has {
+		t.Errorf("%s was not claimed on the bus", p.BusName())
+	}
+}
+
+// TestNewDefaultsToThePrefix documents the fallback: a hand-run process with no
+// --bus-name owns the bare prefix, which backs no VPN type, rather than
+// silently taking a protocol's name.
+func TestNewDefaultsToThePrefix(t *testing.T) {
+	if got := New(nil, "", log.New(io.Discard, "", 0)).BusName(); got != BusNamePrefix {
+		t.Errorf("BusName() = %q, want %q", got, BusNamePrefix)
+	}
+}
+
 func TestNeedSecretsOverBus(t *testing.T) {
 	server, caller := newTestBus(t)
 	exportTestPlugin(t, server)
-	obj := caller.Object(BusName, ObjectPath)
+	obj := caller.Object(testBusName, ObjectPath)
 
 	// PSK missing -> NM must supply "vpn" secrets.
 	var name string
@@ -113,7 +150,7 @@ func TestNeedSecretsOverBus(t *testing.T) {
 func TestConnectBadSettingsReturnsError(t *testing.T) {
 	server, caller := newTestBus(t)
 	exportTestPlugin(t, server)
-	obj := caller.Object(BusName, ObjectPath)
+	obj := caller.Object(testBusName, ObjectPath)
 
 	// Missing gateway -> Connect should fail synchronously.
 	call := obj.Call(Iface+".Connect", 0,
@@ -129,7 +166,7 @@ func TestConnectBadSettingsReturnsError(t *testing.T) {
 func TestConnectHandshakeFailureEmitsSignals(t *testing.T) {
 	server, caller := newTestBus(t)
 	exportTestPlugin(t, server)
-	obj := caller.Object(BusName, ObjectPath)
+	obj := caller.Object(testBusName, ObjectPath)
 
 	if err := caller.AddMatchSignal(
 		dbus.WithMatchInterface(Iface),
@@ -204,7 +241,7 @@ func TestDisconnectDuringConnect(t *testing.T) {
 
 	server, caller := newTestBus(t)
 	p := exportTestPlugin(t, server)
-	obj := caller.Object(BusName, ObjectPath)
+	obj := caller.Object(testBusName, ObjectPath)
 
 	call := obj.Call(Iface+".Connect", 0, settings(
 		map[string]string{nmconfig.KeyGateway: "127.0.0.1", nmconfig.KeyPort: port, nmconfig.KeyLocalID: "client.example"},
@@ -239,7 +276,7 @@ func TestDisconnectDuringConnect(t *testing.T) {
 func TestStatePropertyReadable(t *testing.T) {
 	server, caller := newTestBus(t)
 	exportTestPlugin(t, server)
-	obj := caller.Object(BusName, ObjectPath)
+	obj := caller.Object(testBusName, ObjectPath)
 
 	v, err := obj.GetProperty(Iface + ".State")
 	if err != nil {

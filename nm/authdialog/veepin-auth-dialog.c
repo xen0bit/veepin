@@ -22,12 +22,30 @@
 #include <time.h>
 #include <unistd.h>
 
-#define VEEPIN_SERVICE "org.freedesktop.NetworkManager.veepin"
+/* Every veepin VPN type is its own D-Bus service —
+ * org.freedesktop.NetworkManager.veepin.<protocol>, one per entry in the OS's
+ * "Add VPN" list — but they all name this one helper as their auth-dialog, so
+ * the check below is on the prefix. Which protocol it is comes from the
+ * connection's own "protocol" data item, read from stdin below, not from the
+ * service name: an nmcli- or keyfile-created connection sets that key too. */
+#define VEEPIN_SERVICE_PREFIX "org.freedesktop.NetworkManager.veepin"
 #define KEY_PROTOCOL    "protocol"
 #define KEY_PSK         "psk"
 #define KEY_PASSWORD    "password"
 #define KEY_USER        "user"
 #define KEY_PRIVATE_KEY "private-key"
+
+/* is_veepin_service accepts the service names this helper answers for: the bare
+ * prefix, or one protocol's "<prefix>.<protocol>". A name that merely starts
+ * with the same letters (…veepinX) belongs to someone else and is refused. */
+static gboolean
+is_veepin_service(const char *service)
+{
+    if (!g_str_has_prefix(service, VEEPIN_SERVICE_PREFIX))
+        return FALSE;
+    const char *rest = service + strlen(VEEPIN_SERVICE_PREFIX);
+    return *rest == '\0' || (*rest == '.' && rest[1] != '\0');
+}
 
 /* True if NM must (re-)prompt for the named secret. */
 static gboolean
@@ -102,7 +120,7 @@ main(int argc, char **argv)
     }
     g_option_context_free(ctx);
 
-    if (opt_service && g_strcmp0(opt_service, VEEPIN_SERVICE) != 0) {
+    if (opt_service && !is_veepin_service(opt_service)) {
         g_printerr("veepin-auth-dialog: not my service (%s)\n", opt_service);
         return 1;
     }

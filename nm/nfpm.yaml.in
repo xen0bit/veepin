@@ -12,10 +12,11 @@ section: net
 priority: optional
 maintainer: Remy <21974988+xen0bit@users.noreply.github.com>
 description: |
-  NetworkManager VPN plugin for the veepin IKEv2 VPN.
-  Adds an "IKEv2 (veepin)" VPN type to NetworkManager: a D-Bus service that
-  drives the veepin VPN client plus a GTK editor for the connection form.
-  No dependency on strongSwan.
+  NetworkManager VPN plugins for veepin.
+  Adds one VPN type per veepin protocol — IKEv2, WireGuard, OpenVPN, SSTP, SSH,
+  AnyConnect, Nebula, MASQUE, Fortinet and L2TP/IPsec — so each appears directly
+  in the "Add VPN" list, backed by a shared D-Bus service that drives the veepin
+  client plus a GTK editor per protocol. No dependency on strongSwan.
 vendor: veepin
 homepage: https://github.com/xen0bit/veepin
 license: MIT
@@ -38,6 +39,9 @@ scripts:
   postinstall: scripts/postinstall.sh
   postremove: scripts/postremove.sh
 
+# contents MUST stay the last key in this file: `make packages` appends one
+# editor .so and one .name descriptor entry per protocol here, generated from the
+# Makefile's VEEPIN_PROTOCOLS so the package tracks the list automatically.
 contents:
   - src: bin/nm-veepin-service
     dst: /usr/lib/NetworkManager/nm-veepin-service
@@ -47,14 +51,6 @@ contents:
     dst: /usr/lib/NetworkManager/nm-veepin-auth-dialog
     file_info:
       mode: 0755
-  - src: bin/libnm-vpn-plugin-veepin.so
-    dst: /usr/lib/@MULTIARCH@/NetworkManager/libnm-vpn-plugin-veepin.so
-    file_info:
-      mode: 0644
-  - src: data/nm-veepin-service.name
-    dst: /usr/lib/NetworkManager/VPN/nm-veepin-service.name
-    file_info:
-      mode: 0644
   - src: data/nm-veepin-service.conf
     dst: /usr/share/dbus-1/system.d/nm-veepin-service.conf
     file_info:

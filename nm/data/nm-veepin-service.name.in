@@ -1,0 +1,33 @@
+# Template for one veepin VPN type's NetworkManager descriptor.
+#
+# The Makefile expands it once per protocol in VEEPIN_PROTOCOLS, producing
+# nm-veepin-<protocol>-service.name. NetworkManager builds the OS "Add VPN" list
+# from one entry per descriptor it finds in /usr/lib/NetworkManager/VPN, so one
+# file per protocol is what puts every veepin protocol in that list directly,
+# instead of a single "veepin" entry that opens a second dialog to choose one.
+#
+# Three fields must agree with things outside this file, and CI checks each:
+#   service=  must equal what libnm-vpn-plugin-veepin-<protocol>.so reports, or
+#             libnm refuses to load it and the type silently vanishes from the
+#             GUI (editor_smoketest's check_descriptor).
+#   name=     is what the GUI lists. It is kept identical to the plugin's own
+#             name property, because which of the two a given GUI reads is not
+#             something the plugin can observe.
+#   program=  is one binary for every protocol: NetworkManager passes the
+#             service= above as --bus-name, and the service owns that name.
+[VPN Connection]
+name=veepin @LABEL@
+service=org.freedesktop.NetworkManager.veepin.@PROTOCOL@
+program=/usr/lib/NetworkManager/nm-veepin-service
+supports-multiple-connections=false
+
+[libnm]
+plugin=libnm-vpn-plugin-veepin-@PROTOCOL@.so
+
+[GNOME]
+auth-dialog=/usr/lib/NetworkManager/nm-veepin-auth-dialog
+properties=libnm-vpn-plugin-veepin-@PROTOCOL@.so
+# false: our auth-dialog implements only the classic GTK prompt (it does not
+# honour --external-ui-mode), so we must not advertise external-UI-mode or a
+# GNOME-Shell secret request would get no usable UI description back.
+supports-external-ui-mode=false

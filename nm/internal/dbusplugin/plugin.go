@@ -23,10 +23,21 @@ import (
 
 // D-Bus identifiers for the plugin.
 const (
-	BusName    = "org.freedesktop.NetworkManager.veepin"
-	ObjectPath = dbus.ObjectPath("/org/freedesktop/NetworkManager/VPN/Plugin")
-	Iface      = "org.freedesktop.NetworkManager.VPN.Plugin"
+	// BusNamePrefix is the root of every name this service may own. veepin
+	// registers one service per protocol — BusNamePrefix + "." + protocol — so
+	// that each is a separate VPN type in the OS's "Add VPN" list; see
+	// data/nm-veepin-service.name.in. The D-Bus policy grants root own_prefix
+	// over exactly this prefix.
+	BusNamePrefix = "org.freedesktop.NetworkManager.veepin"
+	ObjectPath    = dbus.ObjectPath("/org/freedesktop/NetworkManager/VPN/Plugin")
+	Iface         = "org.freedesktop.NetworkManager.VPN.Plugin"
 )
+
+// BusNameFor is the well-known name serving one protocol's VPN type. It must
+// match the service= of that protocol's .name descriptor byte for byte:
+// NetworkManager spawns the program named there and waits for this name to
+// appear on the bus.
+func BusNameFor(protocol string) string { return BusNamePrefix + "." + protocol }
 
 // NM_VPN_SERVICE_STATE (nm-vpn-dbus-interface.h). Emitted via StateChanged and
 // exposed as the State property.
@@ -50,11 +61,12 @@ const (
 // Plugin holds the running plugin state: the bus connection, the current VPN
 // session (if any), and the exposed State property.
 type Plugin struct {
-	conn   *dbus.Conn
-	log    *log.Logger
-	props  *prop.Properties
-	quit   chan struct{}
-	closer sync.Once
+	conn    *dbus.Conn
+	busName string
+	log     *log.Logger
+	props   *prop.Properties
+	quit    chan struct{}
+	closer  sync.Once
 
 	mu         sync.Mutex
 	state      uint32
@@ -62,13 +74,29 @@ type Plugin struct {
 	dialCancel context.CancelFunc // cancels an in-flight handshake
 }
 
-// New creates a Plugin bound to conn.
-func New(conn *dbus.Conn, logger *log.Logger) *Plugin {
+// New creates a Plugin bound to conn, claiming busName when Exported. busName
+// is the service NetworkManager spawned this process for — it passes it as
+// --bus-name — so one binary serves every per-protocol VPN type. An empty
+// busName falls back to the bare prefix, which owns no VPN type but keeps a
+// hand-run process from claiming a protocol's name by accident.
+func New(conn *dbus.Conn, busName string, logger *log.Logger) *Plugin {
 	if logger == nil {
 		logger = log.New(log.Writer(), "nm-veepin: ", log.LstdFlags)
 	}
-	return &Plugin{conn: conn, log: logger, quit: make(chan struct{}), state: StateInit}
+	if busName == "" {
+		busName = BusNamePrefix
+	}
+	return &Plugin{
+		conn:    conn,
+		busName: busName,
+		log:     logger,
+		quit:    make(chan struct{}),
+		state:   StateInit,
+	}
 }
+
+// BusName is the well-known name this plugin claims.
+func (p *Plugin) BusName() string { return p.busName }
 
 // Export claims the well-known name and exports the plugin object, its State
 // property, and introspection data. Returns an error if the name is taken.
@@ -101,14 +129,14 @@ func (p *Plugin) Export() error {
 		return err
 	}
 
-	reply, err := p.conn.RequestName(BusName, dbus.NameFlagDoNotQueue)
+	reply, err := p.conn.RequestName(p.busName, dbus.NameFlagDoNotQueue)
 	if err != nil {
 		return err
 	}
 	if reply != dbus.RequestNameReplyPrimaryOwner {
-		return &nameTakenError{BusName}
+		return &nameTakenError{p.busName}
 	}
-	p.log.Printf("exported %s on the bus", BusName)
+	p.log.Printf("exported %s on the bus", p.busName)
 	return nil
 }
 

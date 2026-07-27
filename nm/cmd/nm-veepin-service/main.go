@@ -34,9 +34,14 @@ import (
 )
 
 func main() {
-	// NetworkManager passes --bus-name; accepted for compatibility, unused (the
-	// well-known name is fixed).
-	_ = flag.String("bus-name", dbusplugin.BusName, "D-Bus name (compat, ignored)")
+	// NetworkManager passes --bus-name, set to the service= of whichever .name
+	// descriptor it matched. veepin ships one descriptor per protocol so that
+	// each is its own entry in the OS's "Add VPN" list, and they all name this
+	// same program — so the flag is what tells this process which VPN type it
+	// was spawned for. It must be honoured: claiming the wrong name leaves NM
+	// waiting for a service that never appears.
+	busName := flag.String("bus-name", dbusplugin.BusNamePrefix,
+		"D-Bus name to claim (NetworkManager sets this per VPN type)")
 	persist := flag.Bool("persist", false, "keep running after disconnect (unused; NM re-spawns)")
 	session := flag.Bool("session", false, "connect to the session bus instead of the system bus (debug only)")
 	flag.Parse()
@@ -54,7 +59,7 @@ func main() {
 	}
 	defer conn.Close()
 
-	plugin := dbusplugin.New(conn, logger)
+	plugin := dbusplugin.New(conn, *busName, logger)
 	if err := plugin.Export(); err != nil {
 		logger.Fatalf("export plugin: %v", err)
 	}

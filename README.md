@@ -385,21 +385,23 @@ address pool and data path, and leaves host routing/NAT to the caller.
 A NetworkManager VPN plugin brings the tunnel up and down from a Linux desktop's
 native VPN UI (GNOME / Pop!\_OS), with **no** dependency on strongSwan. It lives
 in the nested `nm/` module — kept out of the core build so the `veepin` binary
-does not inherit its D-Bus and GTK dependencies — and dials **all ten protocols**,
-selected by the `protocol=` key in `vpn.data`:
+does not inherit its D-Bus and GTK dependencies — and registers **all ten
+protocols as separate VPN types**, so each is its own entry in the desktop's
+*Add VPN* list rather than a "veepin" entry that asks which protocol next:
 
 ```sh
 cd nm && make build && sudo make install && sudo systemctl reload NetworkManager
 nmcli connection add type vpn con-name home-veepin ifname '*' \
-  vpn-type org.freedesktop.NetworkManager.veepin \
+  vpn-type org.freedesktop.NetworkManager.veepin.ikev2 \
   vpn.data 'protocol=ikev2, gateway=vpn.example.com, local-id=client.example.com, full-tunnel=yes'
 nmcli connection modify home-veepin vpn.secrets 'psk=a-strong-preshared-key'
 nmcli connection up home-veepin
 ```
 
-Switching protocol is the same command with a different `protocol=` key and that
-protocol's own option names; the graphical *Add VPN* form has a chooser covering
-all ten. See [`doc/networkmanager-plugin.md`](doc/networkmanager-plugin.md) for
+Switching protocol is the same command with a different `vpn-type` suffix, a
+matching `protocol=` key and that protocol's own option names; graphically it is
+a different entry in the *Add VPN* list, each with only its own fields.
+See [`doc/networkmanager-plugin.md`](doc/networkmanager-plugin.md) for
 the full design, the D-Bus contract, the per-protocol key reference, and the
 runbook.
 
