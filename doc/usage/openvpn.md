@@ -53,3 +53,34 @@ masquerade rule for `-wan`; without it, the command prints the `ip`/`iptables`
 lines to run by hand. Each client is assigned the next free pool address and a
 peer-id, and inbound data packets are demuxed by that peer-id. It is verified in
 Docker against both a real `openvpn` client and the veepin client.
+
+### Protecting the control channel
+
+The server accepts the same `--tls-crypt` and `--tls-auth` static-key wrappings
+the client offers, and the flags mirror the client's:
+
+```sh
+# tls-crypt: every control packet authenticated and encrypted.
+sudo ./veepin serve openvpn -ca ca.crt -cert server.crt -key server.key \
+  -tls-crypt ta.key -pool 10.8.0.0/24 -setup-nat -wan eth0
+
+# tls-auth: an HMAC only. -key-direction is the *client's* value; the server
+# takes the opposite slot pair automatically.
+sudo ./veepin serve openvpn -ca ca.crt -cert server.crt -key server.key \
+  -tls-auth ta.key -key-direction 1 -auth SHA256 -pool 10.8.0.0/24
+```
+
+Two reasons to use one. The wrapping is **not negotiated**, so a client
+configured with `tls-crypt` cannot talk to a server without it — the two sides
+have to agree. And it is what makes the server unanswerable to a stranger:
+without it, a bare `P_CONTROL_HARD_RESET_CLIENT_V2` from any source is answered
+with a server hard reset and then the whole certificate flight, which is the
+active-probe stage of *OpenVPN is Open to VPN Fingerprinting*
+([USENIX Security 2022](https://www.usenix.org/conference/usenixsecurity22/presentation/xue-diwen)).
+With a key configured, an opener that fails the HMAC is dropped before any
+session state exists and nothing is sent back.
+
+That closes the *active* half of that paper's method. The passive half — the
+cleartext opcode byte and OpenVPN's distinctive ACK pattern and packet sizes —
+is unaffected, because `tls-crypt` leaves the opcode, session ID, packet ID and
+timestamp in the clear by design.
