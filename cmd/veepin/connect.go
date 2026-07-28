@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/xen0bit/veepin/anyconnect"
+	"github.com/xen0bit/veepin/cisco"
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/fortinet"
@@ -350,6 +351,34 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 			}
 			if *noDTLS {
 				opts[fortinet.OptNoDTLS] = "true"
+			}
+			return opts
+		}, nil
+	case "cisco":
+		var (
+			server   = fs.String("server", "", "IPsec gateway host or IP (required)")
+			port     = fs.Int("port", 0, "gateway IKE port (default 500)")
+			group    = fs.String("group", "", "group name presented as the phase-1 identity (required)")
+			groupPSK = fs.String("group-psk", "", "the group's pre-shared key (required)")
+			user     = fs.String("user", "", "XAuth username (required)")
+			pass     = fs.String("pass", "", "XAuth password (required)")
+			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+			shape    = fs.Int("shape", 0, "per-flow outbound shaping budget in bytes (0 = off, 16384 recommended)")
+		)
+		return func() map[string]string {
+			opts := map[string]string{
+				cisco.OptServer:   *server,
+				cisco.OptGroup:    *group,
+				cisco.OptGroupPSK: *groupPSK,
+				cisco.OptUser:     *user,
+				cisco.OptPassword: *pass,
+				cisco.OptTUN:      *tun,
+			}
+			if *port != 0 {
+				opts[cisco.OptPort] = fmt.Sprint(*port)
+			}
+			if *shape != 0 {
+				opts[cisco.OptShape] = fmt.Sprint(*shape)
 			}
 			return opts
 		}, nil

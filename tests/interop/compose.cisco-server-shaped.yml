@@ -1,0 +1,47 @@
+# strongSwan Cisco IPsec client -> veepin gateway, with downstream shaping on.
+#
+# The gateway pads each inner flow's first 16 KiB towards the tunnel MTU using
+# RFC 4303 section 2.7 traffic-flow-confidentiality padding. strongSwan
+# negotiated nothing for it and needs to have negotiated nothing: a conforming
+# ESP receiver delimits the real packet by the inner IP header's own length and
+# discards the filler. If it did not, the ping would come back malformed or not
+# at all.
+#
+# Data-path check: the strongSwan client pings 10.60.0.1, the veepin gateway's
+# address inside the tunnel.
+name: veepin-interop-cisco-server-shaped
+
+services:
+  veepin-cisco-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    environment:
+      GROUP: "engineering"
+      GROUP_PSK: "the-group-secret"
+      USER: "alice"
+      PASSWORD: "hunter2"
+      POOL: "10.60.0.0/24"
+      SHAPE: "16384"
+    volumes:
+      - ./veepin/cisco-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  strongswan-cisco-client:
+    build:
+      context: strongswan
+    image: interop-strongswan
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+    depends_on: [veepin-cisco-server]
+    volumes:
+      - ./strongswan/swanctl-cisco-client.conf:/etc/swanctl/swanctl.conf:ro
+      - ./strongswan/cisco-client-entrypoint.sh:/entrypoint.sh:ro
+    command: ["/bin/sh", "/entrypoint.sh"]

@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/xen0bit/veepin/anyconnect"
+	"github.com/xen0bit/veepin/cisco"
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/fortinet"
 	"github.com/xen0bit/veepin/gp"
@@ -267,6 +268,48 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			}
 			if *noDTLS {
 				opts[fortinet.OptServerNoDTLS] = "true"
+			}
+			return opts
+		}, nil
+	case "cisco":
+		var (
+			listenIP     = fs.String("listen", "0.0.0.0", "local IP to bind the IKE sockets on")
+			port         = fs.Int("port", 0, "IKE port to listen on (default 500; the NAT-T port is always 4500)")
+			group        = fs.String("group", "", "group name clients must present (required)")
+			groupPSK     = fs.String("group-psk", "", "the group's pre-shared key (required)")
+			user         = fs.String("user", "", "XAuth username to accept (required)")
+			pass         = fs.String("pass", "", "the user's password (required)")
+			pool         = fs.String("pool", "10.60.0.0/24", "internal address pool handed to clients")
+			dns          = fs.String("dns", "", "comma-separated DNS servers offered to clients")
+			domain       = fs.String("domain", "", "default search domain offered to clients")
+			banner       = fs.String("banner", "", "login banner shown to clients")
+			splitInclude = fs.String("split-include", "", "comma-separated CIDRs clients should route into the tunnel (empty = everything)")
+			public       = fs.String("public", "", "address clients reach this gateway on (empty = the bound address)")
+			tun          = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+			shape        = fs.Int("shape", 0, "per-flow downstream shaping budget in bytes: pads each inner flow's first N bytes towards the tunnel MTU with RFC 4303 traffic-flow padding (0 = off, 16384 recommended)")
+		)
+		return func() map[string]string {
+			opts := map[string]string{
+				cisco.OptServerListen:       *listenIP,
+				cisco.OptServerGroup:        *group,
+				cisco.OptServerGroupPSK:     *groupPSK,
+				cisco.OptServerUser:         *user,
+				cisco.OptServerPass:         *pass,
+				cisco.OptServerPool:         *pool,
+				cisco.OptServerDNS:          *dns,
+				cisco.OptServerDomain:       *domain,
+				cisco.OptServerBanner:       *banner,
+				cisco.OptServerSplitInclude: *splitInclude,
+				cisco.OptServerTUN:          *tun,
+			}
+			if *port != 0 {
+				opts[cisco.OptServerPort] = fmt.Sprint(*port)
+			}
+			if *public != "" {
+				opts[cisco.OptServerPublicIP] = *public
+			}
+			if *shape != 0 {
+				opts[cisco.OptServerShape] = fmt.Sprint(*shape)
 			}
 			return opts
 		}, nil

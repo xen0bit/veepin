@@ -3,10 +3,11 @@
 A **working userspace VPN in Go** — both server (responder) and client
 (initiator), written from scratch and depending only on the pure-Go
 `golang.org/x` modules (`x/crypto`, and `x/net` for QUIC), no cgo. It speaks
-**eleven production protocols, client and server for every one** — IKEv2/ESP,
+**twelve production protocols, client and server for every one** — IKEv2/ESP,
 WireGuard, OpenVPN, SSTP, SSH, L2TP/IPsec, AnyConnect, Nebula, MASQUE (CONNECT-IP
-and CONNECT-UDP over HTTP/3), Fortinet and GlobalProtect — each verified in Docker
-against a real third-party implementation and against itself.
+and CONNECT-UDP over HTTP/3), Fortinet, GlobalProtect and Cisco IPsec — each
+verified in Docker against a real third-party implementation and against
+itself.
 
 Every layer is covered by tests, including full VPN integration tests:
 `TestFullVPNFlow` drives a client through the handshake and verifies a real IP
@@ -32,7 +33,7 @@ Deeper docs live under [`doc/`](doc/): per-protocol [usage](doc/usage/),
 
 ## What it does
 
-veepin speaks eleven production protocols — **client and server for every one** —
+veepin speaks twelve production protocols — **client and server for every one** —
 plus one deliberately insecure teaching example. Each protocol is verified in
 Docker against a real third-party implementation *and* against itself (see the
 [Interoperability matrix](#interoperability-matrix)). The table is the summary;
@@ -52,10 +53,11 @@ wire detail, caveats and API surface.
 | **MASQUE** | proxy TLS | IP (CONNECT-IP) and UDP (CONNECT-UDP) over HTTP/3, capsule mode | aioquic | [masque](internal/masque/README.md) |
 | **Fortinet** | password, optional 2FA (TOTP) | PPP over TLS, with cert-based DTLS 1.2 fallback | openconnect | [fortinet](internal/fortinet/README.md) |
 | **GlobalProtect** | password | RFC 4303 ESP over UDP, keyed by the config document, with a framed layer-3 TLS tunnel as fallback | openconnect | [gp](internal/gp/README.md) |
+| **Cisco IPsec** | group PSK + XAuth password | IKEv1 Aggressive Mode, Mode-Config, tunnel-mode ESP-in-UDP | strongSwan | [cisco](internal/cisco/README.md) |
 
 Both roles share one registry API (`client.Register`/`client.RegisterServer`),
 so `veepin connect <proto>` and `veepin serve <proto>` dispatch generically and
-adding a protocol changes no caller. A twelfth registered protocol, **TOY**,
+adding a protocol changes no caller. A thirteenth registered protocol, **TOY**,
 provides **no security** — it is a worked example of the protocol shape, not a
 real protocol; see [The example protocol](#the-example-protocol).
 
@@ -292,10 +294,11 @@ formats, and what it interoperates with — has its own page:
 | MASQUE (CONNECT-IP + CONNECT-UDP) | [doc/usage/masque.md](doc/usage/masque.md) |
 | Fortinet | [doc/usage/fortinet.md](doc/usage/fortinet.md) |
 | GlobalProtect | [doc/usage/gp.md](doc/usage/gp.md) |
+| Cisco IPsec | [doc/usage/cisco.md](doc/usage/cisco.md) |
 
 To use veepin **as a client**, the
 [NetworkManager plugin](#desktop-integration-networkmanager) is the simplest path
-on a Linux desktop — it configures all ten protocols from the native VPN UI. The
+on a Linux desktop — it configures all twelve protocols from the native VPN UI. The
 [Using the bundled client](#using-the-bundled-client) section below walks the CLI
 client through end to end. Stock OS built-in VPN clients (Windows, macOS/iOS,
 Android, strongSwan) can also connect to the veepin IKEv2 server directly — see

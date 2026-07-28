@@ -1,0 +1,42 @@
+# veepin Cisco IPsec client -> strongSwan responder.
+#
+# The full remote-access profile against an independent implementation: IKEv1
+# Aggressive Mode with a group pre-shared key, XAuth for the user credentials,
+# Mode-Config for the address, and a tunnel-mode ESP SA over UDP/4500.
+#
+# Data-path check: the veepin client pings 10.20.30.254, the address the
+# strongSwan entrypoint adds to lo inside its local_ts.
+name: veepin-interop-cisco
+
+services:
+  strongswan-cisco-server:
+    build:
+      context: strongswan
+    image: interop-strongswan
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+      net.ipv4.ip_forward: "1"
+    volumes:
+      - ./strongswan/swanctl-cisco-server.conf:/etc/swanctl/swanctl.conf:ro
+      - ./strongswan/cisco-server-entrypoint.sh:/entrypoint.sh:ro
+    command: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-cisco-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [strongswan-cisco-server]
+    environment:
+      SERVER: "strongswan-cisco-server"
+      GROUP: "engineering"
+      GROUP_PSK: "the-group-secret"
+      USER: "alice"
+      PASSWORD: "hunter2"
+    volumes:
+      - ./veepin/cisco-client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

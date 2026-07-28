@@ -34,7 +34,7 @@ const DefaultProtocol = "ikev2"
 // agree. The insecure "toy" example protocol is intentionally excluded.
 var SupportedProtocols = []string{
 	"ikev2", "wireguard", "openvpn", "sstp", "ssh",
-	"anyconnect", "nebula", "masque", "fortinet", "gp", "l2tp",
+	"anyconnect", "nebula", "masque", "fortinet", "gp", "cisco", "l2tp",
 }
 
 // Connection is the parsed, validated form of a VPN connection.
@@ -74,6 +74,11 @@ const (
 	KeyCert     = "cert"     // certificate path (Nebula)
 	KeyKeyFile  = "key"      // private-key file path (Nebula)
 	KeyIdentity = "identity" // SSH private-key file — an alternative to a password
+
+	// Cisco IPsec remote access. The group name selects which pre-shared key
+	// authenticates phase 1; the per-user credentials follow in XAuth.
+	KeyGroup    = "group"     // remote-access group name
+	KeyGroupPSK = "group-psk" // that group's pre-shared key (a secret)
 )
 
 // Secret keys recognised in vpn.secrets.
@@ -169,6 +174,11 @@ func requireKeys(protocol string, opts map[string]string) error {
 		// Connection-oriented gateways authenticated by a username (plus a password
 		// or, for SSH, an identity key).
 		return requirePresent(opts, KeyServer, KeyUser)
+	case "cisco":
+		// Two credentials in sequence: the group authenticates phase 1, the user
+		// authenticates through XAuth inside it. The group name is not a secret,
+		// so it is required here rather than in secretMissing.
+		return requirePresent(opts, KeyServer, KeyGroup, KeyUser)
 	case "nebula":
 		// A certificate mesh: the CA bundle, this host's certificate and its key.
 		return requirePresent(opts, KeyCA, KeyCert, KeyKeyFile)
@@ -228,6 +238,9 @@ func secretMissing(protocol string, opts map[string]string) bool {
 		return opts[KeyUsername] != "" && opts[KeyPassword] == ""
 	case "sstp", "anyconnect", "fortinet", "gp":
 		return opts[KeyPassword] == ""
+	case "cisco":
+		// Both the group pre-shared key and the XAuth password are required.
+		return opts[KeyGroupPSK] == "" || opts[KeyPassword] == ""
 	case "ssh":
 		// A private-key identity file is an alternative to a password.
 		return opts[KeyIdentity] == "" && opts[KeyPassword] == ""

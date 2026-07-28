@@ -35,3 +35,11 @@ func ipv4ID(ip net.IP) identity {
 func l2tpSelector(ip net.IP) identity {
 	return identity{idType: idIPv4Addr, proto: ipProtoUDP, port: l2tpPort, data: ip.To4()}
 }
+
+// anySubnetID is the remote-access gateway-side traffic selector: 0.0.0.0/0 as
+// an ID_IPV4_ADDR_SUBNET, which is a network followed by its mask. It says the
+// tunnel carries everything, and it is what a client's default route through the
+// gateway is expressed as in phase 2.
+func anySubnetID() identity {
+	return identity{idType: idIPv4AddrSubnet, data: make([]byte, 2*net.IPv4len)}
+}

@@ -888,6 +888,42 @@ func TestInteropGPSelf(t *testing.T) {
 	measureThroughput(t, "compose.gp-self.yml", "veepin-gp-server", "veepin-gp-client", "10.50.0.1")
 }
 
+// Cisco IPsec is the other IKEv1 profile in this tree: Aggressive Mode with a
+// group pre-shared key, XAuth, Mode-Config and a tunnel-mode ESP SA. Both
+// directions run against strongSwan, which is the only open-source stack that
+// implements both roles of it — so unlike the SSL VPNs, this protocol gets a
+// real peer in the client direction as well as the server one.
+
+// TestInteropVeepinCiscoClientStrongSwanServer runs the veepin client against a
+// strongSwan Aggressive Mode + XAuth responder and pings 10.20.30.254, the
+// address strongSwan holds inside its own traffic selector.
+func TestInteropVeepinCiscoClientStrongSwanServer(t *testing.T) {
+	runInteropBench(t, "compose.cisco.yml", "veepin-cisco-client", "strongswan-cisco-server", "10.20.30.254")
+}
+
+// TestInteropStrongSwanCiscoClientVeepinServer is the mirror, exercising
+// veepin's responder: the group-key lookup from the Aggressive Mode identity,
+// the XAuth exchange it drives, the Mode-Config assignment, and a Quick Mode
+// whose traffic selectors strongSwan's policy has to accept.
+func TestInteropStrongSwanCiscoClientVeepinServer(t *testing.T) {
+	runInteropBench(t, "compose.cisco-server.yml", "strongswan-cisco-client", "veepin-cisco-server", "10.60.0.1")
+}
+
+// TestInteropStrongSwanCiscoClientVeepinServerShaped is the same cell with
+// downstream shaping on. The padding is RFC 4303 section 2.7
+// traffic-flow-confidentiality filler, which strongSwan negotiated nothing for
+// and must discard by reading the inner IP header's own length. A receiver that
+// handed the padded buffer up whole would not answer the ping.
+func TestInteropStrongSwanCiscoClientVeepinServerShaped(t *testing.T) {
+	runInterop(t, "compose.cisco-server-shaped.yml", "strongswan-cisco-client", "10.60.0.1")
+}
+
+// TestInteropCiscoSelf is the veepin<->veepin sanity check.
+func TestInteropCiscoSelf(t *testing.T) {
+	runInterop(t, "compose.cisco-self.yml", "veepin-cisco-client", "10.60.0.1")
+	measureThroughput(t, "compose.cisco-self.yml", "veepin-cisco-server", "veepin-cisco-client", "10.60.0.1")
+}
+
 // TOY is the example protocol (internal/toy) and provides no security; these
 // cells prove the *specification*, not the cryptography. The peer they talk to
 // is an independent Python implementation written from internal/toy/SPEC.md
