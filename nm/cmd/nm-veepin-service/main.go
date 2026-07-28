@@ -22,6 +22,7 @@ import (
 	// given requireKeys/secretMissing branches in internal/nmconfig). The insecure
 	// "toy" example protocol is deliberately left out.
 	_ "github.com/xen0bit/veepin/anyconnect"
+	_ "github.com/xen0bit/veepin/cisco"
 	_ "github.com/xen0bit/veepin/fortinet"
 	_ "github.com/xen0bit/veepin/gp"
 	_ "github.com/xen0bit/veepin/ikev2"

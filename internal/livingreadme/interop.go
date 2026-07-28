@@ -154,6 +154,17 @@ var interopMatrix = []interopRow{
 		Self: interopCell{Tests: []string{"TestInteropGPSelf"}, Label: "(over ESP)"},
 	},
 	{
+		Protocol: "Cisco IPsec",
+		Client: interopCell{Tests: []string{
+			"TestInteropVeepinCiscoClientStrongSwanServer",
+		}, Label: "strongSwan (aggressive + XAuth)"},
+		Server: interopCell{Tests: []string{
+			"TestInteropStrongSwanCiscoClientVeepinServer",
+			"TestInteropStrongSwanCiscoClientVeepinServerShaped",
+		}, Label: "strongSwan (Mode-Config, TFC-padded)"},
+		Self: interopCell{Tests: []string{"TestInteropCiscoSelf"}},
+	},
+	{
 		Protocol: "TOY*",
 		Client:   interopCell{Tests: []string{"TestInteropVeepinToyClientReferencePeer"}, Label: "independent Python peer"},
 		Server:   interopCell{Tests: []string{"TestInteropToyClientVeepinServer"}, Label: "independent Python peer"},

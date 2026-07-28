@@ -107,7 +107,7 @@ func TestPeerWithoutNATTIsRejected(t *testing.T) {
 	cookie[0] = 1
 	mm1 := marshalMessage(
 		header{initCookie: cookie, exchange: exchangeMain},
-		[]payload{{typ: payloadSA, body: buildPhase1SA(defaultIKEProposals())}},
+		[]payload{{typ: payloadSA, body: buildPhase1SA(defaultIKEProposals(authPSK))}},
 	)
 	responder.HandleInbound(mm1)
 

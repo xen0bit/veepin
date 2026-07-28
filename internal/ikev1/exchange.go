@@ -16,7 +16,7 @@ func integKeyLen(integID uint16) int {
 // --- initiator ---
 
 func (s *Session) sendMM1() error {
-	s.saBodyI = buildPhase1SA(defaultIKEProposals())
+	s.saBodyI = buildPhase1SA(defaultIKEProposals(s.authMethod()))
 	// The SA payload is what HASH_I/HASH_R authenticate; the Vendor IDs that
 	// follow it announce NAT-T support and are outside that hash.
 	payloads := append([]payload{{typ: payloadSA, body: s.saBodyI}}, natTVendorPayloads()...)
@@ -32,6 +32,10 @@ func (s *Session) dispatchInitiator(h header, first uint8, rest []byte) error {
 		return s.initHandleMM4(first, rest)
 	case stWaitMM6:
 		return s.initHandleMM6(first, rest)
+	case stWaitAM2:
+		return s.initHandleAM2(h, first, rest)
+	case stWaitXAuthReq, stWaitXAuthSet, stWaitCfgRep:
+		return s.handleTransaction(h, first, rest)
 	case stWaitQM2:
 		return s.initHandleQM2(first, rest)
 	}
@@ -56,7 +60,7 @@ func (s *Session) initHandleMM2(h header, first uint8, rest []byte) error {
 		return fmt.Errorf("ikev1: MM2 must choose exactly one transform")
 	}
 	prop, ok := ikePropFromAttrs(transforms[0].attrs)
-	if !ok || !supportedIKE(prop) {
+	if !ok || !s.supportedIKE(prop) {
 		return fmt.Errorf("ikev1: responder chose an unsupported IKE proposal")
 	}
 	s.prop = prop
@@ -112,11 +116,11 @@ func (s *Session) initHandleMM4(first uint8, rest []byte) error {
 		s.float(payloads)
 	}
 
-	idBody := buildID(ipv4ID(s.cfg.LocalIP))
-	hashI := s.keys.hashI(s.localPub, s.peerPub, s.initCookie, s.respCookie, s.saBodyI, idBody)
+	s.idI = buildID(s.localIdentity())
+	hashI := s.keys.hashI(s.localPub, s.peerPub, s.initCookie, s.respCookie, s.saBodyI, s.idI)
 	s.state = stWaitMM6
 	return s.sendEncrypted(exchangeMain, 0, &s.keys.iv, []payload{
-		{typ: payloadID, body: idBody},
+		{typ: payloadID, body: s.idI},
 		{typ: payloadHash, body: hashI},
 	})
 }
@@ -131,12 +135,13 @@ func (s *Session) initHandleMM6(first uint8, rest []byte) error {
 	if !ok1 || !ok2 {
 		return fmt.Errorf("ikev1: MM6 missing ID or HASH")
 	}
-	want := s.keys.hashR(s.localPub, s.peerPub, s.initCookie, s.respCookie, s.saBodyI, id.body)
+	s.idR = append([]byte(nil), id.body...)
+	want := s.keys.hashR(s.localPub, s.peerPub, s.initCookie, s.respCookie, s.saBodyI, s.idR)
 	if !constEq(want, hp.body) {
-		return fmt.Errorf("ikev1: HASH_R verification failed (bad PSK?)")
+		return fmt.Errorf("%w: HASH_R verification failed (bad PSK?)", ErrAuth)
 	}
 	s.advance()
-	return s.startQuickMode()
+	return s.afterPhase1()
 }
 
 // startQuickMode sends QM1 (HASH(1), SA, Ni, IDci, IDcr) as the initiator.
@@ -145,13 +150,18 @@ func (s *Session) startQuickMode() error {
 	s.qmIV = s.keys.quickModeIV(s.qmMsgID)
 	s.qmNi = nonce()
 	s.inSPI = randSPI()
-	s.esp = defaultESPProposals()[0]
+	props := s.defaultESPProposals()
+	s.esp = props[0]
 
+	local, remote, err := s.phase2Selectors()
+	if err != nil {
+		return err
+	}
 	content := []payload{
-		{typ: payloadSA, body: buildPhase2SA(s.inSPI, defaultESPProposals())},
+		{typ: payloadSA, body: buildPhase2SA(s.inSPI, props)},
 		{typ: payloadNonce, body: s.qmNi},
-		{typ: payloadID, body: buildID(l2tpSelector(s.cfg.LocalIP))},
-		{typ: payloadID, body: buildID(l2tpSelector(s.cfg.PeerIP))},
+		{typ: payloadID, body: buildID(local)},
+		{typ: payloadID, body: buildID(remote)},
 	}
 	_, contentChain := payloadChain(content)
 	hash1 := s.keys.prf.Apply(s.keys.skeyidA, concat(be32(s.qmMsgID), contentChain))
@@ -192,7 +202,7 @@ func (s *Session) initHandleQM2(first uint8, rest []byte) error {
 		return fmt.Errorf("ikev1: QM2 SA malformed")
 	}
 	esp, ok := espPropFromAttrs(transforms[0].id, transforms[0].attrs)
-	if !ok || !supportedESP(esp) {
+	if !ok || !s.supportedESP(esp) {
 		return fmt.Errorf("ikev1: responder chose an unsupported ESP proposal")
 	}
 	s.esp = esp
@@ -213,11 +223,18 @@ func (s *Session) initHandleQM2(first uint8, rest []byte) error {
 func (s *Session) dispatchResponder(h header, first uint8, rest []byte) error {
 	switch s.state {
 	case stInit:
+		if s.cfg.Mode == ModeAggressive {
+			return s.respHandleAM1(h, first, rest)
+		}
 		return s.respHandleMM1(h, first, rest)
 	case stWaitMM3:
 		return s.respHandleMM3(first, rest)
 	case stWaitMM5:
 		return s.respHandleMM5(first, rest)
+	case stWaitAM3:
+		return s.respHandleAM3(first, rest)
+	case stWaitXAuthRep, stWaitXAuthAck, stWaitCfgReq:
+		return s.handleTransaction(h, first, rest)
 	case stWaitQM1:
 		return s.respHandleQM1(h, first, rest)
 	case stWaitQM3:
@@ -242,7 +259,7 @@ func (s *Session) respHandleMM1(h header, first uint8, rest []byte) error {
 	if err != nil {
 		return err
 	}
-	prop, num, ok := selectIKEProposal(transforms)
+	prop, num, ok := s.selectIKEProposal(transforms)
 	if !ok {
 		return fmt.Errorf("ikev1: no acceptable IKE proposal offered")
 	}
@@ -325,19 +342,22 @@ func (s *Session) respHandleMM5(first uint8, rest []byte) error {
 	if !ok1 || !ok2 {
 		return fmt.Errorf("ikev1: MM5 missing ID or HASH")
 	}
-	want := s.keys.hashI(s.peerPub, s.localPub, s.initCookie, s.respCookie, s.saBodyI, id.body)
+	s.idI = append([]byte(nil), id.body...)
+	want := s.keys.hashI(s.peerPub, s.localPub, s.initCookie, s.respCookie, s.saBodyI, s.idI)
 	if !constEq(want, hp.body) {
-		return fmt.Errorf("ikev1: HASH_I verification failed (bad PSK?)")
+		return fmt.Errorf("%w: HASH_I verification failed (bad PSK?)", ErrAuth)
 	}
 	s.advance()
 
-	idBody := buildID(ipv4ID(s.cfg.LocalIP))
-	hashR := s.keys.hashR(s.peerPub, s.localPub, s.initCookie, s.respCookie, s.saBodyI, idBody)
-	s.state = stWaitQM1
-	return s.sendEncrypted(exchangeMain, 0, &s.keys.iv, []payload{
-		{typ: payloadID, body: idBody},
+	s.idR = buildID(s.localIdentity())
+	hashR := s.keys.hashR(s.peerPub, s.localPub, s.initCookie, s.respCookie, s.saBodyI, s.idR)
+	if err := s.sendEncrypted(exchangeMain, 0, &s.keys.iv, []payload{
+		{typ: payloadID, body: s.idR},
 		{typ: payloadHash, body: hashR},
-	})
+	}); err != nil {
+		return err
+	}
+	return s.afterPhase1()
 }
 
 func (s *Session) respHandleQM1(h header, first uint8, rest []byte) error {
@@ -368,7 +388,7 @@ func (s *Session) respHandleQM1(h header, first uint8, rest []byte) error {
 	if proto != protoESP || len(spi) != 4 {
 		return fmt.Errorf("ikev1: QM1 SA malformed")
 	}
-	esp, num, ok := selectESPProposal(transforms)
+	esp, num, ok := s.selectESPProposal(transforms)
 	if !ok {
 		return fmt.Errorf("ikev1: no acceptable ESP proposal offered")
 	}

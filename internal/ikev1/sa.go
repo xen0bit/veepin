@@ -22,10 +22,13 @@ type ikeProposal struct {
 // for older native clients. Only MODP-2048 is offered — the sole finite-field
 // group cryptoutil implements; MODP-1024 (group 2) can be added there if a stock
 // client requires it.
-func defaultIKEProposals() []ikeProposal {
+//
+// auth is the authentication method the profile runs: plain PSK, or
+// XAUTHInitPreShared where extended authentication follows phase 1.
+func defaultIKEProposals(auth uint16) []ikeProposal {
 	return []ikeProposal{
-		{encr: encrAES, keyBits: 256, hash: hashSHA2256, group: groupMODP2048, auth: authPSK, lifeSeconds: 3600},
-		{encr: encrAES, keyBits: 256, hash: hashSHA, group: groupMODP2048, auth: authPSK, lifeSeconds: 3600},
+		{encr: encrAES, keyBits: 256, hash: hashSHA2256, group: groupMODP2048, auth: auth, lifeSeconds: 3600},
+		{encr: encrAES, keyBits: 256, hash: hashSHA, group: groupMODP2048, auth: auth, lifeSeconds: 3600},
 	}
 }
 
@@ -169,16 +172,6 @@ type espProposal struct {
 	authAlg     uint16 // authHMACSHA2256 / authHMACSHA
 	encap       uint16 // encapUDPTransport
 	lifeSeconds uint32
-}
-
-// defaultESPProposals is offered by the initiator and accepted by the responder
-// for the L2TP transport SA: AES-256 with HMAC-SHA2-256 then HMAC-SHA-1, both
-// UDP-encapsulated transport mode.
-func defaultESPProposals() []espProposal {
-	return []espProposal{
-		{transformID: espTransformAES, keyBits: 256, authAlg: authHMACSHA2256, encap: encapUDPTransport, lifeSeconds: 3600},
-		{transformID: espTransformAES, keyBits: 256, authAlg: authHMACSHA, encap: encapUDPTransport, lifeSeconds: 3600},
-	}
 }
 
 func (p espProposal) attrs() []byte {

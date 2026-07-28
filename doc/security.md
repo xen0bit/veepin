@@ -68,6 +68,36 @@ GlobalProtect gateways is the point. It is the weakest of the IPsec-carrying
 protocols in this tree, and IKEv2 or WireGuard should be preferred wherever the
 choice exists. See [`internal/gp/README.md`](../internal/gp/README.md).
 
+## Cisco IPsec exposes the group identity, and its group key protects everything
+
+IKEv1 Aggressive Mode trades identity protection for two round trips. The three
+messages carry, in the clear: the group name the client presents as its phase-1
+identity, both Diffie-Hellman public values, both nonces, and the responder's
+authenticating hash. That hash is computed over the group pre-shared key, so a
+passive observer who records one handshake can attack the group key offline, at
+whatever rate the key's entropy allows.
+
+This is a property of the protocol, not of this implementation — it is what
+strongSwan makes an operator write
+`charon.i_dont_care_about_security_and_use_aggressive_mode_psk = yes` to enable.
+The consequences:
+
+- The group key must be a high-entropy secret. It is shared by everyone in the
+  group and it is the only thing standing between a recorded handshake and the
+  session keys, so treating it as a memorable passphrase defeats the protocol.
+- XAuth does not repair this. The user's password travels inside phase-1
+  encryption, so a passive observer does not learn it — but anyone holding the
+  group key can stand up a gateway that clients will authenticate to, and collect
+  passwords from it.
+- Compromise of the group key does not retroactively expose recorded sessions on
+  its own: phase 1 is an ephemeral Diffie-Hellman exchange, so forward secrecy
+  survives. What it exposes is every *future* session, actively.
+
+veepin implements this faithfully because it is what the deployed clients speak.
+IKEv2 — the same tree, the same ESP data path — has neither weakness, and should
+be preferred wherever the choice exists. See
+[`internal/cisco/README.md`](../internal/cisco/README.md).
+
 ## MASQUE carries every inner packet on one reliable QUIC stream
 
 Because `x/net/quic` has no QUIC DATAGRAM frames, CONNECT-IP runs in capsule

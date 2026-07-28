@@ -58,3 +58,49 @@ func FuzzParseSA(f *testing.F) {
 		_, _, _, _ = parseSA(data)
 	})
 }
+
+// FuzzParseCfg covers the Attribute payload that carries XAuth and Mode-Config.
+// It is decrypted before it is parsed, so the input is authenticated — but the
+// values inside it are still whatever the peer chose, and a gateway's
+// configuration reply drives address, DNS and route decisions on the client.
+func FuzzParseCfg(f *testing.F) {
+	f.Add([]byte{})
+	f.Add(make([]byte, cfgHeaderLen))
+	f.Add(buildCfg(cfgPayload{
+		typ:        cfgReply,
+		identifier: 1,
+		attrs: []attr{
+			varAttr(cfgAttrIP4Address, []byte{10, 0, 0, 1}),
+			varAttr(unitySplitInclude, make([]byte, splitIncludeLen)),
+			basicAttr(xauthStatus, xauthStatusOK),
+		},
+	}))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		c, err := parseCfg(data)
+		if err != nil {
+			return
+		}
+		// The whole way an assignment is read, including the vendor attributes
+		// whose values are fixed-width structures the peer supplies.
+		r := parseCfgReply(c)
+		for _, n := range r.SplitInclude {
+			if n.IP == nil || n.Mask == nil {
+				t.Fatalf("split-include network %v is half-parsed", n)
+			}
+		}
+	})
+}
+
+// FuzzParseDPDNotify covers the dead-peer-detection Notification. It arrives on
+// an established session, so it is authenticated — but it is the one message a
+// live tunnel keeps parsing indefinitely, and its SPI length is peer-supplied.
+func FuzzParseDPDNotify(f *testing.F) {
+	f.Add([]byte{})
+	f.Add(make([]byte, 8))
+	f.Add(NewSession(Config{}).buildDPDNotify(notifyRUThere, 1))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		_, _, _ = parseDPDNotify(data)
+	})
+}

@@ -3,6 +3,7 @@ package ikev1
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"fmt"
 )
 
 func randRead(b []byte) (int, error) { return rand.Read(b) }
@@ -24,7 +25,7 @@ func (s *Session) deriveKeys() error {
 	if err != nil {
 		return err
 	}
-	s.keys = derivePhase1(prf, newHash, s.cfg.PSK, s.ni, s.nr, shared, s.initCookie, s.respCookie, int(s.prop.keyBits)/8)
+	s.keys = derivePhase1(prf, newHash, s.psk, s.ni, s.nr, shared, s.initCookie, s.respCookie, int(s.prop.keyBits)/8)
 	return nil
 }
 
@@ -84,6 +85,9 @@ func (s *Session) finish() {
 		OutSPI: s.outSPI, InSPI: s.inSPI, NATT: s.floated,
 		OutEncKey: outKM[:encKeyLen], OutIntegKey: outKM[encKeyLen:],
 		InEncKey: inKM[:encKeyLen], InIntegKey: inKM[encKeyLen:],
+		Tunnel:  s.cfg.Phase2 == Phase2RemoteAccess,
+		ModeCfg: s.assigned,
+		User:    s.xauthUser,
 	}
 	s.state = stDone
 	if s.timer != nil {
@@ -91,6 +95,19 @@ func (s *Session) finish() {
 		s.timer = nil
 	}
 	s.cfg.Handler.Established(r)
+}
+
+// defaultESPProposals is what this session offers in Quick Mode, in the
+// encapsulation mode its profile needs.
+func (s *Session) defaultESPProposals() []espProposal {
+	encap := uint16(encapUDPTransport)
+	if s.cfg.Phase2 == Phase2RemoteAccess {
+		encap = encapUDPTunnel
+	}
+	return []espProposal{
+		{transformID: espTransformAES, keyBits: 256, authAlg: authHMACSHA2256, encap: encap, lifeSeconds: 3600},
+		{transformID: espTransformAES, keyBits: 256, authAlg: authHMACSHA, encap: encap, lifeSeconds: 3600},
+	}
 }
 
 // espResultIDs maps a negotiated ESP proposal to the IKEv2 transform IDs the
@@ -128,15 +145,23 @@ func ikePropFromAttrs(attrs []attr) (ikeProposal, bool) {
 	return ikeProposal{encr: enc, keyBits: kb, hash: hsh, group: grp, auth: auth, lifeSeconds: 3600}, true
 }
 
-func supportedIKE(p ikeProposal) bool {
+// supportedIKE reports whether a phase-1 proposal is one this session will use.
+//
+// The authentication method is matched exactly rather than merely accepted:
+// XAUTHInitPreShared and plain PSK key identically, so the only thing the number
+// conveys is whether extended authentication follows. A peer that offers plain
+// PSK to an XAuth profile would skip it, and a peer that offers XAuth to a
+// profile with no credentials to give would stall — both are better refused
+// here, where the reason is still legible.
+func (s *Session) supportedIKE(p ikeProposal) bool {
 	return p.encr == encrAES && p.keyBits == 256 &&
 		(p.hash == hashSHA2256 || p.hash == hashSHA) &&
-		p.group == groupMODP2048 && p.auth == authPSK
+		p.group == groupMODP2048 && p.auth == s.authMethod()
 }
 
-func selectIKEProposal(transforms []parsedTransform) (ikeProposal, uint8, bool) {
+func (s *Session) selectIKEProposal(transforms []parsedTransform) (ikeProposal, uint8, bool) {
 	for _, t := range transforms {
-		if p, ok := ikePropFromAttrs(t.attrs); ok && supportedIKE(p) {
+		if p, ok := ikePropFromAttrs(t.attrs); ok && s.supportedIKE(p) {
 			return p, t.num, true
 		}
 	}
@@ -153,17 +178,42 @@ func espPropFromAttrs(transformID uint8, attrs []attr) (espProposal, bool) {
 	return espProposal{transformID: transformID, keyBits: kb, authAlg: auth, encap: encap, lifeSeconds: 3600}, true
 }
 
-func supportedESP(p espProposal) bool {
-	okEncap := p.encap == encapUDPTransport || p.encap == encapTransport || p.encap == encapUDPTransportDraft
+// supportedESP reports whether a phase-2 proposal matches the profile. The
+// encapsulation mode is the discriminator: L2TP protects UDP/1701 in transport
+// mode, remote access carries bare IP in tunnel mode, and accepting the wrong
+// one would produce an SA whose packets the peer cannot parse.
+func (s *Session) supportedESP(p espProposal) bool {
+	var okEncap bool
+	if s.cfg.Phase2 == Phase2RemoteAccess {
+		okEncap = p.encap == encapUDPTunnel || p.encap == encapTunnel || p.encap == encapUDPTunnelDraft
+	} else {
+		okEncap = p.encap == encapUDPTransport || p.encap == encapTransport || p.encap == encapUDPTransportDraft
+	}
 	return p.transformID == espTransformAES && p.keyBits == 256 &&
 		(p.authAlg == authHMACSHA2256 || p.authAlg == authHMACSHA) && okEncap
 }
 
-func selectESPProposal(transforms []parsedTransform) (espProposal, uint8, bool) {
+func (s *Session) selectESPProposal(transforms []parsedTransform) (espProposal, uint8, bool) {
 	for _, t := range transforms {
-		if p, ok := espPropFromAttrs(t.id, t.attrs); ok && supportedESP(p) {
+		if p, ok := espPropFromAttrs(t.id, t.attrs); ok && s.supportedESP(p) {
 			return p, t.num, true
 		}
 	}
 	return espProposal{}, 0, false
+}
+
+// phase2Selectors are the traffic selectors Quick Mode names, local first.
+//
+// L2TP names exactly the UDP/1701 flow between the two outer addresses. Remote
+// access names the client's assigned inner address against everything, which is
+// the shape a gateway's policy is written in.
+func (s *Session) phase2Selectors() (local, remote identity, err error) {
+	if s.cfg.Phase2 != Phase2RemoteAccess {
+		return l2tpSelector(s.cfg.LocalIP), l2tpSelector(s.cfg.PeerIP), nil
+	}
+	inner := s.assignedIP()
+	if inner == nil {
+		return identity{}, identity{}, fmt.Errorf("ikev1: no inner address for the phase-2 selector")
+	}
+	return ipv4ID(inner), anySubnetID(), nil
 }
