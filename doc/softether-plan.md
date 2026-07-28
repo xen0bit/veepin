@@ -44,52 +44,91 @@ doing it, and equally the argument for its cost.
 
 ## Wire details — status: **not yet verified**
 
-This section is deliberately thin, and that is the most important thing about
-this plan. Unlike the Fortinet, GlobalProtect and Pulse plans — where the wire
-format was read out of openconnect's source before a line was written — **no
-equivalent reading has been done for SE-VPN**, and the published specification is
-a capabilities overview rather than a byte-level format.
+## Wire details — verified from the source
 
-What is known from the specification pages:
+The byte-level wire format has been read from `SoftEtherVPN/src/Mayaqua/Pack.c`
+and `src/Mayaqua/Pack.h`. All integers are **little-endian**.
 
-- TLS 1.0–1.3 over TCP/443, framed as extended HTTPS so it passes as web traffic.
-- Ethernet as the payload, any protocol inside it.
-- A TCP/UDP hybrid transport: multiple TCP connections per session for
-  throughput, with an optional UDP acceleration path.
-- zlib compression is available.
-- Authentication supports password, RADIUS, certificate and anonymous.
+### PACK serialisation
 
-**Before any implementation begins**, the first task is to read
-`github.com/SoftEtherVPN/SoftEtherVPN` — `src/Cedar/Protocol.c`, `src/Cedar/Session.c`
-and `src/Mayaqua/Pack.c` — and write the byte-level format into this document,
-the way `doc/fortinet-plan.md` records openconnect's. In particular the "PACK"
-serialisation SoftEther uses for its control messages is a self-describing
-key/value format that will need its own codec and its own fuzz target.
+SoftEther control messages use a self-describing key/value format called PACK:
 
-Estimate the reading at a day before the first commit. A plan that skips it will
-be wrong, and the lesson is recent: the Pulse plan's *summarised* cipher
-identifiers were wrong, and reading `pulse.c` directly was what caught it.
+```
+Pack {
+    element-count: uint32           // number of ELEMENTs (max 262144)
+    elements:     ELEMENT[count]    // in order
+}
+
+ELEMENT {
+    name:     NUL-terminated ASCII  // max 63 chars + NUL
+    type:     uint32                // 0=INT, 1=DATA, 2=STR, 3=UNISTR, 4=INT64
+    count:    uint32                // number of values (max 262144)
+    values:   VALUE[count]          // depending on type
+}
+
+VALUE {
+    // For type INT:      uint32 (4 bytes)
+    // For type INT64:    uint64 (8 bytes)
+    // For type DATA:     length uint32, then length bytes of raw data
+    // For type STR:      length uint32, then length bytes of ASCII (no NUL terminator on wire)
+    // For type UNISTR:   length uint32, then length bytes of UTF-8
+}
+```
+
+Maximum sizes: per-VALUE data 384 MB, serialised PACK 512 MB, element name 63 chars.
+
+### Connection flow
+
+The SoftEther native protocol operates over TLS (TCP/443). The exchange is:
+
+1. **TCP connect** to port 443 (default).
+2. **TLS handshake**, presenting the SNI for the virtual hub.
+3. **Client sends a PACK** containing `method="hello"`, client version, build info.
+4. **Server responds** with a PACK containing server version, build info, and a `random` field (20 bytes, used for password hashing).
+5. **Client sends a PACK** containing authentication method (`"login"`), username, hub name, and password proof (SHA1 of SHA1 of password XOR'd with random).
+6. **Server responds** with a PACK containing auth result, assigned IP, and session parameters.
+7. **Ethernet frames** are exchanged raw over the TLS connection, with a 4-byte length prefix before each frame.
+
+### Data path
+
+After authentication, the client and server exchange raw Ethernet frames. Each
+frame is prefixed with a 4-byte little-endian length (the frame's length
+excluding the prefix). There is no type/length/value wrapping beyond this
+4-byte length header — the bytes between length prefixes are a complete Ethernet
+frame (14-byte header + payload, with FCS usually absent as the encapsulating
+link is assumed reliable).
+
+### UDP acceleration
+
+An optional UDP path sends raw Ethernet frames over UDP/4500 with a
+connection-ID-based demux. Each UDP datagram carries an 8-byte header (session
+ID + sequence number) followed by the Ethernet frame. Implementation deferred
+until the TCP-only data path is verified.
+
+### PACK codec implementation
+
+The PACK codec lives in `internal/softether/pack.go` and has been implemented
+with a truncation-rejection test suite and a subslice-zero-allocation decoder.
+The initial implementation covers all five value types; the UNISTR type stores
+UTF-8 on the wire (the same as STR; the difference is in how the SoftEther peer
+interprets the result, which is the caller's responsibility).
 
 ## Phases
 
-1. **Read the source; fill in the wire section above.** Deliverable is this
-   document, not code.
+1. **Read the source; fill in the wire section above.** ✓ DONE.
 2. **`internal/softether/pack.go`** — the PACK key/value codec, both directions,
-   with a truncation-rejection test and a fuzz target. This is the foundation
-   everything else parses through.
-3. **`dataplane`: TAP mode.** `OpenTAP`, and an audit of every place that
-   assumes an IP header at offset 0 (`TrimToIP`, `destOf`/`sourceOf` equivalents,
-   the pump's route table). Do this as its own commit with its own tests, because
-   it touches shared code that thirteen protocols depend on.
+   with a truncation-rejection test and a fuzz target. ✓ DONE.
+3. **`dataplane`: TAP mode.** `OpenTAP` added to `dataplane/tun_linux.go` and
+   `tun_other.go`. Remaining: audit of every place that assumes an IP header at
+   offset 0 (`TrimToIP`, `innerDest`, `flowKeyOf`, the pump's route table).
 4. **`internal/softether/switch.go`** — the learning bridge: MAC table with
-   ageing, flood for unknown/broadcast, per-session port. Testable entirely in
-   memory with no sockets.
+   ageing, flood for unknown/broadcast, per-session port. NOT YET IMPLEMENTED.
 5. **`internal/softether/{auth,session,link}.go`** — the control exchange, the
-   multi-connection session, the frame path.
+   multi-connection session, the frame path. NOT YET IMPLEMENTED.
 6. **Both roles end to end** over a real TLS listener, mirroring
-   `internal/pulse/e2e_test.go`.
+   `internal/pulse/e2e_test.go`. NOT YET IMPLEMENTED.
 7. **Facade, CLI, docs, NM, fuzz, interop** — the standard checklist in
-   `CLAUDE.md`.
+   `AGENTS.md`. NOT YET IMPLEMENTED.
 
 ## Interop
 

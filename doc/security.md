@@ -136,3 +136,90 @@ one protocol here whose data path is not the profile the protocol is designed
 for. It is a performance boundary, not a security or correctness one, and it is
 confined to MASQUE; the moment `x/net/quic` gains datagram support the transport
 swaps under an unchanged data path.
+
+## Post-quantum IKEv2 protects the key exchange, not the authentication
+
+Hybrid PQ IKEv2 (RFC 9370, RFC 9242, and RFC-ietf-ipsecme-ikev2-mlkem) layers
+ML-KEM-768 (FIPS 203) on top of the classical Diffie-Hellman in IKE_SA_INIT via
+an IKE_INTERMEDIATE exchange. The derived SKEYSEED is at least as strong as the
+strongest component — an adversary who breaks the classical Curve25519 half still
+has ML-KEM in the way.
+
+Two things this does NOT protect:
+
+- **Authentication remains classical.** The AUTH payload in IKE_AUTH is still
+  keyed by the PSK, EAP-MSCHAPv2 MSK, or certificate signature, all of which are
+  classical cryptography. A quantum adversary attacking the authentication *live*
+  (rather than retroactively) can forge credentials.
+
+- **Downgrade must be detected by the AUTH computation.** The IKE_INTERMEDIATE
+  messages are folded into the AUTH payload (RFC 9242 §3.3), so an attacker who
+  strips the intermediate exchange from a captured handshake cannot retroactively
+  forge the matching AUTH. `TestAuthOctetsPutsIntAuthLast` and
+  `TestFinalIntAuthOrdersInitiatorThenResponderThenMsgID` pin the construction,
+  and `TestInteropVeepinClientStrongswanServerPQ` /
+  `TestInteropStrongswanClientVeepinServerPQ` prove the AUTH values match a real
+  strongSwan. A misimplementation that omits the folding would silently downgrade
+  the key exchange to classical-only, and both endpoints would agree with each
+  other about it — which is why the cross-implementation cells, not the unit
+  tests, are the load-bearing evidence here.
+
+The ML-KEM implementation uses the Go standard library's `crypto/mlkem`, which
+is a dependency-free path (no new module beyond the stdlib). The IANA group ID
+for ML-KEM-768 in IKEv2 is 36.
+
+
+## SoftEther is layer 2, and shares a broadcast domain between clients
+
+Every other protocol here routes IP. SoftEther bridges Ethernet, which means
+connected clients share a broadcast domain: ARP, DHCP, mDNS and anything else
+that floods reaches every other client. A learning bridge limits *unicast* to
+the port that owns the destination MAC, but it floods anything it has not
+learned, and nothing stops a client claiming another's MAC to attract its
+traffic. There is no port isolation and no MAC pinning.
+
+The login digest is SHA-1 over `username+password`, bound to a 20-byte
+per-session server challenge. The challenge binding is what stops replay; SHA-1
+is what the protocol specifies, and the server must hold the plaintext password
+because the response is computed from it rather than from a verifier.
+
+The data path is TLS-only — SoftEther's UDP acceleration is not implemented — so
+inner traffic inherits TCP head-of-line blocking, and the gateway sees every
+frame in the clear between the TLS termination and the bridge.
+
+`internal/softether/README.md` lists what is not implemented, including the
+missing TAP data path that keeps this protocol from carrying host traffic at
+all.
+
+## AmneziaWG changes what packets look like, not what they protect
+
+AmneziaWG is WireGuard with the wire format perturbed: the message-type byte is
+replaced (H1-H4), random padding is prepended (S1-S4), and junk datagrams
+precede the handshake (Jc/Jmin/Jmax). The cryptography is untouched — the same
+Noise IK handshake, the same ChaCha20-Poly1305 transport keys, the same forward
+secrecy and the same rekey behaviour as `wireguard`.
+
+What this buys and what it does not:
+
+- **It defeats a signature match, not an analyst.** Stock WireGuard is
+  identifiable from one packet: a fixed type constant followed by three zero
+  bytes, at one of three fixed lengths. Changing both defeats a classifier
+  keyed on those. It does not disguise the *traffic pattern* — packet timing,
+  flow duration and volume are unchanged, and a censor doing statistical
+  analysis rather than signature matching is unaffected.
+- **The parameters are a shared secret in practice.** There is no negotiation,
+  deliberately, since a negotiation would itself be a signature. That means a
+  mismatch is a total failure rather than a fallback, and it means anyone who
+  learns a deployment's parameters can fingerprint it precisely.
+- **The padding is not confidentiality.** S1-S4 prepend *unauthenticated*
+  random bytes outside the AEAD. They change the length distribution and
+  nothing else; an attacker may strip or rewrite them freely, and doing so
+  costs them nothing and gains them nothing.
+- **Junk packets are unauthenticated traffic to an unauthenticated peer.** A
+  server with obfuscation configured will read and discard them cheaply, but
+  they are still bytes an off-path sender can make a server process.
+
+veepin implements the parameter-based obfuscation only. The I1-I5 custom
+signature packets, `HeaderProtectionKey`, and protocol mimicry (QUIC/DNS/SIP)
+are not implemented, so a deployment whose peers require them will not
+interoperate.

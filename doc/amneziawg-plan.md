@@ -25,15 +25,21 @@ vendor's remote-access product; it is a capability class.
 
 ## What actually changes
 
-Documented parameters, to be verified against `amneziawg-go` before
-implementation:
+Parameters, verified against `amneziawg-go` (README and source):
 
-- **`Jc`** — a count of junk packets sent before the real handshake.
-- **`Jmin` / `Jmax`** — the size range those junk packets are drawn from.
-- **`S1` / `S2`** — bytes of random padding prepended to the handshake initiation
-  and response respectively, which breaks the fixed-length signature.
+- **`Jc`** — count of junk packets sent before the real handshake (int, recommended 4-12).
+- **`Jmin` / `Jmax`** — size range those junk packets are drawn from (int, Jmin <= Jmax).
+- **`S1` / `S2` / `S3` / `S4`** — bytes of random padding prepended to the
+  handshake initiation, response, cookie reply, and transport data messages
+  respectively, which breaks the fixed-length signature.
 - **`H1`…`H4`** — replacements for the four fixed message-type constants, drawn
-  from a configured range, which breaks the fixed-header signature.
+  from a configured range (`"x-y"` or single value), which breaks the
+  fixed-header signature.
+- **`I1`…`I5`** — custom signature packets sent before the handshake, composed
+  of tags (`<b 0x[seq]>` static bytes, `<r [size]>` random bytes, `<t>` timestamp).
+  Second-phase feature.
+- **`HeaderProtectionKey`** (AWG 3+) — key for encrypting low-entropy header
+  fields. Second-phase feature.
 
 Later versions add protocol *mimicry* — shaping the flow to resemble QUIC, DNS
 or SIP. Treat that as a second phase; the parameter-based obfuscation above is

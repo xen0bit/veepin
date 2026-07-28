@@ -115,6 +115,29 @@ func supportedDH(id uint16) bool {
 	return false
 }
 
+// supportedADDKE gates which additional key exchange methods (RFC 9370) we will
+// accept in an ADDKE transform. Only ML-KEM-768 is implemented: it is the level
+// the IETF hybrid drafts settled on, and crypto/mlkem gives it to us without a
+// dependency.
+func supportedADDKE(id uint16) bool { return id == payload.MLKEM768 }
+
+// SelectADDKE returns the additional key exchange method the peer proposed in
+// its ADDKE1 transform, if we support it. RFC 9370 section 2.1: a proposal that
+// omits the transform type is treated as having proposed NONE, so "no ADDKE"
+// is the normal, non-error outcome and the caller simply skips the
+// IKE_INTERMEDIATE exchange.
+//
+// Only ADDKE1 is handled. The RFC allows up to seven rounds, but one
+// post-quantum KEM alongside the classical group is the whole point of the
+// hybrid — the remaining six exist for agility we have no use for yet.
+func SelectADDKE(p payload.Proposal) (uint16, bool) {
+	tr, ok := chosenTransform(p, payload.TransformADDKE1, supportedADDKE)
+	if !ok {
+		return 0, false
+	}
+	return tr.ID, true
+}
+
 // chosenTransform picks, for one transform category, the first entry in the
 // peer proposal that we support. Returns the transform and whether found.
 func chosenTransform(p payload.Proposal, tt payload.TransformType, ok func(uint16) bool) (payload.Transform, bool) {

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/xen0bit/veepin/amneziawg"
 	"github.com/xen0bit/veepin/anyconnect"
 	"github.com/xen0bit/veepin/cisco"
 	"github.com/xen0bit/veepin/client"
@@ -22,6 +23,7 @@ import (
 	"github.com/xen0bit/veepin/nebula"
 	"github.com/xen0bit/veepin/openvpn"
 	"github.com/xen0bit/veepin/pulse"
+	"github.com/xen0bit/veepin/softether"
 	"github.com/xen0bit/veepin/ssh"
 	"github.com/xen0bit/veepin/sstp"
 	"github.com/xen0bit/veepin/toy"
@@ -129,6 +131,59 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 				ikev2.OptServerClientCA: *clientCA,
 				ikev2.OptServerShape:    fmt.Sprint(*shape),
 			}
+		}, nil
+	case "amneziawg":
+		// Same tunnel surface as `serve wireguard` — AmneziaWG changes only what
+		// the packets look like — plus the obfuscation parameters, which must
+		// match every client exactly because nothing about them is negotiated.
+		var (
+			config     = fs.String("config", "", "wg-quick server config file (defines the interface and peers)")
+			privKey    = fs.String("private-key", "", "server static private key, base64 (required unless in -config)")
+			listenIP   = fs.String("listen", "0.0.0.0", "local IP to bind the UDP socket on")
+			listenPort = fs.Int("listen-port", 0, "UDP port to listen on (default 51820)")
+			address    = fs.String("address", "", "server tunnel address in CIDR form, e.g. 10.10.0.1/24")
+			mtu        = fs.Int("mtu", 0, "inner MTU (default 1420)")
+			tun        = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+			peerPub    = fs.String("peer-public-key", "", "a single peer's static public key, base64 (adds one peer)")
+			peerPSK    = fs.String("peer-preshared-key", "", "the -peer-public-key peer's preshared key, base64 (optional)")
+			peerIPs    = fs.String("peer-allowed-ips", "", "the -peer-public-key peer's allowed IPs, comma-separated CIDRs")
+			shape      = fs.Int("shape", 0, "per-flow downstream shaping budget in bytes (0 = off)")
+			typeInit   = fs.Int("type-init", 0, "H1: message type replacing handshake initiation (0 = stock 1)")
+			typeResp   = fs.Int("type-resp", 0, "H2: message type replacing handshake response (0 = stock 2)")
+			typeCook   = fs.Int("type-cookie", 0, "H3: message type replacing cookie reply (0 = stock 3)")
+			typeTrans  = fs.Int("type-trans", 0, "H4: message type replacing transport data (0 = stock 4)")
+			padInit    = fs.Int("pad-init", 0, "S1: random bytes prepended to handshake initiation")
+			padResp    = fs.Int("pad-resp", 0, "S2: random bytes prepended to handshake response")
+			padCook    = fs.Int("pad-cookie", 0, "S3: random bytes prepended to cookie reply")
+			padTrans   = fs.Int("pad-trans", 0, "S4: random bytes prepended to transport data")
+		)
+		return func() map[string]string {
+			opts := map[string]string{
+				amneziawg.OptServerConfig:           *config,
+				amneziawg.OptServerPrivateKey:       *privKey,
+				amneziawg.OptServerListenIP:         *listenIP,
+				amneziawg.OptServerAddress:          *address,
+				amneziawg.OptServerTUNName:          *tun,
+				amneziawg.OptServerPeerPublicKey:    *peerPub,
+				amneziawg.OptServerPeerPresharedKey: *peerPSK,
+				amneziawg.OptServerPeerAllowedIPs:   *peerIPs,
+				amneziawg.OptServerShape:            fmt.Sprint(*shape),
+				amneziawg.OptTypeInit:               fmt.Sprint(*typeInit),
+				amneziawg.OptTypeResp:               fmt.Sprint(*typeResp),
+				amneziawg.OptTypeCookie:             fmt.Sprint(*typeCook),
+				amneziawg.OptTypeTrans:              fmt.Sprint(*typeTrans),
+				amneziawg.OptPadInit:                fmt.Sprint(*padInit),
+				amneziawg.OptPadResp:                fmt.Sprint(*padResp),
+				amneziawg.OptPadCookie:              fmt.Sprint(*padCook),
+				amneziawg.OptPadTrans:               fmt.Sprint(*padTrans),
+			}
+			if *listenPort != 0 {
+				opts[amneziawg.OptServerListenPort] = fmt.Sprint(*listenPort)
+			}
+			if *mtu != 0 {
+				opts[amneziawg.OptServerMTU] = fmt.Sprint(*mtu)
+			}
+			return opts
 		}, nil
 	case "wireguard":
 		var (
@@ -580,6 +635,26 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			}
 			if *port != 0 {
 				opts[ssh.OptServerPort] = fmt.Sprint(*port)
+			}
+			return opts
+		}, nil
+	case "softether":
+		var (
+			cert = fs.String("cert", "", "path to TLS certificate PEM (required)")
+			key  = fs.String("key", "", "path to TLS private key PEM (required)")
+			user = fs.String("user", "", "username to accept (required)")
+			pass = fs.String("pass", "", "password to accept (required)")
+			tun  = fs.String("tun", "", "TAP interface name (empty = kernel picks)")
+			pool = fs.String("pool", "10.70.0.0/24", "address pool")
+		)
+		return func() map[string]string {
+			opts := map[string]string{
+				softether.OptServerCert: *cert,
+				softether.OptServerKey:  *key,
+				softether.OptServerUser: *user,
+				softether.OptServerPass: *pass,
+				softether.OptServerTUN:  *tun,
+				softether.OptServerPool: *pool,
 			}
 			return opts
 		}, nil

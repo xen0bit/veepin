@@ -25,6 +25,7 @@ import (
 
 	"github.com/xen0bit/veepin/client"
 
+	_ "github.com/xen0bit/veepin/amneziawg"
 	_ "github.com/xen0bit/veepin/anyconnect"
 	_ "github.com/xen0bit/veepin/cisco"
 	_ "github.com/xen0bit/veepin/fortinet"
@@ -35,6 +36,7 @@ import (
 	_ "github.com/xen0bit/veepin/nebula"
 	_ "github.com/xen0bit/veepin/openvpn"
 	_ "github.com/xen0bit/veepin/pulse"
+	_ "github.com/xen0bit/veepin/softether"
 	_ "github.com/xen0bit/veepin/ssh"
 	_ "github.com/xen0bit/veepin/sstp"
 	_ "github.com/xen0bit/veepin/toy"
@@ -91,7 +93,7 @@ var numberWords = map[int]string{
 
 var ordinalWords = map[int]string{
 	8: "eighth", 9: "ninth", 10: "tenth", 11: "eleventh", 12: "twelfth",
-	13: "thirteenth", 14: "fourteenth", 15: "fifteenth",
+	13: "thirteenth", 14: "fourteenth", 15: "fifteenth", 16: "sixteenth",
 }
 
 // countPhrase matches every spelled-out count the README attaches to a phrase,

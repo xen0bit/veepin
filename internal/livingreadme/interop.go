@@ -41,14 +41,16 @@ var interopMatrix = []interopRow{
 			"TestInteropVeepinClientStrongswanServerChaCha20",
 			"TestInteropVeepinClientStrongswanServerIPv6",
 			"TestInteropVeepinClientStrongswanServerV6Underlay",
-		}, Label: "strongSwan (PSK + pubkey, AES-GCM + ChaCha20, dual-stack, v6 underlay)"},
+			"TestInteropVeepinClientStrongswanServerPQ",
+		}, Label: "strongSwan (PSK + pubkey, AES-GCM + ChaCha20, dual-stack, v6 underlay, ML-KEM-768)"},
 		Server: interopCell{Tests: []string{
 			"TestInteropStrongswanClientVeepinServer",
 			"TestInteropStrongswanClientVeepinServerEAP",
 			"TestInteropStrongswanClientVeepinServerFragmented",
 			"TestInteropStrongswanClientVeepinServerV6Underlay",
 			"TestInteropStrongswanClientVeepinServerShaped",
-		}, Label: "strongSwan (+ EAP-MSCHAPv2, RFC 7383 frag, v6 underlay, TFC-padded)"},
+			"TestInteropStrongswanClientVeepinServerPQ",
+		}, Label: "strongSwan (+ EAP-MSCHAPv2, RFC 7383 frag, v6 underlay, TFC-padded, ML-KEM-768)"},
 		Self: interopCell{Tests: []string{
 			"TestInteropSelf",
 			"TestInteropIKEv2ChildRekey",
@@ -173,6 +175,25 @@ var interopMatrix = []interopRow{
 			"TestInteropOpenconnectPulseClientVeepinServerShaped",
 		}, Label: "openconnect (IF-T/TLS, ESP, padded)"},
 		Self: interopCell{Tests: []string{"TestInteropPulseSelf"}, Label: "(over ESP)"},
+	},
+	// SoftEther and AmneziaWG are implemented but not yet proven against a peer.
+	// They carry "‡", not "†": the dagger means *no open-source peer exists*,
+	// which is true of FortiOS and false of both of these — SoftEther VPN Server
+	// is Apache-2.0 and amneziawg-go is a Go implementation. Marking them "†"
+	// would state in the README that no peer was available, when the truth is
+	// that the cells have not been built yet. The Self column especially: a
+	// veepin↔veepin test is always possible, so a dash there is never earned.
+	{
+		Protocol: "SoftEther VPN",
+		Client:   interopCell{Label: "—‡"},
+		Server:   interopCell{Label: "—‡"},
+		Self:     interopCell{Label: "—‡"},
+	},
+	{
+		Protocol: "AmneziaWG",
+		Client:   interopCell{Label: "—‡"},
+		Server:   interopCell{Label: "—‡"},
+		Self:     interopCell{Tests: []string{"TestInteropAmneziaWGSelf"}, Label: "(H1-H4, S1-S4, junk)"},
 	},
 	{
 		Protocol: "TOY*",

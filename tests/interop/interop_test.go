@@ -110,6 +110,41 @@ func TestInteropVeepinClientStrongswanServerChaCha20(t *testing.T) {
 	runInterop(t, "compose.client-ss-chacha.yml", "veepin-client", "10.20.30.254")
 }
 
+// TestInteropAmneziaWGSelf runs the veepin AmneziaWG client against the veepin
+// AmneziaWG server with every obfuscation knob engaged: all four message types
+// replaced, all four paddings non-zero, and junk datagrams ahead of the
+// handshake. A successful cross-tunnel ping proves the transform is reversible
+// over real sockets — the unit tests only round-trip it in memory.
+func TestInteropAmneziaWGSelf(t *testing.T) {
+	runInteropBench(t, "compose.amneziawg-self.yml", "veepin-awg-client", "veepin-awg-server", "10.60.0.1")
+}
+
+// TestInteropVeepinClientStrongswanServerPQ is Direction A with a post-quantum
+// hybrid key exchange: the veepin client offers ML-KEM-768 as an RFC 9370
+// additional key exchange, carried in an RFC 9242 IKE_INTERMEDIATE exchange,
+// against a strongSwan responder configured with ke1_mlkem768.
+//
+// The log assertion is the point. RFC 9370 negotiation degrades silently by
+// design — a responder that declines simply omits the transform and the
+// handshake proceeds classically — so a bare ping proves only that IKEv2 works,
+// which it did even when the exchange was completely broken. The assertion
+// reads strongSwan's log rather than our own: the claim worth making is that a
+// different implementation saw and accepted the exchange, not that we think we
+// sent it.
+func TestInteropVeepinClientStrongswanServerPQ(t *testing.T) {
+	runInteropRequiringLogFrom(t, "compose.client-ss-pq.yml", "veepin-client", "strongswan-server", "10.20.30.254",
+		"parsed IKE_INTERMEDIATE request")
+}
+
+// TestInteropStrongswanClientVeepinServerPQ is Direction B with the same hybrid
+// exchange: strongSwan initiates with ke1_mlkem768 and the veepin server must
+// select the ADDKE transform, answer the IKE_INTERMEDIATE, and fold the KEM
+// secret into SKEYSEED. Asserted on the server's log for the reason above.
+func TestInteropStrongswanClientVeepinServerPQ(t *testing.T) {
+	runInteropRequiringLogFrom(t, "compose.server-ss-pq.yml", "strongswan-client", "veepin-server", "10.10.10.1",
+		"negotiated additional key exchange ML-KEM-768")
+}
+
 // TestInteropVeepinClientStrongswanServerCert is Direction A with certificate
 // authentication: the veepin client authenticates to a strongSwan responder with
 // an ECDSA certificate (no PSK), each verifying the other's chain and RFC 7427
@@ -1151,15 +1186,24 @@ func parseIperfBits(out string) (float64, error) {
 // points at the wrong thing (see the AnyConnect DTLS cell).
 func runInteropRequiringLog(t *testing.T, composeFile, pingSvc, target string, wants ...string) {
 	t.Helper()
+	runInteropRequiringLogFrom(t, composeFile, pingSvc, pingSvc, target, wants...)
+}
+
+// runInteropRequiringLogFrom is runInteropRequiringLog where the service that
+// must report the log line is not the one doing the pinging. The server
+// direction needs this: the peer's client pings, but the claim being checked is
+// about what the *veepin server* did.
+func runInteropRequiringLogFrom(t *testing.T, composeFile, pingSvc, logSvc, target string, wants ...string) {
+	t.Helper()
 	if len(wants) == 0 {
-		t.Fatal("runInteropRequiringLog needs at least one required log line")
+		t.Fatal("runInteropRequiringLogFrom needs at least one required log line")
 	}
 	runInterop(t, composeFile, pingSvc, target)
 
 	deadline := time.Now().Add(logDeadline)
 	var logs string
 	for time.Now().Before(deadline) {
-		out, err := compose(t, composeFile, "logs", "--no-color", pingSvc)
+		out, err := compose(t, composeFile, "logs", "--no-color", logSvc)
 		if err == nil {
 			logs = out
 			missing := false
@@ -1170,7 +1214,7 @@ func runInteropRequiringLog(t *testing.T, composeFile, pingSvc, target string, w
 				}
 			}
 			if !missing {
-				t.Logf("%s reported %s", pingSvc, quoteAll(wants))
+				t.Logf("%s reported %s", logSvc, quoteAll(wants))
 				return
 			}
 		}
@@ -1184,7 +1228,7 @@ func runInteropRequiringLog(t *testing.T, composeFile, pingSvc, target string, w
 		}
 	}
 	t.Fatalf("the tunnel came up but %s never appeared in %s's logs within %s:\n%s",
-		quoteAll(absent), pingSvc, logDeadline, logs)
+		quoteAll(absent), logSvc, logDeadline, logs)
 }
 
 // quoteAll renders a set of required log lines for a message: `"a" and "b"`.

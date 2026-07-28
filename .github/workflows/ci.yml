@@ -217,11 +217,14 @@ jobs:
           ./internal/gp FuzzParsePreloginResponse
           ./internal/gp FuzzParseLoginForm
           ./internal/gp FuzzActivationPing
+          ./internal/softether FuzzDecodePack
+          ./wireguard FuzzDeobfuscate
+          ./wireguard FuzzObfuscateRoundTrip
           TARGETS
 
           # Guard against the truncation described above, and against a target
           # being added to the list without the loop reaching it.
-          expected=61
+          expected=64
           if [ "$ran" -ne "$expected" ]; then
             echo "::error::ran $ran fuzz targets, expected $expected -- the target list was truncated"
             exit 1

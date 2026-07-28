@@ -17,6 +17,7 @@ type SAState int
 const (
 	StateInitial SAState = iota
 	StateSAInitDone
+	StateIntermediate // IKE_SA_INIT done, IKE_INTERMEDIATE in progress (RFC 9242)
 	StateEstablished
 	StateDeleting
 	StateClosed
@@ -28,6 +29,8 @@ func (s SAState) String() string {
 		return "INITIAL"
 	case StateSAInitDone:
 		return "SA_INIT_DONE"
+	case StateIntermediate:
+		return "INTERMEDIATE"
 	case StateEstablished:
 		return "ESTABLISHED"
 	case StateDeleting:
@@ -89,6 +92,24 @@ type IKESA struct {
 	// First IKE_SA_INIT messages, needed for AUTH computation.
 	InitiatorSAInit []byte
 	ResponderSAInit []byte
+
+	// IntAuthI / IntAuthR are the running RFC 9242 section 3.3 authentication
+	// chains over the IKE_INTERMEDIATE messages sent by the initiator and the
+	// responder respectively. Both endpoints maintain both chains, since both
+	// see both directions. Empty when no IKE_INTERMEDIATE exchange happened.
+	IntAuthI []byte
+	IntAuthR []byte
+
+	// ADDKEGroup is the additional key exchange method negotiated in the ADDKE1
+	// transform (RFC 9370), or 0 if none was. It gates IKE_INTERMEDIATE: a peer
+	// that sends the exchange without having negotiated a method is rejected.
+	ADDKEGroup uint16
+
+	// IKEAuthMsgID is the message ID of the *first* IKE_AUTH request, which is
+	// the value IntAuth commits to (RFC 9242 section 3.3). Under EAP there are
+	// several IKE_AUTH round trips and only the first one counts, so this is
+	// captured once rather than read from whichever header is to hand.
+	IKEAuthMsgID uint32
 
 	// Peer identity from IKE_AUTH.
 	PeerID payload.IDPayload

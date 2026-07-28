@@ -91,6 +91,24 @@ func expandIKEKeys(prf *cryptoutil.PRF, skeyseed, ni, nr []byte, spiI, spiR uint
 	return keys
 }
 
+// DeriveIntermediateSKEYSEED computes the new SKEYSEED after an IKE_INTERMEDIATE
+// exchange with an additional key exchange (RFC 9370 section 2.2). The shared
+// secret from the additional key exchange is mixed into SKEYSEED by chaining it
+// through the existing SA's SK_d:
+//
+//	SKEYSEED = prf(SK_d(prev), sharedSecret | SK_i | ...)
+//
+// The SK_i is the initiator's nonce from the intermediate exchange; for the
+// initiator this is Ni, for the responder Nr. The order matters and is specified:
+// the new shared secret comes first, then the intermediate exchange's nonces.
+func DeriveIntermediateSKEYSEED(prf *cryptoutil.PRF, prevSKd, newSharedSecret, ni, nr []byte) []byte {
+	seed := make([]byte, 0, len(newSharedSecret)+len(ni)+len(nr))
+	seed = append(seed, newSharedSecret...)
+	seed = append(seed, ni...)
+	seed = append(seed, nr...)
+	return prf.Apply(prevSKd, seed)
+}
+
 // DeriveChildKeys computes the Child SA keying material (RFC 7296 2.17):
 //
 //	KEYMAT = prf+(SK_d, [g^ir (new)] | Ni | Nr)
@@ -107,22 +125,28 @@ func DeriveChildKeys(prf *cryptoutil.PRF, skd, dhSecret, ni, nr []byte, total in
 }
 
 // AuthOctets computes the data signed/MAC'd by an endpoint's AUTH payload
-// (RFC 7296 section 2.15):
+// (RFC 7296 section 2.15, extended by RFC 9242 section 3.3):
 //
-//	InitiatorSignedOctets = RealMessage1 | NonceRData | prf(SK_pi, IDi')
-//	ResponderSignedOctets = RealMessage2 | NonceIData | prf(SK_pr, IDr')
+//	InitiatorSignedOctets = RealMessage1 | NonceRData | prf(SK_pi, IDi') | IntAuth
+//	ResponderSignedOctets = RealMessage2 | NonceIData | prf(SK_pr, IDr') | IntAuth
 //
 // realMessage is the first message this endpoint sent (the full IKE_SA_INIT
 // request for the initiator, or response for the responder). peerNonce is the
-// other side's nonce. idPayload is the ID payload body (type + reserved +
-// data), i.e. everything after the generic payload header, hashed with the
-// endpoint's own SK_p.
-func AuthOctets(prf *cryptoutil.PRF, realMessage, peerNonce, skp, idPayload []byte) []byte {
+// other side's nonce. idPayload is the ID payload body (type + reserved + data),
+// i.e. everything after the generic payload header, hashed with the endpoint's
+// own SK_p.
+//
+// intAuth covers any IKE_INTERMEDIATE exchanges (see [finalIntAuth]) and is nil
+// when there were none, which degrades this to plain RFC 7296. It goes last,
+// after the ID hash — not between the message and the nonce, which would be a
+// change both endpoints could agree on while no other implementation did.
+func AuthOctets(prf *cryptoutil.PRF, realMessage, peerNonce, skp, idPayload, intAuth []byte) []byte {
 	idPrime := prf.Apply(skp, idPayload)
-	out := make([]byte, 0, len(realMessage)+len(peerNonce)+len(idPrime))
+	out := make([]byte, 0, len(realMessage)+len(peerNonce)+len(idPrime)+len(intAuth))
 	out = append(out, realMessage...)
 	out = append(out, peerNonce...)
 	out = append(out, idPrime...)
+	out = append(out, intAuth...)
 	return out
 }
 

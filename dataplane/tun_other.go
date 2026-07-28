@@ -19,6 +19,9 @@ func OpenTUN(name string) (*TUN, error) {
 // OpenTUNGSO is unsupported off Linux, like OpenTUN.
 func OpenTUNGSO(name string) (*TUN, error) { return OpenTUN(name) }
 
+// OpenTAP is unsupported off Linux, like OpenTUN.
+func OpenTAP(name string) (*TUN, error) { return OpenTUN(name) }
+
 // GSO is always false off Linux.
 func (t *TUN) GSO() bool { return false }
 

@@ -72,6 +72,12 @@ type Config struct {
 	// TUNName is the desired TUN interface name; empty lets the kernel pick.
 	TUNName string
 
+	// PostQuantum offers ML-KEM-768 as an additional key exchange (RFC 9370),
+	// carried in an IKE_INTERMEDIATE exchange (RFC 9242). The result is hybrid:
+	// the classical group still runs and still contributes. A server that does
+	// not support it is not an error — the handshake proceeds classically.
+	PostQuantum bool
+
 	// RekeyInterval is the Child SA soft lifetime: the client proactively
 	// rekeys the ESP SA (a CREATE_CHILD_SA exchange, new keys, old SA deleted)
 	// this often, so a long-lived tunnel never lets its data SA expire. Zero
@@ -113,20 +119,21 @@ const defaultIKERekeyInterval = 4 * time.Hour
 // NetworkManager plugin's connection settings, which is why the parsed names are
 // hyphenated rather than Go-cased.
 const (
-	OptGateway  = "gateway"   // server host or IP (required)
-	OptPort     = "port"      // server IKE port (default 500)
-	OptPSK      = "psk"       // pre-shared key (required)
-	OptLocalID  = "local-id"  // identity presented to the server (required)
-	OptServerID = "server-id" // expected server identity (optional)
-	OptUser     = "user"      // EAP-MSCHAPv2 username (optional)
-	OptPassword = "password"  // EAP-MSCHAPv2 password (optional)
-	OptTUNName  = "tun"       // desired TUN interface name (optional)
-	OptRekey    = "rekey"     // Child SA rekey interval in seconds (optional)
-	OptIKERekey = "ike-rekey" // IKE SA rekey interval in seconds (optional)
-	OptCert     = "cert"      // client certificate PEM path (enables certificate auth)
-	OptKey      = "key"       // client private-key PEM path
-	OptCA       = "ca"        // CA bundle PEM path to verify the server (optional)
-	OptShape    = "shape"     // per-flow upstream shaping budget in bytes (0 = off)
+	OptGateway  = "gateway"      // server host or IP (required)
+	OptPort     = "port"         // server IKE port (default 500)
+	OptPSK      = "psk"          // pre-shared key (required)
+	OptLocalID  = "local-id"     // identity presented to the server (required)
+	OptServerID = "server-id"    // expected server identity (optional)
+	OptUser     = "user"         // EAP-MSCHAPv2 username (optional)
+	OptPassword = "password"     // EAP-MSCHAPv2 password (optional)
+	OptTUNName  = "tun"          // desired TUN interface name (optional)
+	OptRekey    = "rekey"        // Child SA rekey interval in seconds (optional)
+	OptIKERekey = "ike-rekey"    // IKE SA rekey interval in seconds (optional)
+	OptCert     = "cert"         // client certificate PEM path (enables certificate auth)
+	OptKey      = "key"          // client private-key PEM path
+	OptCA       = "ca"           // CA bundle PEM path to verify the server (optional)
+	OptShape    = "shape"        // per-flow upstream shaping budget in bytes (0 = off)
+	OptPQ       = "post-quantum" // offer ML-KEM-768 as an additional key exchange
 )
 
 // parseOptions turns string-keyed options into a Dialer. It is what the registry
@@ -143,6 +150,7 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 		CertFile:    opts[OptCert],
 		KeyFile:     opts[OptKey],
 		CAFile:      opts[OptCA],
+		PostQuantum: opts[OptPQ] == "true",
 	}
 	if p := opts[OptPort]; p != "" {
 		n, err := strconv.Atoi(p)
@@ -223,6 +231,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 		LocalID:     parseIdentity(cfg.LocalID),
 		EAPUsername: cfg.EAPUser,
 		EAPPassword: cfg.EAPPassword,
+		PostQuantum: cfg.PostQuantum,
 		Logger:      logger,
 	}
 	if cfg.ServerID != "" {

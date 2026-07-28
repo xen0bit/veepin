@@ -6,10 +6,11 @@ package payload
 type ExchangeType uint8
 
 const (
-	IKE_SA_INIT     ExchangeType = 34
-	IKE_AUTH        ExchangeType = 35
-	CREATE_CHILD_SA ExchangeType = 36
-	INFORMATIONAL   ExchangeType = 37
+	IKE_SA_INIT      ExchangeType = 34
+	IKE_AUTH         ExchangeType = 35
+	CREATE_CHILD_SA  ExchangeType = 36
+	INFORMATIONAL    ExchangeType = 37
+	IKE_INTERMEDIATE ExchangeType = 43 // RFC 9242
 )
 
 func (e ExchangeType) String() string {
@@ -22,6 +23,8 @@ func (e ExchangeType) String() string {
 		return "CREATE_CHILD_SA"
 	case INFORMATIONAL:
 		return "INFORMATIONAL"
+	case IKE_INTERMEDIATE:
+		return "IKE_INTERMEDIATE"
 	default:
 		return "UNKNOWN_EXCHANGE"
 	}
@@ -119,8 +122,19 @@ const (
 	TransformENCR  TransformType = 1 // Encryption Algorithm
 	TransformPRF   TransformType = 2 // Pseudorandom Function
 	TransformINTEG TransformType = 3 // Integrity Algorithm
-	TransformDH    TransformType = 4 // Diffie-Hellman Group
-	TransformESN   TransformType = 5 // Extended Sequence Numbers
+	TransformDH    TransformType = 4 // Key Exchange Method (was Diffie-Hellman Group)
+	TransformESN   TransformType = 5 // Sequence Numbers
+
+	// Additional Key Exchange transforms (RFC 9370 section 2.1). These are
+	// negotiated alongside the mandatory KE transform and each names a group
+	// from the same registry as TransformDH.
+	TransformADDKE1 TransformType = 6
+	TransformADDKE2 TransformType = 7
+	TransformADDKE3 TransformType = 8
+	TransformADDKE4 TransformType = 9
+	TransformADDKE5 TransformType = 10
+	TransformADDKE6 TransformType = 11
+	TransformADDKE7 TransformType = 12
 )
 
 // Encryption transform IDs (IANA IKEv2 registry).
@@ -153,6 +167,11 @@ const (
 	DH_ECP_384    uint16 = 20
 	DH_ECP_521    uint16 = 21
 	DH_CURVE25519 uint16 = 31
+
+	// Post-quantum KEM group IDs (IANA IKEv2 registry, RFC-ietf-ipsecme-ikev2-mlkem).
+	MLKEM512  uint16 = 35
+	MLKEM768  uint16 = 36
+	MLKEM1024 uint16 = 37
 )
 
 // ESN transform IDs.
@@ -236,6 +255,11 @@ const (
 	IKEFragmentationSupported NotifyType = 16430
 
 	SignatureHashAlgorithms NotifyType = 16431
+
+	// IntermediateExchangeSupported (RFC 9242 section 3.1): advertised in
+	// IKE_SA_INIT to indicate the endpoint can process IKE_INTERMEDIATE exchanges.
+	// 16438, per the IANA registry — not 16444, which is CHILDLESS_IKEV2_SUPPORTED.
+	IntermediateExchangeSupported NotifyType = 16438
 )
 
 // CertEncoding values in CERT / CERTREQ payloads (RFC 7296 section 3.6). Only

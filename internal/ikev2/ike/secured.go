@@ -85,6 +85,8 @@ func (s *Server) handleSecured(pkt []byte, hdr payload.Header, remote *net.UDPAd
 	switch ex {
 	case payload.IKE_AUTH:
 		s.handleIKEAuth(sa, hdr, inners, remote)
+	case payload.IKE_INTERMEDIATE:
+		s.handleIKEIntermediate(sa, hdr, inners, remote)
 	case payload.CREATE_CHILD_SA:
 		s.handleCreateChildSA(sa, hdr, inners, remote)
 	case payload.INFORMATIONAL:

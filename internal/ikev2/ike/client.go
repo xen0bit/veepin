@@ -62,6 +62,14 @@ type ClientConfig struct {
 	// pool falls back to the host's system roots.
 	CARoots *x509.CertPool
 
+	// PostQuantum offers ML-KEM-768 as an additional key exchange (RFC 9370),
+	// carried in an IKE_INTERMEDIATE exchange (RFC 9242) between IKE_SA_INIT and
+	// IKE_AUTH. The result is hybrid: the classical group still runs and still
+	// contributes, so a flaw in either one alone is not enough to recover the
+	// keys. A server that does not offer it is not an error — the handshake
+	// simply proceeds classically.
+	PostQuantum bool
+
 	Logger *log.Logger
 }
 
@@ -106,6 +114,24 @@ type Client struct {
 	// mobike is true once the server confirmed MOBIKE_SUPPORTED in IKE_AUTH,
 	// which is the precondition for Roam.
 	mobike bool
+
+	// peerIntermediate records that the responder advertised
+	// INTERMEDIATE_EXCHANGE_SUPPORTED. It is necessary but not sufficient: the
+	// exchange only runs when an ADDKE method was also negotiated.
+	peerIntermediate bool
+	// addkeGroup is the additional key exchange method the responder accepted in
+	// the ADDKE1 transform (RFC 9370), or 0 if none. Non-zero is what actually
+	// triggers the IKE_INTERMEDIATE exchange.
+	addkeGroup uint16
+	// intAuthI / intAuthR are the RFC 9242 section 3.3 chains over the
+	// IKE_INTERMEDIATE messages in each direction.
+	intAuthI []byte
+	intAuthR []byte
+	// authMsgID is the message ID of the first IKE_AUTH request. It is 1 for a
+	// plain handshake, but each IKE_INTERMEDIATE exchange consumes an ID first
+	// (RFC 9242 section 3.2), so IKE_AUTH cannot simply hardcode 1 — reusing an
+	// ID the responder has already answered gets the request dropped as a replay.
+	authMsgID uint32
 
 	// frag is true once the server confirmed IKE_FRAGMENTATION_SUPPORTED in
 	// IKE_SA_INIT; fragReasm reassembles any fragmented responses it then sends.
@@ -199,13 +225,34 @@ func (c *Client) Connect() (*ClientResult, error) {
 	}
 	c.log.Printf("ikev2 client: IKE_SA_INIT complete")
 
+	// The additional key exchange runs only when the responder actually accepted
+	// an ADDKE method. Support for the exchange alone is not enough: RFC 9242
+	// leaves IKE_INTERMEDIATE with nothing to carry, and sending it anyway
+	// stalls the handshake against a responder that has no reason to answer.
+	c.sendMsgID = 1 // IKE_SA_INIT was 0
+
 	// Float to the NAT-T port: IKE_AUTH and ESP both run on 4500 over one socket,
 	// as RFC 3948 requires. Sharing the socket is what lets a standards-compliant
 	// responder (e.g. strongSwan) send return ESP to our IKE source port.
+	//
+	// This must happen before IKE_INTERMEDIATE, not after. RFC 7296 section 2.23
+	// switches *every* message after IKE_SA_INIT to 4500, and an intermediate
+	// exchange left on 500 keeps the responder's SA pinned to the pre-float
+	// port: strongSwan then sends return ESP to a socket we have already closed
+	// and the tunnel comes up but carries nothing in that direction.
 	if err := c.floatToNATT(); err != nil {
 		c.Close()
 		return nil, fmt.Errorf("NAT-T float: %w", err)
 	}
+
+	if c.addkeGroup != 0 {
+		if err := c.sendIntermediateExchange(); err != nil {
+			c.conn.Close()
+			return nil, fmt.Errorf("IKE_INTERMEDIATE: %w", err)
+		}
+		c.log.Printf("ikev2 client: IKE_INTERMEDIATE complete (ML-KEM-768)")
+	}
+	c.authMsgID = c.sendMsgID
 
 	switch {
 	case c.cfg.EAPUsername != "":
@@ -295,8 +342,17 @@ func (c *Client) saInit() error {
 	}
 	c.ni = mustNonce(32)
 
+	prop := DefaultIKEProposal()
+	if c.cfg.PostQuantum {
+		// RFC 9370: ML-KEM-768 as the first (and only) additional key exchange,
+		// alongside the classical group above. Hybrid by construction — the
+		// classical DH still runs, so this cannot be worse than not offering it.
+		prop.Transforms = append(prop.Transforms,
+			payload.Transform{Type: payload.TransformADDKE1, ID: payload.MLKEM768})
+	}
+
 	b := payload.NewBuilder()
-	b.Add(payload.TypeSA, false, payload.MarshalSA(payload.SAPayload{Proposals: []payload.Proposal{DefaultIKEProposal()}}))
+	b.Add(payload.TypeSA, false, payload.MarshalSA(payload.SAPayload{Proposals: []payload.Proposal{prop}}))
 	b.Add(payload.TypeKE, false, payload.MarshalKE(payload.KEPayload{Group: payload.DH_CURVE25519, KeyData: pub}))
 	b.Add(payload.TypeNonce, false, payload.MarshalNonce(c.ni))
 	local := c.conn.LocalAddr().(*net.UDPAddr)
@@ -315,6 +371,12 @@ func (c *Client) saInit() error {
 	// certificate, so the responder signs (and accepts) a Digital Signature.
 	if c.certCred != nil {
 		addSigHashNotify(b)
+	}
+	// Advertise IKE_INTERMEDIATE support (RFC 9242), but only when we have
+	// something to put in it. An unconditional notify invites a responder to
+	// expect an exchange we will never send.
+	if c.cfg.PostQuantum {
+		addIntermediateNotify(b)
 	}
 	chain := b.Bytes()
 
@@ -344,6 +406,7 @@ func (c *Client) saInit() error {
 	c.spiR = msg.Header.ResponderSPI
 	c.frag = findFragSupported(msg.Payloads)
 	c.peerSigHashes = findSigHashes(msg.Payloads)
+	c.peerIntermediate = hasIntermediateSupport(msg)
 
 	saPay := msg.Find(payload.TypeSA)
 	kePay := msg.Find(payload.TypeKE)
@@ -360,6 +423,30 @@ func (c *Client) saInit() error {
 		return fmt.Errorf("cannot resolve negotiated suite: %w", err)
 	}
 	c.suite = suite
+
+	// RFC 9370 section 2.1: the responder either echoes an ADDKE transform it
+	// accepted, or omits it (equivalent to NONE) and no additional exchange
+	// happens. Requiring the notify as well means we never start an exchange a
+	// responder cannot answer.
+	//
+	// Read the transform off the *parsed* response, not off SelectIKESuite's
+	// second return value: that one is a reconstruction listing only the four
+	// classical transform types, so an ADDKE the responder did accept would
+	// vanish on the way through it.
+	if c.cfg.PostQuantum && c.peerIntermediate {
+		for _, p := range sa.Proposals {
+			if p.Protocol != payload.ProtoIKE {
+				continue
+			}
+			if group, ok := SelectADDKE(p); ok {
+				c.addkeGroup = group
+			}
+			break
+		}
+	}
+	if c.cfg.PostQuantum && c.addkeGroup == 0 {
+		c.log.Printf("ikev2 client: server declined the post-quantum key exchange; continuing with the classical group only")
+	}
 
 	ke, _ := payload.ParseKE(kePay.Body)
 	shared, err := c.dh.ComputeSecret(ke.KeyData)
@@ -378,13 +465,12 @@ func (c *Client) saInit() error {
 
 func (c *Client) authPSK() error {
 	idBody := idPayloadBody(c.cfg.LocalID)
-	authData := computePSKAuth(c.suite.PRF, c.cfg.PSK, c.saInitReq, c.nr, c.keys.SKpi, idBody)
+	authData := computePSKAuth(c.suite.PRF, c.cfg.PSK, c.saInitReq, c.nr, c.keys.SKpi, idBody, c.intAuth(c.authMsgID))
 
 	inner, childOutSPI := c.buildAuthInner(idBody, &payload.AuthPayload{
 		Method: payload.AuthSharedKeyMIC, Data: authData,
 	})
-	c.sendMsgID = 1
-	pkt, err := c.seal(payload.IKE_AUTH, 1, inner.FirstType(), inner.Bytes())
+	pkt, err := c.seal(payload.IKE_AUTH, c.authMsgID, inner.FirstType(), inner.Bytes())
 	if err != nil {
 		return err
 	}
@@ -398,7 +484,7 @@ func (c *Client) authPSK() error {
 	}
 	// IKE_AUTH consumed message ID 1; the next initiator request (e.g. a MOBIKE
 	// UPDATE_SA_ADDRESSES) is 2.
-	c.sendMsgID = 2
+	c.sendMsgID = c.authMsgID + 1
 	return c.finishAuth(inners, childOutSPI, c.cfg.PSK, false)
 }
 
@@ -410,15 +496,14 @@ func (c *Client) authPSK() error {
 // server's certificate and AUTH from the response.
 func (c *Client) authCert() error {
 	idBody := idPayloadBody(c.cfg.LocalID)
-	octets := AuthOctets(c.suite.PRF, c.saInitReq, c.nr, c.keys.SKpi, idBody)
+	octets := AuthOctets(c.suite.PRF, c.saInitReq, c.nr, c.keys.SKpi, idBody, c.intAuth(c.authMsgID))
 	method, authData, err := signAuth(c.certCred, octets, c.peerSigHashes)
 	if err != nil {
 		return err
 	}
 
 	inner, childOutSPI := c.buildCertAuthInner(idBody, method, authData)
-	c.sendMsgID = 1
-	pkt, err := c.seal(payload.IKE_AUTH, 1, inner.FirstType(), inner.Bytes())
+	pkt, err := c.seal(payload.IKE_AUTH, c.authMsgID, inner.FirstType(), inner.Bytes())
 	if err != nil {
 		return err
 	}
@@ -430,7 +515,7 @@ func (c *Client) authCert() error {
 	if err != nil {
 		return err
 	}
-	c.sendMsgID = 2
+	c.sendMsgID = c.authMsgID + 1
 	if err := c.verifyServerCertAuth(inners); err != nil {
 		return err
 	}
@@ -530,7 +615,7 @@ func (c *Client) verifyServerCertAuth(inners []payload.RawPayload) error {
 		return err
 	}
 	idrBody := idPayloadBody(Identity{Type: idr.Type, Data: idr.Data})
-	octets := AuthOctets(c.suite.PRF, c.saInitResp, c.ni, c.keys.SKpr, idrBody)
+	octets := AuthOctets(c.suite.PRF, c.saInitResp, c.ni, c.keys.SKpr, idrBody, c.intAuth(c.authMsgID))
 	if err := verifyAuth(leaf.PublicKey, auth.Method, octets, auth.Data); err != nil {
 		return fmt.Errorf("%w: %v", ErrAuthFailed, err)
 	}
@@ -545,8 +630,7 @@ func (c *Client) authEAP() error {
 
 	// Message 1: IDi + CP + SA + TS, no AUTH (signals EAP).
 	inner, childOutSPI := c.buildAuthInner(idBody, nil)
-	c.sendMsgID = 1
-	pkt, err := c.seal(payload.IKE_AUTH, 1, inner.FirstType(), inner.Bytes())
+	pkt, err := c.seal(payload.IKE_AUTH, c.authMsgID, inner.FirstType(), inner.Bytes())
 	if err != nil {
 		return err
 	}
@@ -577,7 +661,7 @@ func (c *Client) authEAP() error {
 
 	// Message 2: MSCHAPv2 response.
 	respData, msk := ch.BuildResponse(c.cfg.EAPUsername, c.cfg.EAPPassword)
-	if err := c.sendEAP(2, eap.Packet{Code: eap.CodeResponse, Identifier: eapReq.Identifier, Type: eap.TypeMSCHAPv2, Data: respData}); err != nil {
+	if err := c.sendEAP(c.authMsgID+1, eap.Packet{Code: eap.CodeResponse, Identifier: eapReq.Identifier, Type: eap.TypeMSCHAPv2, Data: respData}); err != nil {
 		return err
 	}
 	inners, err = c.recvInners()
@@ -594,7 +678,7 @@ func (c *Client) authEAP() error {
 	}
 
 	// Message 3: acknowledge success.
-	if err := c.sendEAP(3, eap.Packet{Code: eap.CodeResponse, Identifier: successReq.Identifier, Type: eap.TypeMSCHAPv2, Data: eap.SuccessResponseData()}); err != nil {
+	if err := c.sendEAP(c.authMsgID+2, eap.Packet{Code: eap.CodeResponse, Identifier: successReq.Identifier, Type: eap.TypeMSCHAPv2, Data: eap.SuccessResponseData()}); err != nil {
 		return err
 	}
 	inners, err = c.recvInners()
@@ -608,11 +692,11 @@ func (c *Client) authEAP() error {
 	}
 
 	// Message 4: final AUTH keyed by the MSK.
-	octets := AuthOctets(c.suite.PRF, c.saInitReq, c.nr, c.keys.SKpi, idBody)
+	octets := AuthOctets(c.suite.PRF, c.saInitReq, c.nr, c.keys.SKpi, idBody, c.intAuth(c.authMsgID))
 	authData := PSKAuth(c.suite.PRF, msk, octets)
 	b := payload.NewBuilder()
 	b.Add(payload.TypeAUTH, false, payload.MarshalAuth(payload.AuthPayload{Method: payload.AuthSharedKeyMIC, Data: authData}))
-	pkt, err = c.seal(payload.IKE_AUTH, 4, b.FirstType(), b.Bytes())
+	pkt, err = c.seal(payload.IKE_AUTH, c.authMsgID+3, b.FirstType(), b.Bytes())
 	if err != nil {
 		return err
 	}
@@ -624,8 +708,8 @@ func (c *Client) authEAP() error {
 	if err != nil {
 		return err
 	}
-	// The EAP flow consumed message IDs 1..4; the next initiator request is 5.
-	c.sendMsgID = 5
+	// The EAP flow consumed four consecutive message IDs from the first IKE_AUTH.
+	c.sendMsgID = c.authMsgID + 4
 	return c.finishAuth(inners, childOutSPI, msk, true)
 }
 
@@ -692,14 +776,14 @@ func (c *Client) verifyServerAuth(inners []payload.RawPayload, key []byte, eapMS
 	}
 
 	if eapMSK {
-		octets := AuthOctets(c.suite.PRF, c.saInitResp, c.ni, c.keys.SKpr, peerIDBody)
+		octets := AuthOctets(c.suite.PRF, c.saInitResp, c.ni, c.keys.SKpr, peerIDBody, c.intAuth(c.authMsgID))
 		want := PSKAuth(c.suite.PRF, key, octets)
 		if !equalBytes(want, auth.Data) {
 			return fmt.Errorf("server AUTH (MSK) verification failed: %w", ErrAuthFailed)
 		}
 		return nil
 	}
-	if err := verifyPeerPSKAuth(c.suite.PRF, key, c.saInitResp, c.ni, c.keys.SKpr, peerIDBody, auth.Data); err != nil {
+	if err := verifyPeerPSKAuth(c.suite.PRF, key, c.saInitResp, c.ni, c.keys.SKpr, peerIDBody, c.intAuth(c.authMsgID), auth.Data); err != nil {
 		return fmt.Errorf("%w: %v", ErrAuthFailed, err)
 	}
 	return nil

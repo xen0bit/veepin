@@ -44,6 +44,10 @@ type ServerConfig struct {
 	// TUNName is the desired TUN interface name; empty lets the kernel pick.
 	TUNName string
 	// Logger receives progress logs; nil discards them.
+	// Obfuscation, if non-zero enables DPI-resistant wire-format transforms
+	// (AmneziaWG-style). Zero values reproduce stock WireGuard on the wire.
+	Obfuscation ObfuscationConfig
+
 	// Shape enables downstream traffic shaping: how much padded output each
 	// inner flow is given before shaping stops for that flow, so it bounds what
 	// shaping costs. A flow gets Shape/MTU padded packets whatever sizes it
@@ -88,15 +92,19 @@ func init() { client.RegisterServer("wireguard", parseServerOptions) }
 // server-side counterpart of parseOptions. Peers come from a wg-quick -config
 // file; a single peer can also be supplied with the peer-* options for a quick
 // server without a file.
-func parseServerOptions(opts map[string]string) (client.Server, error) {
+// ServerConfigFromOptions builds a ServerConfig from the CLI option map. It is
+// exported because AmneziaWG is WireGuard with a perturbed wire format and
+// needs precisely this surface plus its obfuscation parameters; duplicating the
+// parse there is how the two drift apart.
+func ServerConfigFromOptions(opts map[string]string) (ServerConfig, error) {
 	var sc ServerConfig
 	if path := opts[OptServerConfig]; path != "" {
 		parsed, err := ParseConfigFile(path)
 		if err != nil {
-			return nil, err
+			return sc, err
 		}
 		if sc, err = ServerConfigFromFile(parsed); err != nil {
-			return nil, err
+			return sc, err
 		}
 	}
 	if v := opts[OptServerPrivateKey]; v != "" {
@@ -108,7 +116,7 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 	if v := opts[OptServerListenPort]; v != "" {
 		p, err := strconv.Atoi(v)
 		if err != nil {
-			return nil, fmt.Errorf("wireguard: invalid %s %q", OptServerListenPort, v)
+			return sc, fmt.Errorf("wireguard: invalid %s %q", OptServerListenPort, v)
 		}
 		sc.ListenPort = p
 	}
@@ -118,7 +126,7 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 	if v := opts[OptServerMTU]; v != "" {
 		m, err := strconv.Atoi(v)
 		if err != nil {
-			return nil, fmt.Errorf("wireguard: invalid %s %q", OptServerMTU, v)
+			return sc, fmt.Errorf("wireguard: invalid %s %q", OptServerMTU, v)
 		}
 		sc.MTU = m
 	}
@@ -128,7 +136,7 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 	if v := opts[OptServerShape]; v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 0 {
-			return nil, fmt.Errorf("wireguard: invalid %s %q", OptServerShape, v)
+			return sc, fmt.Errorf("wireguard: invalid %s %q", OptServerShape, v)
 		}
 		sc.Shape = n
 	}
@@ -141,6 +149,14 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 	}
 	sc.ListenIP = opts[OptServerListenIP]
 	sc.Logger = log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
+	return sc, nil
+}
+
+func parseServerOptions(opts map[string]string) (client.Server, error) {
+	sc, err := ServerConfigFromOptions(opts)
+	if err != nil {
+		return nil, err
+	}
 	return NewServer(sc)
 }
 
@@ -192,6 +208,7 @@ type Server struct {
 	shape       int // per-flow downstream shaping budget; 0 disables it
 	gateway     net.IP
 	network     *net.IPNet
+	obfCfg      ObfuscationConfig // AmneziaWG wire obfuscation (zero = stock)
 
 	logger *log.Logger
 	tun    *dataplane.TUN
@@ -255,6 +272,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	return &Server{
 		localStatic: priv,
 		listenAddr:  &net.UDPAddr{IP: net.ParseIP(cfg.ListenIP), Port: cfg.ListenPort},
+		obfCfg:      cfg.Obfuscation,
 		mtu:         mtu,
 		shape:       cfg.Shape,
 		gateway:     gwAddr,
@@ -326,6 +344,7 @@ func (s *Server) ListenAndServe() error {
 		if to == nil {
 			return
 		}
+		pkt = obfuscateSend(pkt, s.obfCfg)
 		if _, werr := conn.WriteToUDP(pkt, to); werr != nil {
 			s.logger.Printf("wireguard: send to %s: %v", to, werr)
 		}
@@ -335,6 +354,9 @@ func (s *Server) ListenAndServe() error {
 	s.pump.SetBatchSender(func(pkts [][]byte, to *net.UDPAddr) {
 		if to == nil {
 			return
+		}
+		for i := range pkts {
+			pkts[i] = obfuscateSend(pkts[i], s.obfCfg)
 		}
 		if _, werr := s.conn.WriteBatch(pkts, to); werr != nil {
 			s.logger.Printf("wireguard: batch send to %s: %v", to, werr)
@@ -375,6 +397,10 @@ func (s *Server) readLoop() {
 		data, dataFroms = data[:0], dataFroms[:0]
 		for i := range n {
 			pkt, from := bufs[i][:sizes[i]], froms[i]
+			pkt = deobfuscateRecv(pkt, s.obfCfg)
+			if pkt == nil {
+				continue
+			}
 			typ, ok := wire.Type(pkt)
 			if !ok {
 				continue
@@ -494,7 +520,11 @@ func (s *Server) handleInitiation(pkt []byte, from *net.UDPAddr) {
 		}
 	}
 
-	if _, err := s.conn.WriteToUDP(respPkt, from); err != nil {
+	// Obfuscated like every other outbound message. This is not on the pump's
+	// send path, so it does not inherit the transform applied there — and a
+	// stock-shaped response to an obfuscated initiation is dropped by the peer
+	// as unparseable, which looks exactly like the server never answering.
+	if _, err := s.conn.WriteToUDP(obfuscateSend(respPkt, s.obfCfg), from); err != nil {
 		s.logger.Printf("wireguard: send response to %s: %v", from, err)
 		return
 	}

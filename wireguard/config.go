@@ -51,6 +51,12 @@ type Config struct {
 	// (see dataplane/shape.go).
 	Shape int
 
+	// Obfuscation, if non-zero enables DPI-resistant wire-format transforms
+	// (AmneziaWG-style): the message-type byte is replaced, reserved bytes may
+	// carry data, and random padding is prepended to each message. Zero values
+	// reproduce stock WireGuard on the wire.
+	Obfuscation ObfuscationConfig
+
 	// Logger receives progress logs; nil discards them. It has no wg-quick
 	// equivalent and is set by a Go caller.
 	Logger *log.Logger

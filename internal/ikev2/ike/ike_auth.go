@@ -26,6 +26,7 @@ func (s *Server) handleIKEAuth(sa *IKESA, hdr payload.Header, inners []payload.R
 		s.handleEAPContinue(sa, hdr, inners, remote)
 		return
 	}
+	sa.IKEAuthMsgID = hdr.MessageID
 
 	authPay := findInner(inners, payload.TypeAUTH)
 	idiPay := findInner(inners, payload.TypeIDi)
@@ -72,7 +73,8 @@ func (s *Server) handleIKEAuth(sa *IKESA, hdr payload.Header, inners []payload.R
 		return
 	}
 	if err := verifyPeerPSKAuth(sa.Suite.PRF, s.cfg.PSK,
-		sa.InitiatorSAInit, sa.Nr, sa.Keys.SKpi, sa.IDiForAuth, auth.Data); err != nil {
+		sa.InitiatorSAInit, sa.Nr, sa.Keys.SKpi, sa.IDiForAuth,
+		sa.intAuth(sa.IKEAuthMsgID), auth.Data); err != nil {
 		s.log.Printf("ikev2: IKE_AUTH (PSK) from %s failed: %v", remote, err)
 		s.respondEncryptedNotify(sa, payload.IKE_AUTH, hdr.MessageID, payload.AuthenticationFailed, remote)
 		return
@@ -80,7 +82,7 @@ func (s *Server) handleIKEAuth(sa *IKESA, hdr payload.Header, inners []payload.R
 
 	// Build our AUTH (PSK) and finish with the Child SA in one response.
 	localIDBody := idPayloadBody(s.cfg.LocalID)
-	ourAuth := computePSKAuth(sa.Suite.PRF, s.cfg.PSK, sa.ResponderSAInit, sa.Ni, sa.Keys.SKpr, localIDBody)
+	ourAuth := computePSKAuth(sa.Suite.PRF, s.cfg.PSK, sa.ResponderSAInit, sa.Ni, sa.Keys.SKpr, localIDBody, sa.intAuth(sa.IKEAuthMsgID))
 
 	b := payload.NewBuilder()
 	b.Add(payload.TypeIDr, false, localIDBody)
@@ -125,17 +127,17 @@ func (s *Server) handleCertAuth(sa *IKESA, hdr payload.Header, inners []payload.
 		return
 	}
 
-	// The initiator signs InitiatorSAInit | Nr | prf(SK_pi, IDi').
-	octets := AuthOctets(sa.Suite.PRF, sa.InitiatorSAInit, sa.Nr, sa.Keys.SKpi, sa.IDiForAuth)
+	// The initiator signs InitiatorSAInit | {Intermediate} | Nr | prf(SK_pi, IDi').
+	octets := AuthOctets(sa.Suite.PRF, sa.InitiatorSAInit, sa.Nr, sa.Keys.SKpi, sa.IDiForAuth, sa.intAuth(sa.IKEAuthMsgID))
 	if err := verifyAuth(leaf.PublicKey, auth.Method, octets, auth.Data); err != nil {
 		s.log.Printf("ikev2: %s certificate AUTH failed: %v", remote, err)
 		s.respondEncryptedNotify(sa, payload.IKE_AUTH, hdr.MessageID, payload.AuthenticationFailed, remote)
 		return
 	}
 
-	// Our AUTH: sign ResponderSAInit | Ni | prf(SK_pr, IDr') with the server key.
+	// Our AUTH: sign ResponderSAInit | {Intermediate} | Ni | prf(SK_pr, IDr') with the server key.
 	localIDBody := idPayloadBody(s.cfg.LocalID)
-	respOctets := AuthOctets(sa.Suite.PRF, sa.ResponderSAInit, sa.Ni, sa.Keys.SKpr, localIDBody)
+	respOctets := AuthOctets(sa.Suite.PRF, sa.ResponderSAInit, sa.Ni, sa.Keys.SKpr, localIDBody, sa.intAuth(sa.IKEAuthMsgID))
 	method, authData, err := signAuth(s.serverCred, respOctets, sa.peerSigHashes)
 	if err != nil {
 		s.log.Printf("ikev2: signing server AUTH for %s: %v", remote, err)
@@ -162,7 +164,7 @@ func (s *Server) handleEAPStart(sa *IKESA, hdr payload.Header, inners []payload.
 	// Our AUTH uses PSK (the server authenticates itself with the PSK even when
 	// the client uses EAP).
 	localIDBody := idPayloadBody(s.cfg.LocalID)
-	ourAuth := computePSKAuth(sa.Suite.PRF, s.cfg.PSK, sa.ResponderSAInit, sa.Ni, sa.Keys.SKpr, localIDBody)
+	ourAuth := computePSKAuth(sa.Suite.PRF, s.cfg.PSK, sa.ResponderSAInit, sa.Ni, sa.Keys.SKpr, localIDBody, sa.intAuth(sa.IKEAuthMsgID))
 
 	// Start EAP-MSCHAPv2.
 	srv := eap.NewServer(s.cfg.EAPCredentials, s.cfg.EAPServerName)
@@ -266,9 +268,9 @@ func (s *Server) handleEAPFinalAuth(sa *IKESA, hdr payload.Header, inners []payl
 		return
 	}
 
-	// The initiator signs InitiatorSAInit | Nr | prf(SK_pi, IDi'), keyed by the
+	// The initiator signs InitiatorSAInit | {Intermediate} | Nr | prf(SK_pi, IDi'), keyed by the
 	// EAP MSK instead of a PSK (RFC 7296 2.16).
-	octets := AuthOctets(sa.Suite.PRF, sa.InitiatorSAInit, sa.Nr, sa.Keys.SKpi, sa.IDiForAuth)
+	octets := AuthOctets(sa.Suite.PRF, sa.InitiatorSAInit, sa.Nr, sa.Keys.SKpi, sa.IDiForAuth, sa.intAuth(sa.IKEAuthMsgID))
 	want := PSKAuth(sa.Suite.PRF, sa.eapMSK, octets)
 	if !equalBytes(want, auth.Data) {
 		s.log.Printf("ikev2: EAP final AUTH from %s failed", remote)
@@ -278,7 +280,7 @@ func (s *Server) handleEAPFinalAuth(sa *IKESA, hdr payload.Header, inners []payl
 
 	// Our final AUTH, also keyed by the MSK.
 	localIDBody := idPayloadBody(s.cfg.LocalID)
-	respOctets := AuthOctets(sa.Suite.PRF, sa.ResponderSAInit, sa.Ni, sa.Keys.SKpr, localIDBody)
+	respOctets := AuthOctets(sa.Suite.PRF, sa.ResponderSAInit, sa.Ni, sa.Keys.SKpr, localIDBody, sa.intAuth(sa.IKEAuthMsgID))
 	ourAuth := PSKAuth(sa.Suite.PRF, sa.eapMSK, respOctets)
 
 	b := payload.NewBuilder()
