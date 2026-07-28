@@ -30,6 +30,7 @@ import (
 	_ "github.com/xen0bit/veepin/masque"
 	_ "github.com/xen0bit/veepin/nebula"
 	_ "github.com/xen0bit/veepin/openvpn"
+	_ "github.com/xen0bit/veepin/pulse"
 	_ "github.com/xen0bit/veepin/ssh"
 	_ "github.com/xen0bit/veepin/sstp"
 	_ "github.com/xen0bit/veepin/wireguard"

@@ -21,6 +21,7 @@ import (
 	"github.com/xen0bit/veepin/masque"
 	"github.com/xen0bit/veepin/nebula"
 	"github.com/xen0bit/veepin/openvpn"
+	"github.com/xen0bit/veepin/pulse"
 	"github.com/xen0bit/veepin/ssh"
 	"github.com/xen0bit/veepin/sstp"
 	"github.com/xen0bit/veepin/toy"
@@ -310,6 +311,54 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			}
 			if *shape != 0 {
 				opts[cisco.OptServerShape] = fmt.Sprint(*shape)
+			}
+			return opts
+		}, nil
+	case "pulse":
+		var (
+			cert         = fs.String("cert", "", "path to the server TLS certificate PEM (required)")
+			key          = fs.String("key", "", "path to the server TLS private key PEM (required)")
+			listenIP     = fs.String("listen", "0.0.0.0", "local IP to bind the HTTPS socket on")
+			port         = fs.Int("port", 0, "HTTPS port to listen on (default 443)")
+			espPort      = fs.Int("esp-port", 0, "UDP port for the ESP data path (default 4500)")
+			public       = fs.String("public", "", "address clients reach this gateway on (empty = the bound address)")
+			pool         = fs.String("pool", "10.70.0.0/24", "internal address pool handed to clients")
+			dns          = fs.String("dns", "", "comma-separated DNS servers offered to clients")
+			domain       = fs.String("domain", "", "DNS search domain offered to clients")
+			splitInclude = fs.String("split-include", "", "comma-separated CIDRs clients should route into the tunnel (empty = everything)")
+			user         = fs.String("user", "", "username to accept (required)")
+			pass         = fs.String("pass", "", "the user's password (required)")
+			noESP        = fs.Bool("no-esp", false, "serve the IF-T/TLS data path only, leaving the UDP port unbound")
+			tun          = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+			shape        = fs.Int("shape", 0, "per-flow downstream shaping budget in bytes: pads each inner flow's first N bytes towards the tunnel MTU (0 = off, 16384 recommended)")
+		)
+		return func() map[string]string {
+			opts := map[string]string{
+				pulse.OptServerCert:         *cert,
+				pulse.OptServerKey:          *key,
+				pulse.OptServerListen:       *listenIP,
+				pulse.OptServerPool:         *pool,
+				pulse.OptServerDNS:          *dns,
+				pulse.OptServerDomain:       *domain,
+				pulse.OptServerSplitInclude: *splitInclude,
+				pulse.OptServerUser:         *user,
+				pulse.OptServerPass:         *pass,
+				pulse.OptServerTUN:          *tun,
+			}
+			if *port != 0 {
+				opts[pulse.OptServerPort] = fmt.Sprint(*port)
+			}
+			if *espPort != 0 {
+				opts[pulse.OptServerESPPort] = fmt.Sprint(*espPort)
+			}
+			if *public != "" {
+				opts[pulse.OptServerPublicIP] = *public
+			}
+			if *shape != 0 {
+				opts[pulse.OptServerShape] = fmt.Sprint(*shape)
+			}
+			if *noESP {
+				opts[pulse.OptServerNoESP] = "true"
 			}
 			return opts
 		}, nil

@@ -31,7 +31,7 @@ AUTHDIALOG := $(BIN_DIR)/nm-veepin-auth-dialog
 # table in editor/veepin-editor.c. (One .so per protocol is forced by libnm: it
 # refuses a plugin whose reported service differs from the descriptor's, and the
 # factory entry point takes no service argument.)
-VEEPIN_PROTOCOLS := ikev2 wireguard openvpn sstp ssh anyconnect nebula masque fortinet gp cisco l2tp
+VEEPIN_PROTOCOLS := ikev2 wireguard openvpn sstp ssh anyconnect nebula masque fortinet gp cisco pulse l2tp
 
 # Display names, used for the descriptor's name= and the plugin's own name
 # property — kept identical to each other on purpose; see the descriptor
@@ -47,6 +47,7 @@ LABEL_masque     := MASQUE
 LABEL_fortinet   := Fortinet
 LABEL_gp         := GlobalProtect
 LABEL_cisco      := Cisco IPsec
+LABEL_pulse      := Ivanti Connect Secure
 LABEL_l2tp       := L2TP/IPsec
 
 EDITOR_SOS  := $(foreach p,$(VEEPIN_PROTOCOLS),$(BIN_DIR)/libnm-vpn-plugin-veepin-$(p).so)

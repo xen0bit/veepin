@@ -191,6 +191,14 @@ static const FieldDef gp_fields[] = {
     { "Password",     KEY_PASSWORD, F_SECRET },
 };
 
+static const FieldDef pulse_fields[] = {
+    { "Gateway",      KEY_SERVER,   F_REQUIRED },
+    { "Username",     KEY_USER,     F_REQUIRED },
+    { "Port",         KEY_PORT,     F_DATA },
+    { "CA (path)",    KEY_CA,       F_DATA },
+    { "Password",     KEY_PASSWORD, F_SECRET },
+};
+
 static const FieldDef cisco_fields[] = {
     { "Gateway",       KEY_SERVER,    F_REQUIRED },
     { "Group",         KEY_GROUP,     F_REQUIRED },
@@ -223,6 +231,7 @@ static const ProtocolDef protocols[] = {
     PROTO("fortinet",   "Fortinet",    fortinet_fields),
     PROTO("gp",         "GlobalProtect", gp_fields),
     PROTO("cisco",      "Cisco IPsec", cisco_fields),
+    PROTO("pulse",      "Ivanti Connect Secure", pulse_fields),
     PROTO("l2tp",       "L2TP/IPsec",  l2tp_fields),
 };
 
