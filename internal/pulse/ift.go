@@ -184,3 +184,10 @@ func EncodeLine(vendor, msgType, id uint32, line string) []byte {
 	copy(payload, line)
 	return EncodeMessage(vendor, msgType, id, payload)
 }
+
+// Data-path sentinels, pre-built so a link that is tearing down or being fed
+// garbage allocates nothing on the way out.
+var (
+	errOversizedMessage = errors.New("pulse: peer sent a message larger than the buffer allows")
+	errPeerClosed       = errors.New("pulse: the peer closed the session")
+)
