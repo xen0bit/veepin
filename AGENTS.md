@@ -1,4 +1,4 @@
-# veepin — working notes for Claude
+# veepin — working notes for coding agents
 
 A from-scratch userspace VPN in pure Go. Thirteen production protocols, **client
 and server for every one**, each verified in Docker against a real third-party
