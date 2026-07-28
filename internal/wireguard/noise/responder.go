@@ -38,17 +38,32 @@ type Responder struct {
 	timestamp  [wire.TimestampLen]byte
 
 	consumed bool
+
+	// typeInitiation / typeResponse are AmneziaWG's H1 and H2, used only when
+	// computing mac1 — see the note on noise.Config.
+	typeInitiation uint32
+	typeResponse   uint32
 }
 
-// NewResponder prepares to answer initiations addressed to localStatic.
+// NewResponder prepares to answer initiations addressed to localStatic, with
+// stock message types.
 func NewResponder(localStatic [KeySize]byte) (*Responder, error) {
+	return NewResponderWithTypes(localStatic, 0, 0)
+}
+
+// NewResponderWithTypes is NewResponder for an AmneziaWG responder: h1 and h2
+// are the substituted message-type words that mac1 is computed over. Zero for
+// either means the stock constant. See the note on Config.
+func NewResponderWithTypes(localStatic [KeySize]byte, h1, h2 uint32) (*Responder, error) {
 	priv, err := ecdh.X25519().NewPrivateKey(localStatic[:])
 	if err != nil {
 		return nil, fmt.Errorf("noise: local static key: %w", err)
 	}
 	return &Responder{
-		localStatic: priv,
-		mac1Key:     hashOf([]byte(labelMAC1), priv.PublicKey().Bytes()),
+		localStatic:    priv,
+		mac1Key:        hashOf([]byte(labelMAC1), priv.PublicKey().Bytes()),
+		typeInitiation: h1,
+		typeResponse:   h2,
 	}, nil
 }
 
@@ -73,7 +88,7 @@ func (r *Responder) Consume(pkt []byte) (peerStatic [KeySize]byte, timestamp [wi
 	if !ok {
 		return peerStatic, timestamp, wire.ErrMalformed
 	}
-	want := mac128(r.mac1Key[:], over1)
+	want := mac128(r.mac1Key[:], macOver(over1, r.typeInitiation))
 	if want != msg.MAC1 {
 		return peerStatic, timestamp, ErrMAC1
 	}
@@ -215,7 +230,7 @@ func (r *Responder) Response(psk [KeySize]byte) ([]byte, *Keypair, error) {
 	}
 	// mac1 authenticates the response to the peer's static key; mac2 stays zero.
 	peerMAC1Key := hashOf([]byte(labelMAC1), r.peerStatic.Bytes())
-	m1 := mac128(peerMAC1Key[:], out[:wire.SizeHandshakeResponse-2*wire.MACSize])
+	m1 := mac128(peerMAC1Key[:], macOver(out[:wire.SizeHandshakeResponse-2*wire.MACSize], r.typeResponse))
 	copy(out[wire.SizeHandshakeResponse-2*wire.MACSize:], m1[:])
 
 	// The responder's sending key is the initiator's receiving key, so the pair

@@ -184,6 +184,10 @@ func (c *Config) resolve() (*resolved, error) {
 		}
 		r.noiseCfg.PresharedKey = psk
 	}
+	// mac1 is computed over the message type, so the noise layer needs H1/H2
+	// rather than having them stamped on afterwards by the obfuscation layer.
+	r.noiseCfg.TypeInitiation = c.Obfuscation.TypeInitiation
+	r.noiseCfg.TypeResponse = c.Obfuscation.TypeResponse
 	if r.mtu == 0 {
 		r.mtu = defaultMTU
 	}

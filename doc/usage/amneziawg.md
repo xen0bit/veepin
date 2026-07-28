@@ -52,10 +52,15 @@ interoperate.
 
 ## Interoperability
 
-Verified veepin-to-veepin with every parameter engaged
-(`TestInteropAmneziaWGSelf`). **Not yet verified against `amneziawg-go`** — the
-interop matrix marks the client and server directions `‡`, meaning the Docker
-cell is work outstanding rather than impossible.
+Verified against `amneziawg-go` in both directions
+(`TestInteropVeepinClientAmneziaWGServer`,
+`TestInteropAmneziaWGClientVeepinServer`), and veepin-to-veepin with every
+parameter engaged including S3/S4 and junk packets
+(`TestInteropAmneziaWGSelf`).
+
+Note that `mac1` authenticates the message *including* its type word, so H1-H4
+must be substituted before the MAC is computed, not after. veepin does this in
+the noise layer for that reason.
 
 ## Security
 

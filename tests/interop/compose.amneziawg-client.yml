@@ -1,0 +1,60 @@
+# veepin AmneziaWG client -> reference amneziawg-go responder.
+#
+# The cell that makes AmneziaWG's obfuscation mean something: a real
+# implementation veepin shares no code with, reading its own awg-quick config,
+# has to recognise veepin's retyped and padded datagrams and answer them.
+#
+# amneziawg-go supports S1 and S2 only for padding (S3/S4 exist in veepin and in
+# later AWG revisions but not in the peer's parameter set here), so those two are
+# the ones exercised; the header substitution covers all four message kinds.
+name: veepin-interop-awg-client
+
+x-awg: &awg
+  SERVER_PRIVATE: "+IRmjL6NRpthikeXn+jGUJNLe1ZJKQaqeWubiG9+GHs="
+  SERVER_PUBLIC: "srb9CBWUN+UL2CYhqHoL+rGKFPNu6nUJiNStgH0EBWM="
+  CLIENT_PRIVATE: "CHk+5XZnPhJ+UXfIx83SaePpgYrK+0/FqiPvNvTp3Hg="
+  CLIENT_PUBLIC: "gjMMAROzi5lHFapIKeaAdJ2RhGe0lW24XysGzBd1OSM="
+  PSK: "cjldFdAmi69yIFhc0Sms/5Yz6boVXkMZbMJl+RzzMZM="
+  SERVER_TUN_IP: "10.61.0.1"
+  CLIENT_TUN_IP: "10.61.0.2"
+  # Full 32-bit header values, the range amneziawg-go's own documentation
+  # recommends. Small ones would let a byte-wide implementation pass by accident.
+  H1: "1148853653"
+  H2: "2071829411"
+  H3: "1503936089"
+  H4: "987654321"
+  S1: "17"
+  S2: "23"
+  JC: "6"
+  JMIN: "40"
+  JMAX: "120"
+
+services:
+  awg-server:
+    build:
+      context: amneziawg
+    image: interop-amneziawg
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      <<: *awg
+    volumes:
+      - ./amneziawg/server-entrypoint.sh:/entrypoint.sh:ro
+    command: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-awg-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [awg-server]
+    environment:
+      <<: *awg
+      SERVER: "awg-server"
+      S3: "0"
+      S4: "0"
+    volumes:
+      - ./veepin/awg-client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

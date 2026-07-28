@@ -451,7 +451,7 @@ func (s *Server) handleInitiation(pkt []byte, from *net.UDPAddr) {
 	}
 	defer s.gate.Done()
 
-	r, err := noise.NewResponder(s.localStatic)
+	r, err := noise.NewResponderWithTypes(s.localStatic, s.obfCfg.TypeInitiation, s.obfCfg.TypeResponse)
 	if err != nil {
 		s.logger.Printf("wireguard: responder: %v", err)
 		return

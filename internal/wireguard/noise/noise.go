@@ -14,6 +14,7 @@ package noise
 import (
 	"crypto/ecdh"
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"time"
@@ -83,6 +84,9 @@ type Initiator struct {
 	// against (protocol paper §5.4.7).
 	lastMAC1 [wire.MACSize]byte
 	sent     bool
+
+	// typeInitiation is Config.TypeInitiation: the word mac1 is computed over.
+	typeInitiation uint32
 }
 
 // Config is one peer's identity material.
@@ -95,6 +99,32 @@ type Config struct {
 	// zero value means "no PSK", which the protocol handles by mixing zeros —
 	// there is no separate code path.
 	PresharedKey [KeySize]byte
+
+	// TypeInitiation / TypeResponse are AmneziaWG's H1 and H2: the 4-octet
+	// message-type words that replace the stock constants 1 and 2 on the wire.
+	// Zero means stock.
+	//
+	// They live here, rather than only in the obfuscation layer, because mac1 is
+	// computed over the message *including* its type word. Substituting the type
+	// after the MAC is stamped invalidates it — which is invisible between two
+	// veepin endpoints, since both would compute over the stock value and agree,
+	// and is rejected immediately by amneziawg-go ("invalid mac1"). Only the MAC
+	// computation uses these; parsing stays on the stock constants throughout.
+	TypeInitiation uint32
+	TypeResponse   uint32
+}
+
+// macOver returns the byte range mac1 authenticates, with the message-type word
+// replaced by typeWord when that is non-zero. It copies only when a substitution
+// is needed, so the stock path allocates nothing extra.
+func macOver(over []byte, typeWord uint32) []byte {
+	if typeWord == 0 || len(over) < 4 {
+		return over
+	}
+	patched := make([]byte, len(over))
+	copy(patched, over)
+	binary.LittleEndian.PutUint32(patched[0:4], typeWord)
+	return patched
 }
 
 // NewInitiator prepares a handshake to the configured peer.
@@ -108,10 +138,11 @@ func NewInitiator(cfg Config) (*Initiator, error) {
 		return nil, fmt.Errorf("noise: remote static key: %w", err)
 	}
 	i := &Initiator{
-		localStatic:  priv,
-		remoteStatic: pub,
-		presharedKey: cfg.PresharedKey,
-		mac1Key:      hashOf([]byte(labelMAC1), cfg.RemoteStatic[:]),
+		localStatic:    priv,
+		remoteStatic:   pub,
+		presharedKey:   cfg.PresharedKey,
+		mac1Key:        hashOf([]byte(labelMAC1), cfg.RemoteStatic[:]),
+		typeInitiation: cfg.TypeInitiation,
 	}
 	return i, nil
 }
@@ -225,7 +256,7 @@ func (i *Initiator) addMACs(msg []byte) error {
 	if !ok {
 		return errors.New("noise: message has no MAC regions")
 	}
-	m1 := mac128(i.mac1Key[:], over1)
+	m1 := mac128(i.mac1Key[:], macOver(over1, i.typeInitiation))
 	copy(msg[len(over1):len(over1)+wire.MACSize], m1[:])
 	i.lastMAC1 = m1
 	// mac2 is left zero; over2 now includes the mac1 just written.

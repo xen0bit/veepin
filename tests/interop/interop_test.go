@@ -110,6 +110,28 @@ func TestInteropVeepinClientStrongswanServerChaCha20(t *testing.T) {
 	runInterop(t, "compose.client-ss-chacha.yml", "veepin-client", "10.20.30.254")
 }
 
+// TestInteropVeepinClientAmneziaWGServer is the client direction against the
+// real amneziawg-go: veepin's initiator must produce datagrams an implementation
+// it shares no code with recognises as AmneziaWG, and complete a Noise IK
+// handshake through them.
+//
+// This cell is what proved the header substitution had to move inside the noise
+// layer. mac1 authenticates the message *including* its type word, so rewriting
+// the type after the MAC is stamped invalidates it — invisible between two
+// veepin endpoints, which both compute over the stock value and agree, and
+// rejected outright by amneziawg-go as "invalid mac1".
+func TestInteropVeepinClientAmneziaWGServer(t *testing.T) {
+	runInteropBench(t, "compose.amneziawg-client.yml", "veepin-awg-client", "awg-server", "10.61.0.1")
+}
+
+// TestInteropAmneziaWGClientVeepinServer is the other direction: the veepin
+// responder must recognise obfuscated datagrams from amneziawg-go and shape its
+// own replies so amneziawg-go accepts them — including the response's mac1,
+// which that implementation does check.
+func TestInteropAmneziaWGClientVeepinServer(t *testing.T) {
+	runInterop(t, "compose.amneziawg-server.yml", "awg-client", "10.61.0.1")
+}
+
 // TestInteropAmneziaWGSelf runs the veepin AmneziaWG client against the veepin
 // AmneziaWG server with every obfuscation knob engaged: all four message types
 // replaced, all four paddings non-zero, and junk datagrams ahead of the

@@ -18,6 +18,7 @@ package wireguard
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"math/big"
 
 	"github.com/xen0bit/veepin/internal/wireguard/wire"
@@ -28,10 +29,16 @@ import (
 type ObfuscationConfig struct {
 	// TypeInitiation/Response/Cookie/Transport (H1..H4) replace the four fixed
 	// message-type constants. Zero leaves the stock value (1, 2, 3, 4).
-	TypeInitiation uint8
-	TypeResponse   uint8
-	TypeCookie     uint8
-	TypeTransport  uint8
+	//
+	// 32-bit, not 8-bit: WireGuard's type field is a 4-octet little-endian word
+	// whose upper three octets are reserved zeroes, and amneziawg-go replaces
+	// the whole word (`binary.LittleEndian.PutUint32`), drawing values from a
+	// range far beyond 255. Storing a byte would interoperate only with the
+	// accidental subset of configurations whose values happen to be small.
+	TypeInitiation uint32
+	TypeResponse   uint32
+	TypeCookie     uint32
+	TypeTransport  uint32
 
 	// PadInitiation/Response/Cookie/Transport (S1..S4) are bytes of random
 	// padding prepended to each message kind, breaking the fixed-length
@@ -55,8 +62,8 @@ type ObfuscationConfig struct {
 // allocation-free.
 func (o ObfuscationConfig) enabled() bool { return o != ObfuscationConfig{} }
 
-// typeFor returns the on-wire type byte for a stock message type.
-func (o ObfuscationConfig) typeFor(stock uint8) uint8 {
+// typeFor returns the on-wire type word for a stock message type.
+func (o ObfuscationConfig) typeFor(stock uint8) uint32 {
 	switch stock {
 	case wire.TypeHandshakeInitiation:
 		if o.TypeInitiation != 0 {
@@ -75,7 +82,7 @@ func (o ObfuscationConfig) typeFor(stock uint8) uint8 {
 			return o.TypeTransport
 		}
 	}
-	return stock
+	return uint32(stock)
 }
 
 // padFor returns the padding prepended to a stock message type.
@@ -107,12 +114,9 @@ func obfuscateSend(pkt []byte, cfg ObfuscationConfig) []byte {
 	newType := cfg.typeFor(stock)
 
 	if pad == 0 {
-		// Type-only rewrite: in place, no allocation. The three bytes after the
-		// type are WireGuard's reserved zeroes and stay zero — amneziawg-go does
-		// not touch them, and filling them would make veepin distinguishable
-		// from the very implementation it has to look like.
-		if newType != stock {
-			pkt[0] = newType
+		// Type-only rewrite: in place, no allocation.
+		if newType != uint32(stock) {
+			binary.LittleEndian.PutUint32(pkt[0:4], newType)
 		}
 		return pkt
 	}
@@ -120,7 +124,7 @@ func obfuscateSend(pkt []byte, cfg ObfuscationConfig) []byte {
 	out := make([]byte, pad+len(pkt))
 	randFill(out[:pad])
 	copy(out[pad:], pkt)
-	out[pad] = newType
+	binary.LittleEndian.PutUint32(out[pad:pad+4], newType)
 	return out
 }
 
@@ -148,13 +152,15 @@ func deobfuscateRecv(pkt []byte, cfg ObfuscationConfig) []byte {
 			continue
 		}
 		out := pkt[pad:]
-		if out[0] != cfg.typeFor(k.stock) {
-			// Right length, wrong type byte: not this message after all. A
+		if binary.LittleEndian.Uint32(out[0:4]) != cfg.typeFor(k.stock) {
+			// Right length, wrong type word: not this message after all. A
 			// transport packet can collide with a control message's length, so
 			// fall through rather than rejecting outright.
 			continue
 		}
-		out[0] = k.stock
+		// Restore the stock word, reserved octets included: the parsers check
+		// the type and the peer's zeroes are what they expect to see.
+		binary.LittleEndian.PutUint32(out[0:4], uint32(k.stock))
 		return out
 	}
 
@@ -164,10 +170,10 @@ func deobfuscateRecv(pkt []byte, cfg ObfuscationConfig) []byte {
 		return nil
 	}
 	out := pkt[pad:]
-	if out[0] != cfg.typeFor(wire.TypeTransportData) {
+	if binary.LittleEndian.Uint32(out[0:4]) != cfg.typeFor(wire.TypeTransportData) {
 		return nil
 	}
-	out[0] = wire.TypeTransportData
+	binary.LittleEndian.PutUint32(out[0:4], uint32(wire.TypeTransportData))
 	return out
 }
 

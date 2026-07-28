@@ -191,8 +191,8 @@ var interopMatrix = []interopRow{
 	},
 	{
 		Protocol: "AmneziaWG",
-		Client:   interopCell{Label: "—‡"},
-		Server:   interopCell{Label: "—‡"},
+		Client:   interopCell{Tests: []string{"TestInteropVeepinClientAmneziaWGServer"}, Label: "amneziawg-go"},
+		Server:   interopCell{Tests: []string{"TestInteropAmneziaWGClientVeepinServer"}, Label: "amneziawg-go"},
 		Self:     interopCell{Tests: []string{"TestInteropAmneziaWGSelf"}, Label: "(H1-H4, S1-S4, junk)"},
 	},
 	{

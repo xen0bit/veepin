@@ -61,6 +61,12 @@ func perturbed(f *flag.Flag) (string, bool) {
 		return strconv.FormatBool(!v), true
 	case int:
 		return strconv.Itoa(v + 1), true
+	case uint:
+		// AmneziaWG's H1-H4 are 32-bit message-type words, so their flags are
+		// uint rather than int.
+		return strconv.FormatUint(uint64(v)+1, 10), true
+	case uint64:
+		return strconv.FormatUint(v+1, 10), true
 	case string:
 		if v == flagSentinel {
 			return flagSentinel + "-2", true

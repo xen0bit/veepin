@@ -14,7 +14,7 @@ available and also the least interesting.
 |---|---|---|---|---|
 | **SoftEther native** *(landed, partial — no TAP data path)* | **Layer 2.** Every existing protocol is L3; this needs TAP, MAC learning and in-tunnel ARP | High | **Yes** — Apache-2.0 client *and* server | [softether-plan.md](softether-plan.md) |
 | **Hybrid PQ IKEv2** (RFC 9370) *(landed, interop-verified)* | Post-quantum key exchange; `crypto/mlkem` is in the stdlib | Medium | Yes — strongSwan 6.x, already the IKEv2 peer | [pq-ikev2-plan.md](pq-ikev2-plan.md) |
-| **AmneziaWG** *(landed, self-interop only)* | DPI/probe resistance — a class the tree has none of | Medium | Yes — `amneziawg-go` | [amneziawg-plan.md](amneziawg-plan.md) |
+| **AmneziaWG** *(landed, interop-verified)* | DPI/probe resistance — a class the tree has none of | Medium | Yes — `amneziawg-go` | [amneziawg-plan.md](amneziawg-plan.md) |
 | **Rosenpass** | PQ handshake feeding WireGuard's PSK | Medium | Yes — Rust reference implementation | [rosenpass-plan.md](rosenpass-plan.md) |
 | Juniper NC / Array / F5 | Nothing structural | Low | Client only | [openconnect-remainder-plan.md](openconnect-remainder-plan.md) |
 

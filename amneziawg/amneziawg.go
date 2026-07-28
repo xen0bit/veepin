@@ -72,10 +72,12 @@ const (
 // divergent names invite the mismatch that produces a silent total failure.
 func parseObfuscation(opts map[string]string) wireguard.ObfuscationConfig {
 	var o wireguard.ObfuscationConfig
-	u8 := func(key string, dst *uint8) {
+	// 32-bit: H1-H4 replace WireGuard's whole 4-octet type word, and real
+	// AmneziaWG configurations draw them from a range far beyond 255.
+	u32 := func(key string, dst *uint32) {
 		if v := opts[key]; v != "" {
-			if n, err := strconv.ParseUint(v, 10, 8); err == nil {
-				*dst = uint8(n)
+			if n, err := strconv.ParseUint(v, 10, 32); err == nil {
+				*dst = uint32(n)
 			}
 		}
 	}
@@ -86,10 +88,10 @@ func parseObfuscation(opts map[string]string) wireguard.ObfuscationConfig {
 			}
 		}
 	}
-	u8(OptTypeInit, &o.TypeInitiation)
-	u8(OptTypeResp, &o.TypeResponse)
-	u8(OptTypeCookie, &o.TypeCookie)
-	u8(OptTypeTrans, &o.TypeTransport)
+	u32(OptTypeInit, &o.TypeInitiation)
+	u32(OptTypeResp, &o.TypeResponse)
+	u32(OptTypeCookie, &o.TypeCookie)
+	u32(OptTypeTrans, &o.TypeTransport)
 	num(OptPadInit, &o.PadInitiation)
 	num(OptPadResp, &o.PadResponse)
 	num(OptPadCookie, &o.PadCookie)

@@ -2,6 +2,7 @@ package wireguard
 
 import (
 	"bytes"
+	"encoding/binary"
 	"testing"
 
 	"github.com/xen0bit/veepin/internal/wireguard/wire"
@@ -12,7 +13,9 @@ import (
 // relying on two kinds sharing a value.
 func awgTestConfig() ObfuscationConfig {
 	return ObfuscationConfig{
-		TypeInitiation: 0x71, TypeResponse: 0x72, TypeCookie: 0x73, TypeTransport: 0x74,
+		// Large 32-bit values, as amneziawg-go's own recommended range produces.
+		// Small ones would let a single-byte implementation pass by accident.
+		TypeInitiation: 1148853653, TypeResponse: 2071829411, TypeCookie: 1503936089, TypeTransport: 987654321,
 		PadInitiation: 17, PadResponse: 23, PadCookie: 5, PadTransport: 11,
 	}
 }
@@ -67,8 +70,9 @@ func TestObfuscationRoundTripsEveryMessageKind(t *testing.T) {
 			if len(onWire) != tc.size+cfg.padFor(tc.typ) {
 				t.Fatalf("on-wire length %d, want %d", len(onWire), tc.size+cfg.padFor(tc.typ))
 			}
-			if onWire[cfg.padFor(tc.typ)] != cfg.typeFor(tc.typ) {
-				t.Fatalf("on-wire type byte %#x, want %#x", onWire[cfg.padFor(tc.typ)], cfg.typeFor(tc.typ))
+			gotType := binary.LittleEndian.Uint32(onWire[cfg.padFor(tc.typ) : cfg.padFor(tc.typ)+4])
+			if gotType != cfg.typeFor(tc.typ) {
+				t.Fatalf("on-wire type word %d, want %d", gotType, cfg.typeFor(tc.typ))
 			}
 
 			got := deobfuscateRecv(onWire, cfg)
@@ -141,7 +145,7 @@ func TestDeobfuscateDoesNotCorruptOnAFailedCandidate(t *testing.T) {
 // stay on the allocation-free data path, and it must: with S4 unset, the only
 // change is one byte, in place.
 func TestTypeOnlyObfuscationDoesNotAllocate(t *testing.T) {
-	cfg := ObfuscationConfig{TypeTransport: 0x74}
+	cfg := ObfuscationConfig{TypeTransport: 987654321}
 	pkt := stockMessage(wire.TypeTransportData, 1400)
 	if n := testing.AllocsPerRun(100, func() { obfuscateSend(pkt, cfg) }); n != 0 {
 		t.Fatalf("obfuscateSend allocated %v times per run with padding disabled", n)
@@ -193,5 +197,24 @@ func TestMismatchedConfigsDoNotSilentlyPass(t *testing.T) {
 	onWire := obfuscateSend(stockMessage(wire.TypeHandshakeInitiation, wire.SizeHandshakeInitiation), send)
 	if got := deobfuscateRecv(onWire, recv); got != nil {
 		t.Fatalf("a mismatched receiver accepted the packet as %d bytes", len(got))
+	}
+}
+
+// TestTypeSubstitutionCoversTheWholeWord is the claim that broke interop with
+// amneziawg-go: WireGuard's type field is a 4-octet little-endian word, and the
+// reference implementation replaces all of it. An implementation that writes
+// only the low byte round-trips against itself perfectly and fails against any
+// real deployment, whose H values are drawn from a range far beyond 255.
+func TestTypeSubstitutionCoversTheWholeWord(t *testing.T) {
+	const h4 = 0x4A3B2C1D // needs all four octets
+	cfg := ObfuscationConfig{TypeTransport: h4, PadTransport: 7}
+
+	onWire := obfuscateSend(stockMessage(wire.TypeTransportData, 128), cfg)
+	got := binary.LittleEndian.Uint32(onWire[7:11])
+	if got != h4 {
+		t.Fatalf("on-wire type word = %#x, want %#x — only the low octet was written", got, h4)
+	}
+	if onWire[8] == 0 && onWire[9] == 0 && onWire[10] == 0 {
+		t.Fatal("the upper three octets are still zero; the reserved bytes were not used")
 	}
 }
