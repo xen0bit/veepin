@@ -575,12 +575,13 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 		}, nil
 	case "softether":
 		var (
-			server = fs.String("server", "", "SoftEther VPN gateway host or IP (required)")
-			port   = fs.Int("port", 0, "gateway TLS port (default 443)")
-			user   = fs.String("user", "", "username (required)")
-			pass   = fs.String("pass", "", "password (required)")
-			hub    = fs.String("hub", "", "virtual hub name (default VPN)")
-			tun    = fs.String("tun", "", "TAP interface name (empty = kernel picks)")
+			server   = fs.String("server", "", "SoftEther VPN gateway host or IP (required)")
+			port     = fs.Int("port", 0, "gateway TLS port (default 443)")
+			user     = fs.String("user", "", "username (required)")
+			pass     = fs.String("pass", "", "password (required)")
+			hub      = fs.String("hub", "", "virtual hub name (default VPN)")
+			tun      = fs.String("tun", "", "TAP interface name (empty = kernel picks)")
+			insecure = fs.Bool("insecure", false, "skip gateway certificate verification (SoftEther ships a self-signed certificate by default; this downgrades the transport to unauthenticated)")
 		)
 		return func() map[string]string {
 			opts := map[string]string{
@@ -588,6 +589,7 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 				softether.OptUser:     *user,
 				softether.OptPassword: *pass,
 				softether.OptTUN:      *tun,
+				softether.OptInsecure: fmt.Sprint(*insecure),
 			}
 			if *port != 0 {
 				opts[softether.OptPort] = fmt.Sprint(*port)

@@ -33,11 +33,37 @@ All flags default to zero, which reproduces stock WireGuard behaviour.
 | `-pad-cookie` | S3 | Random padding before cookie reply (bytes) |
 | `-pad-trans` | S4 | Random padding before transport data (bytes) |
 
-Both ends must use identical parameters.
+These eight are accepted by both `connect` and `serve`. Three more are
+client-only, since junk is emitted ahead of a handshake the client initiates:
+
+| Flag | AmneziaWG param | Description |
+|------|-----------------|-------------|
+| `-junk-count` | Jc | Junk datagrams sent before the handshake (4-12 recommended) |
+| `-junk-min` | Jmin | Smallest junk datagram (bytes) |
+| `-junk-max` | Jmax | Largest junk datagram (bytes) |
+
+Both ends must use identical parameters. There is no negotiation — that would
+itself be a signature — so a mismatch is a handshake that never completes
+rather than a fallback to stock behaviour.
+
+Not implemented: the `I1`-`I5` custom signature packets, `HeaderProtectionKey`
+(AWG 3+), and protocol mimicry. A deployment whose peers require them will not
+interoperate.
+
+## Interoperability
+
+Verified veepin-to-veepin with every parameter engaged
+(`TestInteropAmneziaWGSelf`). **Not yet verified against `amneziawg-go`** — the
+interop matrix marks the client and server directions `‡`, meaning the Docker
+cell is work outstanding rather than impossible.
 
 ## Security
 
-AmneziaWG is **obfuscation, not encryption**. It resists passive
-classification by DPI systems; it does not add confidentiality or integrity
-beyond what WireGuard already provides, and it does not resist an active
-prober that knows the parameters.
+AmneziaWG is **obfuscation, not encryption**. It resists passive classification
+by DPI systems; it adds no confidentiality or integrity beyond what WireGuard
+already provides, and it does not resist an active prober that knows the
+parameters. The S1-S4 padding sits *outside* the AEAD and is unauthenticated:
+an attacker may strip or rewrite it freely, gaining and costing nothing. Traffic
+timing, flow duration and volume are unchanged, so a censor doing statistical
+rather than signature analysis is unaffected. See
+[`doc/security.md`](../security.md).

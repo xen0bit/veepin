@@ -640,21 +640,27 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 		}, nil
 	case "softether":
 		var (
-			cert = fs.String("cert", "", "path to TLS certificate PEM (required)")
-			key  = fs.String("key", "", "path to TLS private key PEM (required)")
-			user = fs.String("user", "", "username to accept (required)")
-			pass = fs.String("pass", "", "password to accept (required)")
-			tun  = fs.String("tun", "", "TAP interface name (empty = kernel picks)")
-			pool = fs.String("pool", "10.70.0.0/24", "address pool")
+			cert   = fs.String("cert", "", "path to TLS certificate PEM (required)")
+			key    = fs.String("key", "", "path to TLS private key PEM (required)")
+			user   = fs.String("user", "", "username to accept (required)")
+			pass   = fs.String("pass", "", "password to accept (required)")
+			tun    = fs.String("tun", "", "TAP interface name (empty = kernel picks)")
+			pool   = fs.String("pool", "10.70.0.0/24", "address pool")
+			listen = fs.String("listen", "", "local IP to bind the TLS listener on (default 0.0.0.0)")
+			port   = fs.Int("port", 0, "TLS port to listen on (default 443)")
 		)
 		return func() map[string]string {
 			opts := map[string]string{
-				softether.OptServerCert: *cert,
-				softether.OptServerKey:  *key,
-				softether.OptServerUser: *user,
-				softether.OptServerPass: *pass,
-				softether.OptServerTUN:  *tun,
-				softether.OptServerPool: *pool,
+				softether.OptServerCert:   *cert,
+				softether.OptServerKey:    *key,
+				softether.OptServerUser:   *user,
+				softether.OptServerPass:   *pass,
+				softether.OptServerTUN:    *tun,
+				softether.OptServerPool:   *pool,
+				softether.OptServerListen: *listen,
+			}
+			if *port != 0 {
+				opts[softether.OptServerPort] = fmt.Sprint(*port)
 			}
 			return opts
 		}, nil

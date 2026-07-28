@@ -114,6 +114,35 @@ On Windows and macOS/iOS this is the "Username and password" user-authentication
 option on an IKEv2 profile; strongSwan uses `leftauth=psk` / `rightauth=eap-mschapv2`
 with `eap_identity` and a password secret.
 
+## Post-quantum key exchange (RFC 9370)
+
+`-post-quantum` offers ML-KEM-768 as an *additional* key exchange alongside the
+classical group, carried in an IKE_INTERMEDIATE exchange (RFC 9242) between
+IKE_SA_INIT and IKE_AUTH:
+
+```sh
+veepin connect ikev2 -server vpn.example.com -psk secret \
+    -id client.example.com -post-quantum
+```
+
+The result is hybrid: Curve25519 still runs and still contributes, so breaking
+either primitive alone recovers nothing. A server that does not offer it is not
+an error — the handshake proceeds classically, and the client logs that the
+server declined.
+
+The server needs no flag. It accepts the additional key exchange whenever a
+client both proposes an ADDKE transform it supports and advertises
+INTERMEDIATE_EXCHANGE_SUPPORTED.
+
+Only ML-KEM-768 is implemented, and only as the first (ADDKE1) round. RFC 9370
+permits up to seven, but one post-quantum KEM beside the classical group is the
+whole point of a hybrid.
+
+Interoperates with strongSwan 6.x configured with `ke1_mlkem768` in its
+proposal — note that a strongSwan built before OpenSSL 3.5 knows the keyword but
+has no implementation behind it and answers INVALID_SYNTAX. What this does and
+does not protect is in [`doc/security.md`](../security.md).
+
 ## Roaming (MOBIKE)
 
 The server supports MOBIKE (RFC 4555), so a client that changes network — phone
