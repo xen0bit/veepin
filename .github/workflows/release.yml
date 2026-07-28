@@ -1,10 +1,16 @@
 name: release
 
 # Run GoReleaser on every pushed semver tag (e.g. `git tag v1.2.3 && git push --tags`).
+#
+# Also dispatchable, because a tag push is a one-shot event: if Actions drops it
+# — which has happened — the tag exists, no run was ever queued, nothing reports
+# an error, and re-pushing the tag is not guaranteed to re-fire it. Dispatching
+# against the tag ref re-runs the release without inventing a new version.
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: write # needed to create the GitHub Release and upload artifacts
