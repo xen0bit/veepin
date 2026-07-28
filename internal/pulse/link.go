@@ -9,11 +9,12 @@ package pulse
 // messages back. Both end through stop, which records the first cause.
 
 import (
-	"io"
 	"log"
 	"net"
 	"net/netip"
 	"sync"
+
+	"github.com/xen0bit/veepin/dataplane"
 )
 
 // maxInnerPacket bounds one inner packet, and with it the read buffer. It is
@@ -23,7 +24,7 @@ const maxInnerPacket = 9000
 // link is a running IF-T/TLS data carrier.
 type link struct {
 	conn   net.Conn
-	tun    io.ReadWriteCloser
+	tun    tunIO
 	logger *log.Logger
 	seq    uint32
 
@@ -32,9 +33,10 @@ type link struct {
 	// cannot spoof another's traffic onto the shared TUN.
 	sourceIs netip.Addr
 
-	// ownsTUN says whether closing the link closes the TUN. A client's link
-	// owns it; a server's shares one TUN across every client and must not.
-	ownsTUN bool
+	// closeTUN, when set, is called when the link stops. A client's link owns
+	// its TUN and closes it; a server's shares one across every client and
+	// leaves it alone.
+	closeTUN func() error
 
 	mu       sync.Mutex
 	writeMu  sync.Mutex
@@ -44,7 +46,7 @@ type link struct {
 	shutdown func()
 }
 
-func newLink(conn net.Conn, tun io.ReadWriteCloser, logger *log.Logger) *link {
+func newLink(conn net.Conn, tun tunIO, logger *log.Logger) *link {
 	return &link{conn: conn, tun: tun, logger: logger, done: make(chan struct{})}
 }
 
@@ -120,10 +122,15 @@ func (l *link) dispatch(m Message) {
 	}
 	switch m.Type {
 	case TypeData:
-		if !l.allowed(m.Payload) {
+		// Trim any shaping filler the sender added. The inner IP header's own
+		// Total Length delimits the real packet, which is exactly how a kernel
+		// would read it — and is what lets a peer that negotiated nothing
+		// benefit from shaping unmodified.
+		pkt := dataplane.TrimToIP(m.Payload)
+		if pkt == nil || !l.allowed(pkt) {
 			return
 		}
-		_, _ = l.tun.Write(m.Payload)
+		_, _ = l.tun.Write(pkt)
 	case TypeClose:
 		l.stop(errPeerClosed)
 	}
@@ -196,8 +203,8 @@ func (l *link) stop(cause error) {
 
 	close(l.done)
 	_ = l.conn.Close()
-	if l.ownsTUN {
-		_ = l.tun.Close()
+	if l.closeTUN != nil {
+		_ = l.closeTUN()
 	}
 	if shutdown != nil {
 		shutdown()

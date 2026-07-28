@@ -31,6 +31,10 @@ const TypeConfigDone = 0x8f
 // the ordinary reason, and the TLS connection is already open for it.
 const espProbeTimeout = 4 * time.Second
 
+// espProbeInterval is how long one probe waits for its answer before the next
+// goes out.
+const espProbeInterval = 200 * time.Millisecond
+
 // Client is an established Pulse tunnel.
 type Client struct {
 	cfg    Config
@@ -79,7 +83,7 @@ func Connect(conn net.Conn, host, path, user, password, hostname string,
 
 	c := &Client{cfg: cfg, info: info, logger: logger}
 	c.link = newLink(conn, tun, logger)
-	c.link.ownsTUN = true
+	c.link.closeTUN = tun.Close
 
 	if wantESP && serverKeys != nil && cfg.ESPPort > 0 {
 		if err := c.startESP(conn, cfg, myKeys, serverKeys, tun, shape); err == nil {
@@ -252,12 +256,16 @@ func probeESP(conn *net.UDPConn, sa *esp.SA, src net.IP) error {
 		if _, err := conn.Write(pkt); err != nil {
 			return fmt.Errorf("pulse: sending the ESP probe: %w", err)
 		}
-		if err := conn.SetReadDeadline(time.Now().Add(espProbeTimeout / 2)); err != nil {
+		// Probe often rather than waiting long: the usual reason the first one
+		// goes unanswered is that the server has not finished reading the
+		// keying response yet, which is a matter of milliseconds. A blocked UDP
+		// port, the other reason, is not going to unblock either way.
+		if err := conn.SetReadDeadline(time.Now().Add(espProbeInterval)); err != nil {
 			return err
 		}
 		n, rerr := conn.Read(buf)
 		if rerr != nil {
-			continue // the deadline expired; probe again while there is time
+			continue
 		}
 		if _, _, derr := sa.Decapsulate(buf[:n]); derr == nil {
 			_ = conn.SetReadDeadline(time.Time{})
