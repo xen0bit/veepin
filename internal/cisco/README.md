@@ -51,7 +51,7 @@ sequenceDiagram
     C->>G: HASH(1), SA, Ni, IDci = assigned/32, IDcr = 0.0.0.0/0
     G->>C: HASH(2), SA, Nr, IDci, IDcr
     C->>G: HASH(3)
-    Note over C,G: ESP over UDP/4500; R-U-THERE keeps it honest
+    Note over C,G: ESP over UDP/4500 — R-U-THERE keeps it honest
 ```
 
 Two credentials in sequence is the whole point of the design: the group key
