@@ -1,0 +1,46 @@
+# veepin Ivanti client -> veepin Ivanti gateway, over real TLS.
+#
+# The veepin<->veepin sanity check. Its value is attribution: if it passes while
+# the openconnect cells fail, veepin and the protocol have diverged rather than
+# veepin being broken. Both ends prefer the ESP data path.
+#
+# Data-path check: the veepin client pings 10.70.0.1, the gateway.
+name: veepin-interop-pulse-self
+
+volumes:
+  certs:
+
+services:
+  veepin-pulse-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    environment:
+      USER: "alice"
+      PASSWORD: "s3cret"
+      POOL: "10.70.0.0/24"
+    volumes:
+      - ./veepin/pulse-server-entrypoint.sh:/entrypoint.sh:ro
+      - certs:/certs
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-pulse-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-pulse-server]
+    environment:
+      SERVER: "veepin-pulse-server"
+      USER: "alice"
+      PASSWORD: "s3cret"
+    volumes:
+      - ./veepin/pulse-client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

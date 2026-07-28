@@ -229,3 +229,65 @@ func TestNewSAMirrors(t *testing.T) {
 		t.Errorf("inner = %x (next header %d)", inner[:4], nh)
 	}
 }
+
+// TestKeyBlocksNameTheirOwnInboundDirection pins the rule that a mutually
+// consistent mistake hides: each keying block describes the direction its
+// *sender* will be received on. The server's block is what the client stamps on
+// packets to the server; the client's block is what the server stamps on packets
+// back.
+//
+// Wiring both ends the other way round produces two SAs that still agree with
+// each other, so veepin<->veepin passes and only a real peer notices. This test
+// is that peer: it builds the SAs the two ends build and checks that the SPI a
+// client sends with is the one the server's block named.
+func TestKeyBlocksNameTheirOwnInboundDirection(t *testing.T) {
+	serverKeys, err := GenerateKeys(EncAES256CBC, HMACSHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientKeys, err := GenerateKeys(EncAES256CBC, HMACSHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Built exactly as internal/pulse's two roles build them.
+	clientSA, err := NewSA(serverKeys, clientKeys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverSA, err := NewSA(clientKeys, serverKeys)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if clientSA.SPIOut != serverKeys.SPI {
+		t.Errorf("the client sends with SPI %#x, want the server block's %#x", clientSA.SPIOut, serverKeys.SPI)
+	}
+	if serverSA.SPIIn != serverKeys.SPI {
+		t.Errorf("the server receives on SPI %#x, want its own block's %#x", serverSA.SPIIn, serverKeys.SPI)
+	}
+	if serverSA.SPIOut != clientKeys.SPI {
+		t.Errorf("the server sends with SPI %#x, want the client block's %#x", serverSA.SPIOut, clientKeys.SPI)
+	}
+	if clientSA.SPIIn != clientKeys.SPI {
+		t.Errorf("the client receives on SPI %#x, want its own block's %#x", clientSA.SPIIn, clientKeys.SPI)
+	}
+
+	// And the probe survives a round trip both ways, which is what the two ends
+	// actually exchange first.
+	probe, err := clientSA.Encapsulate([]byte{0}, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner, _, err := serverSA.Decapsulate(probe)
+	if err != nil {
+		t.Fatalf("the server could not open the client's probe: %v", err)
+	}
+	echo, err := serverSA.Encapsulate(inner, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back, _, derr := clientSA.Decapsulate(echo); derr != nil || len(back) != 1 || back[0] != 0 {
+		t.Fatalf("the client could not open the echo: %v (%x)", derr, back)
+	}
+}

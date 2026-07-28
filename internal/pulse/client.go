@@ -205,7 +205,10 @@ func (c *Client) startESP(conn net.Conn, cfg Config, myKeys, serverKeys *Keys,
 		return fmt.Errorf("pulse: dialing the ESP path: %w", err)
 	}
 
-	sa, err := NewSA(myKeys, serverKeys)
+	// The server's block is what this client stamps on packets it sends; the
+	// block it sent itself is what the server stamps on packets coming back.
+	// See the matching note in the server's awaitESPResponse.
+	sa, err := NewSA(serverKeys, myKeys)
 	if err != nil {
 		_ = udp.Close()
 		return err
@@ -238,15 +241,18 @@ func (c *Client) startESP(conn net.Conn, cfg Config, myKeys, serverKeys *Keys,
 }
 
 // probeESP proves the ESP path carries traffic in both directions before the
-// client commits to it. The probe is an ESP dummy packet (RFC 4303 next-header
-// 59): it needs no inner packet the server would have to route, and any
-// authenticated datagram back is proof the path works.
+// client commits to it.
+//
+// The probe is the one this protocol family defines: a single zero octet, with
+// the next-header field naming the inner family, echoed back unchanged. It is
+// not an IP packet, so the peer routes nothing; getting the same octet back is
+// the proof.
 func probeESP(conn *net.UDPConn, sa *esp.SA, src net.IP) error {
-	filler := make([]byte, 32)
-	if v4 := src.To4(); v4 != nil {
-		copy(filler, v4)
+	nextHeader := byte(4)
+	if src.To4() == nil {
+		nextHeader = 41
 	}
-	pkt, err := sa.Encapsulate(filler, 59)
+	pkt, err := sa.Encapsulate([]byte{0}, nextHeader)
 	if err != nil {
 		return fmt.Errorf("pulse: protecting the ESP probe: %w", err)
 	}
@@ -267,7 +273,7 @@ func probeESP(conn *net.UDPConn, sa *esp.SA, src net.IP) error {
 		if rerr != nil {
 			continue
 		}
-		if _, _, derr := sa.Decapsulate(buf[:n]); derr == nil {
+		if inner, _, derr := sa.Decapsulate(buf[:n]); derr == nil && len(inner) == 1 && inner[0] == 0 {
 			_ = conn.SetReadDeadline(time.Time{})
 			return nil
 		}

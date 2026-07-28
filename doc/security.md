@@ -98,6 +98,34 @@ IKEv2 — the same tree, the same ESP data path — has neither weakness, and sh
 be preferred wherever the choice exists. See
 [`internal/cisco/README.md`](../internal/cisco/README.md).
 
+## Ivanti Connect Secure pushes its ESP keys rather than negotiating them
+
+Like GlobalProtect, this protocol has no key exchange for its data path. Unlike
+GlobalProtect, each end mints its own direction: the gateway sends a keying
+block for the traffic it will receive, the client answers with one for the
+traffic it will receive, and both travel inside the authenticated TLS session.
+
+That difference is real but small. It means neither end alone chooses both
+directions' keys, so a weak random source at one end does not compromise the
+other. It does not restore forward secrecy: the keys are sent, not derived, so
+whoever can read one session's configuration exchange can decrypt that session's
+ESP traffic for as long as those keys are in use, and recording the ciphertext
+and obtaining the exchange later is enough.
+
+The practical consequence is where the security actually sits. The TLS session
+is the whole of the data path's confidentiality — the gateway's certificate and
+private key protect the ESP keys and nothing else does. A compromise of that key
+retroactively exposes every session whose exchange was recorded.
+
+The IF-T/TLS data path, taken when UDP does not get through, has the opposite
+property: it is protected by the TLS session directly, so it inherits whatever
+forward secrecy the negotiated TLS suite provides. It is the slower path and the
+better-protected one.
+
+veepin implements this faithfully because interoperating with real Ivanti
+gateways is the point. IKEv2 and WireGuard should be preferred wherever the
+choice exists. See [`internal/pulse/README.md`](../internal/pulse/README.md).
+
 ## MASQUE carries every inner packet on one reliable QUIC stream
 
 Because `x/net/quic` has no QUIC DATAGRAM frames, CONNECT-IP runs in capsule

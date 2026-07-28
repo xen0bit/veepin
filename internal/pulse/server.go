@@ -340,7 +340,14 @@ func (s *Server) awaitESPResponse(st *stream, sess *session, serverKeys *Keys, c
 				s.logger.Printf("pulse: %s: ESP response: %v", sess.info.User, perr)
 				return
 			}
-			sa, serr := NewSA(serverKeys, clientKeys)
+			// Each block describes the direction its *sender* will be
+			// received on. The server's own block is what the client stamps on
+			// packets to the server, so it is the server's inbound SA; the
+			// client's block is what the server stamps on packets to the
+			// client, so it is the server's outbound one. Getting this
+			// backwards produces a pair of SAs that still agree with each
+			// other, so only a real peer catches it.
+			sa, serr := NewSA(clientKeys, serverKeys)
 			if serr != nil {
 				s.logger.Printf("pulse: %s: ESP keys: %v", sess.info.User, serr)
 				return
@@ -348,7 +355,7 @@ func (s *Server) awaitESPResponse(st *stream, sess *session, serverKeys *Keys, c
 			peer := &espPeer{srv: s, sa: sa}
 			sess.esp = peer
 			s.mu.Lock()
-			s.bySPI[clientKeys.SPI] = peer
+			s.bySPI[serverKeys.SPI] = peer
 			s.mu.Unlock()
 		case TypeControl:
 			// "ncmo=1": the client has the keys and ESP may start.
@@ -399,13 +406,18 @@ func (s *Server) handleESP(pkt []byte, from *net.UDPAddr) {
 	if err != nil {
 		return
 	}
-	switch nh {
-	case 59:
-		// A probe or filler packet: answer it, so the client's probe sees the
-		// path work, but route nothing.
-		if reply, rerr := peer.sa.Encapsulate(make([]byte, 32), 59); rerr == nil {
+	// The ESP probe is a single zero octet, and the client considers the path
+	// live when it gets that same octet back. It is not an IP packet and must
+	// not be routed — echoing it is the whole protocol.
+	if len(inner) == 1 && inner[0] == 0 {
+		if reply, rerr := peer.sa.Encapsulate(inner, nh); rerr == nil {
 			_, _ = s.udp().WriteToUDP(reply, from)
 		}
+		return
+	}
+	switch nh {
+	case 59:
+		// A pure filler packet with nothing inside.
 		return
 	case 4, 41:
 		if inner = dataplane.TrimToIP(inner); inner == nil {
