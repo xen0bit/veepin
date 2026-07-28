@@ -68,6 +68,8 @@
 #define KEY_ALLOWED_IPS   "allowed-ips"
 #define KEY_PRIVATE_KEY   "private-key"
 #define KEY_PRESHARED_KEY "preshared-key"
+
+#define KEY_HUB           "hub"
 /* OpenVPN (its user key differs from the rest). */
 #define KEY_REMOTE        "remote"
 #define KEY_USERNAME      "username"
@@ -125,6 +127,29 @@ static const FieldDef wireguard_fields[] = {
     { "Allowed IPs",     KEY_ALLOWED_IPS,   F_REQUIRED },
     { "Pre-shared key",  KEY_PRESHARED_KEY, F_SECRET },
     { "DNS",             KEY_DNS,           F_DATA },
+};
+
+/* AmneziaWG takes WireGuard's fields unchanged — it is WireGuard with the wire
+ * format perturbed. The obfuscation parameters (H1-H4, S1-S4, Jc/Jmin/Jmax) are
+ * deliberately absent: they are a shared secret between peers, they are all or
+ * nothing, and a dozen spin boxes in a connection dialog is the wrong way to
+ * enter them. A profile that needs them uses a config file via nmcli. */
+static const FieldDef amneziawg_fields[] = {
+    { "Private key",     KEY_PRIVATE_KEY,   F_SECRET },
+    { "Peer public key", KEY_PUBLIC_KEY,    F_REQUIRED },
+    { "Endpoint",        KEY_ENDPOINT,      F_REQUIRED },
+    { "Address",         KEY_ADDRESS,       F_REQUIRED },
+    { "Allowed IPs",     KEY_ALLOWED_IPS,   F_REQUIRED },
+    { "Pre-shared key",  KEY_PRESHARED_KEY, F_SECRET },
+    { "DNS",             KEY_DNS,           F_DATA },
+};
+
+static const FieldDef softether_fields[] = {
+    { "Server",       KEY_SERVER,   F_REQUIRED },
+    { "Username",     KEY_USER,     F_REQUIRED },
+    { "Password",     KEY_PASSWORD, F_SECRET },
+    { "Virtual hub",  KEY_HUB,      F_DATA },
+    { "Port",         KEY_PORT,     F_DATA },
 };
 
 static const FieldDef openvpn_fields[] = {
@@ -233,6 +258,8 @@ static const ProtocolDef protocols[] = {
     PROTO("cisco",      "Cisco IPsec", cisco_fields),
     PROTO("pulse",      "Ivanti Connect Secure", pulse_fields),
     PROTO("l2tp",       "L2TP/IPsec",  l2tp_fields),
+    PROTO("amneziawg",  "AmneziaWG",   amneziawg_fields),
+    PROTO("softether",  "SoftEther VPN", softether_fields),
 };
 
 #define N_PROTOCOLS G_N_ELEMENTS(protocols)
