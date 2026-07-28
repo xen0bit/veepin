@@ -245,15 +245,6 @@ func ParseEAP(buf []byte) (EAPPacket, error) {
 	return p, nil
 }
 
-// authMessage wraps an EAP packet in the IF-T/TLS authentication envelope: the
-// Auth Type word, then the EAP packet.
-func authMessage(msgType, id uint32, eap []byte) []byte {
-	payload := make([]byte, 4+len(eap))
-	binary.BigEndian.PutUint32(payload[0:4], AuthTypeJuniper1)
-	copy(payload[4:], eap)
-	return EncodeMessage(VendorTCG, msgType, id, payload)
-}
-
 // parseAuthMessage unwraps that envelope, rejecting an Auth Type this
 // implementation does not speak rather than reading past it.
 func parseAuthMessage(m Message) (EAPPacket, error) {
