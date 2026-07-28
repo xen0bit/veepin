@@ -165,6 +165,16 @@ var interopMatrix = []interopRow{
 		Self: interopCell{Tests: []string{"TestInteropCiscoSelf"}},
 	},
 	{
+		Protocol: "Ivanti Connect Secure",
+		Client:   interopCell{Label: "—†"},
+		Server: interopCell{Tests: []string{
+			"TestInteropOpenconnectPulseClientVeepinServer",
+			"TestInteropOpenconnectPulseClientVeepinServerESP",
+			"TestInteropOpenconnectPulseClientVeepinServerShaped",
+		}, Label: "openconnect (IF-T/TLS, ESP, padded)"},
+		Self: interopCell{Tests: []string{"TestInteropPulseSelf"}, Label: "(over ESP)"},
+	},
+	{
 		Protocol: "TOY*",
 		Client:   interopCell{Tests: []string{"TestInteropVeepinToyClientReferencePeer"}, Label: "independent Python peer"},
 		Server:   interopCell{Tests: []string{"TestInteropToyClientVeepinServer"}, Label: "independent Python peer"},

@@ -22,6 +22,7 @@ import (
 	"github.com/xen0bit/veepin/masque"
 	"github.com/xen0bit/veepin/nebula"
 	"github.com/xen0bit/veepin/openvpn"
+	"github.com/xen0bit/veepin/pulse"
 	"github.com/xen0bit/veepin/ssh"
 	"github.com/xen0bit/veepin/sstp"
 	"github.com/xen0bit/veepin/toy"
@@ -379,6 +380,42 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 			}
 			if *shape != 0 {
 				opts[cisco.OptShape] = fmt.Sprint(*shape)
+			}
+			return opts
+		}, nil
+	case "pulse":
+		var (
+			server   = fs.String("server", "", "Ivanti Connect Secure gateway host or IP (required)")
+			port     = fs.Int("port", 0, "gateway HTTPS port (default 443)")
+			path     = fs.String("path", "", "request path the IF-T/TLS upgrade is sent to (default \"/\")")
+			user     = fs.String("user", "", "username (required)")
+			pass     = fs.String("pass", "", "password (required)")
+			ca       = fs.String("ca", "", "PEM bundle to verify the gateway against")
+			insecure = fs.Bool("insecure", false, "skip TLS certificate verification (self-signed gateways)")
+			noESP    = fs.Bool("no-esp", false, "stay on the IF-T/TLS data path even where the gateway hands out ESP keys")
+			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+			shape    = fs.Int("shape", 0, "per-flow outbound shaping budget in bytes (0 = off, 16384 recommended)")
+		)
+		return func() map[string]string {
+			opts := map[string]string{
+				pulse.OptServer:   *server,
+				pulse.OptPath:     *path,
+				pulse.OptUser:     *user,
+				pulse.OptPassword: *pass,
+				pulse.OptCA:       *ca,
+				pulse.OptTUN:      *tun,
+			}
+			if *port != 0 {
+				opts[pulse.OptPort] = fmt.Sprint(*port)
+			}
+			if *shape != 0 {
+				opts[pulse.OptShape] = fmt.Sprint(*shape)
+			}
+			if *insecure {
+				opts[pulse.OptInsecure] = "true"
+			}
+			if *noESP {
+				opts[pulse.OptNoESP] = "true"
 			}
 			return opts
 		}, nil

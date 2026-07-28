@@ -924,6 +924,41 @@ func TestInteropCiscoSelf(t *testing.T) {
 	measureThroughput(t, "compose.cisco-self.yml", "veepin-cisco-server", "veepin-cisco-client", "10.60.0.1")
 }
 
+// Ivanti Connect Secure has no open-source server, so only the server direction
+// gets a real peer: openconnect's --protocol=pulse is the only implementation of
+// this protocol outside Ivanti's own, and it implements the client alone. The
+// client-direction cell carries the fixed label rather than a false failure.
+
+// TestInteropOpenconnectPulseClientVeepinServer runs the openconnect Ivanti
+// client against the veepin gateway on the IF-T/TLS data path and pings
+// 10.70.0.1, the gateway.
+func TestInteropOpenconnectPulseClientVeepinServer(t *testing.T) {
+	runInteropBench(t, "compose.pulse.yml", "opnc-pulse-client", "veepin-pulse-server", "10.70.0.1")
+}
+
+// TestInteropOpenconnectPulseClientVeepinServerESP is the same cell on the ESP
+// data path. The ping alone would pass on a silent fallback to the IF-T/TLS
+// connection, so the run additionally requires openconnect to report that the
+// ESP path came up.
+func TestInteropOpenconnectPulseClientVeepinServerESP(t *testing.T) {
+	runInteropRequiringLog(t, "compose.pulse-esp.yml", "opnc-pulse-client", "10.70.0.1",
+		"ESP session established")
+}
+
+// TestInteropOpenconnectPulseClientVeepinServerShaped is the IF-T/TLS cell with
+// downstream shaping on: the padding is trailing filler the receiver must trim
+// by the inner IP header's own length.
+func TestInteropOpenconnectPulseClientVeepinServerShaped(t *testing.T) {
+	runInterop(t, "compose.pulse-shaped.yml", "opnc-pulse-client", "10.70.0.1")
+}
+
+// TestInteropPulseSelf is the veepin<->veepin sanity check, over the ESP path
+// both ends prefer.
+func TestInteropPulseSelf(t *testing.T) {
+	runInterop(t, "compose.pulse-self.yml", "veepin-pulse-client", "10.70.0.1")
+	measureThroughput(t, "compose.pulse-self.yml", "veepin-pulse-server", "veepin-pulse-client", "10.70.0.1")
+}
+
 // TOY is the example protocol (internal/toy) and provides no security; these
 // cells prove the *specification*, not the cryptography. The peer they talk to
 // is an independent Python implementation written from internal/toy/SPEC.md
