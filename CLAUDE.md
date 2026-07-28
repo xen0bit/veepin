@@ -225,6 +225,26 @@ Re-run these; don't "fix" them.
 - `internal/fortinet` — `TestDTLSAttachesToTLSTunnel`.
 - The release workflow's `nm-packages` job dying on an Ubuntu mirror sync.
 
+## Cutting a release
+
+Tags drive it: `.github/workflows/release.yml` runs GoReleaser on any pushed
+`v*` tag, and the changelog is generated from `feat:`/`fix:` commits (the
+`docs`/`test`/`chore`/`ci` types, scoped forms included, are filtered out).
+
+**Do not tag the tip of `main` blindly.** The living-README workflow commits its
+regenerated tables with `[skip ci]` in the message, and GitHub skips *every*
+workflow for a push whose head commit carries that marker — the tag push
+included. The tag lands, the workflow never runs, and no release appears. There
+is no error anywhere; `gh release list` simply does not show it.
+
+Check before tagging, and tag a commit without the marker:
+
+```sh
+git log -1 --format=%s origin/main    # must not contain [skip ci]
+```
+
+If the tip does carry it, land a real commit first and tag that.
+
 ## Sequencing several protocols
 
 They serialise, because they all touch `doc.go`, the README protocol table and
