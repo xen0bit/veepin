@@ -29,7 +29,9 @@ drives the production client against the live server and checks bidirectional ES
 
 Deeper docs live under [`doc/`](doc/): per-protocol [usage](doc/usage/),
 [architecture](doc/architecture.md), [security](doc/security.md),
-[testing](doc/testing.md) and [benchmarks](doc/benchmarks.md).
+[testing](doc/testing.md) and [benchmarks](doc/benchmarks.md). What might be
+added next, and what was considered and rejected, is in
+[`doc/protocol-roadmap.md`](doc/protocol-roadmap.md).
 
 ## What it does
 
