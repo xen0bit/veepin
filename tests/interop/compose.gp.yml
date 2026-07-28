@@ -1,0 +1,50 @@
+# Independent openconnect GlobalProtect client -> veepin GlobalProtect gateway,
+# on the SSL tunnel.
+#
+# openconnect is the real reference client and fully implements the GlobalProtect
+# data paths, so this cell moves packets: it verifies veepin's login, the jnlp
+# document, the config XML and the 16-octet framing against a stack that shares
+# none of veepin's code. The gateway publishes its certificate into a shared
+# volume; the client pins it by fingerprint.
+#
+# Data-path check: the openconnect client pings 10.50.0.1, the gateway.
+name: veepin-interop-gp
+
+volumes:
+  certs:
+
+services:
+  veepin-gp-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    environment:
+      USER: "alice"
+      PASSWORD: "s3cret"
+      POOL: "10.50.0.0/24"
+    volumes:
+      - ./veepin/gp-server-entrypoint.sh:/entrypoint.sh:ro
+      - certs:/certs
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  opnc-gp-client:
+    build:
+      context: gp
+    image: interop-gp
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-gp-server]
+    environment:
+      SERVER: "veepin-gp-server"
+      USER: "alice"
+      PASSWORD: "s3cret"
+      NO_ESP: "1"
+    volumes:
+      - ./gp/openconnect-entrypoint.sh:/entrypoint.sh:ro
+      - certs:/certs
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

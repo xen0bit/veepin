@@ -1,0 +1,53 @@
+# Independent openconnect GlobalProtect client -> veepin GlobalProtect gateway,
+# on the ESP data path.
+#
+# This is the cell that exercises the protocol's distinctive part: the gateway
+# generates both SPIs and all four ESP keys, hands them to the client inside the
+# configuration XML, and the client activates the path with marker ICMP pings
+# before any traffic flows. Nothing here is negotiated, so a disagreement about
+# key sizes, SPI encoding or the marker shows up as silence.
+#
+# The test asserts the gateway logged "ESP path up", because a client that fell
+# back to the SSL tunnel would still ping successfully and the cell would pass
+# while proving nothing.
+#
+# Data-path check: the openconnect client pings 10.50.0.1, the gateway.
+name: veepin-interop-gp-esp
+
+volumes:
+  certs:
+
+services:
+  veepin-gp-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    environment:
+      USER: "alice"
+      PASSWORD: "s3cret"
+      POOL: "10.50.0.0/24"
+    volumes:
+      - ./veepin/gp-server-entrypoint.sh:/entrypoint.sh:ro
+      - certs:/certs
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  opnc-gp-client:
+    build:
+      context: gp
+    image: interop-gp
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-gp-server]
+    environment:
+      SERVER: "veepin-gp-server"
+      USER: "alice"
+      PASSWORD: "s3cret"
+    volumes:
+      - ./gp/openconnect-entrypoint.sh:/entrypoint.sh:ro
+      - certs:/certs
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

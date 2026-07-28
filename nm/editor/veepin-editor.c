@@ -180,6 +180,14 @@ static const FieldDef fortinet_fields[] = {
     { "TOTP secret",  KEY_TOTP,     F_SECRET },
 };
 
+static const FieldDef gp_fields[] = {
+    { "Gateway",      KEY_SERVER,   F_REQUIRED },
+    { "Username",     KEY_USER,     F_REQUIRED },
+    { "Port",         KEY_PORT,     F_DATA },
+    { "CA (path)",    KEY_CA,       F_DATA },
+    { "Password",     KEY_PASSWORD, F_SECRET },
+};
+
 static const FieldDef l2tp_fields[] = {
     { "Server",        KEY_SERVER,   F_REQUIRED },
     { "Username",      KEY_USER,     F_REQUIRED },
@@ -201,6 +209,7 @@ static const ProtocolDef protocols[] = {
     PROTO("nebula",     "Nebula",      nebula_fields),
     PROTO("masque",     "MASQUE",      masque_fields),
     PROTO("fortinet",   "Fortinet",    fortinet_fields),
+    PROTO("gp",         "GlobalProtect", gp_fields),
     PROTO("l2tp",       "L2TP/IPsec",  l2tp_fields),
 };
 

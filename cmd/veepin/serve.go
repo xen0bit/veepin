@@ -14,6 +14,7 @@ import (
 	"github.com/xen0bit/veepin/anyconnect"
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/fortinet"
+	"github.com/xen0bit/veepin/gp"
 	"github.com/xen0bit/veepin/ikev2"
 	"github.com/xen0bit/veepin/l2tp"
 	"github.com/xen0bit/veepin/masque"
@@ -266,6 +267,50 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			}
 			if *noDTLS {
 				opts[fortinet.OptServerNoDTLS] = "true"
+			}
+			return opts
+		}, nil
+	case "gp":
+		var (
+			cert     = fs.String("cert", "", "path to the server TLS certificate PEM (required)")
+			key      = fs.String("key", "", "path to the server TLS private key PEM (required)")
+			listenIP = fs.String("listen", "0.0.0.0", "local IP to bind the HTTPS socket on")
+			port     = fs.Int("port", 0, "HTTPS port to listen on (default 443)")
+			espPort  = fs.Int("esp-port", 0, "UDP port for the ESP data path (default 4501)")
+			public   = fs.String("public", "", "address clients reach this gateway on, advertised as the ESP endpoint (empty = the address their control connection arrived on)")
+			pool     = fs.String("pool", "10.50.0.0/24", "internal address pool handed to clients")
+			dns      = fs.String("dns", "", "comma-separated DNS servers offered to clients")
+			user     = fs.String("user", "", "username to accept (required)")
+			pass     = fs.String("pass", "", "the user's password (required)")
+			noESP    = fs.Bool("no-esp", false, "serve the SSL tunnel only, leaving the UDP port unbound")
+			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+			shape    = fs.Int("shape", 0, "per-flow downstream shaping budget in bytes: pads each inner flow's first N bytes to the tunnel MTU, hiding an inner TLS handshake's size pattern (0 = off, 16384 recommended)")
+		)
+		return func() map[string]string {
+			opts := map[string]string{
+				gp.OptServerCert:   *cert,
+				gp.OptServerKey:    *key,
+				gp.OptServerListen: *listenIP,
+				gp.OptServerPool:   *pool,
+				gp.OptServerDNS:    *dns,
+				gp.OptServerUser:   *user,
+				gp.OptServerPass:   *pass,
+				gp.OptServerTUN:    *tun,
+			}
+			if *port != 0 {
+				opts[gp.OptServerPort] = fmt.Sprint(*port)
+			}
+			if *espPort != 0 {
+				opts[gp.OptServerESPPort] = fmt.Sprint(*espPort)
+			}
+			if *public != "" {
+				opts[gp.OptServerPublicIP] = *public
+			}
+			if *shape != 0 {
+				opts[gp.OptServerShape] = fmt.Sprint(*shape)
+			}
+			if *noESP {
+				opts[gp.OptServerNoESP] = "true"
 			}
 			return opts
 		}, nil

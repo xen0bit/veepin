@@ -144,6 +144,16 @@ var interopMatrix = []interopRow{
 		Self: interopCell{Tests: []string{"TestInteropFortinetSelf"}, Label: "(over DTLS)"},
 	},
 	{
+		Protocol: "GlobalProtect",
+		Client:   interopCell{Label: "—†"},
+		Server: interopCell{Tests: []string{
+			"TestInteropOpenconnectGPClientVeepinServer",
+			"TestInteropOpenconnectGPClientVeepinServerESP",
+			"TestInteropOpenconnectGPClientVeepinServerShaped",
+		}, Label: "openconnect (SSL tunnel, ESP, padded)"},
+		Self: interopCell{Tests: []string{"TestInteropGPSelf"}, Label: "(over ESP)"},
+	},
+	{
 		Protocol: "TOY*",
 		Client:   interopCell{Tests: []string{"TestInteropVeepinToyClientReferencePeer"}, Label: "independent Python peer"},
 		Server:   interopCell{Tests: []string{"TestInteropToyClientVeepinServer"}, Label: "independent Python peer"},

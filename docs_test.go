@@ -27,6 +27,7 @@ import (
 
 	_ "github.com/xen0bit/veepin/anyconnect"
 	_ "github.com/xen0bit/veepin/fortinet"
+	_ "github.com/xen0bit/veepin/gp"
 	_ "github.com/xen0bit/veepin/ikev2"
 	_ "github.com/xen0bit/veepin/l2tp"
 	_ "github.com/xen0bit/veepin/masque"

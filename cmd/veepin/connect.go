@@ -15,6 +15,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/fortinet"
+	"github.com/xen0bit/veepin/gp"
 	"github.com/xen0bit/veepin/ikev2"
 	"github.com/xen0bit/veepin/l2tp"
 	"github.com/xen0bit/veepin/masque"
@@ -349,6 +350,40 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 			}
 			if *noDTLS {
 				opts[fortinet.OptNoDTLS] = "true"
+			}
+			return opts
+		}, nil
+	case "gp":
+		var (
+			server   = fs.String("server", "", "GlobalProtect gateway host or IP (required)")
+			port     = fs.Int("port", 0, "gateway HTTPS port (default 443)")
+			user     = fs.String("user", "", "username (required)")
+			pass     = fs.String("pass", "", "password (required)")
+			ca       = fs.String("ca", "", "PEM bundle to verify the gateway against")
+			insecure = fs.Bool("insecure", false, "skip TLS certificate verification (self-signed gateways)")
+			noESP    = fs.Bool("no-esp", false, "stay on the SSL tunnel even where the gateway hands out ESP keys")
+			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+			shape    = fs.Int("shape", 0, "per-flow outbound shaping budget in bytes (0 = off, 16384 recommended)")
+		)
+		return func() map[string]string {
+			opts := map[string]string{
+				gp.OptServer:   *server,
+				gp.OptUser:     *user,
+				gp.OptPassword: *pass,
+				gp.OptCA:       *ca,
+				gp.OptTUN:      *tun,
+			}
+			if *port != 0 {
+				opts[gp.OptPort] = fmt.Sprint(*port)
+			}
+			if *shape != 0 {
+				opts[gp.OptShape] = fmt.Sprint(*shape)
+			}
+			if *insecure {
+				opts[gp.OptInsecure] = "true"
+			}
+			if *noESP {
+				opts[gp.OptNoESP] = "true"
 			}
 			return opts
 		}, nil
