@@ -1,0 +1,287 @@
+// Package softether implements the SoftEther VPN native protocol (SE-VPN):
+// Ethernet frames over TLS using the SoftEther PACK serialisation for the
+// control exchange, with an optional UDP acceleration data path.
+//
+// This is veepin's only layer-2 (TAP-mode) protocol. It requires a TAP device
+// rather than the TUN interface every other protocol uses.
+package softether
+
+import (
+	"context"
+	"crypto/tls"
+	"fmt"
+	"log"
+	"net"
+	"os"
+	"strconv"
+
+	"github.com/xen0bit/veepin/client"
+	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/veepin/internal/softether"
+)
+
+// Opt* constants for CLI option parsing.
+const (
+	OptServer   = "server"
+	OptPort     = "port"
+	OptUser     = "user"
+	OptPassword = "password"
+	OptHub      = "hub"
+	OptTUN      = "tun"
+	OptInsecure = "insecure"
+
+	OptServerListen = "listen"
+	OptServerPort   = "port"
+	OptServerCert   = "cert"
+	OptServerKey    = "key"
+	OptServerPool   = "pool"
+	OptServerUser   = "user"
+	OptServerPass   = "pass"
+	OptServerTUN    = "tun"
+)
+
+// Config configures the SoftEther VPN client.
+type Config struct {
+	Server   string // gateway host or IP
+	Port     int    // gateway port (default 443)
+	User     string // username (required)
+	Password string // password (required)
+	Hub      string // virtual hub name (default "VPN")
+	TUNName  string // TAP interface name
+
+	// InsecureSkipVerify disables gateway certificate verification. Needed for
+	// the self-signed certificates SoftEther ships with by default, and a
+	// downgrade to unauthenticated transport wherever it is set.
+	InsecureSkipVerify bool
+}
+
+// Session wraps a client connection.
+type Session struct {
+	cs  *softether.ClientSession
+	tap *dataplane.TUN
+}
+
+// Dial connects to a SoftEther VPN server.
+func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
+	if cfg.Server == "" {
+		return nil, client.Result{}, fmt.Errorf("softether: server is required")
+	}
+	if cfg.User == "" {
+		return nil, client.Result{}, fmt.Errorf("softether: user is required")
+	}
+	port := cfg.Port
+	if port == 0 {
+		port = 443
+	}
+	hub := cfg.Hub
+	if hub == "" {
+		hub = "VPN"
+	}
+
+	// Verify the gateway's certificate by default. SoftEther deployments often
+	// use a self-signed certificate, so InsecureSkipVerify has to be reachable —
+	// but it is opt-in and named, not the silent default it was.
+	tlsCfg := &tls.Config{ServerName: cfg.Server, InsecureSkipVerify: cfg.InsecureSkipVerify} //nolint:gosec // gated on an explicit opt-in
+	addr := net.JoinHostPort(cfg.Server, strconv.Itoa(port))
+
+	cs, err := softether.Connect(addr, tlsCfg, cfg.User, cfg.Password, hub)
+	if err != nil {
+		return nil, client.Result{}, fmt.Errorf("softether: connect: %w", err)
+	}
+
+	tap, err := dataplane.OpenTAP(cfg.TUNName)
+	if err != nil {
+		cs.Close()
+		return nil, client.Result{}, err
+	}
+
+	return &Session{cs: cs, tap: tap}, client.Result{
+		TUNName: tap.Name(),
+		MTU:     1500,
+	}, nil
+}
+
+// Wait blocks until the session is done.
+func (s *Session) Wait(ctx context.Context) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// Close tears down the session.
+func (s *Session) Close() error {
+	csErr := s.cs.Close()
+	tapErr := s.tap.Close()
+	if csErr != nil {
+		return csErr
+	}
+	return tapErr
+}
+
+type dialer struct{ cfg Config }
+
+func (d dialer) Dial(ctx context.Context) (client.Session, client.Result, error) {
+	return Dial(ctx, d.cfg)
+}
+
+func parseOptions(opts map[string]string) (client.Dialer, error) {
+	var cfg Config
+	cfg.Server = opts[OptServer]
+	cfg.User = opts[OptUser]
+	cfg.Password = opts[OptPassword]
+	cfg.Hub = opts[OptHub]
+	cfg.TUNName = opts[OptTUN]
+	cfg.InsecureSkipVerify = opts[OptInsecure] == "true"
+	if p := opts[OptPort]; p != "" {
+		n, err := strconv.Atoi(p)
+		if err != nil {
+			return nil, fmt.Errorf("softether: bad %s %q: %w", OptPort, p, err)
+		}
+		cfg.Port = n
+	}
+	return dialer{cfg: cfg}, nil
+}
+
+func init() {
+	client.Register("softether", parseOptions)
+}
+
+// Server is a SoftEther VPN server.
+type Server struct {
+	tap        *dataplane.TUN
+	server     *softether.Server
+	ln         net.Listener
+	tlsCfg     *tls.Config
+	listenIP   string
+	listenPort int
+	log        *log.Logger
+	closed     chan struct{}
+}
+
+// ServerConfig configures the SoftEther VPN server.
+type ServerConfig struct {
+	Listen  string // local IP to bind (default 0.0.0.0)
+	Port    int    // TLS port (default 443)
+	Cert    string // path to TLS cert PEM
+	Key     string // path to TLS key PEM
+	Pool    string // address pool CIDR
+	User    string // username (required)
+	Pass    string // password (required)
+	TUNName string // TAP interface name
+	Logger  *log.Logger
+}
+
+// NewServer creates a SoftEther VPN server.
+func NewServer(cfg ServerConfig) (*Server, error) {
+	if cfg.User == "" {
+		return nil, fmt.Errorf("softether: server user is required")
+	}
+	if cfg.Pass == "" {
+		return nil, fmt.Errorf("softether: server pass is required")
+	}
+	if cfg.Cert == "" || cfg.Key == "" {
+		return nil, fmt.Errorf("softether: cert and key are required")
+	}
+	cert, err := tls.LoadX509KeyPair(cfg.Cert, cfg.Key)
+	if err != nil {
+		return nil, fmt.Errorf("softether: load cert: %w", err)
+	}
+	tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}}
+
+	tap, err := dataplane.OpenTAP(cfg.TUNName)
+	if err != nil {
+		return nil, err
+	}
+
+	bridge := softether.NewBridge(softether.DefaultAgeTime)
+	gatewayMAC := softether.MACAddr{0x00, 0x0c, 0x29, 0x01, 0x02, 0x03}
+	gatewayIP := net.ParseIP("10.70.0.1")
+
+	srv := softether.NewServer(tlsCfg, bridge, gatewayMAC, gatewayIP,
+		softether.SingleUser(cfg.User, cfg.Pass))
+
+	logger := cfg.Logger
+	if logger == nil {
+		logger = log.New(os.Stderr, "", log.LstdFlags)
+	}
+	srv.SetLogger(logger.Printf)
+
+	listenIP := cfg.Listen
+	if listenIP == "" {
+		listenIP = "0.0.0.0"
+	}
+	port := cfg.Port
+	if port == 0 {
+		port = softether.DefaultPort
+	}
+	return &Server{
+		tap:        tap,
+		server:     srv,
+		tlsCfg:     tlsCfg,
+		listenIP:   listenIP,
+		listenPort: port,
+		log:        logger,
+		closed:     make(chan struct{}),
+	}, nil
+}
+
+// ListenAndServe binds the TLS listener and starts serving. Per the contract in
+// client/client.go, NewServer opened the TAP and validated; the socket is bound
+// only here.
+func (s *Server) ListenAndServe() error {
+	ln, err := tls.Listen("tcp", net.JoinHostPort(s.listenIP, strconv.Itoa(s.listenPort)), s.tlsCfg)
+	if err != nil {
+		return fmt.Errorf("softether: listen: %w", err)
+	}
+	s.ln = ln
+	defer ln.Close()
+
+	s.log.Printf("softether: listening on %s", ln.Addr())
+	err = s.server.Serve(ln)
+	close(s.closed)
+	return err
+}
+
+// Close shuts down the server.
+func (s *Server) Close() error {
+	s.server.Close()
+	if s.ln != nil {
+		s.ln.Close()
+	}
+	return s.tap.Close()
+}
+
+// TUNName returns the TAP interface name.
+func (s *Server) TUNName() string { return s.tap.Name() }
+
+// Gateway returns the server's tunnel address.
+func (s *Server) Gateway() net.IP { return net.ParseIP("10.70.0.1") }
+
+// Network returns the tunnel subnet.
+func (s *Server) Network() *net.IPNet {
+	_, n, _ := net.ParseCIDR("10.70.0.0/24")
+	return n
+}
+
+func parseServerOptions(opts map[string]string) (client.Server, error) {
+	sc := ServerConfig{
+		Listen:  opts[OptServerListen],
+		User:    opts[OptServerUser],
+		Pass:    opts[OptServerPass],
+		Cert:    opts[OptServerCert],
+		Key:     opts[OptServerKey],
+		Pool:    opts[OptServerPool],
+		TUNName: opts[OptServerTUN],
+	}
+	if p := opts[OptServerPort]; p != "" {
+		n, err := strconv.Atoi(p)
+		if err != nil {
+			return nil, fmt.Errorf("softether: bad %s %q: %w", OptServerPort, p, err)
+		}
+		sc.Port = n
+	}
+	return NewServer(sc)
+}
+
+func init() {
+	client.RegisterServer("softether", parseServerOptions)
+}

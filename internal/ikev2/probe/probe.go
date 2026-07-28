@@ -174,7 +174,7 @@ func (c *client) saInit() error {
 func (c *client) auth() error {
 	prf := c.suite.prf
 	idBody := payload.MarshalID(c.id)
-	inner := ike.PSKAuth(prf, c.psk, ike.AuthOctets(prf, c.saInitReq, c.nr, c.keys.SKpi, idBody))
+	inner := ike.PSKAuth(prf, c.psk, ike.AuthOctets(prf, c.saInitReq, nil, c.nr, c.keys.SKpi, idBody))
 	c.childOutSPI = randU32()
 	tsAll := payload.TSPayload{Selectors: []payload.TrafficSelector{allTraffic()}}
 	cpReq := payload.CPPayload{Type: payload.CFGRequest, Attrs: []payload.CFGAttr{{Type: payload.CFGInternalIP4Address}, {Type: payload.CFGInternalIP4Netmask}, {Type: payload.CFGInternalIP4DNS}}}
@@ -473,7 +473,7 @@ func (c *client) authEAP() error {
 	}
 
 	// IKE_AUTH #4: final AUTH from MSK.
-	octets := ike.AuthOctets(prf, c.saInitReq, c.nr, c.keys.SKpi, idBody)
+	octets := ike.AuthOctets(prf, c.saInitReq, nil, c.nr, c.keys.SKpi, idBody)
 	authData := ike.PSKAuth(prf, msk, octets)
 	b4 := payload.NewBuilder()
 	b4.Add(payload.TypeAUTH, false, payload.MarshalAuth(payload.AuthPayload{Method: payload.AuthSharedKeyMIC, Data: authData}))

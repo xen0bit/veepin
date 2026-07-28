@@ -20,6 +20,7 @@ while [ "$i" -le 30 ]; do
         -tun tun0 \
         -rekey "${REKEY:-0}" \
         -ike-rekey "${IKE_REKEY:-0}" \
+        -post-quantum="${POST_QUANTUM:-false}" \
         -full-tunnel=false
     echo "veepin-client: attempt $i failed; retrying in 2s"
     i=$((i + 1))

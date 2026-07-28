@@ -1,0 +1,58 @@
+# veepin AmneziaWG client -> veepin AmneziaWG server, with every obfuscation
+# knob engaged: all four message types replaced, all four paddings non-zero,
+# and junk packets ahead of the handshake.
+#
+# This is the cell that proves the obfuscation is reversible over real sockets.
+# The unit tests round-trip the transform in memory; only this proves that a
+# retyped, padded, junk-preceded flow still completes a Noise IK handshake and
+# carries traffic.
+name: veepin-interop-awg-self
+
+x-awg: &awg
+  SERVER_PRIVATE: "+IRmjL6NRpthikeXn+jGUJNLe1ZJKQaqeWubiG9+GHs="
+  SERVER_PUBLIC: "srb9CBWUN+UL2CYhqHoL+rGKFPNu6nUJiNStgH0EBWM="
+  CLIENT_PRIVATE: "CHk+5XZnPhJ+UXfIx83SaePpgYrK+0/FqiPvNvTp3Hg="
+  CLIENT_PUBLIC: "gjMMAROzi5lHFapIKeaAdJ2RhGe0lW24XysGzBd1OSM="
+  PSK: "cjldFdAmi69yIFhc0Sms/5Yz6boVXkMZbMJl+RzzMZM="
+  SERVER_TUN_IP: "10.60.0.1"
+  CLIENT_TUN_IP: "10.60.0.2"
+  H1: "113"
+  H2: "114"
+  H3: "115"
+  H4: "116"
+  S1: "17"
+  S2: "23"
+  S3: "5"
+  S4: "11"
+
+services:
+  veepin-awg-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      <<: *awg
+    volumes:
+      - ./veepin/awg-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-awg-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-awg-server]
+    environment:
+      <<: *awg
+      SERVER: "veepin-awg-server"
+      JC: "6"
+      JMIN: "40"
+      JMAX: "120"
+    volumes:
+      - ./veepin/awg-client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

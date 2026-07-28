@@ -1,0 +1,37 @@
+# Direction A with PQ: veepin client -> strongSwan responder.
+# Both sides negotiate ML-KEM-768 as an additional key exchange.
+name: veepin-interop-a-pq
+
+services:
+  strongswan-server:
+    build:
+      context: strongswan-pq
+    image: interop-strongswan-pq
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+      net.ipv4.ip_forward: "1"
+    volumes:
+      - ./strongswan/swanctl-server-pq.conf:/etc/swanctl/swanctl.conf:ro
+      - ./strongswan-pq/99-stdout-log.conf:/etc/strongswan.d/99-stdout-log.conf:ro
+      - ./strongswan-pq/server-entrypoint.sh:/entrypoint.sh:ro
+    command: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [strongswan-server]
+    environment:
+      SERVER: "strongswan-server"
+      PSK: "interop-test-psk"
+      CLIENT_ID: "client.example.com"
+      SERVER_ID: "vpn.example.com"
+      POST_QUANTUM: "true"
+    volumes:
+      - ./veepin/client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

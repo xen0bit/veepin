@@ -16,6 +16,7 @@ import (
 // Linux TUN/TAP ioctl constants (from <linux/if_tun.h> and <linux/if.h>).
 const (
 	cIFF_TUN         = 0x0001
+	cIFF_TAP         = 0x0002
 	cIFF_NO_PI       = 0x1000
 	cIFF_VNET_HDR    = 0x4000
 	cTUNSETIFF       = 0x400454ca
@@ -74,6 +75,33 @@ func OpenTUN(name string) (*TUN, error) {
 	}
 
 	// The kernel writes back the assigned name.
+	assigned := string(req.Name[:])
+	if i := indexZero(req.Name[:]); i >= 0 {
+		assigned = string(req.Name[:i])
+	}
+
+	return &TUN{fd: fd, name: assigned}, nil
+}
+
+// OpenTAP opens /dev/net/tun in TAP (Ethernet) mode. It reads and writes raw
+// Ethernet frames (no packet-info header). Requires CAP_NET_ADMIN.
+func OpenTAP(name string) (*TUN, error) {
+	fd, err := syscall.Open("/dev/net/tun", syscall.O_RDWR, 0)
+	if err != nil {
+		return nil, fmt.Errorf("dataplane: open /dev/net/tun: %w (need CAP_NET_ADMIN)", err)
+	}
+
+	var req ifReq
+	copy(req.Name[:], name)
+	req.Flags = cIFF_TAP | cIFF_NO_PI
+
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd),
+		uintptr(cTUNSETIFF), uintptr(unsafe.Pointer(&req)))
+	if errno != 0 {
+		_ = syscall.Close(fd)
+		return nil, fmt.Errorf("dataplane: TAP TUNSETIFF: %v (need CAP_NET_ADMIN)", errno)
+	}
+
 	assigned := string(req.Name[:])
 	if i := indexZero(req.Name[:]); i >= 0 {
 		assigned = string(req.Name[:i])

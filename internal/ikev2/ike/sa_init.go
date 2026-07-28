@@ -118,6 +118,28 @@ func (s *Server) handleIKESAInit(pkt []byte, hdr payload.Header, remote *net.UDP
 	// AUTH the server may sign in IKE_AUTH.
 	newSA.peerSigHashes = findSigHashes(msg.Payloads)
 
+	// Additional key exchange (RFC 9370). Accept ML-KEM-768 only when the
+	// initiator both proposed it in an ADDKE1 transform and advertised
+	// INTERMEDIATE_EXCHANGE_SUPPORTED, since the exchange that carries it is
+	// the one thing it cannot be done without.
+	if hasIntermediateSupport(msg) {
+		for _, p := range sa.Proposals {
+			if p.Num != accepted.Num {
+				continue
+			}
+			if group, ok := SelectADDKE(p); ok {
+				newSA.ADDKEGroup = group
+				accepted.Transforms = append(accepted.Transforms,
+					payload.Transform{Type: payload.TransformADDKE1, ID: group})
+				// Logged so an interop cell can assert the post-quantum path
+				// actually came up: a bare ping passes just as happily on a
+				// silent fallback to the classical group alone.
+				s.log.Printf("ikev2: %s negotiated additional key exchange ML-KEM-768", remote)
+			}
+			break
+		}
+	}
+
 	_, keys := DeriveIKEKeys(
 		suite.PRF, shared, newSA.Ni, newSA.Nr,
 		newSA.InitiatorSPI, newSA.ResponderSPI,
@@ -138,6 +160,12 @@ func (s *Server) handleIKESAInit(pkt []byte, hdr payload.Header, remote *net.UDP
 	s.addNATDetection(b, newSA.InitiatorSPI, newSA.ResponderSPI, remote, on4500)
 	if newSA.fragEnabled {
 		addFragSupported(b)
+	}
+	// Echo INTERMEDIATE_EXCHANGE_SUPPORTED only when an additional key exchange
+	// was actually negotiated, so an initiator never sees an invitation to send
+	// an exchange this SA has nothing to put in.
+	if newSA.ADDKEGroup != 0 {
+		addIntermediateNotify(b)
 	}
 	// When the server can do certificate auth, advertise the RFC 7427 signature
 	// hashes and ask for a certificate (an empty CERTREQ = "any CA I trust"), so

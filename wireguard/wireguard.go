@@ -184,6 +184,10 @@ func (c *Config) resolve() (*resolved, error) {
 		}
 		r.noiseCfg.PresharedKey = psk
 	}
+	// mac1 is computed over the message type, so the noise layer needs H1/H2
+	// rather than having them stamped on afterwards by the obfuscation layer.
+	r.noiseCfg.TypeInitiation = c.Obfuscation.TypeInitiation
+	r.noiseCfg.TypeResponse = c.Obfuscation.TypeResponse
 	if r.mtu == 0 {
 		r.mtu = defaultMTU
 	}
@@ -245,7 +249,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 		return nil, client.Result{}, fmt.Errorf("wireguard: dial %s: %w", r.endpoint, err)
 	}
 
-	kp, err := handshake(ctx, conn, r.noiseCfg, logger)
+	kp, err := handshake(ctx, conn, r.noiseCfg, logger, cfg.Obfuscation)
 	if err != nil {
 		conn.Close()
 		if errors.Is(err, noise.ErrDecrypt) {
@@ -277,13 +281,16 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 		logger:        logger,
 		noiseCfg:      r.noiseCfg,
 		rekeyInterval: r.rekey,
+		obfCfg:        cfg.Obfuscation,
 		done:          make(chan struct{}),
 		stop:          make(chan struct{}),
 	}
 
 	// The socket is connected, so the destination is implicit and the pump's
 	// PeerAddr is ignored.
+	obf := cfg.Obfuscation
 	send := func(pkt []byte, _ *net.UDPAddr) {
+		pkt = obfuscateSend(pkt, obf)
 		if _, werr := conn.Write(pkt); werr != nil {
 			logger.Printf("wireguard: send error: %v", werr)
 		}
@@ -299,6 +306,9 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	// BatchConn is the pump goroutine's own; readLoop has another.
 	sendBC := dataplane.NewBatchConn(conn)
 	pump.SetBatchSender(func(pkts [][]byte, _ *net.UDPAddr) {
+		for i := range pkts {
+			pkts[i] = obfuscateSend(pkts[i], obf)
+		}
 		if _, werr := sendBC.WriteBatch(pkts, nil); werr != nil {
 			logger.Printf("wireguard: batch send error: %v", werr)
 		}
@@ -329,8 +339,14 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 // fresh initiation every rekeyTimeout until one is answered, the attempt budget
 // is spent, or ctx is cancelled. Each attempt uses a new Initiator, since an
 // initiation — and its ephemeral key — is single-use.
-func handshake(ctx context.Context, conn *net.UDPConn, cfg noise.Config, logger *log.Logger) (*noise.Keypair, error) {
-	buf := make([]byte, wire.SizeHandshakeResponse)
+//
+// obf, if non-zero, applies AmneziaWG wire transforms to the initiation and
+// response, and emits Jc junk datagrams ahead of each initiation.
+func handshake(ctx context.Context, conn *net.UDPConn, cfg noise.Config, logger *log.Logger, obf ObfuscationConfig) (*noise.Keypair, error) {
+	// The response arrives padded by S2, so the buffer must have room for it;
+	// sizing it to the stock 92 bytes silently truncates an obfuscated response
+	// and the handshake fails with a parse error that names the wrong cause.
+	buf := make([]byte, wire.SizeHandshakeResponse+obf.PadResponse)
 	for attempt := 1; ; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -343,7 +359,13 @@ func handshake(ctx context.Context, conn *net.UDPConn, cfg noise.Config, logger 
 		if err != nil {
 			return nil, err
 		}
-		if _, err := conn.Write(msg); err != nil {
+		// Junk first: the point is that the first datagram of the flow is not a
+		// 148-byte initiation. Failures are ignored — junk is advisory, and a
+		// peer that never sees it is no worse off.
+		for _, j := range junkPackets(obf) {
+			_, _ = conn.Write(j)
+		}
+		if _, err := conn.Write(obfuscateSend(msg, obf)); err != nil {
 			return nil, fmt.Errorf("send initiation: %w", err)
 		}
 
@@ -352,7 +374,21 @@ func handshake(ctx context.Context, conn *net.UDPConn, cfg noise.Config, logger 
 			deadline = dl
 		}
 		_ = conn.SetReadDeadline(deadline)
-		n, err := conn.Read(buf)
+		var n int
+		for {
+			n, err = conn.Read(buf)
+			if err != nil {
+				break
+			}
+			recv := deobfuscateRecv(buf[:n], obf)
+			if recv != nil {
+				n = copy(buf, recv)
+				break
+			}
+			// Junk or a stray datagram: neither an error nor a response. Read
+			// again against the same deadline rather than burning a handshake
+			// attempt or parsing it as a response.
+		}
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				if attempt >= maxAttempts {
@@ -407,6 +443,9 @@ type session struct {
 	// liveness Probe) so only one runs at a time.
 	hsExchMu sync.Mutex
 
+	// obfCfg is the AmneziaWG obfuscation config (zero = stock WireGuard).
+	obfCfg ObfuscationConfig
+
 	closeOnce sync.Once
 	closeErr  error
 	done      chan struct{} // closed when the inbound loop exits
@@ -443,7 +482,10 @@ func (s *session) readLoop() {
 		n, err := bc.ReadBatch(bufs, sizes)
 		data = data[:0]
 		for i := range n {
-			pkt := bufs[i][:sizes[i]]
+			pkt := deobfuscateRecv(bufs[i][:sizes[i]], s.obfCfg)
+			if pkt == nil {
+				continue
+			}
 			t, ok := wire.Type(pkt)
 			if !ok {
 				continue
@@ -631,7 +673,10 @@ func (s *session) doHandshake(ctx context.Context) (*noise.Keypair, error) {
 		}
 		ch := make(chan []byte, 1)
 		s.setPending(&pendingHandshake{localIdx: init.LocalIndex(), ch: ch})
-		if _, err := s.conn.Write(msg); err != nil {
+		// Obfuscated like the first initiation. Missing this is the kind of bug
+		// that passes every test that only watches a tunnel come up: the
+		// session establishes and then dies at the first rekey.
+		if _, err := s.conn.Write(obfuscateSend(msg, s.obfCfg)); err != nil {
 			return nil, fmt.Errorf("send initiation: %w", err)
 		}
 
@@ -688,7 +733,7 @@ func (s *session) sendKeepalive(t *wgTunnel) {
 		s.logger.Printf("wireguard: keepalive: %v", err)
 		return
 	}
-	if _, err := s.conn.Write(pkt); err != nil {
+	if _, err := s.conn.Write(obfuscateSend(pkt, s.obfCfg)); err != nil {
 		s.logger.Printf("wireguard: keepalive send: %v", err)
 	}
 }

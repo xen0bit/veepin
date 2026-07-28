@@ -370,7 +370,7 @@ func (it *initiator) doSAInit() {
 func (it *initiator) doAuth() {
 	// Build inner payloads: IDi, AUTH, CP(CFG_REQUEST), SA(ESP), TSi, TSr.
 	idBody := idPayloadBody(it.id)
-	authData := computePSKAuth(it.suite.PRF, it.psk, it.saInitReq, it.nr, it.keys.SKpi, idBody)
+	authData := computePSKAuth(it.suite.PRF, it.psk, it.saInitReq, it.nr, it.keys.SKpi, idBody, nil)
 
 	it.childOutSPI = newChildSPI()
 	espSPI := u32BE(it.childOutSPI)
@@ -424,7 +424,7 @@ func (it *initiator) doAuth() {
 	idr, _ := payload.ParseID(idrPay.Body)
 	peerIDBody := idPayloadBody(Identity{Type: idr.Type, Data: idr.Data})
 	if err := verifyPeerPSKAuth(it.suite.PRF, it.psk, it.saInitResp, it.ni,
-		it.keys.SKpr, peerIDBody, ra.Data); err != nil {
+		it.keys.SKpr, peerIDBody, nil, ra.Data); err != nil {
 		it.tb.Fatalf("responder AUTH verification failed: %v", err)
 	}
 

@@ -370,6 +370,8 @@ func (s *Server) handlePacket(pkt []byte, remote *net.UDPAddr, on4500 bool) {
 		s.handleIKESAInit(pkt, hdr, remote, on4500)
 	case payload.IKE_AUTH:
 		s.handleSecured(pkt, hdr, remote, payload.IKE_AUTH, on4500)
+	case payload.IKE_INTERMEDIATE:
+		s.handleSecured(pkt, hdr, remote, payload.IKE_INTERMEDIATE, on4500)
 	case payload.CREATE_CHILD_SA:
 		s.handleSecured(pkt, hdr, remote, payload.CREATE_CHILD_SA, on4500)
 	case payload.INFORMATIONAL:

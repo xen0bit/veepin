@@ -90,7 +90,7 @@ func (it *initiator) rebind(t *testing.T) {
 func (it *initiator) doAuthMobike(t *testing.T) bool {
 	t.Helper()
 	idBody := idPayloadBody(it.id)
-	authData := computePSKAuth(it.suite.PRF, it.psk, it.saInitReq, it.nr, it.keys.SKpi, idBody)
+	authData := computePSKAuth(it.suite.PRF, it.psk, it.saInitReq, it.nr, it.keys.SKpi, idBody, nil)
 	it.childOutSPI = newChildSPI()
 	tsAll := payload.TSPayload{Selectors: []payload.TrafficSelector{allTrafficV4()}}
 	cpReq := payload.CPPayload{Type: payload.CFGRequest, Attrs: []payload.CFGAttr{

@@ -1,0 +1,56 @@
+# Reference amneziawg-go client -> veepin AmneziaWG server.
+#
+# The other direction: veepin's responder must recognise obfuscated datagrams
+# produced by an implementation it shares no code with, and its own replies must
+# be shaped so that implementation accepts them.
+name: veepin-interop-awg-server
+
+x-awg: &awg
+  SERVER_PRIVATE: "+IRmjL6NRpthikeXn+jGUJNLe1ZJKQaqeWubiG9+GHs="
+  SERVER_PUBLIC: "srb9CBWUN+UL2CYhqHoL+rGKFPNu6nUJiNStgH0EBWM="
+  CLIENT_PRIVATE: "CHk+5XZnPhJ+UXfIx83SaePpgYrK+0/FqiPvNvTp3Hg="
+  CLIENT_PUBLIC: "gjMMAROzi5lHFapIKeaAdJ2RhGe0lW24XysGzBd1OSM="
+  PSK: "cjldFdAmi69yIFhc0Sms/5Yz6boVXkMZbMJl+RzzMZM="
+  SERVER_TUN_IP: "10.61.0.1"
+  CLIENT_TUN_IP: "10.61.0.2"
+  # Full 32-bit header values, the range amneziawg-go's own documentation
+  # recommends. Small ones would let a byte-wide implementation pass by accident.
+  H1: "1148853653"
+  H2: "2071829411"
+  H3: "1503936089"
+  H4: "987654321"
+  S1: "17"
+  S2: "23"
+  JC: "6"
+  JMIN: "40"
+  JMAX: "120"
+
+services:
+  veepin-awg-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      <<: *awg
+      S3: "0"
+      S4: "0"
+    volumes:
+      - ./veepin/awg-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  awg-client:
+    build:
+      context: amneziawg
+    image: interop-amneziawg
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-awg-server]
+    environment:
+      <<: *awg
+      SERVER: "veepin-awg-server"
+    volumes:
+      - ./amneziawg/client-entrypoint.sh:/entrypoint.sh:ro
+    command: ["/bin/sh", "/entrypoint.sh"]

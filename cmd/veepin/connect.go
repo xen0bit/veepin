@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/xen0bit/veepin/amneziawg"
 	"github.com/xen0bit/veepin/anyconnect"
 	"github.com/xen0bit/veepin/cisco"
 	"github.com/xen0bit/veepin/client"
@@ -23,6 +24,7 @@ import (
 	"github.com/xen0bit/veepin/nebula"
 	"github.com/xen0bit/veepin/openvpn"
 	"github.com/xen0bit/veepin/pulse"
+	"github.com/xen0bit/veepin/softether"
 	"github.com/xen0bit/veepin/ssh"
 	"github.com/xen0bit/veepin/sstp"
 	"github.com/xen0bit/veepin/toy"
@@ -135,6 +137,7 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 			key      = fs.String("key", "", "client private-key PEM (with -cert)")
 			ca       = fs.String("ca", "", "CA bundle PEM to verify the server (optional; default system roots)")
 			shape    = fs.Int("shape", 0, "per-flow upstream shaping budget in bytes: pads each inner flow's first N bytes to the tunnel MTU (0 = off; the server shapes downstream independently)")
+			pq       = fs.Bool("post-quantum", false, "offer ML-KEM-768 as an additional key exchange (RFC 9370); hybrid with the classical group, and skipped if the server declines")
 		)
 		return func() map[string]string {
 			opts := map[string]string{
@@ -149,6 +152,7 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 				ikev2.OptKey:      *key,
 				ikev2.OptCA:       *ca,
 				ikev2.OptShape:    fmt.Sprint(*shape),
+				ikev2.OptPQ:       fmt.Sprint(*pq),
 			}
 			if *port != 0 {
 				opts[ikev2.OptPort] = fmt.Sprint(*port)
@@ -568,6 +572,85 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 				opts[ssh.OptInsecure] = "true"
 			}
 			return opts
+		}, nil
+	case "softether":
+		var (
+			server   = fs.String("server", "", "SoftEther VPN gateway host or IP (required)")
+			port     = fs.Int("port", 0, "gateway TLS port (default 443)")
+			user     = fs.String("user", "", "username (required)")
+			pass     = fs.String("pass", "", "password (required)")
+			hub      = fs.String("hub", "", "virtual hub name (default VPN)")
+			tun      = fs.String("tun", "", "TAP interface name (empty = kernel picks)")
+			insecure = fs.Bool("insecure", false, "skip gateway certificate verification (SoftEther ships a self-signed certificate by default; this downgrades the transport to unauthenticated)")
+		)
+		return func() map[string]string {
+			opts := map[string]string{
+				softether.OptServer:   *server,
+				softether.OptUser:     *user,
+				softether.OptPassword: *pass,
+				softether.OptTUN:      *tun,
+				softether.OptInsecure: fmt.Sprint(*insecure),
+			}
+			if *port != 0 {
+				opts[softether.OptPort] = fmt.Sprint(*port)
+			}
+			if *hub != "" {
+				opts[softether.OptHub] = *hub
+			}
+			return opts
+		}, nil
+	case "amneziawg":
+		// AmneziaWG is WireGuard with the wire format perturbed, so the tunnel
+		// flags mirror the wireguard case; the obfuscation flags below are the
+		// whole difference. They are not negotiated — both ends must be given
+		// identical values, exactly like a pre-shared key.
+		var (
+			privKey   = fs.String("private-key", "", "our static private key, base64 (required)")
+			pubKey    = fs.String("public-key", "", "the server's static public key, base64 (required)")
+			psk       = fs.String("preshared-key", "", "optional 32-byte pre-shared key, base64")
+			endpoint  = fs.String("endpoint", "", "server host:port (required)")
+			address   = fs.String("address", "", "our tunnel address, e.g. 10.0.0.2/24 (required)")
+			allowed   = fs.String("allowed-ips", "", "comma-separated allowed IPs (default 0.0.0.0/0)")
+			dns       = fs.String("dns", "", "comma-separated DNS servers to install")
+			mtu       = fs.Int("mtu", 0, "tunnel MTU (0 = protocol default)")
+			tun       = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+			shape     = fs.Int("shape", 0, "per-flow upstream shaping budget in bytes (0 = off)")
+			typeInit  = fs.Uint("type-init", 0, "H1: message type replacing handshake initiation (0 = stock 1)")
+			typeResp  = fs.Uint("type-resp", 0, "H2: message type replacing handshake response (0 = stock 2)")
+			typeCook  = fs.Uint("type-cookie", 0, "H3: message type replacing cookie reply (0 = stock 3)")
+			typeTrans = fs.Uint("type-trans", 0, "H4: message type replacing transport data (0 = stock 4)")
+			padInit   = fs.Int("pad-init", 0, "S1: random bytes prepended to handshake initiation")
+			padResp   = fs.Int("pad-resp", 0, "S2: random bytes prepended to handshake response")
+			padCook   = fs.Int("pad-cookie", 0, "S3: random bytes prepended to cookie reply")
+			padTrans  = fs.Int("pad-trans", 0, "S4: random bytes prepended to transport data")
+			junkCount = fs.Int("junk-count", 0, "Jc: junk datagrams sent before the handshake (0 = none)")
+			junkMin   = fs.Int("junk-min", 0, "Jmin: smallest junk datagram in bytes")
+			junkMax   = fs.Int("junk-max", 0, "Jmax: largest junk datagram in bytes")
+		)
+		return func() map[string]string {
+			return map[string]string{
+				amneziawg.OptPrivateKey:   *privKey,
+				amneziawg.OptPublicKey:    *pubKey,
+				wireguard.OptPresharedKey: *psk,
+				amneziawg.OptEndpoint:     *endpoint,
+				amneziawg.OptAddress:      *address,
+				amneziawg.OptAllowedIPs:   *allowed,
+				amneziawg.OptDNS:          *dns,
+				amneziawg.OptMTU:          fmt.Sprint(*mtu),
+				amneziawg.OptTUNName:      *tun,
+				amneziawg.OptShape:        fmt.Sprint(*shape),
+				amneziawg.OptTypeInit:     fmt.Sprint(*typeInit),
+				amneziawg.OptTypeResp:     fmt.Sprint(*typeResp),
+				amneziawg.OptTypeCookie:   fmt.Sprint(*typeCook),
+				amneziawg.OptTypeTrans:    fmt.Sprint(*typeTrans),
+				amneziawg.OptPadInit:      fmt.Sprint(*padInit),
+				amneziawg.OptPadResp:      fmt.Sprint(*padResp),
+				amneziawg.OptPadCookie:    fmt.Sprint(*padCook),
+				amneziawg.OptPadTrans:     fmt.Sprint(*padTrans),
+				amneziawg.OptJunkCount:    fmt.Sprint(*junkCount),
+				amneziawg.OptJunkMin:      fmt.Sprint(*junkMin),
+				amneziawg.OptJunkMax:      fmt.Sprint(*junkMax),
+			}
 		}, nil
 	default:
 		return nil, fmt.Errorf("unknown protocol %q (available: %s)",

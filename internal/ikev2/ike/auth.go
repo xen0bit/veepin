@@ -42,16 +42,16 @@ func idPayloadBody(id Identity) []byte {
 // realMessage is this endpoint's own first IKE_SA_INIT message; peerNonce is
 // the other party's nonce; skp is this endpoint's own SK_p (SK_pi if we are the
 // initiator, SK_pr if responder).
-func computePSKAuth(prf *cryptoutil.PRF, psk, realMessage, peerNonce, skp, idBody []byte) []byte {
-	octets := AuthOctets(prf, realMessage, peerNonce, skp, idBody)
+func computePSKAuth(prf *cryptoutil.PRF, psk, realMessage, peerNonce, skp, idBody, intAuth []byte) []byte {
+	octets := AuthOctets(prf, realMessage, peerNonce, skp, idBody, intAuth)
 	return PSKAuth(prf, psk, octets)
 }
 
 // verifyPeerPSKAuth checks the peer's AUTH payload under PSK.
 //
 // The peer signs: peerRealMessage | ourNonce | prf(peerSK_p, peerIDbody).
-func verifyPeerPSKAuth(prf *cryptoutil.PRF, psk, peerRealMessage, ourNonce, peerSKp, peerIDBody, gotAuth []byte) error {
-	octets := AuthOctets(prf, peerRealMessage, ourNonce, peerSKp, peerIDBody)
+func verifyPeerPSKAuth(prf *cryptoutil.PRF, psk, peerRealMessage, ourNonce, peerSKp, peerIDBody, intAuth, gotAuth []byte) error {
+	octets := AuthOctets(prf, peerRealMessage, ourNonce, peerSKp, peerIDBody, intAuth)
 	want := PSKAuth(prf, psk, octets)
 	if !bytes.Equal(want, gotAuth) {
 		return fmt.Errorf("ike: PSK authentication failed")

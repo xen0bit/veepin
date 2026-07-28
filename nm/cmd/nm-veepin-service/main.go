@@ -21,6 +21,7 @@ import (
 	// runtime with "unknown protocol" — so a new protocol must be added here (and
 	// given requireKeys/secretMissing branches in internal/nmconfig). The insecure
 	// "toy" example protocol is deliberately left out.
+	_ "github.com/xen0bit/veepin/amneziawg"
 	_ "github.com/xen0bit/veepin/anyconnect"
 	_ "github.com/xen0bit/veepin/cisco"
 	_ "github.com/xen0bit/veepin/fortinet"
@@ -31,6 +32,7 @@ import (
 	_ "github.com/xen0bit/veepin/nebula"
 	_ "github.com/xen0bit/veepin/openvpn"
 	_ "github.com/xen0bit/veepin/pulse"
+	_ "github.com/xen0bit/veepin/softether"
 	_ "github.com/xen0bit/veepin/ssh"
 	_ "github.com/xen0bit/veepin/sstp"
 	_ "github.com/xen0bit/veepin/wireguard"

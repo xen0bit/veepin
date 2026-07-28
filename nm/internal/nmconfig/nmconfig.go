@@ -33,8 +33,8 @@ const DefaultProtocol = "ikev2"
 // cmd package's TestAllSupportedProtocolsRegistered guards that the two lists
 // agree. The insecure "toy" example protocol is intentionally excluded.
 var SupportedProtocols = []string{
-	"ikev2", "wireguard", "openvpn", "sstp", "ssh",
-	"anyconnect", "nebula", "masque", "fortinet", "gp", "cisco", "pulse", "l2tp",
+	"amneziawg", "anyconnect", "cisco", "fortinet", "gp", "ikev2", "l2tp",
+	"masque", "nebula", "openvpn", "pulse", "softether", "ssh", "sstp", "wireguard",
 }
 
 // Connection is the parsed, validated form of a VPN connection.
@@ -170,10 +170,16 @@ func requireKeys(protocol string, opts map[string]string) error {
 			return nil
 		}
 		return requirePresent(opts, KeyRemote)
-	case "sstp", "ssh", "anyconnect", "fortinet", "gp", "pulse", "l2tp":
+	case "sstp", "ssh", "anyconnect", "fortinet", "gp", "pulse", "l2tp", "softether":
 		// Connection-oriented gateways authenticated by a username (plus a password
 		// or, for SSH, an identity key).
 		return requirePresent(opts, KeyServer, KeyUser)
+	case "amneziawg":
+		// WireGuard-style static-keys, no password.
+		if opts[KeyConfig] != "" {
+			return nil
+		}
+		return requirePresent(opts, KeyPrivateKey, KeyPublicKey, KeyEndpoint, KeyAddress)
 	case "cisco":
 		// Two credentials in sequence: the group authenticates phase 1, the user
 		// authenticates through XAuth inside it. The group name is not a secret,
@@ -236,8 +242,10 @@ func secretMissing(protocol string, opts map[string]string) bool {
 		// Password only when a username is configured; certificate-only auth (or an
 		// .ovpn with embedded credentials) needs no NM-prompted secret.
 		return opts[KeyUsername] != "" && opts[KeyPassword] == ""
-	case "sstp", "anyconnect", "fortinet", "gp", "pulse":
+	case "sstp", "anyconnect", "fortinet", "gp", "pulse", "softether":
 		return opts[KeyPassword] == ""
+	case "amneziawg":
+		return opts[KeyConfig] == "" && opts[KeyPrivateKey] == ""
 	case "cisco":
 		// Both the group pre-shared key and the XAuth password are required.
 		return opts[KeyGroupPSK] == "" || opts[KeyPassword] == ""
