@@ -3,9 +3,14 @@
 package interop
 
 import (
+	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // The L2TPv3 cells, against the Linux kernel's own l2tp_eth.
@@ -46,16 +51,42 @@ func TestInteropL2TPv3Self(t *testing.T) {
 	requireARPInsideTunnel(t, "compose.l2tpv3-self.yml", "veepin-l2tpv3-client", "tap0", "10.64.0.1")
 }
 
-// requireL2TPModules skips a cell when the host kernel has no L2TP support. The
-// peer IS the kernel, so without the modules there is no peer -- and skipping
-// says so, rather than reporting a veepin failure for a missing dependency.
+// requireL2TPModules skips a cell when the host kernel cannot provide an L2TP
+// data plane.
+//
+// The peer for these cells IS the kernel: `ip l2tp` needs l2tp_core, l2tp_eth
+// and l2tp_netlink, and the containers use the HOST's kernel, so the modules
+// have to be present there. GitHub's runners ship a kernel with them absent --
+// the peer container reports "the kernel has no L2TP support" and nothing can
+// be tested.
+//
+// Skipping is the honest outcome: it says the environment cannot host the peer,
+// where failing would claim veepin is broken. The cells do pass on any host with
+// the modules, which is where the kernel interop claim comes from -- see
+// internal/l2tpv3/README.md.
 func requireL2TPModules(t *testing.T) {
 	t.Helper()
 	requireDocker(t)
-	out, err := compose(t, "compose.l2tpv3.yml", "config")
-	if err != nil {
-		t.Fatalf("compose config: %v\n%s", err, out)
+
+	// Already loaded is the cheapest yes.
+	if _, err := os.Stat("/sys/module/l2tp_eth"); err == nil {
+		return
 	}
+	// Otherwise the module has to be on disk for the peer to modprobe it.
+	var uts unix.Utsname
+	if err := unix.Uname(&uts); err == nil {
+		release := string(bytes.TrimRight(uts.Release[:], "\x00"))
+		dir := filepath.Join("/lib/modules", release, "kernel/net/l2tp")
+		if entries, derr := os.ReadDir(dir); derr == nil {
+			for _, e := range entries {
+				if strings.HasPrefix(e.Name(), "l2tp_eth.ko") {
+					return
+				}
+			}
+		}
+	}
+	t.Skip("no l2tp_eth kernel module on this host: the peer for this cell is the " +
+		"Linux kernel itself, so there is nothing to test against (GitHub runners are like this)")
 }
 
 // requireARPInsideTunnel asserts the peer's MAC was learned through the tunnel.

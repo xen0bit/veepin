@@ -65,6 +65,26 @@ both halves wrong the same way — and only a real peer notices.
 exactly that reason, and the interop cells use **asymmetric 8-octet cookies**
 because a symmetric one cannot catch the bug.
 
+## The kernel cells need kernel modules
+
+`TestInteropVeepinClientKernelL2TPv3Server` and
+`TestInteropKernelL2TPv3ClientVeepinServer` use the Linux kernel itself as the
+peer, so `l2tp_core`, `l2tp_eth` and `l2tp_netlink` must exist on the **host** —
+the containers share its kernel. **GitHub runners do not have them**, so those
+two cells skip in CI and the interop table shows them as not-passed.
+
+They do pass on any host with the modules; that is where the kernel-interop
+claim comes from, and it is how the cookie-direction and sublayer behaviour were
+actually verified. Run them yourself with:
+
+```sh
+cd tests/interop
+docker compose -f compose.l2tpv3.yml down -v --remove-orphans
+go test -tags interop -run TestInteropVeepinClientKernelL2TPv3Server -v -timeout 15m ./...
+```
+
+The veepin↔veepin cell needs no modules and runs everywhere.
+
 ## Caveats
 
 - **No authentication and no encryption.** The cookie is a check value against

@@ -197,10 +197,14 @@ var interopMatrix = []interopRow{
 	},
 	{
 		Protocol: "L2TPv3",
+		// The peer for both kernel cells IS the Linux kernel, so they need
+		// l2tp_eth on the HOST. GitHub runners ship a kernel without it and the
+		// cells skip there, which reads as not-passed in a CI-generated table --
+		// hence the caveat in the label rather than a bare peer name.
 		Client: interopCell{Tests: []string{"TestInteropVeepinClientKernelL2TPv3Server"},
-			Label: "Linux kernel (`ip l2tp`, 8-octet asymmetric cookies)"},
+			Label: "Linux kernel (`ip l2tp`, 8-octet asymmetric cookies) — needs `l2tp_eth` on the host"},
 		Server: interopCell{Tests: []string{"TestInteropKernelL2TPv3ClientVeepinServer"},
-			Label: "Linux kernel (`ip l2tp`)"},
+			Label: "Linux kernel (`ip l2tp`) — needs `l2tp_eth` on the host"},
 		Self: interopCell{Tests: []string{"TestInteropL2TPv3Self"}, Label: "(shaped)"},
 	},
 	{
