@@ -66,7 +66,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 
 func (s *Server) send(pkt []byte, to *net.UDPAddr) {
 	if s.conn != nil {
-		s.conn.WriteToUDP(pkt, to)
+		_, _ = s.conn.WriteToUDP(pkt, to)
 	}
 }
 

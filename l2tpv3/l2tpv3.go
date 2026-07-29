@@ -205,7 +205,9 @@ func parseHex(s string) []byte {
 	out := make([]byte, 0, len(s)/2)
 	for i := 0; i+1 < len(s); i += 2 {
 		var v byte
-		fmt.Sscanf(s[i:i+2], "%02x", &v)
+		if _, err := fmt.Sscanf(s[i:i+2], "%02x", &v); err != nil {
+			return out
+		}
 		out = append(out, v)
 	}
 	return out
