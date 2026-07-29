@@ -2,11 +2,12 @@
 // golang.org/x/crypto its only dependency (WireGuard mandates ChaCha20-Poly1305
 // and BLAKE2s, which the standard library does not ship).
 //
-// It speaks fifteen production protocols, as both an initiator and a responder
+// It speaks sixteen production protocols, as both an initiator and a responder
 // for every one: IKEv2/ESP, WireGuard, OpenVPN, SSTP, SSH, L2TP/IPsec,
-// AnyConnect, Nebula, MASQUE, Fortinet, GlobalProtect, Cisco IPsec,
-// Ivanti Connect Secure, SoftEther VPN (SE-VPN) and AmneziaWG. Each is verified
-// in Docker against a real third-party implementation, and against itself.
+// L2TPv3 Ethernet pseudowire, AnyConnect, Nebula, MASQUE, Fortinet,
+// GlobalProtect, Cisco IPsec, Ivanti Connect Secure, SoftEther VPN (SE-VPN)
+// and AmneziaWG. Each is verified in Docker against a real third-party
+// implementation, and against itself.
 //
 // The tree is arranged so a further protocol is a sibling rather than a rewrite:
 //
@@ -64,12 +65,16 @@
 //     and ChaCha20-Poly1305 transport, with configurable message-type constants
 //     and random padding to defeat packet-signature classification.
 //
+//   - l2tpv3, internal/l2tpv3 — L2TPv3 Ethernet pseudowire (RFC 3931 + 4719):
+//     layer-2 Ethernet frames over UDP, with a static session and optional
+//     cookie and sublayer. Uses a TAP device instead of TUN.
+//
 // Two packages are shared by the PPP-carrying protocols: internal/ppp (LCP,
 // MS-CHAPv2, IPCP, both roles) and internal/mschap.
 //
 // # The example protocol
 //
-// toy and internal/toy implement TOY, which is NOT one of the fifteen above and
+// toy and internal/toy implement TOY, which is NOT one of the sixteen above and
 // PROVIDES NO SECURITY. It is a worked example of how a protocol is assembled
 // here — a handshake producing a client.Result, a dataplane.Pump data path, both
 // roles registered — with the cryptography replaced by deliberately worthless

@@ -32,6 +32,7 @@ import (
 	_ "github.com/xen0bit/veepin/gp"
 	_ "github.com/xen0bit/veepin/ikev2"
 	_ "github.com/xen0bit/veepin/l2tp"
+	_ "github.com/xen0bit/veepin/l2tpv3"
 	_ "github.com/xen0bit/veepin/masque"
 	_ "github.com/xen0bit/veepin/nebula"
 	_ "github.com/xen0bit/veepin/openvpn"
@@ -88,12 +89,12 @@ func TestPackageDocNamesEveryProtocol(t *testing.T) {
 // for where TOY sits among them.
 var numberWords = map[int]string{
 	8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve",
-	13: "thirteen", 14: "fourteen", 15: "fifteen",
+	13: "thirteen", 14: "fourteen", 15: "fifteen", 16: "sixteen",
 }
 
 var ordinalWords = map[int]string{
 	8: "eighth", 9: "ninth", 10: "tenth", 11: "eleventh", 12: "twelfth",
-	13: "thirteenth", 14: "fourteenth", 15: "fifteenth", 16: "sixteenth",
+	13: "thirteenth", 14: "fourteenth", 15: "fifteenth", 16: "sixteenth", 17: "seventeenth",
 }
 
 // countPhrase matches every spelled-out count the README attaches to a phrase,

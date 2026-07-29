@@ -19,6 +19,7 @@ import (
 	"github.com/xen0bit/veepin/gp"
 	"github.com/xen0bit/veepin/ikev2"
 	"github.com/xen0bit/veepin/l2tp"
+	"github.com/xen0bit/veepin/l2tpv3"
 	"github.com/xen0bit/veepin/masque"
 	"github.com/xen0bit/veepin/nebula"
 	"github.com/xen0bit/veepin/openvpn"
@@ -661,6 +662,34 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			}
 			if *port != 0 {
 				opts[softether.OptServerPort] = fmt.Sprint(*port)
+			}
+			return opts
+		}, nil
+	case "l2tpv3":
+		var (
+			listen   = fs.String("listen", "", "local IP to bind (default 0.0.0.0)")
+			port     = fs.Int("port", 0, "UDP port (default 1701)")
+			sid      = fs.Uint("session-id", 0, "our session ID (required)")
+			psid     = fs.Uint("peer-session-id", 0, "peer's session ID (required)")
+			cookie   = fs.String("cookie", "", "receive-side cookie as hex (optional)")
+			pcookie  = fs.String("peer-cookie", "", "send-side cookie as hex (optional)")
+			sublayer = fs.Bool("sublayer", false, "enable Default L2-Specific Sublayer")
+			tun      = fs.String("tun", "", "TAP interface name (empty = kernel picks)")
+		)
+		return func() map[string]string {
+			opts := map[string]string{
+				l2tpv3.OptServerListen: *listen,
+				l2tpv3.OptTUN:          *tun,
+				l2tpv3.OptSessionID:    fmt.Sprint(*sid),
+				l2tpv3.OptPeerSession:  fmt.Sprint(*psid),
+				l2tpv3.OptCookie:       *cookie,
+				l2tpv3.OptPeerCookie:   *pcookie,
+			}
+			if *port != 0 {
+				opts[l2tpv3.OptPort] = fmt.Sprint(*port)
+			}
+			if *sublayer {
+				opts[l2tpv3.OptSublayer] = "true"
 			}
 			return opts
 		}, nil

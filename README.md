@@ -3,11 +3,12 @@
 A **working userspace VPN in Go** — both server (responder) and client
 (initiator), written from scratch and depending only on the pure-Go
 `golang.org/x` modules (`x/crypto`, and `x/net` for QUIC), no cgo. It speaks
-**fifteen production protocols, client and server for every one** — IKEv2/ESP,
-WireGuard, OpenVPN, SSTP, SSH, L2TP/IPsec, AnyConnect, Nebula, MASQUE (CONNECT-IP
-and CONNECT-UDP over HTTP/3), Fortinet, GlobalProtect, Cisco IPsec, Ivanti
-Connect Secure, SoftEther VPN (SE-VPN) and AmneziaWG — each verified in Docker
-against a real third-party implementation and against itself.
+**sixteen production protocols, client and server for every one** — IKEv2/ESP,
+WireGuard, OpenVPN, SSTP, SSH, L2TP/IPsec, L2TPv3 Ethernet pseudowire,
+AnyConnect, Nebula, MASQUE (CONNECT-IP and CONNECT-UDP over HTTP/3), Fortinet,
+GlobalProtect, Cisco IPsec, Ivanti Connect Secure, SoftEther VPN (SE-VPN) and
+AmneziaWG — each verified in Docker against a real third-party implementation
+and against itself.
 
 Every layer is covered by tests, including full VPN integration tests:
 `TestFullVPNFlow` drives a client through the handshake and verifies a real IP
@@ -35,7 +36,7 @@ added next, and what was considered and rejected, is in
 
 ## What it does
 
-veepin speaks fifteen production protocols — **client and server for every one** —
+veepin speaks sixteen production protocols — **client and server for every one** —
 plus one deliberately insecure teaching example. Each protocol is verified in
 Docker against a real third-party implementation *and* against itself (see the
 [Interoperability matrix](#interoperability-matrix)). The table is the summary;
@@ -50,6 +51,7 @@ wire detail, caveats and API surface.
 | **SSTP** | MS-CHAPv2 over PPP | PPP/IPCP over TLS, SHA-256 crypto binding | SoftEther, `sstpc`/pppd | [sstp](internal/sstp/wire/README.md) |
 | **SSH** | public key / password | IP over `tun@openssh.com` (layer-3) | OpenSSH `sshd` / `ssh -w` | [ssh](internal/sshtun/README.md) |
 | **L2TP/IPsec** | IKEv1 PSK + MS-CHAPv2 | L2TP/PPP inside an ESP transport SA (NAT-T) | strongSwan + xl2tpd | [l2tp](internal/l2tp/README.md) |
+| **L2TPv3** | unauthenticated (static config) | Ethernet frames over UDP/1701, RFC 3931 + 4719 | Linux kernel (`ip l2tp`) | [l2tpv3](internal/l2tpv3/) |
 | **AnyConnect** | password | CSTP over TLS, with DTLS 1.2 PSK fallback | ocserv, openconnect | [anyconnect](internal/anyconnect/README.md) |
 | **Nebula** | certificate PKI, per host | Noise IX mesh, AES-GCM / ChaCha20 | slackhq/nebula | [nebula](internal/nebula/README.md) |
 | **MASQUE** | proxy TLS | IP (CONNECT-IP) and UDP (CONNECT-UDP) over HTTP/3, capsule mode | aioquic | [masque](internal/masque/README.md) |
@@ -62,7 +64,7 @@ wire detail, caveats and API surface.
 
 Both roles share one registry API (`client.Register`/`client.RegisterServer`),
 so `veepin connect <proto>` and `veepin serve <proto>` dispatch generically and
-adding a protocol changes no caller. A sixteenth registered protocol, **TOY**,
+adding a protocol changes no caller. A seventeenth registered protocol, **TOY**,
 provides **no security** — it is a worked example of the protocol shape, not a
 real protocol; see [The example protocol](#the-example-protocol).
 
