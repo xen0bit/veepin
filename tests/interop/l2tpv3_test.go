@@ -51,6 +51,31 @@ func TestInteropL2TPv3Self(t *testing.T) {
 	requireARPInsideTunnel(t, "compose.l2tpv3-self.yml", "veepin-l2tpv3-client", "tap0", "10.64.0.1")
 }
 
+// TestPendingQl2tpdKeepalive is a REPRODUCTION, not a passing cell. It is
+// deliberately not named TestInterop* so it joins no CI shard and reports no
+// result; run it by hand with -run TestPendingQl2tpdKeepalive.
+//
+// What was observed, from a tcpdump on the ql2tpd side (2026-07-29, go-l2tp
+// v0.1.8):
+//
+//	ql2tpd -> veepin  ccid=1100 ns=0 nr=0  HELLO
+//	veepin -> ql2tpd  ccid=2200 ns=0 nr=1  ACK      <- correct: nr=1 acks ns=0
+//	ql2tpd -> veepin  ccid=1100 ns=0 nr=0  HELLO    <- retransmit anyway
+//	... x3, then "transmit of avpMsgTypeHello failed after 3 retry attempts"
+//
+// veepin's messages are well-formed and ql2tpd parses them: when veepin also
+// sends HELLOs, ql2tpd acknowledges each one and advances its Nr (1, 2, 3). It
+// is only ql2tpd's own retransmit queue that never clears, even though our Nr
+// should satisfy its processAckQueue (seqCompare(nr=1, ns=0) > 0).
+//
+// So the exchange is not yet understood well enough to assert on. Until it is,
+// veepin's quiescent control connection is covered by unit tests only, and
+// internal/l2tpv3/README.md says so rather than implying an interop guarantee
+// this cell does not provide.
+func TestPendingQl2tpdKeepalive(t *testing.T) {
+	t.Skip("reproduction only: ql2tpd does not clear its retransmit queue on our ACK; see the comment above")
+}
+
 // requireL2TPModules skips a cell when the host kernel cannot provide an L2TP
 // data plane.
 //

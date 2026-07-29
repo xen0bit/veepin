@@ -10,6 +10,8 @@ This is veepin's only layer-2 data path.
 | `frame.go` | the data-packet codec: `EncodeData`, `DecodeData`, cookie verification |
 | `session.go` | `SessionConfig` — session IDs, both cookies, sublayer, peer address |
 | `pump.go` | the TAP↔UDP data path and `SessionIDDemux` |
+| `control.go` | the RFC 3931 control-message codec and AVP parser |
+| `keepalive.go` | the quiescent control connection: reliable transport + HELLO |
 
 ## Why this is not a version switch inside `internal/l2tp`
 
@@ -85,6 +87,46 @@ go test -tags interop -run TestInteropVeepinClientKernelL2TPv3Server -v -timeout
 
 The veepin↔veepin cell needs no modules and runs everywhere.
 
+## The control connection is *quiescent*, not dynamic
+
+veepin runs the subset go-l2tp calls a **quiescent** tunnel: the RFC 3931 control
+connection with reliable transport, carrying HELLO keepalives and nothing else.
+Sessions are still configured statically at both ends.
+
+That is a deliberate stopping point, not laziness. **Nothing open-source
+implements a dynamic L2TPv3 control plane.** Debian ships `xl2tpd` and `l2tpns`,
+both L2TPv2/PPP. `go-l2tp` is the only implementation of an L2TPv3 control
+connection, and its `getV3MsgSpec` (`l2tp/msg.go`) returns a spec for exactly one
+message — HELLO; its dynamic tunnel calls `newV2Sccrq` and is L2TPv2 only.
+Implementing SCCRQ/SCCRP/SCCCN and ICRQ/ICRP/ICCN would therefore produce ~900
+lines testable only against themselves, which this repo's own thesis says proves
+nothing.
+
+What the quiescent connection buys is real: a static pseudowire sends nothing of
+its own, so a dead peer is indistinguishable from an idle one. HELLO makes
+silence mean something, and `Session.Probe` reports the control connection's idle
+time when one is running.
+
+**The control connection is not interop-verified.** `tests/interop/ql2tpd/`
+and `compose.l2tpv3-keepalive.yml` build a peer and the exchange runs, but
+ql2tpd never clears its own retransmit queue on our ACK and eventually declares
+the tunnel down — even though a packet capture shows our ACK carrying the Nr its
+own `processAckQueue` should accept. veepin's messages are demonstrably
+well-formed (ql2tpd parses our HELLOs and acknowledges each one, advancing its
+Nr), so the fault is not obviously ours, but it is not understood well enough to
+assert on. Until it is, the control connection is covered by **unit tests only**
+— which by this repo's own standard means it is not proven correct. The
+reproduction is `go test -tags interop -run TestPendingQl2tpdKeepalive`.
+
+Two details that a v2 implementation gets wrong when carried over:
+
+- **The Control Connection ID is one 32-bit field.** v2 has a 16-bit tunnel ID
+  and a 16-bit session ID; a v3 control message carries no session ID at all.
+- **An acknowledgement is an explicit ACK message (Message-Type 20)**, not v2's
+  zero-length body. Send a v3 peer a bare header and it sees a malformed message,
+  not an ack, and never clears its retransmit queue.
+  `TestAckIsAnExplicitMessageNotAnEmptyBody` holds that in place.
+
 ## Caveats
 
 - **No authentication and no encryption.** The cookie is a check value against
@@ -93,9 +135,15 @@ The veepin↔veepin cell needs no modules and runs everywhere.
   and observe one packet can inject frames into the bridged segment forever
   after. This is a property of L2TPv3, not of this implementation, and it is why
   the protocol is normally run inside IPsec.
-- **Static sessions only.** No control plane: no SCCRQ/SCCRP/SCCCN, no
-  ICRQ/ICRP/ICCN, no Hello, no StopCCN. Both ends must be configured by hand, and
-  a peer expecting to negotiate will not connect.
+- **Static sessions only.** The control connection carries HELLO, ACK and
+  StopCCN; there is no SCCRQ/SCCRP/SCCCN or ICRQ/ICRP/ICCN, so sessions and
+  cookies must be configured by hand at both ends and a peer expecting to
+  negotiate will not connect. See the section above for why.
+- **The control connection is unauthenticated.** RFC 3931 offers a Message
+  Digest AVP with a shared secret; it is not implemented, and an inbound hidden
+  AVP is rejected rather than mis-parsed. The Control Connection ID is checked on
+  every message, which stops an off-path sender resetting the sequence state by
+  guessing, but it is a 32-bit value in the clear, not a key.
 - **Shaping covers IP only.** `flowKeyOfFrame` shapes EtherType 0x0800 and
   0x86DD; ARP, STP and everything else goes out unpadded, because Ethernet has no
   length field for a receiver to trim padding by. An observer can therefore still

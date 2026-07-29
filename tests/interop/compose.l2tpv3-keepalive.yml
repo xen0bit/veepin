@@ -1,0 +1,58 @@
+# veepin L2TPv3 (quiescent) <-> ql2tpd: the control connection, not just data.
+#
+# The claim this cell exists to check is NOT "a ping crosses the tunnel" -- the
+# kernel cells already prove that. It is that veepin's RFC 3931 control
+# connection interoperates: 0xc803 headers, a 32-bit Control Connection ID, Ns/Nr
+# sequencing, and above all that an acknowledgement is an explicit ACK MESSAGE
+# (Message-Type 20) rather than L2TPv2's zero-length body. Send a v3 peer a bare
+# header and it never clears its retransmit queue.
+#
+# So the test asserts a log line from ql2tpd showing HELLOs being exchanged and
+# acknowledged. A ping alone passes just as happily with the control plane dead,
+# because the data path is static and does not depend on it -- which is exactly
+# the silent-fallback false green runInteropRequiringLog exists for.
+name: veepin-interop-l2tpv3-keepalive
+
+x-pw: &pw
+  UDP_PORT: "1701"
+  HELLO_MS: "2000"
+
+services:
+  veepin-l2tpv3-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      <<: *pw
+      PEER: "ql2tpd-peer"
+      LOCAL_SESSION: "100"
+      PEER_SESSION: "200"
+      # Control Connection IDs are separate from the data Session IDs.
+      CCID: "1100"
+      PEER_CCID: "2200"
+      KEEPALIVE: "2"
+      TUN_IP: "10.65.0.2"
+    volumes:
+      - ./veepin/l2tpv3-client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  ql2tpd-peer:
+    build:
+      context: ql2tpd
+    image: interop-ql2tpd
+    cap_add: [NET_ADMIN, SYS_MODULE]
+    volumes:
+      - ./ql2tpd/peer-entrypoint.sh:/entrypoint.sh:ro
+      - /lib/modules:/lib/modules:ro
+    environment:
+      <<: *pw
+      PEER: "veepin-l2tpv3-client"
+      LOCAL_SESSION: "200"
+      PEER_SESSION: "100"
+      TID: "2200"
+      PTID: "1100"
+      TUN_IP: "10.65.0.1"
+    command: ["/bin/sh", "/entrypoint.sh"]
