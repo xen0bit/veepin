@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/xen0bit/veepin/internal/ikev2/payload"
 	"github.com/xen0bit/veepin/internal/ikev2/transform"
@@ -268,9 +269,15 @@ func TestPostQuantumHandshakeCompletes(t *testing.T) {
 	if !res.AssignedIP.Equal(net.IPv4(10, 8, 8, 8)) {
 		t.Fatalf("assigned IP %v", res.AssignedIP)
 	}
+	// Wait, rather than polling with a default: the server sends the IKE_AUTH
+	// response BEFORE it invokes OnChildSA (ike_auth.go), so Connect can return
+	// while the server goroutine is still a few lines short of the callback. A
+	// non-blocking receive here reads that ordinary interleaving as a failure,
+	// and did so on a loaded CI runner. Every other Child SA assertion in this
+	// package waits with the same timeout.
 	select {
 	case <-childCh:
-	default:
+	case <-time.After(2 * time.Second):
 		t.Fatal("no Child SA was created")
 	}
 }
