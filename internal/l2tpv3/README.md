@@ -1,7 +1,9 @@
 # internal/l2tpv3 — L2TPv3 Ethernet pseudowire
 
 RFC 3931 (L2TPv3) carrying Ethernet frames per RFC 4719, static sessions only.
-This is veepin's only layer-2 data path.
+This is veepin's only working layer-2 data path — [`internal/softether`](../softether)
+is layer 2 by design but switches frames between clients without reaching a host
+TAP.
 
 ## Files
 
@@ -12,6 +14,36 @@ This is veepin's only layer-2 data path.
 | `pump.go` | the TAP↔UDP data path and `SessionIDDemux` |
 | `control.go` | the RFC 3931 control-message codec and AVP parser |
 | `keepalive.go` | the quiescent control connection: reliable transport + HELLO |
+
+## The data path
+
+```mermaid
+flowchart LR
+    subgraph OUT["Outbound — TAP to the wire"]
+      direction TB
+      TAP1["TAP: raw Ethernet frame"] --> ENC["prepend header:<br/>Session ID, RemoteCookie, zeroed sublayer"]
+      ENC --> SHAPE["optional shaping:<br/>IP EtherTypes only"]
+      SHAPE --> UDPOUT["UDP/1701 to peer"]
+    end
+    subgraph IN["Inbound — the wire to TAP"]
+      direction TB
+      UDPIN["UDP/1701 from peer"] --> T{"T bit set?"}
+      T -->|"no, data"| DEMUX["SessionIDDemux:<br/>32-bit Session ID at offset 4"]
+      DEMUX --> CK{"LocalCookie<br/>verifies?"}
+      CK -->|no| DROP["drop, pre-built sentinel"]
+      CK -->|yes| TRIM["strip header,<br/>subslice, no copy"]
+      TRIM --> TAP2["TAP: raw Ethernet frame"]
+      T -->|"yes, control"| CTL["control connection:<br/>HELLO, ACK 20, StopCCN"]
+      CTL --> PROBE["Session.Probe reports idle time"]
+    end
+```
+
+Two things in that picture are load-bearing. One socket carries both planes, so
+the read loop dispatches on the **T bit** (`IsControl`) rather than on what the
+state machine expected next — a control message arriving mid-stream is handled,
+not mistaken for a short frame. And the cookie is verified *before* the source
+address is learned (`pump.go`), so an off-path sender cannot redirect the
+session by racing a packet in.
 
 ## Why this is not a version switch inside `internal/l2tp`
 

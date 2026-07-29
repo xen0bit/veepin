@@ -1,9 +1,13 @@
 // Package softether implements the SoftEther VPN native protocol (SE-VPN):
-// Ethernet frames over TLS using the SoftEther PACK serialisation for the
-// control exchange, with an optional UDP acceleration data path.
+// Ethernet frames over TLS, using the SoftEther PACK serialisation for the
+// control exchange. SoftEther's UDP acceleration is NOT implemented -- the data
+// path is TLS only, and so carries TCP's head-of-line blocking.
 //
-// This is veepin's only layer-2 (TAP-mode) protocol. It requires a TAP device
-// rather than the TUN interface every other protocol uses.
+// This is one of veepin's two layer-2 (TAP-mode) protocols, alongside l2tpv3:
+// it requires a TAP device rather than the TUN interface most protocols use.
+// Note that the frames are switched between connected clients only -- nothing
+// yet bridges them to the host TAP, so l2tpv3 is the one with a working
+// layer-2 data path. See internal/softether/README.md for the full caveats.
 package softether
 
 import (
