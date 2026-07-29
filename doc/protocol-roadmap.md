@@ -239,9 +239,18 @@ Then the mechanical guards, each of which fails loudly and by name:
 
 **Verify the harness before writing the compose file.** The cell depends on
 `l2tp_eth`, `l2tp_core` and `l2tp_netlink` being loadable on a GitHub runner.
-Check `modprobe l2tp_eth` in the target image *first*; if the modules are absent
-the peer story collapses and this plan needs rethinking before any code is
-written, not after.
+
+*This is what actually happened, and the warning was half-heeded.* The modules
+were checked on the development host — where they exist — and the cells were
+built and verified against the kernel there. **GitHub runners do not have them**,
+which only surfaced when CI turned red: the peer container reports "the kernel
+has no L2TP support" and the cells time out on a ping.
+
+The fix is to skip rather than fail, because the environment cannot host the
+peer and that is not a veepin fault. The kernel cells therefore prove the
+interop claim only on a host with the modules; the veepin↔veepin cell needs
+none and runs everywhere. The lesson generalises: **check the peer on the
+machine CI actually uses, not the one you are sitting at.**
 
 Cells: `compose.l2tpv3.yml` (veepin client ↔ kernel),
 `compose.l2tpv3-server.yml` (kernel client ↔ veepin server),
