@@ -34,7 +34,8 @@ const DefaultProtocol = "ikev2"
 // agree. The insecure "toy" example protocol is intentionally excluded.
 var SupportedProtocols = []string{
 	"amneziawg", "anyconnect", "cisco", "fortinet", "gp", "ikev2", "l2tp",
-	"masque", "nebula", "openvpn", "pulse", "softether", "ssh", "sstp", "wireguard",
+	"l2tpv3", "masque", "nebula", "openvpn", "pulse", "softether", "ssh",
+	"sstp", "wireguard",
 }
 
 // Connection is the parsed, validated form of a VPN connection.
@@ -74,6 +75,10 @@ const (
 	KeyCert     = "cert"     // certificate path (Nebula)
 	KeyKeyFile  = "key"      // private-key file path (Nebula)
 	KeyIdentity = "identity" // SSH private-key file — an alternative to a password
+
+	// L2TPv3 Ethernet pseudowire.
+	KeySessionID    = "session-id"
+	KeyPeerSessionID = "peer-session-id"
 
 	// Cisco IPsec remote access. The group name selects which pre-shared key
 	// authenticates phase 1; the per-user credentials follow in XAuth.
@@ -170,6 +175,9 @@ func requireKeys(protocol string, opts map[string]string) error {
 			return nil
 		}
 		return requirePresent(opts, KeyRemote)
+	case "l2tpv3":
+		// Static pseudowire: requires session IDs and a server address.
+		return requirePresent(opts, KeyGateway, KeySessionID, KeyPeerSessionID)
 	case "sstp", "ssh", "anyconnect", "fortinet", "gp", "pulse", "l2tp", "softether":
 		// Connection-oriented gateways authenticated by a username (plus a password
 		// or, for SSH, an identity key).
@@ -255,6 +263,9 @@ func secretMissing(protocol string, opts map[string]string) bool {
 	case "l2tp":
 		// Both the IPsec PSK and the PPP password are required.
 		return opts[KeyPSK] == "" || opts[KeyPassword] == ""
+	case "l2tpv3":
+		// Static pseudowire: no secrets needed.
+		return false
 	case "nebula", "masque":
 		// Authenticated by a certificate / TLS only: no NM-prompted secret.
 		return false

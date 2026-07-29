@@ -28,6 +28,7 @@ import (
 	_ "github.com/xen0bit/veepin/gp"
 	_ "github.com/xen0bit/veepin/ikev2"
 	_ "github.com/xen0bit/veepin/l2tp"
+	_ "github.com/xen0bit/veepin/l2tpv3"
 	_ "github.com/xen0bit/veepin/masque"
 	_ "github.com/xen0bit/veepin/nebula"
 	_ "github.com/xen0bit/veepin/openvpn"

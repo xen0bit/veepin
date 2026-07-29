@@ -84,8 +84,13 @@
 #define KEY_GROUP         "group"
 #define KEY_GROUP_PSK     "group-psk"
 /* Nebula. */
-#define KEY_LIGHTHOUSES   "lighthouses"
-#define KEY_STATIC_HOSTS  "static-hosts"
+#define KEY_LIGHTHOUSES      "lighthouses"
+#define KEY_STATIC_HOSTS     "static-hosts"
+/* L2TPv3. */
+#define KEY_SESSION_ID       "session-id"
+#define KEY_PEER_SESSION_ID  "peer-session-id"
+#define KEY_COOKIE           "cookie"
+#define KEY_PEER_COOKIE      "peer-cookie"
 
 /*****************************************************************************/
 /* Protocol / field model                                                    */
@@ -242,6 +247,15 @@ static const FieldDef l2tp_fields[] = {
     { "DNS",           KEY_DNS,      F_DATA },
 };
 
+static const FieldDef l2tpv3_fields[] = {
+    { "Gateway",         KEY_GATEWAY,        F_REQUIRED },
+    { "Session ID",      KEY_SESSION_ID,     F_REQUIRED },
+    { "Peer session ID", KEY_PEER_SESSION_ID, F_REQUIRED },
+    { "Port",            KEY_PORT,           F_DATA },
+    { "Cookie (hex)",    KEY_COOKIE,         F_DATA },
+    { "Peer cookie (hex)", KEY_PEER_COOKIE,  F_DATA },
+};
+
 #define PROTO(id_, label_, fields_) { id_, label_, fields_, G_N_ELEMENTS(fields_) }
 
 static const ProtocolDef protocols[] = {
@@ -258,6 +272,7 @@ static const ProtocolDef protocols[] = {
     PROTO("cisco",      "Cisco IPsec", cisco_fields),
     PROTO("pulse",      "Ivanti Connect Secure", pulse_fields),
     PROTO("l2tp",       "L2TP/IPsec",  l2tp_fields),
+    PROTO("l2tpv3",     "L2TPv3",      l2tpv3_fields),
     PROTO("amneziawg",  "AmneziaWG",   amneziawg_fields),
     PROTO("softether",  "SoftEther VPN", softether_fields),
 };
