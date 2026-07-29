@@ -27,10 +27,13 @@ import (
 
 	_ "github.com/xen0bit/veepin/amneziawg"
 	_ "github.com/xen0bit/veepin/anyconnect"
+	_ "github.com/xen0bit/veepin/array"
 	_ "github.com/xen0bit/veepin/cisco"
+	_ "github.com/xen0bit/veepin/f5"
 	_ "github.com/xen0bit/veepin/fortinet"
 	_ "github.com/xen0bit/veepin/gp"
 	_ "github.com/xen0bit/veepin/ikev2"
+	_ "github.com/xen0bit/veepin/junipenc"
 	_ "github.com/xen0bit/veepin/l2tp"
 	_ "github.com/xen0bit/veepin/l2tpv3"
 	_ "github.com/xen0bit/veepin/masque"
@@ -90,11 +93,13 @@ func TestPackageDocNamesEveryProtocol(t *testing.T) {
 var numberWords = map[int]string{
 	8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve",
 	13: "thirteen", 14: "fourteen", 15: "fifteen", 16: "sixteen",
+	17: "seventeen", 18: "eighteen", 19: "nineteen",
 }
 
 var ordinalWords = map[int]string{
 	8: "eighth", 9: "ninth", 10: "tenth", 11: "eleventh", 12: "twelfth",
-	13: "thirteenth", 14: "fourteenth", 15: "fifteenth", 16: "sixteenth", 17: "seventeenth",
+	13: "thirteenth", 14: "fourteenth", 15: "fifteenth", 16: "sixteenth",
+	17: "seventeenth", 18: "eighteenth", 19: "nineteenth", 20: "twentieth",
 }
 
 // countPhrase matches every spelled-out count the README attaches to a phrase,

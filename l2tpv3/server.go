@@ -13,9 +13,9 @@ import (
 
 // ServerConfig configures an L2TPv3 Ethernet pseudowire server.
 type ServerConfig struct {
-	Listen    string // local IP to bind (default 0.0.0.0)
-	Port      int    // UDP port (default 1701)
-	TUNName   string // TAP interface name
+	Listen  string // local IP to bind (default 0.0.0.0)
+	Port    int    // UDP port (default 1701)
+	TUNName string // TAP interface name
 
 	SessionID   uint32 // our session ID (local)
 	PeerSession uint32 // peer's session ID (remote)

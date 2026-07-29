@@ -18,15 +18,15 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 		frame    []byte
 	}{
 		{
-			name:     "no cookie, no sublayer",
-			session:  1,
-			frame:    ethernetFrame("00:11:22:33:44:55", "66:77:88:99:aa:bb", 0x0800, []byte("hello")),
+			name:    "no cookie, no sublayer",
+			session: 1,
+			frame:   ethernetFrame("00:11:22:33:44:55", "66:77:88:99:aa:bb", 0x0800, []byte("hello")),
 		},
 		{
-			name:     "4-octet cookie, no sublayer",
-			session:  42,
-			cookie:   []byte{0xde, 0xad, 0xbe, 0xef},
-			frame:    ethernetFrame("aa:bb:cc:dd:ee:ff", "00:01:02:03:04:05", 0x0800, []byte("IP packet")),
+			name:    "4-octet cookie, no sublayer",
+			session: 42,
+			cookie:  []byte{0xde, 0xad, 0xbe, 0xef},
+			frame:   ethernetFrame("aa:bb:cc:dd:ee:ff", "00:01:02:03:04:05", 0x0800, []byte("IP packet")),
 		},
 		{
 			name:     "8-octet cookie, sublayer",

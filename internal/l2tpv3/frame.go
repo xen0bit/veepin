@@ -76,9 +76,9 @@ func EncodeData(dst []byte, sessionID uint32, cookie []byte, sublayer bool, fram
 
 // DataHeader carries the decoded fields from an L2TPv3 data packet header.
 type DataHeader struct {
-	SessionID  uint32
-	Cookie     []byte // subslice of the original packet
-	Sublayer   [4]byte
+	SessionID   uint32
+	Cookie      []byte // subslice of the original packet
+	Sublayer    [4]byte
 	HasSublayer bool
 	// Frame is the Ethernet frame (subslice of input, zero-copy).
 	Frame []byte
@@ -104,7 +104,7 @@ func DecodeData(pkt []byte, cookieLen int, sublayer bool) (*DataHeader, error) {
 	}
 
 	h := &DataHeader{
-		SessionID: binary.BigEndian.Uint32(pkt[4:]),
+		SessionID:   binary.BigEndian.Uint32(pkt[4:]),
 		HasSublayer: sublayer,
 	}
 

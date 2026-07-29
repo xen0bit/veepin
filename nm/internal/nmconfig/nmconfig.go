@@ -33,9 +33,9 @@ const DefaultProtocol = "ikev2"
 // cmd package's TestAllSupportedProtocolsRegistered guards that the two lists
 // agree. The insecure "toy" example protocol is intentionally excluded.
 var SupportedProtocols = []string{
-	"amneziawg", "anyconnect", "cisco", "fortinet", "gp", "ikev2", "l2tp",
-	"l2tpv3", "masque", "nebula", "openvpn", "pulse", "softether", "ssh",
-	"sstp", "wireguard",
+	"amneziawg", "anyconnect", "array", "cisco", "f5", "fortinet", "gp",
+	"ikev2", "junipenc", "l2tp", "l2tpv3", "masque", "nebula", "openvpn",
+	"pulse", "softether", "ssh", "sstp", "wireguard",
 }
 
 // Connection is the parsed, validated form of a VPN connection.
@@ -77,7 +77,7 @@ const (
 	KeyIdentity = "identity" // SSH private-key file — an alternative to a password
 
 	// L2TPv3 Ethernet pseudowire.
-	KeySessionID    = "session-id"
+	KeySessionID     = "session-id"
 	KeyPeerSessionID = "peer-session-id"
 
 	// Cisco IPsec remote access. The group name selects which pre-shared key
@@ -175,6 +175,8 @@ func requireKeys(protocol string, opts map[string]string) error {
 			return nil
 		}
 		return requirePresent(opts, KeyRemote)
+	case "array", "f5", "junipenc":
+		return requirePresent(opts, KeyServer, KeyUser)
 	case "l2tpv3":
 		// Static pseudowire: requires session IDs and a server address.
 		return requirePresent(opts, KeyGateway, KeySessionID, KeyPeerSessionID)
@@ -263,6 +265,8 @@ func secretMissing(protocol string, opts map[string]string) bool {
 	case "l2tp":
 		// Both the IPsec PSK and the PPP password are required.
 		return opts[KeyPSK] == "" || opts[KeyPassword] == ""
+	case "array", "f5", "junipenc":
+		return opts[KeyPassword] == ""
 	case "l2tpv3":
 		// Static pseudowire: no secrets needed.
 		return false

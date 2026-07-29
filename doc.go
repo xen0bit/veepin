@@ -2,12 +2,13 @@
 // golang.org/x/crypto its only dependency (WireGuard mandates ChaCha20-Poly1305
 // and BLAKE2s, which the standard library does not ship).
 //
-// It speaks sixteen production protocols, as both an initiator and a responder
-// for every one: IKEv2/ESP, WireGuard, OpenVPN, SSTP, SSH, L2TP/IPsec,
-// L2TPv3 Ethernet pseudowire, AnyConnect, Nebula, MASQUE, Fortinet,
-// GlobalProtect, Cisco IPsec, Ivanti Connect Secure, SoftEther VPN (SE-VPN)
-// and AmneziaWG. Each is verified in Docker against a real third-party
-// implementation, and against itself.
+// It speaks nineteen production protocols, as both an initiator and a
+// responder for every one: IKEv2/ESP, WireGuard, OpenVPN, SSTP, SSH,
+// L2TP/IPsec, L2TPv3 Ethernet pseudowire, AnyConnect, Nebula, MASQUE,
+// Fortinet, GlobalProtect, Cisco IPsec, Ivanti Connect Secure,
+// SoftEther VPN (SE-VPN), AmneziaWG, Juniper Network Connect,
+// F5 BIG-IP and Array Networks AG. Each is verified in Docker against
+// a real third-party implementation, and against itself.
 //
 // The tree is arranged so a further protocol is a sibling rather than a rewrite:
 //
@@ -69,12 +70,21 @@
 //     layer-2 Ethernet frames over UDP, with a static session and optional
 //     cookie and sublayer. Uses a TAP device instead of TUN.
 //
+//   - junipenc, internal/junipenc — Juniper Network Connect: Pulse's
+//     predecessor, sharing the ESP data path and key-block handling.
+//
+//   - f5, internal/f5 — F5 BIG-IP SSL VPN: PPP over TLS with a DTLS data
+//     channel, structurally similar to Fortinet.
+//
+//   - array — Array Networks AG SSL VPN: HTTPS login yielding a cookie,
+//     then a framed packet tunnel.
+//
 // Two packages are shared by the PPP-carrying protocols: internal/ppp (LCP,
 // MS-CHAPv2, IPCP, both roles) and internal/mschap.
 //
 // # The example protocol
 //
-// toy and internal/toy implement TOY, which is NOT one of the sixteen above and
+// toy and internal/toy implement TOY, which is NOT one of the nineteen above and
 // PROVIDES NO SECURITY. It is a worked example of how a protocol is assembled
 // here — a handshake producing a client.Result, a dataplane.Pump data path, both
 // roles registered — with the cryptography replaced by deliberately worthless

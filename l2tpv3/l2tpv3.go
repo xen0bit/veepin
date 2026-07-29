@@ -13,16 +13,16 @@ import (
 )
 
 const (
-	OptGateway  = "gateway"
-	OptPort     = "port"
-	OptTUN      = "tun"
-	OptShape    = "shape"
+	OptGateway = "gateway"
+	OptPort    = "port"
+	OptTUN     = "tun"
+	OptShape   = "shape"
 
-	OptSessionID    = "session-id"
-	OptPeerSession  = "peer-session-id"
-	OptCookie       = "cookie"
-	OptPeerCookie   = "peer-cookie"
-	OptSublayer     = "sublayer"
+	OptSessionID   = "session-id"
+	OptPeerSession = "peer-session-id"
+	OptCookie      = "cookie"
+	OptPeerCookie  = "peer-cookie"
+	OptSublayer    = "sublayer"
 
 	// Server-side option keys.
 	OptServerListen = "listen"
@@ -31,10 +31,10 @@ const (
 
 // Config configures an L2TPv3 Ethernet pseudowire client.
 type Config struct {
-	Server   string // gateway host or IP
-	Port     int    // UDP port (default 1701)
-	TUNName  string // TAP interface name
-	Shape    int    // upstream shaping budget
+	Server  string // gateway host or IP
+	Port    int    // UDP port (default 1701)
+	TUNName string // TAP interface name
+	Shape   int    // upstream shaping budget
 
 	SessionID   uint32 // our session ID
 	PeerSession uint32 // peer's session ID
@@ -91,10 +91,10 @@ func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
 		cfg.SessionID, sessCfg, logger)
 
 	s := &Session{
-		conn:   conn,
-		tap:    tap,
-		pump:   pump,
-		done:   make(chan struct{}),
+		conn: conn,
+		tap:  tap,
+		pump: pump,
+		done: make(chan struct{}),
 	}
 	go pump.Run()
 	go s.readLoop()
@@ -151,11 +151,11 @@ func (s *Session) Close() error {
 
 func parseOptions(opts map[string]string) (client.Dialer, error) {
 	cfg := Config{
-		Server:   opts[OptGateway],
-		TUNName:  opts[OptTUN],
-		Cookie:   opts[OptCookie],
+		Server:     opts[OptGateway],
+		TUNName:    opts[OptTUN],
+		Cookie:     opts[OptCookie],
 		PeerCookie: opts[OptPeerCookie],
-		Sublayer: opts[OptSublayer] == "true",
+		Sublayer:   opts[OptSublayer] == "true",
 	}
 	if p := opts[OptPort]; p != "" {
 		n, err := strconv.Atoi(p)

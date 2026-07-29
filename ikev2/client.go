@@ -128,23 +128,23 @@ const defaultIKERekeyInterval = 4 * time.Hour
 // NetworkManager plugin's connection settings, which is why the parsed names are
 // hyphenated rather than Go-cased.
 const (
-	OptGateway  = "gateway"      // server host or IP (required)
-	OptPort     = "port"         // server IKE port (default 500)
-	OptPSK      = "psk"          // pre-shared key (required)
-	OptLocalID  = "local-id"     // identity presented to the server (required)
-	OptServerID = "server-id"    // expected server identity (optional)
-	OptUser     = "user"         // EAP-MSCHAPv2 username (optional)
-	OptPassword = "password"     // EAP-MSCHAPv2 password (optional)
-	OptTUNName  = "tun"          // desired TUN interface name (optional)
-	OptRekey    = "rekey"        // Child SA rekey interval in seconds (optional)
-	OptIKERekey = "ike-rekey"    // IKE SA rekey interval in seconds (optional)
-	OptCert     = "cert"         // client certificate PEM path (enables certificate auth)
-	OptKey      = "key"          // client private-key PEM path
-	OptCA       = "ca"           // CA bundle PEM path to verify the server (optional)
-	OptShape    = "shape"        // per-flow upstream shaping budget in bytes (0 = off)
-	OptPQ       = "post-quantum" // offer ML-KEM-768 as an additional key exchange
-	OptIPTFS    = "iptfs"        // enable AGGFRAG (IP-TFS) aggregation (RFC 9347)
-	OptIPTFSRate = "iptfs-rate"  // constant-rate IP-TFS in bytes/sec; 0 = aggregation only
+	OptGateway   = "gateway"      // server host or IP (required)
+	OptPort      = "port"         // server IKE port (default 500)
+	OptPSK       = "psk"          // pre-shared key (required)
+	OptLocalID   = "local-id"     // identity presented to the server (required)
+	OptServerID  = "server-id"    // expected server identity (optional)
+	OptUser      = "user"         // EAP-MSCHAPv2 username (optional)
+	OptPassword  = "password"     // EAP-MSCHAPv2 password (optional)
+	OptTUNName   = "tun"          // desired TUN interface name (optional)
+	OptRekey     = "rekey"        // Child SA rekey interval in seconds (optional)
+	OptIKERekey  = "ike-rekey"    // IKE SA rekey interval in seconds (optional)
+	OptCert      = "cert"         // client certificate PEM path (enables certificate auth)
+	OptKey       = "key"          // client private-key PEM path
+	OptCA        = "ca"           // CA bundle PEM path to verify the server (optional)
+	OptShape     = "shape"        // per-flow upstream shaping budget in bytes (0 = off)
+	OptPQ        = "post-quantum" // offer ML-KEM-768 as an additional key exchange
+	OptIPTFS     = "iptfs"        // enable AGGFRAG (IP-TFS) aggregation (RFC 9347)
+	OptIPTFSRate = "iptfs-rate"   // constant-rate IP-TFS in bytes/sec; 0 = aggregation only
 )
 
 // parseOptions turns string-keyed options into a Dialer. It is what the registry

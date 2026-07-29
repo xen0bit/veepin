@@ -13,12 +13,15 @@ import (
 
 	"github.com/xen0bit/veepin/amneziawg"
 	"github.com/xen0bit/veepin/anyconnect"
+	"github.com/xen0bit/veepin/array"
 	"github.com/xen0bit/veepin/cisco"
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/veepin/f5"
 	"github.com/xen0bit/veepin/fortinet"
 	"github.com/xen0bit/veepin/gp"
 	"github.com/xen0bit/veepin/ikev2"
+	"github.com/xen0bit/veepin/junipenc"
 	"github.com/xen0bit/veepin/l2tp"
 	"github.com/xen0bit/veepin/l2tpv3"
 	"github.com/xen0bit/veepin/masque"
@@ -124,37 +127,37 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 	switch protocol {
 	case "ikev2":
 		var (
-			server   = fs.String("server", "", "VPN server host or IP (required)")
-			port     = fs.Int("port", 0, "server IKE port (default 500)")
-			psk      = fs.String("psk", "", "pre-shared key (required)")
-			id       = fs.String("id", "", "local identity presented to the server (required)")
-			serverID = fs.String("server-id", "", "expected server identity (optional, verified if set)")
-			user     = fs.String("user", "", "EAP-MSCHAPv2 username (enables EAP instead of client PSK)")
-			pass     = fs.String("pass", "", "EAP-MSCHAPv2 password")
-			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
-			rekey    = fs.Int("rekey", 0, "Child SA rekey interval in seconds (0 = default 3600)")
-			ikeRekey = fs.Int("ike-rekey", 0, "IKE SA rekey interval in seconds (0 = default 14400)")
-			cert     = fs.String("cert", "", "client certificate PEM (enables certificate auth instead of PSK)")
-			key      = fs.String("key", "", "client private-key PEM (with -cert)")
-			ca       = fs.String("ca", "", "CA bundle PEM to verify the server (optional; default system roots)")
-			shape    = fs.Int("shape", 0, "per-flow upstream shaping budget in bytes: pads each inner flow's first N bytes to the tunnel MTU (0 = off; the server shapes downstream independently)")
-			pq       = fs.Bool("post-quantum", false, "offer ML-KEM-768 as an additional key exchange (RFC 9370); hybrid with the classical group, and skipped if the server declines")
-			iptfs    = fs.Bool("iptfs", false, "enable AGGFRAG aggregation and fragmentation (RFC 9347) for the Child SA")
+			server    = fs.String("server", "", "VPN server host or IP (required)")
+			port      = fs.Int("port", 0, "server IKE port (default 500)")
+			psk       = fs.String("psk", "", "pre-shared key (required)")
+			id        = fs.String("id", "", "local identity presented to the server (required)")
+			serverID  = fs.String("server-id", "", "expected server identity (optional, verified if set)")
+			user      = fs.String("user", "", "EAP-MSCHAPv2 username (enables EAP instead of client PSK)")
+			pass      = fs.String("pass", "", "EAP-MSCHAPv2 password")
+			tun       = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+			rekey     = fs.Int("rekey", 0, "Child SA rekey interval in seconds (0 = default 3600)")
+			ikeRekey  = fs.Int("ike-rekey", 0, "IKE SA rekey interval in seconds (0 = default 14400)")
+			cert      = fs.String("cert", "", "client certificate PEM (enables certificate auth instead of PSK)")
+			key       = fs.String("key", "", "client private-key PEM (with -cert)")
+			ca        = fs.String("ca", "", "CA bundle PEM to verify the server (optional; default system roots)")
+			shape     = fs.Int("shape", 0, "per-flow upstream shaping budget in bytes: pads each inner flow's first N bytes to the tunnel MTU (0 = off; the server shapes downstream independently)")
+			pq        = fs.Bool("post-quantum", false, "offer ML-KEM-768 as an additional key exchange (RFC 9370); hybrid with the classical group, and skipped if the server declines")
+			iptfs     = fs.Bool("iptfs", false, "enable AGGFRAG aggregation and fragmentation (RFC 9347) for the Child SA")
 			iptfsRate = fs.Int("iptfs-rate", 0, "constant-rate IP-TFS transmission in bytes/sec; 0 = aggregation only")
 		)
 		return func() map[string]string {
 			opts := map[string]string{
-				ikev2.OptGateway:  *server,
-				ikev2.OptPSK:      *psk,
-				ikev2.OptLocalID:  *id,
-				ikev2.OptServerID: *serverID,
-				ikev2.OptUser:     *user,
-				ikev2.OptPassword: *pass,
-				ikev2.OptTUNName:  *tun,
-				ikev2.OptCert:     *cert,
-				ikev2.OptKey:      *key,
-				ikev2.OptCA:       *ca,
-				ikev2.OptShape:    fmt.Sprint(*shape),
+				ikev2.OptGateway:   *server,
+				ikev2.OptPSK:       *psk,
+				ikev2.OptLocalID:   *id,
+				ikev2.OptServerID:  *serverID,
+				ikev2.OptUser:      *user,
+				ikev2.OptPassword:  *pass,
+				ikev2.OptTUNName:   *tun,
+				ikev2.OptCert:      *cert,
+				ikev2.OptKey:       *key,
+				ikev2.OptCA:        *ca,
+				ikev2.OptShape:     fmt.Sprint(*shape),
 				ikev2.OptPQ:        fmt.Sprint(*pq),
 				ikev2.OptIPTFS:     fmt.Sprint(*iptfs),
 				ikev2.OptIPTFSRate: fmt.Sprint(*iptfsRate),
@@ -631,6 +634,57 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 				opts[l2tpv3.OptSublayer] = "true"
 			}
 			return opts
+		}, nil
+	case "junipenc":
+		var (
+			server = fs.String("server", "", "Juniper NC gateway host or IP (required)")
+			port   = fs.Int("port", 0, "gateway TCP port (default 443)")
+			user   = fs.String("user", "", "username (required)")
+			pass   = fs.String("pass", "", "password (required)")
+			tun    = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+		)
+		return func() map[string]string {
+			return map[string]string{
+				junipenc.OptServer:   *server,
+				junipenc.OptPort:     fmt.Sprint(*port),
+				junipenc.OptUser:     *user,
+				junipenc.OptPassword: *pass,
+				junipenc.OptTUN:      *tun,
+			}
+		}, nil
+	case "f5":
+		var (
+			server = fs.String("server", "", "F5 BIG-IP gateway host or IP (required)")
+			port   = fs.Int("port", 0, "gateway TCP port (default 443)")
+			user   = fs.String("user", "", "username (required)")
+			pass   = fs.String("pass", "", "password (required)")
+			tun    = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+		)
+		return func() map[string]string {
+			return map[string]string{
+				f5.OptServer:   *server,
+				f5.OptPort:     fmt.Sprint(*port),
+				f5.OptUser:     *user,
+				f5.OptPassword: *pass,
+				f5.OptTUN:      *tun,
+			}
+		}, nil
+	case "array":
+		var (
+			server = fs.String("server", "", "Array Networks AG gateway host or IP (required)")
+			port   = fs.Int("port", 0, "gateway TCP port (default 443)")
+			user   = fs.String("user", "", "username (required)")
+			pass   = fs.String("pass", "", "password (required)")
+			tun    = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+		)
+		return func() map[string]string {
+			return map[string]string{
+				array.OptServer:   *server,
+				array.OptPort:     fmt.Sprint(*port),
+				array.OptUser:     *user,
+				array.OptPassword: *pass,
+				array.OptTUN:      *tun,
+			}
 		}, nil
 	case "amneziawg":
 		// AmneziaWG is WireGuard with the wire format perturbed, so the tunnel

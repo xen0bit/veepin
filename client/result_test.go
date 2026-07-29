@@ -97,9 +97,9 @@ func TestResultValidate(t *testing.T) {
 		// to an address within the tunnel subnet. We accept the parse but
 		// create a scenario where the Gateway falls inside a /24.
 		r := Result{
-			TUNName:    "tap0",
-			Layer2:     true,
-			MTU:        1500,
+			TUNName: "tap0",
+			Layer2:  true,
+			MTU:     1500,
 		}
 		// With no AssignedIP/Netmask, the subnet check is impossible (nothing
 		// to compare against), so this should pass.

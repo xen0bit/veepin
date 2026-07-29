@@ -23,10 +23,13 @@ import (
 	// "toy" example protocol is deliberately left out.
 	_ "github.com/xen0bit/veepin/amneziawg"
 	_ "github.com/xen0bit/veepin/anyconnect"
+	_ "github.com/xen0bit/veepin/array"
 	_ "github.com/xen0bit/veepin/cisco"
+	_ "github.com/xen0bit/veepin/f5"
 	_ "github.com/xen0bit/veepin/fortinet"
 	_ "github.com/xen0bit/veepin/gp"
 	_ "github.com/xen0bit/veepin/ikev2"
+	_ "github.com/xen0bit/veepin/junipenc"
 	_ "github.com/xen0bit/veepin/l2tp"
 	_ "github.com/xen0bit/veepin/l2tpv3"
 	_ "github.com/xen0bit/veepin/masque"
