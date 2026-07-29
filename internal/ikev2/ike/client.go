@@ -70,6 +70,13 @@ type ClientConfig struct {
 	// simply proceeds classically.
 	PostQuantum bool
 
+	// IPTFS enables AGGFRAG aggregation and fragmentation (RFC 9347) for the
+	// Child SA. When set, USE_AGGFRAG is advertised in IKE_AUTH.
+	IPTFS bool
+	// IPTFSRate is the constant-rate transmission target in bytes/sec. Zero
+	// means aggregation-only.
+	IPTFSRate int
+
 	Logger *log.Logger
 }
 

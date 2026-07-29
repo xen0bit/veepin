@@ -260,6 +260,10 @@ const (
 	// IKE_SA_INIT to indicate the endpoint can process IKE_INTERMEDIATE exchanges.
 	// 16438, per the IANA registry — not 16444, which is CHILDLESS_IKEV2_SUPPORTED.
 	IntermediateExchangeSupported NotifyType = 16438
+
+	// UseAggFrag (RFC 9347 section 3.1): advertised by both peers to enable
+	// AGGFRAG aggregation and fragmentation for the Child SA.
+	UseAggFrag NotifyType = 16442
 )
 
 // CertEncoding values in CERT / CERTREQ payloads (RFC 7296 section 3.6). Only

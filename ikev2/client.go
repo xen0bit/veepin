@@ -78,6 +78,15 @@ type Config struct {
 	// not support it is not an error — the handshake proceeds classically.
 	PostQuantum bool
 
+	// IPTFS enables AGGFRAG aggregation and fragmentation (RFC 9347) for the
+	// Child SA. When set, the client advertises USE_AGGFRAG in IKE_AUTH and
+	// uses ESP Next Header 144 instead of the usual 4/41.
+	IPTFS bool
+	// IPTFSRate is the constant-rate transmission target in bytes/sec. Zero
+	// means aggregation-only (no constant-rate shaping); the data path fills
+	// each ESP packet to the MTU with whatever inner traffic is available.
+	IPTFSRate int
+
 	// RekeyInterval is the Child SA soft lifetime: the client proactively
 	// rekeys the ESP SA (a CREATE_CHILD_SA exchange, new keys, old SA deleted)
 	// this often, so a long-lived tunnel never lets its data SA expire. Zero
@@ -134,6 +143,8 @@ const (
 	OptCA       = "ca"           // CA bundle PEM path to verify the server (optional)
 	OptShape    = "shape"        // per-flow upstream shaping budget in bytes (0 = off)
 	OptPQ       = "post-quantum" // offer ML-KEM-768 as an additional key exchange
+	OptIPTFS    = "iptfs"        // enable AGGFRAG (IP-TFS) aggregation (RFC 9347)
+	OptIPTFSRate = "iptfs-rate"  // constant-rate IP-TFS in bytes/sec; 0 = aggregation only
 )
 
 // parseOptions turns string-keyed options into a Dialer. It is what the registry
@@ -151,6 +162,14 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 		KeyFile:     opts[OptKey],
 		CAFile:      opts[OptCA],
 		PostQuantum: opts[OptPQ] == "true",
+		IPTFS:       opts[OptIPTFS] == "true",
+	}
+	if v := opts[OptIPTFSRate]; v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("bad %s %q", OptIPTFSRate, v)
+		}
+		cfg.IPTFSRate = n
 	}
 	if p := opts[OptPort]; p != "" {
 		n, err := strconv.Atoi(p)
@@ -232,6 +251,8 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 		EAPUsername: cfg.EAPUser,
 		EAPPassword: cfg.EAPPassword,
 		PostQuantum: cfg.PostQuantum,
+		IPTFS:       cfg.IPTFS,
+		IPTFSRate:   cfg.IPTFSRate,
 		Logger:      logger,
 	}
 	if cfg.ServerID != "" {

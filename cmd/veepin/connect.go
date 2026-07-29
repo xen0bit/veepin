@@ -139,6 +139,8 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 			ca       = fs.String("ca", "", "CA bundle PEM to verify the server (optional; default system roots)")
 			shape    = fs.Int("shape", 0, "per-flow upstream shaping budget in bytes: pads each inner flow's first N bytes to the tunnel MTU (0 = off; the server shapes downstream independently)")
 			pq       = fs.Bool("post-quantum", false, "offer ML-KEM-768 as an additional key exchange (RFC 9370); hybrid with the classical group, and skipped if the server declines")
+			iptfs    = fs.Bool("iptfs", false, "enable AGGFRAG aggregation and fragmentation (RFC 9347) for the Child SA")
+			iptfsRate = fs.Int("iptfs-rate", 0, "constant-rate IP-TFS transmission in bytes/sec; 0 = aggregation only")
 		)
 		return func() map[string]string {
 			opts := map[string]string{
@@ -153,7 +155,9 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 				ikev2.OptKey:      *key,
 				ikev2.OptCA:       *ca,
 				ikev2.OptShape:    fmt.Sprint(*shape),
-				ikev2.OptPQ:       fmt.Sprint(*pq),
+				ikev2.OptPQ:        fmt.Sprint(*pq),
+				ikev2.OptIPTFS:     fmt.Sprint(*iptfs),
+				ikev2.OptIPTFSRate: fmt.Sprint(*iptfsRate),
 			}
 			if *port != 0 {
 				opts[ikev2.OptPort] = fmt.Sprint(*port)
