@@ -15,6 +15,9 @@ UDP_PORT="${UDP_PORT:-1701}"
 COOKIE="${COOKIE:-}"
 PEER_COOKIE="${PEER_COOKIE:-}"
 SHAPE="${SHAPE:-0}"
+CCID="${CCID:-0}"
+PEER_CCID="${PEER_CCID:-0}"
+KEEPALIVE="${KEEPALIVE:-0}"
 
 set -- \
     -gateway "$PEER" \
@@ -23,7 +26,10 @@ set -- \
     -peer-session-id "$PEER_SESSION" \
     -tun tap0 \
     -sublayer \
-    -shape "$SHAPE"
+    -shape "$SHAPE" \
+    -ccid "$CCID" \
+    -peer-ccid "$PEER_CCID" \
+    -keepalive "$KEEPALIVE"
 [ -n "$COOKIE" ] && set -- "$@" -cookie "$COOKIE"
 [ -n "$PEER_COOKIE" ] && set -- "$@" -peer-cookie "$PEER_COOKIE"
 

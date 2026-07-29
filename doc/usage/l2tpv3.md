@@ -85,6 +85,30 @@ one end and without it at the other mis-frames every packet by four octets —
 with no error, just corrupted frames. Presence is a configuration property; it is
 never inferred from the packet.
 
+## Keepalives (the quiescent control connection)
+
+By default the pseudowire is entirely static and silent, which means a dead peer
+looks exactly like an idle one. Setting a Control Connection ID at both ends
+brings up the RFC 3931 control connection and starts HELLO keepalives, so
+failure is detected:
+
+```sh
+veepin connect l2tpv3 -gateway peer.example.com \
+    -session-id 100 -peer-session-id 200 \
+    -ccid 1100 -peer-ccid 2200 -keepalive 30 ...
+```
+
+Control Connection IDs are **separate from Session IDs** and mirror the same way
+(`-ccid` is ours, `-peer-ccid` is theirs). Both must be non-zero; 0 is reserved.
+Control messages share the data port — only the T bit distinguishes them.
+
+Against `ql2tpd`, set `hello_timeout` in its TOML to enable the same mode, and
+map `tid`/`ptid` to `-peer-ccid`/`-ccid` respectively.
+
+veepin implements the **quiescent** control connection only: HELLO, ACK and
+StopCCN. There is no SCCRQ/ICRQ negotiation, because no open-source
+implementation has one to test against — see `internal/l2tpv3/README.md`.
+
 ## Options
 
 | Flag | Meaning |
@@ -99,6 +123,9 @@ never inferred from the packet.
 | `-sublayer` | carry the Default L2-Specific Sublayer |
 | `-tun` | TAP interface name (empty = kernel picks) |
 | `-shape` | per-flow shaping budget in bytes (0 = off) |
+| `-ccid` | our Control Connection ID; with `-peer-ccid`, enables HELLO keepalives |
+| `-peer-ccid` | the peer's Control Connection ID |
+| `-keepalive` | HELLO interval in seconds (default 30) |
 
 ## MTU
 

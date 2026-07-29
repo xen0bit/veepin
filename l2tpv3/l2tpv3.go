@@ -43,6 +43,9 @@ const (
 	OptCookie      = "cookie"          // hex cookie WE chose, verified on inbound
 	OptPeerCookie  = "peer-cookie"     // hex cookie the PEER chose, written on outbound
 	OptSublayer    = "sublayer"        // carry the Default L2-Specific Sublayer
+	OptCCID        = "ccid"            // our Control Connection ID; enables HELLO keepalives
+	OptPeerCCID    = "peer-ccid"       // the peer's Control Connection ID
+	OptKeepalive   = "keepalive"       // HELLO interval in seconds (default 30)
 )
 
 // Server option keys.
@@ -75,6 +78,16 @@ type Config struct {
 	Cookie      string // hex, chosen by us, verified inbound
 	PeerCookie  string // hex, chosen by the peer, written outbound
 	Sublayer    bool
+
+	// CCID and PeerCCID enable the quiescent control connection: HELLO
+	// keepalives over RFC 3931's reliable transport, on the same UDP port as
+	// the data. Both must be non-zero, since a Control Connection ID of 0 is
+	// reserved. Zero means no control plane at all, which is a bare static
+	// pseudowire -- correct, but silent, so a dead peer looks like an idle one.
+	CCID     uint32
+	PeerCCID uint32
+	// Keepalive is the HELLO interval (default 30s).
+	Keepalive time.Duration
 }
 
 // Dial brings up a static L2TPv3 Ethernet pseudowire.
@@ -130,6 +143,14 @@ func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
 	}
 
 	s := &Session{conn: conn, tap: tap, pump: pump, done: make(chan struct{})}
+	if cfg.CCID != 0 && cfg.PeerCCID != 0 {
+		s.ctl = l2tpv3.NewControlConn(l2tpv3.ControlConfig{
+			LocalCCID: cfg.CCID, RemoteCCID: cfg.PeerCCID,
+			HelloInterval: cfg.Keepalive, PeerAddr: peer,
+		}, func(pkt []byte, _ *net.UDPAddr) { _, _ = conn.Write(pkt) },
+			func() { logger.Printf("l2tpv3: control connection lost (peer stopped acknowledging)") })
+		go s.ctl.Run()
+	}
 	go pump.Run()
 	go s.readLoop()
 
@@ -214,6 +235,9 @@ type Session struct {
 	conn *net.UDPConn
 	tap  *dataplane.TUN
 	pump *l2tpv3.Pump
+	// ctl is the quiescent control connection, or nil for a bare static
+	// pseudowire.
+	ctl  *l2tpv3.ControlConn
 	done chan struct{}
 }
 
@@ -242,6 +266,13 @@ func (s *Session) readLoop() {
 			}
 			continue
 		}
+		// Control and data share the port; only the T bit separates them.
+		if l2tpv3.IsControl(buf[:n]) {
+			if s.ctl != nil {
+				s.ctl.HandleControl(buf[:n], nil)
+			}
+			continue
+		}
 		s.pump.HandleInbound(buf[:n], nil)
 	}
 }
@@ -260,7 +291,16 @@ func (s *Session) Wait(ctx context.Context) error {
 // client.Prober. A static pseudowire sends nothing of its own, so without this
 // a dead peer is indistinguishable from an idle one.
 func (s *Session) Probe(context.Context) (time.Duration, error) {
-	return s.pump.IdleFor(), nil
+	idle := s.pump.IdleFor()
+	if s.ctl != nil {
+		// With keepalives running, the control connection is the real liveness
+		// signal: it produces traffic on a schedule, so silence there means
+		// something. The data path may legitimately be idle for hours.
+		if c := s.ctl.IdleFor(); c < idle {
+			idle = c
+		}
+	}
+	return idle, nil
 }
 
 // Close tears the pseudowire down. It is safe to call more than once.
@@ -270,6 +310,9 @@ func (s *Session) Close() error {
 		return nil
 	default:
 		close(s.done)
+	}
+	if s.ctl != nil {
+		s.ctl.Close()
 	}
 	s.pump.Close()
 	s.conn.Close()
@@ -300,6 +343,17 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 	if cfg.PeerSession, err = optUint32(opts, OptPeerSession); err != nil {
 		return nil, err
 	}
+	if cfg.CCID, err = optUint32(opts, OptCCID); err != nil {
+		return nil, err
+	}
+	if cfg.PeerCCID, err = optUint32(opts, OptPeerCCID); err != nil {
+		return nil, err
+	}
+	secs, err := optInt(opts, OptKeepalive)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Keepalive = time.Duration(secs) * time.Second
 	return dialer{cfg}, nil
 }
 

@@ -685,19 +685,25 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 		}, nil
 	case "l2tpv3":
 		var (
-			listen   = fs.String("listen", "", "local IP to bind (default 0.0.0.0)")
-			port     = fs.Int("port", 0, "UDP port (default 1701)")
-			sid      = fs.Uint("session-id", 0, "our session ID: what the peer sends to (required)")
-			psid     = fs.Uint("peer-session-id", 0, "the peer's session ID: what we send to (required)")
-			cookie   = fs.String("cookie", "", "hex cookie WE chose, verified on inbound packets (0, 4 or 8 octets)")
-			pcookie  = fs.String("peer-cookie", "", "hex cookie the PEER chose, written on outbound packets")
-			sublayer = fs.Bool("sublayer", false, "carry the Default L2-Specific Sublayer (the Linux kernel sends one)")
-			tun      = fs.String("tun", "", "TAP interface name (empty = kernel picks)")
-			shape    = fs.Int("shape", 0, "per-flow downstream shaping budget in bytes; pads IP-bearing frames only (0 = off)")
+			listen    = fs.String("listen", "", "local IP to bind (default 0.0.0.0)")
+			port      = fs.Int("port", 0, "UDP port (default 1701)")
+			sid       = fs.Uint("session-id", 0, "our session ID: what the peer sends to (required)")
+			psid      = fs.Uint("peer-session-id", 0, "the peer's session ID: what we send to (required)")
+			cookie    = fs.String("cookie", "", "hex cookie WE chose, verified on inbound packets (0, 4 or 8 octets)")
+			pcookie   = fs.String("peer-cookie", "", "hex cookie the PEER chose, written on outbound packets")
+			sublayer  = fs.Bool("sublayer", false, "carry the Default L2-Specific Sublayer (the Linux kernel sends one)")
+			tun       = fs.String("tun", "", "TAP interface name (empty = kernel picks)")
+			shape     = fs.Int("shape", 0, "per-flow downstream shaping budget in bytes; pads IP-bearing frames only (0 = off)")
+			ccid      = fs.Uint("ccid", 0, "our Control Connection ID; with -peer-ccid, enables HELLO keepalives (RFC 3931 quiescent tunnel)")
+			pccid     = fs.Uint("peer-ccid", 0, "the peer's Control Connection ID")
+			keepalive = fs.Int("keepalive", 0, "HELLO interval in seconds (default 30)")
 		)
 		return func() map[string]string {
 			opts := map[string]string{
 				l2tpv3.OptServerShape:  fmt.Sprint(*shape),
+				l2tpv3.OptCCID:         fmt.Sprint(*ccid),
+				l2tpv3.OptPeerCCID:     fmt.Sprint(*pccid),
+				l2tpv3.OptKeepalive:    fmt.Sprint(*keepalive),
 				l2tpv3.OptServerListen: *listen,
 				l2tpv3.OptTUN:          *tun,
 				l2tpv3.OptSessionID:    fmt.Sprint(*sid),

@@ -58,3 +58,29 @@ func FuzzSessionIDDemux(f *testing.F) {
 		}
 	})
 }
+
+// FuzzParseControl drives the control-message parser with arbitrary bytes. A
+// control connection is reachable by anyone who can send to the data port, so
+// this parser is as exposed as the data one.
+func FuzzParseControl(f *testing.F) {
+	f.Add(AppendControl(nil, 100, 0, 0, msgHello, nil))
+	f.Add(AppendControl(nil, 0xffffffff, 65535, 65535, msgAck, nil))
+	f.Add(AppendControl(nil, 1, 0, 0, msgStopCCN, nil))
+	f.Add([]byte{0xc8, 0x03, 0x00, 0x0c})
+	f.Add([]byte{})
+
+	f.Fuzz(func(t *testing.T, pkt []byte) {
+		m, err := ParseControl(pkt)
+		if err != nil {
+			return
+		}
+		// Every AVP must be a subslice of the input, and none may claim a
+		// length beyond it.
+		for _, a := range m.AVPs {
+			if len(a.Value) > len(pkt) {
+				t.Fatalf("an AVP value of %d octets came from a %d-octet message",
+					len(a.Value), len(pkt))
+			}
+		}
+	})
+}

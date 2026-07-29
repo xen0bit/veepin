@@ -606,16 +606,19 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 		}, nil
 	case "l2tpv3":
 		var (
-			gateway  = fs.String("gateway", "", "L2TPv3 peer host or IP (required)")
-			port     = fs.Int("port", 0, "peer UDP port (default 1701)")
-			lport    = fs.Int("local-port", 0, "local UDP port to bind (default: same as -port; a static pseudowire is symmetric)")
-			sid      = fs.Uint("session-id", 0, "our session ID: what the peer sends to (required)")
-			psid     = fs.Uint("peer-session-id", 0, "the peer's session ID: what we send to (required)")
-			cookie   = fs.String("cookie", "", "hex cookie WE chose, verified on inbound packets (0, 4 or 8 octets)")
-			pcookie  = fs.String("peer-cookie", "", "hex cookie the PEER chose, written on outbound packets")
-			sublayer = fs.Bool("sublayer", false, "carry the Default L2-Specific Sublayer (the Linux kernel sends one)")
-			tun      = fs.String("tun", "", "TAP interface name (empty = kernel picks)")
-			shape    = fs.Int("shape", 0, "per-flow shaping budget in bytes; pads IP-bearing frames only (0 = off)")
+			gateway   = fs.String("gateway", "", "L2TPv3 peer host or IP (required)")
+			port      = fs.Int("port", 0, "peer UDP port (default 1701)")
+			lport     = fs.Int("local-port", 0, "local UDP port to bind (default: same as -port; a static pseudowire is symmetric)")
+			sid       = fs.Uint("session-id", 0, "our session ID: what the peer sends to (required)")
+			psid      = fs.Uint("peer-session-id", 0, "the peer's session ID: what we send to (required)")
+			cookie    = fs.String("cookie", "", "hex cookie WE chose, verified on inbound packets (0, 4 or 8 octets)")
+			pcookie   = fs.String("peer-cookie", "", "hex cookie the PEER chose, written on outbound packets")
+			sublayer  = fs.Bool("sublayer", false, "carry the Default L2-Specific Sublayer (the Linux kernel sends one)")
+			tun       = fs.String("tun", "", "TAP interface name (empty = kernel picks)")
+			shape     = fs.Int("shape", 0, "per-flow shaping budget in bytes; pads IP-bearing frames only (0 = off)")
+			ccid      = fs.Uint("ccid", 0, "our Control Connection ID; with -peer-ccid, enables HELLO keepalives (RFC 3931 quiescent tunnel)")
+			pccid     = fs.Uint("peer-ccid", 0, "the peer's Control Connection ID")
+			keepalive = fs.Int("keepalive", 0, "HELLO interval in seconds (default 30)")
 		)
 		return func() map[string]string {
 			opts := map[string]string{
@@ -627,6 +630,9 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 				l2tpv3.OptTUN:         *tun,
 				l2tpv3.OptShape:       fmt.Sprint(*shape),
 				l2tpv3.OptLocalPort:   fmt.Sprint(*lport),
+				l2tpv3.OptCCID:        fmt.Sprint(*ccid),
+				l2tpv3.OptPeerCCID:    fmt.Sprint(*pccid),
+				l2tpv3.OptKeepalive:   fmt.Sprint(*keepalive),
 			}
 			if *port != 0 {
 				opts[l2tpv3.OptPort] = fmt.Sprint(*port)

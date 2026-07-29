@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"sync/atomic"
+	"time"
 
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
@@ -27,6 +28,12 @@ type ServerConfig struct {
 	Cookie      string // hex, chosen by us, verified inbound
 	PeerCookie  string // hex, chosen by the peer, written outbound
 	Sublayer    bool
+
+	// CCID / PeerCCID enable the quiescent control connection (HELLO
+	// keepalives). Zero on either disables it, leaving a bare static pseudowire.
+	CCID      uint32
+	PeerCCID  uint32
+	Keepalive time.Duration
 }
 
 // Server is a listening L2TPv3 pseudowire endpoint.
@@ -41,6 +48,9 @@ type Server struct {
 	// another goroutine, so it is atomic rather than a plain field.
 	conn   atomic.Pointer[net.UDPConn]
 	closed atomic.Bool
+
+	// ctl is the quiescent control connection, or nil.
+	ctl *l2tpv3.ControlConn
 }
 
 // NewServer opens the TAP and validates the configuration. Per the package
@@ -64,6 +74,15 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		logger: log.New(log.Writer(), "", log.LstdFlags),
 	}
 	s.pump = l2tpv3.NewPump(tap, s.send, sessCfg, s.logger)
+	if cfg.CCID != 0 && cfg.PeerCCID != 0 {
+		// PeerAddr is left nil: a server does not know where its peer is until
+		// a message arrives and verifies against the CCID it chose.
+		s.ctl = l2tpv3.NewControlConn(l2tpv3.ControlConfig{
+			LocalCCID: cfg.CCID, RemoteCCID: cfg.PeerCCID, HelloInterval: cfg.Keepalive,
+		}, s.send, func() {
+			s.logger.Printf("l2tpv3: control connection lost (peer stopped acknowledging)")
+		})
+	}
 	if cfg.Shape > 0 {
 		mtu := innerMTU(sessCfg, nil)
 		s.pump.SetShaper(dataplane.NewShaper(dataplane.ShapeConfig{Bytes: cfg.Shape}), mtu+ethHeaderLen)
@@ -109,6 +128,9 @@ func (s *Server) ListenAndServe() error {
 		len(s.sess.LocalCookie), len(s.sess.RemoteCookie), s.sess.Sublayer)
 
 	go s.pump.Run()
+	if s.ctl != nil {
+		go s.ctl.Run()
+	}
 
 	// The pump retains nothing past the TAP write, so one buffer is reused for
 	// every datagram rather than copied per packet.
@@ -126,6 +148,13 @@ func (s *Server) ListenAndServe() error {
 			s.logger.Printf("l2tpv3: read: %v (continuing)", err)
 			continue
 		}
+		// Control and data share the port; only the T bit separates them.
+		if l2tpv3.IsControl(buf[:n]) {
+			if s.ctl != nil {
+				s.ctl.HandleControl(buf[:n], from)
+			}
+			continue
+		}
 		s.pump.HandleInbound(buf[:n], from)
 	}
 }
@@ -134,6 +163,9 @@ func (s *Server) ListenAndServe() error {
 func (s *Server) Close() error {
 	if s.closed.Swap(true) {
 		return nil
+	}
+	if s.ctl != nil {
+		s.ctl.Close()
 	}
 	s.pump.Close()
 	if conn := s.conn.Load(); conn != nil {
@@ -178,6 +210,17 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 	if cfg.PeerSession, err = optUint32(opts, OptPeerSession); err != nil {
 		return nil, err
 	}
+	if cfg.CCID, err = optUint32(opts, OptCCID); err != nil {
+		return nil, err
+	}
+	if cfg.PeerCCID, err = optUint32(opts, OptPeerCCID); err != nil {
+		return nil, err
+	}
+	secs, err := optInt(opts, OptKeepalive)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Keepalive = time.Duration(secs) * time.Second
 	return NewServer(cfg)
 }
 
