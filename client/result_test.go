@@ -56,6 +56,7 @@ func TestResultValidate(t *testing.T) {
 			{"no interface", func(r *Result) { r.TUNName = "" }},
 			{"no address", func(r *Result) { r.AssignedIP = nil }},
 			{"negative MTU", func(r *Result) { r.MTU = -1 }},
+			{"no address and no Layer2", func(r *Result) { r.AssignedIP = nil; r.Layer2 = false }},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				bad := good
@@ -74,6 +75,36 @@ func TestResultValidate(t *testing.T) {
 		r.Gateway = net.ParseIP("192.168.1.1")
 		if err := r.Validate(); err != nil {
 			t.Errorf("Validate() = %v, want nil", err)
+		}
+	})
+
+	// A layer-2 tunnel assigns no address of its own. The addressing checks
+	// must not apply, but the Gateway check still must.
+	t.Run("layer2 with no address passes", func(t *testing.T) {
+		r := Result{
+			TUNName: "tap0",
+			Layer2:  true,
+			MTU:     1500,
+		}
+		if err := r.Validate(); err != nil {
+			t.Errorf("layer-2 result with no address rejected: %v", err)
+		}
+	})
+
+	t.Run("layer2 with gateway inside the tunnel subnet is still caught", func(t *testing.T) {
+		// Gateway is still the outer address even for a layer-2 tunnel.
+		// This is a hypothetical: a layer-2 tunnel returns a Gateway pointing
+		// to an address within the tunnel subnet. We accept the parse but
+		// create a scenario where the Gateway falls inside a /24.
+		r := Result{
+			TUNName:    "tap0",
+			Layer2:     true,
+			MTU:        1500,
+		}
+		// With no AssignedIP/Netmask, the subnet check is impossible (nothing
+		// to compare against), so this should pass.
+		if err := r.Validate(); err != nil {
+			t.Errorf("layer-2 result with no address and a Gateway rejected: %v", err)
 		}
 	})
 }

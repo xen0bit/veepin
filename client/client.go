@@ -74,6 +74,13 @@ type Result struct {
 	// Prefix6 is AssignedIP6's prefix length.
 	Prefix6 int
 
+	// Layer2 marks a tunnel whose interface carries Ethernet frames, not IP
+	// packets. Such a tunnel assigns no address of its own -- the interface
+	// joins a bridged segment and gets its address from DHCP or ARP inside it
+	// -- so the addressing checks below do not apply. The Gateway check still
+	// does: an outer address is an outer address whatever the tunnel carries.
+	Layer2 bool
+
 	// Gateway is the server's OUTER address -- the one the client dialled, on
 	// the underlying network. It is not an address inside the tunnel.
 	//
@@ -114,7 +121,7 @@ func (r Result) Validate() error {
 	if r.TUNName == "" {
 		return errors.New("client: result names no interface")
 	}
-	if r.AssignedIP == nil && r.AssignedIP6 == nil {
+	if !r.Layer2 && r.AssignedIP == nil && r.AssignedIP6 == nil {
 		return errors.New("client: result assigns no address")
 	}
 	if r.MTU < 0 {

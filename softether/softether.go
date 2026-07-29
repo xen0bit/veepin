@@ -97,6 +97,7 @@ func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
 
 	return &Session{cs: cs, tap: tap}, client.Result{
 		TUNName: tap.Name(),
+		Layer2:  true,
 		MTU:     1500,
 	}, nil
 }
