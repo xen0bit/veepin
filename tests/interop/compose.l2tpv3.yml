@@ -1,0 +1,52 @@
+# veepin L2TPv3 client -> Linux kernel L2TPv3 pseudowire.
+#
+# The claim: veepin's encoder produces frames the kernel's own l2tp_eth accepts,
+# cookie and sublayer included. Cookies are ASYMMETRIC and 8 octets, because a
+# symmetric cookie cannot catch a swapped-direction bug -- both ends would be
+# wrong the same way and the cell would pass.
+name: veepin-interop-l2tpv3
+
+x-pw: &pw
+  LOCAL_SESSION: "100"
+  PEER_SESSION: "200"
+  UDP_PORT: "1701"
+
+services:
+  l2tpv3-peer:
+    build:
+      context: l2tpv3
+    image: interop-l2tpv3
+    cap_add: [NET_ADMIN, SYS_MODULE]
+    volumes:
+      - ./l2tpv3/peer-entrypoint.sh:/entrypoint.sh:ro
+      - /lib/modules:/lib/modules:ro
+    environment:
+      <<: *pw
+      LOCAL_SESSION: "200"
+      PEER_SESSION: "100"
+      PEER: "veepin-l2tpv3-client"
+      TUN_IP: "10.62.0.1"
+      # What the kernel SENDS; veepin must expect exactly this inbound.
+      COOKIE: "aabbccddaabbccdd"
+      # What the kernel EXPECTS inbound; veepin must send exactly this.
+      PEER_COOKIE: "1122334455667788"
+    command: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-l2tpv3-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      <<: *pw
+      PEER: "l2tpv3-peer"
+      TUN_IP: "10.62.0.2"
+      # Mirrored: what we expect inbound is what the kernel sends, and what we
+      # send is what the kernel expects.
+      COOKIE: "aabbccddaabbccdd"
+      PEER_COOKIE: "1122334455667788"
+    volumes:
+      - ./veepin/l2tpv3-client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

@@ -63,6 +63,11 @@ type Config struct {
 	// ReleaseAddr, if set, reclaims the assignment when the SA is torn down.
 	ReleaseAddr func(Assignment)
 
+	// IPTFS permits AGGFRAG (RFC 9347) on Child SAs whose client asks for it.
+	// The responder never initiates it: USE_AGGFRAG is only agreed when both
+	// peers send the notify, so this gates the echo, not the offer.
+	IPTFS bool
+
 	// DataPath, if set, receives Child SA lifecycle events so a data plane can
 	// route ESP traffic.
 	DataPath DataPath

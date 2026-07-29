@@ -1,0 +1,53 @@
+# veepin L2TPv3 client <-> veepin L2TPv3 server.
+#
+# This cell proves the two halves agree with each other, which is NOT the same as
+# being right -- a swapped cookie direction passes here perfectly. The kernel
+# cells are what prove correctness; this one proves both roles exist and that
+# shaping does not break the pseudowire.
+name: veepin-interop-l2tpv3-self
+
+x-pw: &pw
+  UDP_PORT: "1701"
+  # Shaped in both directions, so the cell also covers the layer-2 shaping path:
+  # IP-bearing frames are padded and trimmed by the inner header, ARP is not
+  # padded at all.
+  SHAPE: "16384"
+
+services:
+  veepin-l2tpv3-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      <<: *pw
+      LOCAL_SESSION: "200"
+      PEER_SESSION: "100"
+      TUN_IP: "10.64.0.1"
+      COOKIE: "1122334455667788"
+      PEER_COOKIE: "aabbccddaabbccdd"
+    volumes:
+      - ./veepin/l2tpv3-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-l2tpv3-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-l2tpv3-server]
+    environment:
+      <<: *pw
+      LOCAL_SESSION: "100"
+      PEER_SESSION: "200"
+      PEER: "veepin-l2tpv3-server"
+      TUN_IP: "10.64.0.2"
+      COOKIE: "aabbccddaabbccdd"
+      PEER_COOKIE: "1122334455667788"
+    volumes:
+      - ./veepin/l2tpv3-client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

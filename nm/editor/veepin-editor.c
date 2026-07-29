@@ -247,27 +247,6 @@ static const FieldDef l2tp_fields[] = {
     { "DNS",           KEY_DNS,      F_DATA },
 };
 
-static const FieldDef junipenc_fields[] = {
-    { "Server",   KEY_SERVER,   F_REQUIRED },
-    { "Username", KEY_USER,     F_REQUIRED },
-    { "Port",     KEY_PORT,     F_DATA },
-    { "Password", KEY_PASSWORD, F_SECRET },
-};
-
-static const FieldDef f5_fields[] = {
-    { "Server",   KEY_SERVER,   F_REQUIRED },
-    { "Username", KEY_USER,     F_REQUIRED },
-    { "Port",     KEY_PORT,     F_DATA },
-    { "Password", KEY_PASSWORD, F_SECRET },
-};
-
-static const FieldDef array_fields[] = {
-    { "Server",   KEY_SERVER,   F_REQUIRED },
-    { "Username", KEY_USER,     F_REQUIRED },
-    { "Port",     KEY_PORT,     F_DATA },
-    { "Password", KEY_PASSWORD, F_SECRET },
-};
-
 static const FieldDef l2tpv3_fields[] = {
     { "Gateway",         KEY_GATEWAY,        F_REQUIRED },
     { "Session ID",      KEY_SESSION_ID,     F_REQUIRED },
@@ -294,9 +273,6 @@ static const ProtocolDef protocols[] = {
     PROTO("pulse",      "Ivanti Connect Secure", pulse_fields),
     PROTO("l2tp",       "L2TP/IPsec",  l2tp_fields),
     PROTO("l2tpv3",     "L2TPv3",      l2tpv3_fields),
-    PROTO("junipenc",   "Juniper NC",  junipenc_fields),
-    PROTO("f5",         "F5 BIG-IP",   f5_fields),
-    PROTO("array",      "Array Networks", array_fields),
     PROTO("amneziawg",  "AmneziaWG",   amneziawg_fields),
     PROTO("softether",  "SoftEther VPN", softether_fields),
 };

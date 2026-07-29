@@ -33,8 +33,8 @@ const DefaultProtocol = "ikev2"
 // cmd package's TestAllSupportedProtocolsRegistered guards that the two lists
 // agree. The insecure "toy" example protocol is intentionally excluded.
 var SupportedProtocols = []string{
-	"amneziawg", "anyconnect", "array", "cisco", "f5", "fortinet", "gp",
-	"ikev2", "junipenc", "l2tp", "l2tpv3", "masque", "nebula", "openvpn",
+	"amneziawg", "anyconnect", "cisco", "fortinet", "gp",
+	"ikev2", "l2tp", "l2tpv3", "masque", "nebula", "openvpn",
 	"pulse", "softether", "ssh", "sstp", "wireguard",
 }
 
@@ -175,8 +175,6 @@ func requireKeys(protocol string, opts map[string]string) error {
 			return nil
 		}
 		return requirePresent(opts, KeyRemote)
-	case "array", "f5", "junipenc":
-		return requirePresent(opts, KeyServer, KeyUser)
 	case "l2tpv3":
 		// Static pseudowire: requires session IDs and a server address.
 		return requirePresent(opts, KeyGateway, KeySessionID, KeyPeerSessionID)
@@ -265,8 +263,6 @@ func secretMissing(protocol string, opts map[string]string) bool {
 	case "l2tp":
 		// Both the IPsec PSK and the PPP password are required.
 		return opts[KeyPSK] == "" || opts[KeyPassword] == ""
-	case "array", "f5", "junipenc":
-		return opts[KeyPassword] == ""
 	case "l2tpv3":
 		// Static pseudowire: no secrets needed.
 		return false

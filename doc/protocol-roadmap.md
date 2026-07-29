@@ -1,8 +1,10 @@
 # What veepin might speak next
 
-Fifteen production protocols are in the tree. This page ranks what could come
+Sixteen production protocols are in the tree. This page ranks what could come
 next, says plainly what each is worth, and carries the implementation plan for
 each — the wire detail, the reuse, the interop shape, and the honest caveats.
+Sections marked *(landed)* have been built; they are kept here rather than
+deleted because the plan and what it cost are the useful record.
 
 The ranking criterion is not "how many protocols" — it is **what a candidate
 teaches the tree that nothing already in it does**. On that measure the SSL-VPN
@@ -14,8 +16,8 @@ least interesting.
 
 | # | Candidate | Filed as | New capability | Effort | Real peer, both roles? |
 |---|---|---|---|---|---|
-| 1 | **L2TPv3 Ethernet pseudowire** (RFC 3931 + 4719) | **New row** | **Layer 2**, actually delivered — the gap SoftEther left open | Medium-high | **Yes** — the Linux kernel, both directions |
-| 2 | **IP-TFS / AGGFRAG** (RFC 9347) | IKEv2 option | **Constant-rate traffic-flow confidentiality** — shapes packet *counts and timing*, which `dataplane/shape.go` explicitly does not | Medium | Partly — strongSwan 6.0.2+ does aggregation; **nobody open-source does the constant-rate half** |
+| 1 | **L2TPv3 Ethernet pseudowire** (RFC 3931 + 4719) *(landed — static)* | **New row** | **Layer 2**, actually delivered — the gap SoftEther left open | Medium-high | **Yes** — the Linux kernel, both directions |
+| 2 | **IP-TFS / AGGFRAG** (RFC 9347) *(partly landed)* | IKEv2 option | **Constant-rate traffic-flow confidentiality** — shapes packet *counts and timing*, which `dataplane/shape.go` explicitly does not | Medium | Partly — strongSwan 6.0.2+ does aggregation; **nobody open-source does the constant-rate half** |
 | 3 | **Nebula relays** | Nebula option | Relay fallback when hole punching fails | Low | Yes — `nebula`, already pinned and green |
 | 4 | **RFC 9329** (TCP encapsulation of IKE and IPsec) | IKEv2 option | IPsec through a UDP-hostile network; brings **libreswan** in as a new peer | Low | Yes — libreswan 4.0+, both roles |
 | 5 | **Rosenpass** | WireGuard option | PQ handshake feeding WireGuard's PSK | Medium | Yes — Rust reference implementation |
@@ -51,7 +53,11 @@ overstate what veepin actually does.
 
 ---
 
-# 1. L2TPv3 Ethernet pseudowire — a new registry row
+# 1. L2TPv3 Ethernet pseudowire — a new registry row *(landed)*
+
+> **Landed**, static pseudowire only, interop-verified against the Linux kernel
+> in both directions. The dynamic control plane (SCCRQ/ICRQ) is still to do —
+> see [What is left](#l2tpv3-what-is-left) at the end of this section.
 
 ## Why this is first
 
@@ -262,7 +268,16 @@ dynamic control plane.
 
 ---
 
-# 2. IP-TFS / AGGFRAG (RFC 9347) — an IKEv2 option
+# 2. IP-TFS / AGGFRAG (RFC 9347) — an IKEv2 option *(partly landed)*
+
+> **Partly landed.** The codec, the `USE_AGGFRAG` negotiation in both roles, and
+> the ESP next-header-144 data path are in and unit-tested. **The constant-rate
+> sender is not** — which is the half that actually delivers traffic-flow
+> confidentiality — and there is no strongSwan interop cell yet, so the wire
+> format is unproven against a real peer. `internal/ikev2/aggfrag/README.md` and
+> `doc/security.md` both say so plainly; do not describe veepin as providing
+> IP-TFS traffic-flow confidentiality until the sender lands.
+
 
 ## Why this is the most interesting candidate
 
@@ -549,14 +564,15 @@ requests whose base is `main`** — a PR stacked on another branch gets no check
 at all. Branch each off the previous, merge in order, and rebase onto `main`
 before expecting CI.
 
-1. **`client.Result.Layer2`** — small, fixes SoftEther's existing spurious
-   `Validate` failure, unblocks L2TPv3. Independently defensible.
-2. **L2TPv3 static pseudowire** — the new row. Verify `modprobe l2tp_eth` on a
-   runner *before* writing code.
-3. **L2TPv3 dynamic control plane** — gated on 2 being green.
-4. **IP-TFS aggregation + fragmentation** — interops against strongSwan.
-5. **IP-TFS constant-rate** — a separate commit, so the interop-verified half is
-   not held hostage to the half no peer can check.
+1. ~~**`client.Result.Layer2`**~~ — **done.** Also fixed SoftEther's existing
+   spurious `Validate` failure.
+2. ~~**L2TPv3 static pseudowire**~~ — **done**, green against the kernel in both
+   directions.
+3. **L2TPv3 dynamic control plane** — gated on 2 being green, which it now is.
+4. **IP-TFS aggregation + fragmentation** — codec, negotiation and data path are
+   in; **the strongSwan cell is not**, so this is not yet proven.
+5. **IP-TFS constant-rate** — not started. This is the half that makes the
+   feature worth having; until it lands, `-iptfs` buys framing, not confidentiality.
 6. **RFC 9329** — plus a plain libreswan-over-UDP cell first, proving the new
    peer image before asserting anything about TCP.
 7. **Nebula relays** — independent of all of the above, and the smallest useful

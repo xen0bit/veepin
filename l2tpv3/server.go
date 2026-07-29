@@ -1,10 +1,11 @@
 package l2tpv3
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
-	"strconv"
+	"sync/atomic"
 
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
@@ -12,123 +13,145 @@ import (
 )
 
 // ServerConfig configures an L2TPv3 Ethernet pseudowire server.
+//
+// "Server" means only "the end that waits": a static pseudowire is symmetric,
+// so the two roles differ in who binds and who dials, not in what they speak.
 type ServerConfig struct {
 	Listen  string // local IP to bind (default 0.0.0.0)
 	Port    int    // UDP port (default 1701)
 	TUNName string // TAP interface name
+	Shape   int    // per-flow downstream shaping budget in bytes
 
-	SessionID   uint32 // our session ID (local)
-	PeerSession uint32 // peer's session ID (remote)
-	Cookie      string // hex-encoded cookie for our receive side
-	PeerCookie  string // hex-encoded cookie for peer's receive side
-	Sublayer    bool   // enable Default L2-Specific Sublayer
+	SessionID   uint32 // ours: what the peer sends to
+	PeerSession uint32 // the peer's: what we send to
+	Cookie      string // hex, chosen by us, verified inbound
+	PeerCookie  string // hex, chosen by the peer, written outbound
+	Sublayer    bool
 }
 
+// Server is a listening L2TPv3 pseudowire endpoint.
 type Server struct {
 	tap    *dataplane.TUN
 	pump   *l2tpv3.Pump
-	conn   *net.UDPConn
 	cfg    ServerConfig
+	sess   *l2tpv3.SessionConfig
 	logger *log.Logger
-	closed chan struct{}
+
+	// conn is written by ListenAndServe and read by the pump's send callback on
+	// another goroutine, so it is atomic rather than a plain field.
+	conn   atomic.Pointer[net.UDPConn]
+	closed atomic.Bool
 }
 
+// NewServer opens the TAP and validates the configuration. Per the package
+// contract it binds nothing -- the socket is opened in ListenAndServe, so the
+// caller can configure host networking first.
 func NewServer(cfg ServerConfig) (*Server, error) {
-	localCookie := parseHex(cfg.Cookie)
-	remoteCookie := parseHex(cfg.PeerCookie)
+	sessCfg, err := sessionConfig(cfg.SessionID, cfg.PeerSession, cfg.Cookie, cfg.PeerCookie, cfg.Sublayer)
+	if err != nil {
+		return nil, err
+	}
 
 	tap, err := dataplane.OpenTAP(cfg.TUNName)
 	if err != nil {
 		return nil, fmt.Errorf("l2tpv3: open TAP: %w", err)
 	}
 
-	logger := log.New(log.Writer(), "l2tpv3: ", log.LstdFlags)
-
 	s := &Server{
 		tap:    tap,
 		cfg:    cfg,
-		logger: logger,
-		closed: make(chan struct{}),
+		sess:   sessCfg,
+		logger: log.New(log.Writer(), "", log.LstdFlags),
 	}
-
-	sessCfg := &l2tpv3.SessionConfig{
-		LocalSessionID:  cfg.SessionID,
-		RemoteSessionID: cfg.PeerSession,
-		LocalCookie:     localCookie,
-		RemoteCookie:    remoteCookie,
-		Sublayer:        cfg.Sublayer,
+	s.pump = l2tpv3.NewPump(tap, s.send, sessCfg, s.logger)
+	if cfg.Shape > 0 {
+		mtu := innerMTU(sessCfg, nil)
+		s.pump.SetShaper(dataplane.NewShaper(dataplane.ShapeConfig{Bytes: cfg.Shape}), mtu+ethHeaderLen)
 	}
-
-	s.pump = l2tpv3.NewPump(tap, s.send, cfg.SessionID, sessCfg, logger)
-
 	return s, nil
 }
 
+// send writes one datagram to the peer the pump learned from inbound traffic.
+// A server has no configured peer address: until a packet arrives and passes
+// the cookie check there is nowhere to send, and to is nil.
 func (s *Server) send(pkt []byte, to *net.UDPAddr) {
-	if s.conn != nil {
-		_, _ = s.conn.WriteToUDP(pkt, to)
+	conn := s.conn.Load()
+	if conn == nil || to == nil {
+		return
 	}
+	_, _ = conn.WriteToUDP(pkt, to)
 }
 
+// ListenAndServe binds the UDP socket and serves until Close.
 func (s *Server) ListenAndServe() error {
 	listenIP := s.cfg.Listen
 	if listenIP == "" {
 		listenIP = "0.0.0.0"
 	}
+	ip := net.ParseIP(listenIP)
+	if ip == nil {
+		return fmt.Errorf("l2tpv3: bad %s %q", OptServerListen, listenIP)
+	}
 	port := s.cfg.Port
 	if port == 0 {
-		port = 1701
+		port = defaultPort
 	}
 
-	addr := &net.UDPAddr{IP: net.ParseIP(listenIP), Port: port}
-	conn, err := net.ListenUDP("udp", addr)
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: ip, Port: port})
 	if err != nil {
 		return fmt.Errorf("l2tpv3: listen: %w", err)
 	}
-	s.conn = conn
+	s.conn.Store(conn)
 	defer conn.Close()
 
-	s.logger.Printf("l2tpv3: listening on %s", addr)
+	s.logger.Printf("l2tpv3: listening on %s:%d, TAP %s, session %d -> %d, cookie %d/%d octets, sublayer %v",
+		listenIP, port, s.tap.Name(), s.sess.LocalSessionID, s.sess.RemoteSessionID,
+		len(s.sess.LocalCookie), len(s.sess.RemoteCookie), s.sess.Sublayer)
 
 	go s.pump.Run()
 
+	// The pump retains nothing past the TAP write, so one buffer is reused for
+	// every datagram rather than copied per packet.
 	buf := make([]byte, 65535)
 	for {
-		n, _, err := conn.ReadFromUDP(buf)
+		n, from, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			select {
-			case <-s.closed:
+			if s.closed.Load() || errors.Is(err, net.ErrClosed) {
 				return nil
-			default:
-				return fmt.Errorf("l2tpv3: read: %w", err)
 			}
+			// A transient read error must not take the server down. This socket
+			// is unconnected, so it does not see the ICMP-port-unreachable case
+			// the client's readLoop has to survive, but the principle is the
+			// same: one bad datagram is not a reason to stop serving every peer.
+			s.logger.Printf("l2tpv3: read: %v (continuing)", err)
+			continue
 		}
-		pkt := make([]byte, n)
-		copy(pkt, buf[:n])
-		s.pump.HandleInbound(pkt)
+		s.pump.HandleInbound(buf[:n], from)
 	}
 }
 
+// Close stops the server. It is safe to call more than once.
 func (s *Server) Close() error {
-	close(s.closed)
+	if s.closed.Swap(true) {
+		return nil
+	}
 	s.pump.Close()
-	if s.conn != nil {
-		s.conn.Close()
+	if conn := s.conn.Load(); conn != nil {
+		conn.Close()
 	}
 	return s.tap.Close()
 }
 
+// TUNName is the TAP interface the pseudowire is bound to.
 func (s *Server) TUNName() string { return s.tap.Name() }
 
-func (s *Server) Gateway() net.IP {
-	// L2TPv3 is L2, no tunnel-internal address.
-	return nil
-}
+// Gateway is nil: a layer-2 pseudowire has no address inside the tunnel, so
+// there is no gateway for a client to point at.
+func (s *Server) Gateway() net.IP { return nil }
 
-func (s *Server) Network() *net.IPNet {
-	// L2TPv3 is L2, no tunnel subnet.
-	return nil
-}
+// Network is nil for the same reason -- the bridged segment's subnet is a
+// property of the bridge, not of this tunnel.
+func (s *Server) Network() *net.IPNet { return nil }
 
 func parseServerOptions(opts map[string]string) (client.Server, error) {
 	cfg := ServerConfig{
@@ -138,26 +161,22 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 		PeerCookie: opts[OptPeerCookie],
 		Sublayer:   opts[OptSublayer] == "true",
 	}
-	if p := opts["listen-port"]; p != "" {
-		n, err := strconv.Atoi(p)
-		if err != nil {
-			return nil, fmt.Errorf("l2tpv3: bad listen-port %q: %w", p, err)
-		}
-		cfg.Port = n
+	var err error
+	// The key is OptPort, matching what serve.go emits. Reading some other
+	// spelling here would leave --port silently ignored, and flags_test would
+	// not catch it: it checks that a flag reaches the option map, not that the
+	// map reaches the config.
+	if cfg.Port, err = optInt(opts, OptPort); err != nil {
+		return nil, err
 	}
-	if v := opts[OptSessionID]; v != "" {
-		n, err := strconv.ParseUint(v, 0, 32)
-		if err != nil {
-			return nil, fmt.Errorf("l2tpv3: bad %s %q: %w", OptSessionID, v, err)
-		}
-		cfg.SessionID = uint32(n)
+	if cfg.Shape, err = optInt(opts, OptServerShape); err != nil {
+		return nil, err
 	}
-	if v := opts[OptPeerSession]; v != "" {
-		n, err := strconv.ParseUint(v, 0, 32)
-		if err != nil {
-			return nil, fmt.Errorf("l2tpv3: bad %s %q: %w", OptPeerSession, v, err)
-		}
-		cfg.PeerSession = uint32(n)
+	if cfg.SessionID, err = optUint32(opts, OptSessionID); err != nil {
+		return nil, err
+	}
+	if cfg.PeerSession, err = optUint32(opts, OptPeerSession); err != nil {
+		return nil, err
 	}
 	return NewServer(cfg)
 }

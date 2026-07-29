@@ -13,15 +13,12 @@ import (
 
 	"github.com/xen0bit/veepin/amneziawg"
 	"github.com/xen0bit/veepin/anyconnect"
-	"github.com/xen0bit/veepin/array"
 	"github.com/xen0bit/veepin/cisco"
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
-	"github.com/xen0bit/veepin/f5"
 	"github.com/xen0bit/veepin/fortinet"
 	"github.com/xen0bit/veepin/gp"
 	"github.com/xen0bit/veepin/ikev2"
-	"github.com/xen0bit/veepin/junipenc"
 	"github.com/xen0bit/veepin/l2tp"
 	"github.com/xen0bit/veepin/l2tpv3"
 	"github.com/xen0bit/veepin/masque"
@@ -609,23 +606,27 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 		}, nil
 	case "l2tpv3":
 		var (
-			server   = fs.String("server", "", "L2TPv3 gateway host or IP (required)")
-			port     = fs.Int("port", 0, "gateway UDP port (default 1701)")
-			sid      = fs.Uint("session-id", 0, "our session ID (required)")
-			psid     = fs.Uint("peer-session-id", 0, "peer's session ID (required)")
-			cookie   = fs.String("cookie", "", "receive-side cookie as hex (optional)")
-			pcookie  = fs.String("peer-cookie", "", "send-side cookie as hex (optional)")
-			sublayer = fs.Bool("sublayer", false, "enable Default L2-Specific Sublayer")
+			gateway  = fs.String("gateway", "", "L2TPv3 peer host or IP (required)")
+			port     = fs.Int("port", 0, "peer UDP port (default 1701)")
+			lport    = fs.Int("local-port", 0, "local UDP port to bind (default: same as -port; a static pseudowire is symmetric)")
+			sid      = fs.Uint("session-id", 0, "our session ID: what the peer sends to (required)")
+			psid     = fs.Uint("peer-session-id", 0, "the peer's session ID: what we send to (required)")
+			cookie   = fs.String("cookie", "", "hex cookie WE chose, verified on inbound packets (0, 4 or 8 octets)")
+			pcookie  = fs.String("peer-cookie", "", "hex cookie the PEER chose, written on outbound packets")
+			sublayer = fs.Bool("sublayer", false, "carry the Default L2-Specific Sublayer (the Linux kernel sends one)")
 			tun      = fs.String("tun", "", "TAP interface name (empty = kernel picks)")
+			shape    = fs.Int("shape", 0, "per-flow shaping budget in bytes; pads IP-bearing frames only (0 = off)")
 		)
 		return func() map[string]string {
 			opts := map[string]string{
-				l2tpv3.OptGateway:     *server,
+				l2tpv3.OptGateway:     *gateway,
 				l2tpv3.OptSessionID:   fmt.Sprint(*sid),
 				l2tpv3.OptPeerSession: fmt.Sprint(*psid),
 				l2tpv3.OptCookie:      *cookie,
 				l2tpv3.OptPeerCookie:  *pcookie,
 				l2tpv3.OptTUN:         *tun,
+				l2tpv3.OptShape:       fmt.Sprint(*shape),
+				l2tpv3.OptLocalPort:   fmt.Sprint(*lport),
 			}
 			if *port != 0 {
 				opts[l2tpv3.OptPort] = fmt.Sprint(*port)
@@ -634,57 +635,6 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 				opts[l2tpv3.OptSublayer] = "true"
 			}
 			return opts
-		}, nil
-	case "junipenc":
-		var (
-			server = fs.String("server", "", "Juniper NC gateway host or IP (required)")
-			port   = fs.Int("port", 0, "gateway TCP port (default 443)")
-			user   = fs.String("user", "", "username (required)")
-			pass   = fs.String("pass", "", "password (required)")
-			tun    = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
-		)
-		return func() map[string]string {
-			return map[string]string{
-				junipenc.OptServer:   *server,
-				junipenc.OptPort:     fmt.Sprint(*port),
-				junipenc.OptUser:     *user,
-				junipenc.OptPassword: *pass,
-				junipenc.OptTUN:      *tun,
-			}
-		}, nil
-	case "f5":
-		var (
-			server = fs.String("server", "", "F5 BIG-IP gateway host or IP (required)")
-			port   = fs.Int("port", 0, "gateway TCP port (default 443)")
-			user   = fs.String("user", "", "username (required)")
-			pass   = fs.String("pass", "", "password (required)")
-			tun    = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
-		)
-		return func() map[string]string {
-			return map[string]string{
-				f5.OptServer:   *server,
-				f5.OptPort:     fmt.Sprint(*port),
-				f5.OptUser:     *user,
-				f5.OptPassword: *pass,
-				f5.OptTUN:      *tun,
-			}
-		}, nil
-	case "array":
-		var (
-			server = fs.String("server", "", "Array Networks AG gateway host or IP (required)")
-			port   = fs.Int("port", 0, "gateway TCP port (default 443)")
-			user   = fs.String("user", "", "username (required)")
-			pass   = fs.String("pass", "", "password (required)")
-			tun    = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
-		)
-		return func() map[string]string {
-			return map[string]string{
-				array.OptServer:   *server,
-				array.OptPort:     fmt.Sprint(*port),
-				array.OptUser:     *user,
-				array.OptPassword: *pass,
-				array.OptTUN:      *tun,
-			}
 		}, nil
 	case "amneziawg":
 		// AmneziaWG is WireGuard with the wire format perturbed, so the tunnel

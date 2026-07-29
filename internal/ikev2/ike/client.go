@@ -15,6 +15,7 @@ import (
 
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/cryptoutil"
+	"github.com/xen0bit/veepin/internal/ikev2/aggfrag"
 	"github.com/xen0bit/veepin/internal/ikev2/eap"
 	"github.com/xen0bit/veepin/internal/ikev2/esp"
 	"github.com/xen0bit/veepin/internal/ikev2/payload"
@@ -98,6 +99,9 @@ type ClientResult struct {
 	IntegKeyOut []byte
 	EncKeyIn    []byte // responder->initiator (we decrypt with this)
 	IntegKeyIn  []byte
+	// AggFrag is true when both peers agreed USE_AGGFRAG, so the Child SA
+	// carries RFC 9347 AGGFRAG payloads instead of plain inner IP packets.
+	AggFrag bool
 }
 
 // Client is an IKEv2 initiator. It performs the handshake and exposes the
@@ -749,6 +753,14 @@ func (c *Client) buildAuthInner(idBody []byte, auth *payload.AuthPayload) (*payl
 	// Advertise MOBIKE (RFC 4555) so the server permits us to relocate this SA's
 	// addresses later without a full re-handshake.
 	addMobikeSupported(b)
+	if c.cfg.IPTFS {
+		// USE_AGGFRAG (RFC 9347 section 3.1). Both peers must send it; if the
+		// responder does not echo it the Child SA carries ordinary inner IP
+		// packets and we fall back, exactly as the PostQuantum path does.
+		b.Add(payload.TypeNotify, false, payload.MarshalNotify(payload.NotifyPayload{
+			Protocol: payload.ProtoNone, Type: payload.UseAggFrag,
+		}))
+	}
 	return b, childOutSPI
 }
 
@@ -856,6 +868,18 @@ func (c *Client) applyAuthResult(inners []payload.RawPayload, childOutSPI uint32
 	res.Suite = es
 	if len(espSA.Proposals) > 0 && len(espSA.Proposals[0].SPI) == 4 {
 		res.OutboundSPI = beU32(espSA.Proposals[0].SPI)
+	}
+
+	// AGGFRAG is on only if the responder echoed USE_AGGFRAG. Assuming it from
+	// our own request would put next-header 144 on the wire against a peer
+	// expecting plain inner IP, and every packet would be dropped as malformed.
+	if c.cfg.IPTFS {
+		res.AggFrag = findNotify(inners, payload.UseAggFrag) != nil
+		if res.AggFrag {
+			c.log.Printf("ike: AGGFRAG (RFC 9347) negotiated; ESP next header %d", aggfrag.ESPNextHeader)
+		} else {
+			c.log.Printf("ike: peer did not offer USE_AGGFRAG; falling back to plain ESP")
+		}
 	}
 
 	// Derive Child keys (initiator perspective).
@@ -1165,6 +1189,9 @@ func (r *ClientResult) BuildTunnel() (dataplane.Tunnel, error) {
 		routes: append(defaultRoute(), defaultRoute6()...),
 	}
 	t.peer.Store(r.ServerAddr)
+	if r.AggFrag {
+		return newAggfragTunnel(t), nil
+	}
 	return t, nil
 }
 

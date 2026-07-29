@@ -223,3 +223,45 @@ veepin implements the parameter-based obfuscation only. The I1-I5 custom
 signature packets, `HeaderProtectionKey`, and protocol mimicry (QUIC/DNS/SIP)
 are not implemented, so a deployment whose peers require them will not
 interoperate.
+
+## L2TPv3 has no authentication and no encryption at all
+
+L2TPv3 (RFC 3931) is a transport, not a security protocol. veepin implements it
+faithfully, which means the pseudowire it builds protects nothing:
+
+- **Every frame crosses the network in the clear.** Anyone on the path reads the
+  full Ethernet frame, inner IP header included.
+- **There is no authentication of any kind.** The only thing standing between an
+  off-path attacker and the bridged segment is the pair (Session ID, cookie), and
+  both are sent in the clear on every packet. One observed packet is enough to
+  inject frames forever after — there is no rekey, no sequence check, and no
+  replay window, because the protocol defines none.
+- **The cookie is not a key.** RFC 3931 §4.1.2.1 is explicit that it guards
+  against mis-delivery and *blind* insertion — an attacker who has to guess
+  8 octets. It is compared in constant time here, which stops a timing oracle,
+  but that is the limit of what it can be asked to do.
+
+This is why L2TPv3 is normally deployed inside IPsec. veepin does not do that for
+you: `veepin connect l2tpv3` builds the pseudowire and nothing else. Run it on a
+trusted network, or inside another veepin tunnel.
+
+Being layer 2, it also inherits everything the SoftEther section above says about
+sharing a broadcast domain: ARP, DHCP and every broadcast frame cross the tunnel,
+and a host on the segment can ARP-spoof any other.
+
+## IP-TFS is implemented as framing, not yet as traffic-flow confidentiality
+
+`-iptfs` negotiates RFC 9347 AGGFRAG and moves the data path onto ESP next-header
+144, with aggregation handled on receive and fragmentation in both directions.
+What it does **not** yet do is the part the RFC is named for: **constant-rate
+transmission**. `-iptfs-rate` is accepted and does nothing.
+
+Without constant-rate transmission the packet counts and inter-packet timing
+still track the traffic inside, exactly as the README's "Scope and limitations"
+says of every other protocol here. Enabling `-iptfs` therefore buys efficiency
+and a standards-track framing — it does not buy the traffic-analysis resistance
+the name suggests. Do not rely on it for that until the sender lands.
+
+The negotiation is also not interop-tested against strongSwan yet, so by this
+repo's own standard the wire format is unproven: a veepin↔veepin test shows the
+two halves agree, not that either is right.

@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 
 	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/veepin/internal/ikev2/aggfrag"
 	"github.com/xen0bit/veepin/internal/ikev2/esp"
 )
 
@@ -96,6 +97,81 @@ func (t *espTunnel) Encapsulate(ipPacket []byte) ([]byte, error) {
 	return t.espSA.Encapsulate(ipPacket, espNextHeader(ipPacket))
 }
 
+// aggfragTunnel is an espTunnel whose Child SA carries RFC 9347 AGGFRAG
+// payloads instead of plain inner IP packets.
+//
+// It is a distinct type rather than a flag on espTunnel because
+// dataplane.MultiTunnel is discovered by type assertion: a method defined on
+// espTunnel would make EVERY IKEv2 tunnel take the pump's aggregating path,
+// including the fifteen protocols-worth of traffic that never negotiated
+// AGGFRAG at all.
+//
+// packer and reasm are each touched by exactly one goroutine -- packer by the
+// pump's outbound loop, reasm by its inbound one -- which is what lets them
+// hold reusable buffers without a lock.
+type aggfragTunnel struct {
+	*espTunnel
+	packer *aggfrag.Packer
+	reasm  *aggfrag.Reassembler
+}
+
+func newAggfragTunnel(t *espTunnel) *aggfragTunnel {
+	return &aggfragTunnel{espTunnel: t, packer: aggfrag.NewPacker(), reasm: aggfrag.NewReassembler()}
+}
+
+// Encapsulate wraps one inner packet in an AGGFRAG payload.
+//
+// One packet per payload is well-formed -- a payload is a run of blocks, and
+// one block is a run of one -- and it is the whole of what fits
+// dataplane.Tunnel's one-in-one-out shape. Aggregating SEVERAL packets per
+// payload, and the constant-rate transmission that makes IP-TFS a
+// traffic-flow-confidentiality mechanism rather than merely a framing one, both
+// need a timer-driven sender that the Tunnel interface has nowhere to put. See
+// internal/ikev2/aggfrag/README.md for what that leaves undone.
+func (t *aggfragTunnel) Encapsulate(ipPacket []byte) ([]byte, error) {
+	payload, _ := t.packer.Pack([][]byte{ipPacket}, aggfrag.HeaderLen+len(ipPacket))
+	return t.espSA.Encapsulate(payload, aggfrag.ESPNextHeader)
+}
+
+// EncapsulatePadded pads the AGGFRAG payload itself rather than adding ESP TFC
+// padding around it, because a pad block is what an AGGFRAG receiver already
+// knows to discard.
+func (t *aggfragTunnel) EncapsulatePadded(ipPacket []byte, minInner int) ([]byte, error) {
+	size := max(aggfrag.HeaderLen+len(ipPacket), minInner)
+	payload, _ := t.packer.Pack([][]byte{ipPacket}, size)
+	return t.espSA.Encapsulate(payload, aggfrag.ESPNextHeader)
+}
+
+// DecapsulateMulti opens one ESP packet and returns every inner packet the
+// AGGFRAG payload inside it held, implementing dataplane.MultiTunnel. A peer
+// that aggregates -- strongSwan does -- puts several in each ESP packet, and
+// returning only the first would drop the rest without a word.
+func (t *aggfragTunnel) DecapsulateMulti(espPkt []byte, out [][]byte) ([][]byte, error) {
+	inner, nextHeader, err := t.espSA.Decapsulate(espPkt)
+	if err != nil {
+		return out, err
+	}
+	switch nextHeader {
+	case 59:
+		return out, errDummyPacket
+	case aggfrag.ESPNextHeader:
+		pkts, err := t.reasm.Feed(inner)
+		if err != nil {
+			return out, err
+		}
+		return append(out, pkts...), nil
+	case 4, 41:
+		// A peer may still send plain inner packets on an AGGFRAG SA -- the
+		// next-header says which, per packet, so both are handled rather than
+		// assumed.
+		if inner = dataplane.TrimToIP(inner); inner == nil {
+			return out, errBadInner
+		}
+		return append(out, inner), nil
+	}
+	return out, errBadInner
+}
+
 // EncapsulatePadded is Encapsulate with RFC 4303 §2.7 traffic-flow-
 // confidentiality padding, implementing dataplane.PaddingTunnel.
 func (t *espTunnel) EncapsulatePadded(ipPacket []byte, minInner int) ([]byte, error) {
@@ -135,6 +211,14 @@ func (t *espTunnel) Decapsulate(espPkt []byte) ([]byte, error) {
 	return inner, nil
 }
 
+// espTunnelIface is what both espTunnel and aggfragTunnel provide: a
+// dataplane.Tunnel that can also be repointed at a new peer address on a MOBIKE
+// roam.
+type espTunnelIface interface {
+	dataplane.Tunnel
+	SetPeerAddr(*net.UDPAddr)
+}
+
 // PumpDataPath connects the IKE layer's Child SA lifecycle to a dataplane.Pump.
 // It implements ike.DataPath (AddChild/RemoveChild) and the espReceiver
 // interface (HandleESP) the server uses for inbound ESP on port 4500.
@@ -144,15 +228,19 @@ func (t *espTunnel) Decapsulate(espPkt []byte) ([]byte, error) {
 type PumpDataPath struct {
 	pump *dataplane.Pump
 
-	mu   sync.Mutex
-	byIn map[uint32]*espTunnel
+	mu sync.Mutex
+	// byIn maps a Child SA's inbound SPI to the tunnel registered with the pump.
+	// It holds the REGISTERED tunnel, which for an AGGFRAG SA is the wrapper and
+	// not the espTunnel inside it: Pump.RemoveTunnel matches by identity, so
+	// removing the inner one would leave the wrapper routing packets forever.
+	byIn map[uint32]espTunnelIface
 }
 
 // NewPumpDataPath wires Child SA events into pump.
 func NewPumpDataPath(pump *dataplane.Pump) *PumpDataPath {
 	return &PumpDataPath{
 		pump: pump,
-		byIn: make(map[uint32]*espTunnel),
+		byIn: make(map[uint32]espTunnelIface),
 	}
 }
 
@@ -171,10 +259,15 @@ func (d *PumpDataPath) AddChild(sa *IKESA, child *ChildSA) {
 		routes: append(hostRoute(child.ClientIP), hostRoute6(child.ClientIP6)...),
 	}
 	t.peer.Store(child.PeerAddr) // initial return address, refined per inbound ESP
+
+	var reg espTunnelIface = t
+	if child.AggFrag {
+		reg = newAggfragTunnel(t)
+	}
 	d.mu.Lock()
-	d.byIn[child.InboundSPI] = t
+	d.byIn[child.InboundSPI] = reg
 	d.mu.Unlock()
-	d.pump.AddTunnel(t)
+	d.pump.AddTunnel(reg)
 }
 
 // RemoveChild tears down the ESP data path for a Child SA.

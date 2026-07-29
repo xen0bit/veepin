@@ -1,118 +1,215 @@
+// Package l2tpv3 implements an L2TPv3 Ethernet pseudowire (RFC 3931 and
+// RFC 4719), client and server.
+//
+// It is the tree's only layer-2 data path: the tunnel carries Ethernet frames
+// on a TAP device rather than IP packets on a TUN, so the interface joins a
+// bridged segment and takes its address from DHCP or ARP inside the tunnel.
+// client.Result.Layer2 marks that, and is why no address is returned here.
+//
+// This package speaks the STATIC pseudowire only -- sessions and cookies are
+// configured at both ends, as `ip l2tp add tunnel` / `ip l2tp add session`
+// configure them on Linux. There is no control plane; SCCRQ/ICRQ negotiation is
+// separate work.
+//
+// SECURITY: L2TPv3 provides no authentication and no encryption. The cookie is
+// a check value against mis-delivery and blind insertion, not a key. Run it
+// over something, or on a network you trust. See doc/security.md.
 package l2tpv3
 
 import (
 	"context"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"strconv"
+	"time"
 
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/l2tpv3"
 )
 
+// Client option keys.
 const (
-	OptGateway = "gateway"
-	OptPort    = "port"
-	OptTUN     = "tun"
-	OptShape   = "shape"
-
-	OptSessionID   = "session-id"
-	OptPeerSession = "peer-session-id"
-	OptCookie      = "cookie"
-	OptPeerCookie  = "peer-cookie"
-	OptSublayer    = "sublayer"
-
-	// Server-side option keys.
-	OptServerListen = "listen"
-	OptServerShape  = "shape"
+	OptGateway     = "gateway"         // peer host or IP (required)
+	OptPort        = "port"            // peer UDP port (default 1701)
+	OptLocalPort   = "local-port"      // local UDP port to bind (default: same as port)
+	OptTUN         = "tun"             // TAP interface name (empty = kernel picks)
+	OptShape       = "shape"           // per-flow shaping budget in bytes (0 = off)
+	OptSessionID   = "session-id"      // our Session ID: what the peer sends to (required)
+	OptPeerSession = "peer-session-id" // the peer's Session ID: what we send to (required)
+	OptCookie      = "cookie"          // hex cookie WE chose, verified on inbound
+	OptPeerCookie  = "peer-cookie"     // hex cookie the PEER chose, written on outbound
+	OptSublayer    = "sublayer"        // carry the Default L2-Specific Sublayer
 )
 
-// Config configures an L2TPv3 Ethernet pseudowire client.
-type Config struct {
-	Server  string // gateway host or IP
-	Port    int    // UDP port (default 1701)
-	TUNName string // TAP interface name
-	Shape   int    // upstream shaping budget
+// Server option keys.
+const (
+	OptServerListen = "listen" // local IP to bind (default 0.0.0.0)
+	OptServerShape  = "shape"  // per-flow downstream shaping budget in bytes
+)
 
-	SessionID   uint32 // our session ID
-	PeerSession uint32 // peer's session ID
-	Cookie      string // hex-encoded receive-side cookie
-	PeerCookie  string // hex-encoded send-side cookie
-	Sublayer    bool   // enable Default L2-Specific Sublayer
+// defaultPort is the IANA port for L2TP; L2TPv3 over UDP uses it too.
+const defaultPort = 1701
+
+// ethHeaderLen is the Ethernet header a TAP frame carries on top of the IP MTU.
+const ethHeaderLen = 14
+
+// Config configures an L2TPv3 pseudowire client.
+type Config struct {
+	Server string // peer host or IP
+	Port   int    // peer UDP port (default 1701)
+	// LocalPort is the port to bind locally. It defaults to Port, NOT to an
+	// ephemeral port: a static pseudowire has no control plane to tell the peer
+	// where to reply, so the peer's configuration fixes both ends (Linux
+	// `udp_sport`/`udp_dport`) and a client that dialled from an ephemeral port
+	// would transmit perfectly and never hear anything back.
+	LocalPort int
+	TUNName   string // TAP interface name
+	Shape     int    // per-flow upstream shaping budget in bytes
+
+	SessionID   uint32 // ours: what the peer sends to
+	PeerSession uint32 // the peer's: what we send to
+	Cookie      string // hex, chosen by us, verified inbound
+	PeerCookie  string // hex, chosen by the peer, written outbound
+	Sublayer    bool
 }
 
-// Dial connects to an L2TPv3 peer over a static Ethernet pseudowire.
+// Dial brings up a static L2TPv3 Ethernet pseudowire.
+//
+// Per the package contract it installs no routes and no addresses; the returned
+// Result carries Layer2, so the caller knows the interface takes its address
+// from inside the bridged segment rather than from here.
 func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
+	sessCfg, err := sessionConfig(cfg.SessionID, cfg.PeerSession, cfg.Cookie, cfg.PeerCookie, cfg.Sublayer)
+	if err != nil {
+		return nil, client.Result{}, err
+	}
 	if cfg.Server == "" {
-		return nil, client.Result{}, fmt.Errorf("l2tpv3: server is required")
+		return nil, client.Result{}, fmt.Errorf("l2tpv3: %s is required", OptGateway)
 	}
 
 	port := cfg.Port
 	if port == 0 {
-		port = 1701
+		port = defaultPort
 	}
 
-	localCookie := parseHex(cfg.Cookie)
-	remoteCookie := parseHex(cfg.PeerCookie)
-
-	sessCfg := &l2tpv3.SessionConfig{
-		LocalSessionID:  cfg.SessionID,
-		RemoteSessionID: cfg.PeerSession,
-		LocalCookie:     localCookie,
-		RemoteCookie:    remoteCookie,
-		Sublayer:        cfg.Sublayer,
-	}
-
-	serverAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(cfg.Server, strconv.Itoa(port)))
+	peer, err := net.ResolveUDPAddr("udp", net.JoinHostPort(cfg.Server, strconv.Itoa(port)))
 	if err != nil {
-		return nil, client.Result{}, fmt.Errorf("l2tpv3: resolve: %w", err)
+		return nil, client.Result{}, fmt.Errorf("l2tpv3: resolve %q: %w", cfg.Server, err)
 	}
-	sessCfg.PeerAddr = serverAddr
+	sessCfg.PeerAddr = peer
 
-	conn, err := net.DialUDP("udp", nil, serverAddr)
+	localPort := cfg.LocalPort
+	if localPort == 0 {
+		localPort = port
+	}
+	conn, err := net.DialUDP("udp", &net.UDPAddr{Port: localPort}, peer)
 	if err != nil {
-		return nil, client.Result{}, fmt.Errorf("l2tpv3: dial: %w", err)
+		return nil, client.Result{}, fmt.Errorf("l2tpv3: bind :%d: %w", localPort, err)
 	}
 
 	tap, err := dataplane.OpenTAP(cfg.TUNName)
 	if err != nil {
 		conn.Close()
-		return nil, client.Result{}, err
+		return nil, client.Result{}, fmt.Errorf("l2tpv3: open TAP: %w", err)
 	}
 
-	logger := log.New(log.Writer(), "l2tpv3: ", log.LstdFlags)
+	logger := log.New(log.Writer(), "", log.LstdFlags)
+	pump := l2tpv3.NewPump(tap, func(pkt []byte, _ *net.UDPAddr) {
+		// The socket is connected, so the destination is already fixed and the
+		// pump's learned reply address is unused on this side.
+		_, _ = conn.Write(pkt)
+	}, sessCfg, logger)
 
-	pump := l2tpv3.NewPump(tap,
-		func(pkt []byte, to *net.UDPAddr) {
-			_, _ = conn.Write(pkt)
-		},
-		cfg.SessionID, sessCfg, logger)
-
-	s := &Session{
-		conn: conn,
-		tap:  tap,
-		pump: pump,
-		done: make(chan struct{}),
+	mtu := innerMTU(sessCfg, peer.IP)
+	if cfg.Shape > 0 {
+		pump.SetShaper(dataplane.NewShaper(dataplane.ShapeConfig{Bytes: cfg.Shape}), mtu+ethHeaderLen)
 	}
+
+	s := &Session{conn: conn, tap: tap, pump: pump, done: make(chan struct{})}
 	go pump.Run()
 	go s.readLoop()
 
-	res := client.Result{
+	logger.Printf("l2tpv3: pseudowire up on %s: :%d -> %s, session %d -> %d, cookie %d/%d octets, sublayer %v, MTU %d",
+		tap.Name(), localPort, peer, sessCfg.LocalSessionID, sessCfg.RemoteSessionID,
+		len(sessCfg.LocalCookie), len(sessCfg.RemoteCookie), sessCfg.Sublayer, mtu)
+
+	return s, client.Result{
 		TUNName: tap.Name(),
 		Layer2:  true,
-		Gateway: net.ParseIP(cfg.Server),
-		MTU:     1446,
-	}
-	if len(localCookie) >= 8 {
-		res.MTU = 1438
-	}
-
-	return s, res, nil
+		// The RESOLVED peer address, not cfg.Server: net.ParseIP of a hostname
+		// is nil, and a nil Gateway silently means "no host route", so a
+		// hostname would leave the tunnel's own packets free to recurse into it.
+		Gateway: peer.IP,
+		MTU:     mtu,
+	}, nil
 }
 
-// Session wraps an L2TPv3 tunnel.
+// innerMTU is the largest IP packet that fits without fragmenting the outer
+// datagram:
+//
+//	1500 outer
+//	 -20 IPv4 (or -40 IPv6) underlay header
+//	  -8 UDP
+//	  -8 L2TPv3 flags/ver, reserved and Session ID
+//	  -N cookie WE SEND (RemoteCookie -- the peer's, on our outbound packets)
+//	  -4 sublayer, when the session carries one
+//	 -14 Ethernet header inside the tunnel
+//
+// which is 1446 for a cookieless session with a sublayer, and 1438 when it
+// carries an 8-octet cookie.
+func innerMTU(c *l2tpv3.SessionConfig, peer net.IP) int {
+	underlay := 20
+	if peer != nil && peer.To4() == nil {
+		underlay = 40
+	}
+	return 1500 - underlay - 8 - c.Overhead() - ethHeaderLen
+}
+
+// sessionConfig validates and assembles the session shared by both roles.
+func sessionConfig(local, remote uint32, cookie, peerCookie string, sublayer bool) (*l2tpv3.SessionConfig, error) {
+	localCookie, err := parseCookie(OptCookie, cookie)
+	if err != nil {
+		return nil, err
+	}
+	remoteCookie, err := parseCookie(OptPeerCookie, peerCookie)
+	if err != nil {
+		return nil, err
+	}
+	c := &l2tpv3.SessionConfig{
+		LocalSessionID:  local,
+		RemoteSessionID: remote,
+		LocalCookie:     localCookie,
+		RemoteCookie:    remoteCookie,
+		Sublayer:        sublayer,
+	}
+	if err := c.Validate(); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// parseCookie decodes a hex cookie. A malformed one is an error rather than a
+// silently shortened cookie: the cookie is the session's only check value, and
+// quietly dropping half of it would weaken the tunnel without saying so.
+func parseCookie(opt, s string) ([]byte, error) {
+	if s == "" {
+		return nil, nil
+	}
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		return nil, fmt.Errorf("l2tpv3: bad %s %q: %w", opt, s, err)
+	}
+	if !l2tpv3.ValidCookieLen(len(b)) {
+		return nil, fmt.Errorf("l2tpv3: %s is %d octets: %w", opt, len(b), l2tpv3.ErrCookieLen)
+	}
+	return b, nil
+}
+
+// Session is an established pseudowire.
 type Session struct {
 	conn *net.UDPConn
 	tap  *dataplane.TUN
@@ -121,29 +218,59 @@ type Session struct {
 }
 
 func (s *Session) readLoop() {
+	// The pump writes the frame to the TAP before returning and retains
+	// nothing, so the read buffer is reused rather than copied per packet.
 	buf := make([]byte, 65535)
 	for {
 		n, err := s.conn.Read(buf)
 		if err != nil {
+			// Only a closed socket ends the loop. Everything else is transient
+			// and must not: this socket is CONNECTED, so Linux reports an ICMP
+			// port-unreachable for an earlier send as an error on the next read.
+			// A pseudowire whose peer has not finished configuring its tunnel
+			// generates exactly that, and returning here would kill the receive
+			// path permanently for a condition that resolves in a second. It
+			// cost an interop cell to find, because a veepin-to-veepin test has
+			// both ends bound before either sends and never produces the ICMP.
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
 			select {
 			case <-s.done:
+				return
 			default:
 			}
-			return
+			continue
 		}
-		pkt := make([]byte, n)
-		copy(pkt, buf[:n])
-		s.pump.HandleInbound(pkt)
+		s.pump.HandleInbound(buf[:n], nil)
 	}
 }
 
+// Wait blocks until the context is cancelled or the session is closed.
 func (s *Session) Wait(ctx context.Context) error {
-	<-ctx.Done()
-	return ctx.Err()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.done:
+		return nil
+	}
 }
 
+// Probe reports how long the pseudowire has been silent, implementing
+// client.Prober. A static pseudowire sends nothing of its own, so without this
+// a dead peer is indistinguishable from an idle one.
+func (s *Session) Probe(context.Context) (time.Duration, error) {
+	return s.pump.IdleFor(), nil
+}
+
+// Close tears the pseudowire down. It is safe to call more than once.
 func (s *Session) Close() error {
-	close(s.done)
+	select {
+	case <-s.done:
+		return nil
+	default:
+		close(s.done)
+	}
 	s.pump.Close()
 	s.conn.Close()
 	return s.tap.Close()
@@ -157,35 +284,47 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 		PeerCookie: opts[OptPeerCookie],
 		Sublayer:   opts[OptSublayer] == "true",
 	}
-	if p := opts[OptPort]; p != "" {
-		n, err := strconv.Atoi(p)
-		if err != nil {
-			return nil, fmt.Errorf("l2tpv3: bad %s %q: %w", OptPort, p, err)
-		}
-		cfg.Port = n
+	var err error
+	if cfg.Port, err = optInt(opts, OptPort); err != nil {
+		return nil, err
 	}
-	if v := opts[OptSessionID]; v != "" {
-		n, err := strconv.ParseUint(v, 0, 32)
-		if err != nil {
-			return nil, fmt.Errorf("l2tpv3: bad %s %q: %w", OptSessionID, v, err)
-		}
-		cfg.SessionID = uint32(n)
+	if cfg.LocalPort, err = optInt(opts, OptLocalPort); err != nil {
+		return nil, err
 	}
-	if v := opts[OptPeerSession]; v != "" {
-		n, err := strconv.ParseUint(v, 0, 32)
-		if err != nil {
-			return nil, fmt.Errorf("l2tpv3: bad %s %q: %w", OptPeerSession, v, err)
-		}
-		cfg.PeerSession = uint32(n)
+	if cfg.Shape, err = optInt(opts, OptShape); err != nil {
+		return nil, err
 	}
-	if v := opts[OptShape]; v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 0 {
-			return nil, fmt.Errorf("l2tpv3: bad %s %q", OptShape, v)
-		}
-		cfg.Shape = n
+	if cfg.SessionID, err = optUint32(opts, OptSessionID); err != nil {
+		return nil, err
+	}
+	if cfg.PeerSession, err = optUint32(opts, OptPeerSession); err != nil {
+		return nil, err
 	}
 	return dialer{cfg}, nil
+}
+
+func optInt(opts map[string]string, key string) (int, error) {
+	v := opts[key]
+	if v == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("l2tpv3: bad %s %q", key, v)
+	}
+	return n, nil
+}
+
+func optUint32(opts map[string]string, key string) (uint32, error) {
+	v := opts[key]
+	if v == "" {
+		return 0, nil
+	}
+	n, err := strconv.ParseUint(v, 0, 32)
+	if err != nil {
+		return 0, fmt.Errorf("l2tpv3: bad %s %q: %w", key, v, err)
+	}
+	return uint32(n), nil
 }
 
 type dialer struct{ cfg Config }
@@ -196,19 +335,4 @@ func (d dialer) Dial(ctx context.Context) (client.Session, client.Result, error)
 
 func init() {
 	client.Register("l2tpv3", parseOptions)
-}
-
-func parseHex(s string) []byte {
-	if s == "" {
-		return nil
-	}
-	out := make([]byte, 0, len(s)/2)
-	for i := 0; i+1 < len(s); i += 2 {
-		var v byte
-		if _, err := fmt.Sscanf(s[i:i+2], "%02x", &v); err != nil {
-			return out
-		}
-		out = append(out, v)
-	}
-	return out
 }

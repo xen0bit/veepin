@@ -196,6 +196,14 @@ var interopMatrix = []interopRow{
 		Self:     interopCell{Tests: []string{"TestInteropAmneziaWGSelf"}, Label: "(H1-H4, S1-S4, junk)"},
 	},
 	{
+		Protocol: "L2TPv3",
+		Client: interopCell{Tests: []string{"TestInteropVeepinClientKernelL2TPv3Server"},
+			Label: "Linux kernel (`ip l2tp`, 8-octet asymmetric cookies)"},
+		Server: interopCell{Tests: []string{"TestInteropKernelL2TPv3ClientVeepinServer"},
+			Label: "Linux kernel (`ip l2tp`)"},
+		Self: interopCell{Tests: []string{"TestInteropL2TPv3Self"}, Label: "(shaped)"},
+	},
+	{
 		Protocol: "TOY*",
 		Client:   interopCell{Tests: []string{"TestInteropVeepinToyClientReferencePeer"}, Label: "independent Python peer"},
 		Server:   interopCell{Tests: []string{"TestInteropToyClientVeepinServer"}, Label: "independent Python peer"},

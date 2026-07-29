@@ -1,0 +1,52 @@
+# Linux kernel L2TPv3 pseudowire -> veepin L2TPv3 server.
+#
+# The other direction: veepin's decoder must accept what the kernel emits --
+# including the all-zeros Default L2-Specific Sublayer the kernel sends even with
+# sequencing off, which a decoder that infers presence from content mis-frames on
+# every packet.
+name: veepin-interop-l2tpv3-server
+
+x-pw: &pw
+  UDP_PORT: "1701"
+
+services:
+  veepin-l2tpv3-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      <<: *pw
+      LOCAL_SESSION: "200"
+      PEER_SESSION: "100"
+      TUN_IP: "10.63.0.1"
+      # Mirrors the kernel below: iproute2's `cookie` is what the kernel PUTS ON
+      # ITS OUTBOUND packets (confirmed by tcpdump), so it is what veepin must
+      # expect inbound; its `peer_cookie` is what it expects, so it is what
+      # veepin must send.
+      COOKIE: "aabbccddaabbccdd"
+      PEER_COOKIE: "1122334455667788"
+    volumes:
+      - ./veepin/l2tpv3-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  l2tpv3-peer:
+    build:
+      context: l2tpv3
+    image: interop-l2tpv3
+    cap_add: [NET_ADMIN, SYS_MODULE]
+    depends_on: [veepin-l2tpv3-server]
+    volumes:
+      - ./l2tpv3/peer-entrypoint.sh:/entrypoint.sh:ro
+      - /lib/modules:/lib/modules:ro
+    environment:
+      <<: *pw
+      LOCAL_SESSION: "100"
+      PEER_SESSION: "200"
+      PEER: "veepin-l2tpv3-server"
+      TUN_IP: "10.63.0.2"
+      COOKIE: "aabbccddaabbccdd"
+      PEER_COOKIE: "1122334455667788"
+    command: ["/bin/sh", "/entrypoint.sh"]

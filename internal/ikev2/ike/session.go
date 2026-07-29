@@ -67,6 +67,10 @@ type ChildSA struct {
 	// PeerAddr is the transport address to send encapsulated ESP to (may have
 	// floated to :4500 after NAT-T).
 	PeerAddr *net.UDPAddr
+	// AggFrag is set when the peer advertised USE_AGGFRAG and we echoed it, so
+	// this Child SA carries RFC 9347 AGGFRAG payloads with ESP next header 144
+	// instead of plain inner IP packets.
+	AggFrag bool
 }
 
 // IKESA holds all state for one IKE Security Association.

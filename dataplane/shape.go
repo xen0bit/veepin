@@ -206,6 +206,54 @@ func (s *Shaper) sweep(now int64) {
 	}
 }
 
+// Ethernet header constants for the layer-2 shaping path.
+const (
+	ethHeaderLen  = 14
+	ethTypeIPv4   = 0x0800
+	ethTypeIPv6   = 0x86dd
+	ethTypeOffset = 12
+)
+
+// ShapeableFrame reports whether an Ethernet frame may be padded.
+//
+// Only IPv4 and IPv6 payloads may. Padding works everywhere else in this tree
+// because the receiver trims by the inner IP header's own Total Length, with
+// nothing negotiated -- see TrimToIP. Ethernet has no length field of its own,
+// so a padded ARP or STP frame has nothing to trim by and would reach the peer
+// with trailing rubbish attached. Rather than pad what cannot be trimmed, a
+// layer-2 shaper leaves non-IP frames alone; they are a small and bursty
+// minority, which is stated plainly in the caveats rather than papered over.
+func ShapeableFrame(frame []byte) bool {
+	if len(frame) < ethHeaderLen {
+		return false
+	}
+	switch binary.BigEndian.Uint16(frame[ethTypeOffset:]) {
+	case ethTypeIPv4, ethTypeIPv6:
+		return true
+	}
+	return false
+}
+
+// TargetFrame is Target for an Ethernet frame: it keys the flow off the
+// encapsulated IP packet, so a layer-2 tunnel shapes by the same per-flow
+// budget as every layer-3 one. mtu is the frame-level target, Ethernet header
+// included.
+//
+// A frame carrying anything but IP returns 0 -- see ShapeableFrame.
+func (s *Shaper) TargetFrame(frame []byte, mtu int) int {
+	if s == nil {
+		return 0
+	}
+	if !ShapeableFrame(frame) {
+		return 0
+	}
+	inner := s.Target(frame[ethHeaderLen:], mtu-ethHeaderLen)
+	if inner <= 0 {
+		return 0
+	}
+	return inner + ethHeaderLen
+}
+
 // flowKeyOf extracts the inner 5-tuple. Ports are read only for the transports
 // that have them at a fixed offset and only from a first fragment; anything
 // else groups by addresses and protocol alone, which is coarser but never

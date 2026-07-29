@@ -67,13 +67,25 @@ func runServe(args []string) error {
 
 	// 2. Host networking: the server owns the tunnel, not the host's routing, so
 	// the operator opts into (or performs) the address/forwarding/NAT setup.
-	if *setup {
+	//
+	// A layer-2 server (L2TPv3) has no tunnel subnet and no gateway inside the
+	// tunnel: the interface joins a bridged segment and takes its address from
+	// DHCP or ARP in there. Network() is nil for those, so neither the NAT setup
+	// nor the advice below applies -- and maskBits would dereference the nil.
+	switch {
+	case srv.Network() == nil:
+		logger.Printf("layer-2 server: %s carries Ethernet frames and assigns no address.", srv.TUNName())
+		logger.Printf("Bring it up and bridge or address it yourself:")
+		logger.Printf("    sudo ip link set %s up", srv.TUNName())
+		logger.Printf("    sudo ip link set %s master br0    # or: ip addr add <addr>/<len> dev %s",
+			srv.TUNName(), srv.TUNName())
+	case *setup:
 		if err := setupNetworking(srv.TUNName(), srv.Gateway(), srv.Network(), *wanIface); err != nil {
 			logger.Printf("-setup-nat: %v (continuing; configure manually)", err)
 		} else {
 			logger.Printf("configured %s gateway=%s and NAT via %s", srv.TUNName(), srv.Gateway(), *wanIface)
 		}
-	} else {
+	default:
 		logger.Printf("TUN not auto-configured. Bring it up with:")
 		logger.Printf("    sudo ip addr add %s/%d dev %s", srv.Gateway(), maskBits(srv.Network()), srv.TUNName())
 		logger.Printf("    sudo ip link set %s up", srv.TUNName())
@@ -90,7 +102,11 @@ func runServe(args []string) error {
 		_ = srv.Close()
 	}()
 
-	logger.Printf("%s server ready on %s (clients assigned from %s)", protocol, srv.TUNName(), srv.Network())
+	if srv.Network() != nil {
+		logger.Printf("%s server ready on %s (clients assigned from %s)", protocol, srv.TUNName(), srv.Network())
+	} else {
+		logger.Printf("%s server ready on %s (layer 2; no address assignment)", protocol, srv.TUNName())
+	}
 	if err := srv.ListenAndServe(); err != nil {
 		return fmt.Errorf("serve: %w", err)
 	}
@@ -116,9 +132,11 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			key      = fs.String("key", "", "server private-key PEM (with -cert)")
 			clientCA = fs.String("client-ca", "", "CA bundle PEM enabling client certificate auth (optional)")
 			shape    = fs.Int("shape", 0, "per-flow downstream shaping budget in bytes: pads each inner flow's first N bytes to the tunnel MTU, hiding an inner TLS handshake's size pattern (0 = off, 16384 recommended)")
+			iptfs    = fs.Bool("iptfs", false, "permit AGGFRAG / IP-TFS (RFC 9347) for clients that request it")
 		)
 		return func() map[string]string {
 			return map[string]string{
+				ikev2.OptServerIPTFS:    fmt.Sprint(*iptfs),
 				ikev2.OptServerListen:   *listen,
 				ikev2.OptServerPublic:   *public,
 				ikev2.OptServerPSK:      *psk,
@@ -669,15 +687,17 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 		var (
 			listen   = fs.String("listen", "", "local IP to bind (default 0.0.0.0)")
 			port     = fs.Int("port", 0, "UDP port (default 1701)")
-			sid      = fs.Uint("session-id", 0, "our session ID (required)")
-			psid     = fs.Uint("peer-session-id", 0, "peer's session ID (required)")
-			cookie   = fs.String("cookie", "", "receive-side cookie as hex (optional)")
-			pcookie  = fs.String("peer-cookie", "", "send-side cookie as hex (optional)")
-			sublayer = fs.Bool("sublayer", false, "enable Default L2-Specific Sublayer")
+			sid      = fs.Uint("session-id", 0, "our session ID: what the peer sends to (required)")
+			psid     = fs.Uint("peer-session-id", 0, "the peer's session ID: what we send to (required)")
+			cookie   = fs.String("cookie", "", "hex cookie WE chose, verified on inbound packets (0, 4 or 8 octets)")
+			pcookie  = fs.String("peer-cookie", "", "hex cookie the PEER chose, written on outbound packets")
+			sublayer = fs.Bool("sublayer", false, "carry the Default L2-Specific Sublayer (the Linux kernel sends one)")
 			tun      = fs.String("tun", "", "TAP interface name (empty = kernel picks)")
+			shape    = fs.Int("shape", 0, "per-flow downstream shaping budget in bytes; pads IP-bearing frames only (0 = off)")
 		)
 		return func() map[string]string {
 			opts := map[string]string{
+				l2tpv3.OptServerShape:  fmt.Sprint(*shape),
 				l2tpv3.OptServerListen: *listen,
 				l2tpv3.OptTUN:          *tun,
 				l2tpv3.OptSessionID:    fmt.Sprint(*sid),
@@ -699,7 +719,12 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 	}
 }
 
+// maskBits is the prefix length of a tunnel subnet. A nil network -- a layer-2
+// server, which has no subnet of its own -- reports 0 rather than panicking.
 func maskBits(n *net.IPNet) int {
+	if n == nil {
+		return 0
+	}
 	ones, _ := n.Mask.Size()
 	return ones
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 
+	"github.com/xen0bit/veepin/internal/ikev2/aggfrag"
 	"github.com/xen0bit/veepin/internal/ikev2/eap"
 	"github.com/xen0bit/veepin/internal/ikev2/payload"
 )
@@ -348,6 +349,17 @@ func (s *Server) finishIKEAuth(sa *IKESA, hdr payload.Header, inners []payload.R
 		}))
 		b.Add(payload.TypeTSi, false, tsiPay.Body)
 		b.Add(payload.TypeTSr, false, tsrPay.Body)
+		// USE_AGGFRAG (RFC 9347 section 3.1) is only agreed when BOTH peers send
+		// it, so the echo is what turns it on. Echoing unconditionally would put
+		// next-header 144 on the wire against a client that never asked for it.
+		if s.cfg.IPTFS && findNotify(inners, payload.UseAggFrag) != nil {
+			respChild.AggFrag = true
+			b.Add(payload.TypeNotify, false, payload.MarshalNotify(payload.NotifyPayload{
+				Protocol: payload.ProtoNone, Type: payload.UseAggFrag,
+			}))
+			s.log.Printf("ike: AGGFRAG (RFC 9347) negotiated; ESP next header %d",
+				aggfrag.ESPNextHeader)
+		}
 	} else if haveChild {
 		b.Add(payload.TypeNotify, false, payload.MarshalNotify(payload.NotifyPayload{
 			Protocol: payload.ProtoNone, Type: payload.TSUnacceptable,

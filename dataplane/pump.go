@@ -58,6 +58,19 @@ type PaddingTunnel interface {
 	EncapsulatePadded(ipPacket []byte, minInner int) ([]byte, error)
 }
 
+// MultiTunnel is a Tunnel whose datagrams can carry more than one inner packet.
+// Most cannot -- one datagram in, one packet out -- but an aggregating format
+// such as RFC 9347 AGGFRAG puts several in each one, and returning only the
+// first would silently drop the rest.
+//
+// DecapsulateMulti appends the inner packets to out and returns it, so a caller
+// with a scratch slice reassembles without allocating. The returned packets are
+// only valid until the next call.
+type MultiTunnel interface {
+	Tunnel
+	DecapsulateMulti(pkt []byte, out [][]byte) ([][]byte, error)
+}
+
 // Sender writes an encapsulated datagram to a peer. Any protocol-specific
 // framing (IKEv2's non-ESP marker, for instance) is the sender's business.
 type Sender func(pkt []byte, to *net.UDPAddr)
@@ -122,6 +135,10 @@ type Pump struct {
 	// bound. A protocol whose peer sends periodic keepalives turns this into a
 	// client.Prober with a few lines (see IdleFor).
 	lastInbound atomic.Int64
+
+	// multiScratch is the reusable packet slice DecapsulateMulti appends into.
+	// Only the single inbound goroutine touches it, so it needs no lock.
+	multiScratch [][]byte
 
 	mu     sync.RWMutex
 	byKey  map[uint32]Tunnel // inbound demux
@@ -281,6 +298,10 @@ func (p *Pump) IdleFor() time.Duration {
 // valid ESP return address). Pass nil on a connected socket where the source is
 // implicit (client mode).
 func (p *Pump) HandleInbound(pkt []byte, from *net.UDPAddr) {
+	if t, ok := p.multiTunnelFor(pkt, from); ok {
+		p.handleInboundMulti(t, pkt)
+		return
+	}
 	inner, ok := p.decapInbound(pkt, from)
 	if !ok {
 		return
@@ -288,6 +309,53 @@ func (p *Pump) HandleInbound(pkt []byte, from *net.UDPAddr) {
 	if _, err := p.writeTUN(inner); err != nil {
 		if p.log != nil {
 			p.log.Printf("dataplane: TUN write failed: %v", err)
+		}
+	}
+}
+
+// multiTunnelFor resolves an inbound datagram to a MultiTunnel, if its tunnel is
+// one. It is the only extra work an ordinary tunnel pays for the aggregating
+// case: one map lookup that decapInbound would have done anyway.
+func (p *Pump) multiTunnelFor(pkt []byte, from *net.UDPAddr) (MultiTunnel, bool) {
+	key, ok := p.demux(pkt)
+	if !ok {
+		return nil, false
+	}
+	p.mu.RLock()
+	t := p.byKey[key]
+	p.mu.RUnlock()
+	mt, ok := t.(MultiTunnel)
+	if !ok {
+		return nil, false
+	}
+	if from != nil {
+		if u, ok := t.(interface{ SetPeerAddr(*net.UDPAddr) }); ok {
+			u.SetPeerAddr(from)
+		}
+	}
+	return mt, true
+}
+
+// handleInboundMulti delivers every inner packet one aggregated datagram holds.
+func (p *Pump) handleInboundMulti(t MultiTunnel, pkt []byte) {
+	inners, err := t.DecapsulateMulti(pkt, p.multiScratch[:0])
+	if err != nil {
+		if p.log != nil {
+			p.log.Printf("dataplane: aggregated decap failed: %v", err)
+		}
+		return
+	}
+	p.multiScratch = inners[:0]
+	p.lastInbound.Store(time.Now().UnixNano())
+	for _, inner := range inners {
+		if len(inner) == 0 {
+			continue
+		}
+		if _, err := p.writeTUN(inner); err != nil {
+			if p.log != nil {
+				p.log.Printf("dataplane: TUN write failed: %v", err)
+			}
+			return
 		}
 	}
 }

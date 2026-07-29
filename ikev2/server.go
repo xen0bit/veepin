@@ -73,6 +73,11 @@ type ServerConfig struct {
 	// dataplane.DefaultShapeBytes is a reasonable value.
 	Shape int
 
+	// IPTFS permits AGGFRAG (RFC 9347) on Child SAs whose client asks for it.
+	// The responder never initiates it -- USE_AGGFRAG is only agreed when both
+	// peers send the notify -- so this gates the echo, not the offer.
+	IPTFS bool
+
 	// Logger receives progress logs; nil discards them.
 	Logger *log.Logger
 }
@@ -174,6 +179,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		PublicIP:   cfg.PublicIP,
 		ServerCert: serverCert,
 		ClientCAs:  clientCAs,
+		IPTFS:      cfg.IPTFS,
 		Logger:     logger,
 		AssignAddr: func() (ike.Assignment, error) {
 			ip, aerr := pool.Allocate()
@@ -268,6 +274,7 @@ const (
 	OptServerKey      = "key"       // server private-key PEM
 	OptServerClientCA = "client-ca" // CA bundle PEM enabling client certificate auth
 	OptServerShape    = "shape"     // per-flow downstream shaping budget in bytes (0 = off)
+	OptServerIPTFS    = "iptfs"     // permit AGGFRAG (RFC 9347) for clients that request it
 )
 
 func init() { client.RegisterServer("ikev2", parseServerOptions) }
@@ -304,6 +311,7 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 	if v := opts[OptServerDNS]; v != "" {
 		cfg.DNS = parseIPList(v)
 	}
+	cfg.IPTFS = opts[OptServerIPTFS] == "true"
 	if v := opts[OptServerShape]; v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 0 {
