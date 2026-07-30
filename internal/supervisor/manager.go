@@ -44,18 +44,39 @@ type Status struct {
 }
 
 // running is the live handle for one listener: the constructed server, the
-// goroutine that owns it until Close returns, and the mutex guarding rebuild.
-// Manager.mu protects the listeners map; one run's own mutex guards the
-// server/ServeErr fields against a rebuild racing the status/read path.
+// goroutine that owns it until Close returns, and the state the management API
+// reads back.
+//
+// mu guards every field below it, without exception. That is stricter than the
+// call graph makes it look, and deliberately so: Manager.Status releases
+// Manager.mu before it reads a handle, so Manager.mu is NOT a second layer of
+// protection over these fields the way it is over the listeners map. An earlier
+// version wrote cfg/state/serveErr on the rebuild-failed path while holding only
+// Manager.mu and raced Status for exactly that reason.
+//
+// done is also the generation marker. stopLocked clears it, so a serve goroutine
+// that returns late — after the 5s wait gave up, or after a rebuild already
+// installed a new server — can tell that the state it is holding is stale and
+// decline to publish it.
 type running struct {
+	mu       sync.Mutex
 	cfg      ListenerConfig
 	srv      client.Server
-	mu       sync.Mutex
 	state    string
 	since    time.Time
 	serveErr error
-	cancel   chan struct{}
 	done     chan struct{}
+}
+
+// setState publishes a terminal build outcome (disabled, or error) on r.
+func (r *running) setState(cfg ListenerConfig, state string, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cfg = cfg
+	r.srv = nil
+	r.state = state
+	r.serveErr = err
+	r.since = time.Now()
 }
 
 // Manager owns a set of listeners and reconciles them to a config directory.
@@ -138,7 +159,7 @@ func (m *Manager) Apply() error {
 		if _, exists := m.listeners[name]; exists {
 			continue
 		}
-		r, err := m.build(name, cfg)
+		r, err := m.build(cfg)
 		if err != nil {
 			return fmt.Errorf("supervisor: building %q: %w", name, err)
 		}
@@ -165,9 +186,10 @@ func configChanged(a, b ListenerConfig) bool {
 	return false
 }
 
-// statusFromLocked reads r's state under its mutex and returns it as a Status.
-// Called under Manager.mu; re-acquires r.mu.
-func statusFromLocked(r *running) Status {
+// statusOf reads r's state under r.mu and returns it as a Status. The caller may
+// or may not hold Manager.mu -- r.mu is the only lock that protects these fields,
+// so this is safe either way.
+func statusOf(r *running) Status {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s := Status{
@@ -202,7 +224,7 @@ func (m *Manager) Status(name string) Status {
 	if !ok {
 		return Status{Name: name, State: "unknown"}
 	}
-	return statusFromLocked(r)
+	return statusOf(r)
 }
 
 // All returns the status of every tracked listener, sorted by name. The
@@ -211,15 +233,15 @@ func (m *Manager) All() []Status {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make([]Status, 0, len(m.listeners))
-	// Sorted by name for stable API output; statusFromLocked is the per-
-	// listener section that re-acquires the listener mutex.
+	// Sorted by name for stable API output; statusOf is the per-listener
+	// section that acquires the listener mutex.
 	byName := make([]string, 0, len(m.listeners))
 	for n := range m.listeners {
 		byName = append(byName, n)
 	}
 	sort.Strings(byName)
 	for _, n := range byName {
-		out = append(out, statusFromLocked(m.listeners[n]))
+		out = append(out, statusOf(m.listeners[n]))
 	}
 	return out
 }
@@ -295,63 +317,71 @@ func (m *Manager) Server(name string) client.Server {
 	return r.srv
 }
 
-// build constructs a listener, installs its host networking, and launches it.
-// Called under Manager.mu; the goroutine it starts does not need the manager
-// lock, only r.mu, so a long-lived Server never pins the manager.
-func (m *Manager) build(name string, cfg ListenerConfig) (*running, error) {
+// build allocates a fresh handle and starts it. Called under Manager.mu; the
+// goroutine start launches does not need the manager lock, only r.mu, so a
+// long-lived Server never pins the manager.
+func (m *Manager) build(cfg ListenerConfig) (*running, error) {
+	r := &running{}
+	if err := m.start(r, cfg); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+// start constructs the listener's server, installs its host networking, and
+// launches the serve goroutine against r. It publishes the outcome on r whether
+// it succeeds or fails, so a caller that keeps the handle around always has a
+// state and an error to report; the error is also returned for callers that
+// want to propagate it.
+//
+// Called with r.mu NOT held: construction can block on a TUN open and a syscall
+// or two of iptables, and holding the status lock across that would stall the
+// management API's reads for the duration.
+func (m *Manager) start(r *running, cfg ListenerConfig) error {
 	if !cfg.Enabled {
-		r := &running{cfg: cfg, state: "disabled"}
-		return r, nil
+		r.setState(cfg, "disabled", nil)
+		return nil
 	}
 	srv, err := m.ctor(cfg.Protocol, cfg.Options)
 	if err != nil {
-		return nil, fmt.Errorf("constructing %s server: %w", cfg.Protocol, err)
+		err = fmt.Errorf("constructing %s server: %w", cfg.Protocol, err)
+		r.setState(cfg, "error", err)
+		return err
 	}
 	if cfg.SetupNAT {
-		if err := hostnet.Apply(name, hostnet.Config{
+		if aerr := hostnet.Apply(cfg.Name, hostnet.Config{
 			TUNName: srv.TUNName(),
 			Gateway: srv.Gateway(),
 			Network: srv.Network(),
 			WAN:     cfg.WAN,
-		}); err != nil {
+		}); aerr != nil {
 			_ = srv.Close()
-			return nil, fmt.Errorf("host networking: %w", err)
+			aerr = fmt.Errorf("host networking: %w", aerr)
+			r.setState(cfg, "error", aerr)
+			return aerr
 		}
 	}
-	r := &running{
-		cfg:    cfg,
-		srv:    srv,
-		state:  "running",
-		since:  time.Now(),
-		cancel: make(chan struct{}),
-		done:   make(chan struct{}),
-	}
-	go r.serve(m.log)
-	return r, nil
+	done := make(chan struct{})
+	r.mu.Lock()
+	r.cfg, r.srv, r.state, r.since, r.serveErr, r.done =
+		cfg, srv, "running", time.Now(), nil, done
+	r.mu.Unlock()
+	// srv and done are passed by value rather than re-read from r: by the time
+	// the goroutine runs, a Stop may already have cleared both, and this
+	// generation of the goroutine owns this generation's server.
+	go serve(r, m.log, srv, done)
+	return nil
 }
 
 // rebuildLocked is the per-listener cold rebuild: stop, construct new, start.
-// It re-uses the running handle so external addresses to the listener (status
-// reads) keep referring to the same *running. Manager.mu is held by the caller.
+// It re-uses the running handle so external references to the listener (a status
+// read that captured the pointer) keep referring to the same *running. On
+// failure start leaves r in "error" state with the reason, so the next Apply
+// retries it and the management API reports why. Manager.mu is held by the
+// caller.
 func (m *Manager) rebuildLocked(r *running, cfg ListenerConfig) error {
 	m.stopLocked(r)
-	newR, err := m.build(r.cfg.Name, cfg)
-	if err != nil {
-		// Leave r in the map in "error" state so the next Apply can retry and
-		// the management API reports failure with the error.
-		r.cfg = cfg
-		r.state = "error"
-		r.serveErr = err
-		r.since = time.Now()
-		return err
-	}
-	// Move the freshly-built fields into the existing handle so Manager.mu stays
-	// the only thing external callers held.
-	r.mu.Lock()
-	r.cfg, r.srv, r.state, r.since, r.cancel, r.done, r.serveErr =
-		newR.cfg, newR.srv, newR.state, newR.since, newR.cancel, newR.done, nil
-	r.mu.Unlock()
-	return nil
+	return m.start(r, cfg)
 }
 
 // stopLocked closes the listener's server and waits for the goroutine to exit,
@@ -359,21 +389,16 @@ func (m *Manager) rebuildLocked(r *running, cfg ListenerConfig) error {
 // acquires r.mu.
 func (m *Manager) stopLocked(r *running) {
 	r.mu.Lock()
-	srv := r.srv
-	cancel := r.cancel
-	done := r.done
+	srv, done, cfg := r.srv, r.done, r.cfg
 	r.srv = nil
+	// Clearing done retires this generation: a serve goroutine that returns
+	// after this point finds r.done no longer its own and leaves the state
+	// below alone.
+	r.done = nil
 	r.state = "stopped"
 	r.since = time.Now()
 	r.mu.Unlock()
 
-	if cancel != nil {
-		select {
-		case <-cancel:
-		default:
-			close(cancel)
-		}
-	}
 	if srv != nil {
 		_ = srv.Close()
 	}
@@ -381,49 +406,53 @@ func (m *Manager) stopLocked(r *running) {
 		select {
 		case <-done:
 		case <-time.After(5 * time.Second):
+			m.log.Printf("supervisor: %s: serve goroutine still running after 5s; carrying on", cfg.Name)
 		}
 	}
 	// Host-state teardown for the listener's own rules; layer-2 / no-WAN
 	// configs are a no-op in hostnet.Teardown, so it is safe to call
 	// unconditionally.
-	if r.cfg.SetupNAT {
+	if cfg.SetupNAT {
 		// We no longer have srv's TUNName/Gateway/Network (srv was just closed
 		// and may have freed the TUN). Re-derive from the config's Options
 		// where possible; otherwise the rules' removal survives on the comment
 		// tag alone (which carries the name).
-		_ = hostnet.Teardown(r.cfg.Name, hostnet.Config{
-			TUNName: r.cfg.Options["tun"],
-			WAN:     r.cfg.WAN,
+		_ = hostnet.Teardown(cfg.Name, hostnet.Config{
+			TUNName: cfg.Options["tun"],
+			WAN:     cfg.WAN,
 		})
 	}
 }
 
-// serve is the goroutine that owns one listener's ListenAndServe. It records
-// the result and signals completion so Stop can wait deterministically. The
-// completion is signaled via a deferred close(done), which makes the early-
-// return path (srv nil at goroutine start: a disabled listener, or Stop won
-// the race before serve got hold of srv) close done just like the served path.
-func (r *running) serve(logger *log.Logger) {
-	defer close(r.done)
-	r.mu.Lock()
-	srv := r.srv
-	r.mu.Unlock()
-	if srv == nil {
-		return
-	}
+// serve is the goroutine that owns one listener's ListenAndServe. It records the
+// result and signals completion via a deferred close(done) so stopLocked can
+// wait deterministically.
+//
+// srv and done are parameters, not reads off r, because this goroutine belongs
+// to one generation of the listener: a rebuild installs a new server and a new
+// done channel on the same handle. Publishing the result is gated on r.done
+// still being this generation's channel, so a goroutine that returns after its
+// server was replaced (or after stopLocked gave up waiting) cannot overwrite the
+// live listener's state with its own stale outcome.
+func serve(r *running, logger *log.Logger, srv client.Server, done chan struct{}) {
+	defer close(done)
 	err := srv.ListenAndServe()
+
 	r.mu.Lock()
-	r.serveErr = err
-	if errors.Is(err, net.ErrClosed) {
-		r.state = "stopped"
-	} else if err != nil {
-		r.state = "error"
-	} else {
-		r.state = "stopped"
+	current := r.done == done
+	if current {
+		r.serveErr = err
+		if err != nil && !errors.Is(err, net.ErrClosed) {
+			r.state = "error"
+		} else {
+			r.state = "stopped"
+		}
+		r.since = time.Now()
 	}
-	r.since = time.Now()
+	name, protocol := r.cfg.Name, r.cfg.Protocol
 	r.mu.Unlock()
+
 	if err != nil && !errors.Is(err, net.ErrClosed) {
-		logger.Printf("supervisor: %s/%s: %v", r.cfg.Name, r.cfg.Protocol, err)
+		logger.Printf("supervisor: %s/%s: %v", name, protocol, err)
 	}
 }

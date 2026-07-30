@@ -433,6 +433,87 @@ func TestApplyConcurrentRebuildsAreSafe(t *testing.T) {
 	wg.Wait()
 }
 
+// failingRebuildManager returns a manager with one running listener whose
+// further constructions all fail, plus the live handle for that listener. It
+// sets up the two tests below, which cover the same defect from either side.
+func failingRebuildManager(t *testing.T) (*Manager, *running) {
+	t.Helper()
+	dir := t.TempDir()
+	writeCfg(t, dir, "site-a", "wireguard")
+	ctor := &fakeCtor{}
+	var failing atomic.Bool
+	mgr := NewManager(dir, testLogger(t),
+		func(protocol string, opts map[string]string) (client.Server, error) {
+			if failing.Load() {
+				return nil, fmt.Errorf("simulated construction failure")
+			}
+			return ctor.construct(protocol, opts)
+		})
+	t.Cleanup(func() { _ = mgr.Close() })
+	if err := mgr.Apply(); err != nil {
+		t.Fatal(err)
+	}
+	mgr.mu.Lock()
+	r := mgr.listeners["site-a"]
+	mgr.mu.Unlock()
+	failing.Store(true)
+	return mgr, r
+}
+
+// TestReadingAHandleDoesNotRaceAFailingRebuild pins the locking contract on the
+// running handle: r.mu alone protects every field on it, on every path.
+//
+// The rebuild-failed path used to publish cfg/state/serveErr holding only
+// Manager.mu. That is not enough, because Manager.Status releases Manager.mu
+// before it reads the handle it just looked up -- so Manager.mu is not a second
+// layer of protection over these fields the way it is over the listeners map.
+//
+// The reader here calls statusOf on the handle directly, which is what Status
+// effectively does once it has dropped Manager.mu. Going through Status instead
+// makes the test useless: its Manager.mu acquire orders almost every read
+// against the writer, and the surviving window is narrow enough that 200
+// rebuilds against four spinning readers do not land in it. Reading the handle
+// is the honest model of the hazard, and it reports the race on the first pass.
+// Run with -race.
+func TestReadingAHandleDoesNotRaceAFailingRebuild(t *testing.T) {
+	mgr, r := failingRebuildManager(t)
+
+	var stop atomic.Bool
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for !stop.Load() {
+				_ = statusOf(r)
+			}
+		}()
+	}
+	for range 200 {
+		_ = mgr.Rebuild("site-a")
+	}
+	stop.Store(true)
+	wg.Wait()
+}
+
+// TestFailedRebuildKeepsTheListenerAndReportsWhy is the behavioural half: a
+// rebuild whose construction failed leaves the listener tracked, in "error"
+// state, carrying the reason -- so the next Apply retries it and the management
+// API has something to show instead of a listener that silently vanished.
+func TestFailedRebuildKeepsTheListenerAndReportsWhy(t *testing.T) {
+	mgr, _ := failingRebuildManager(t)
+	if err := mgr.Rebuild("site-a"); err == nil {
+		t.Fatal("Rebuild against a failing ctor succeeded")
+	}
+	s := mgr.Status("site-a")
+	if s.State != "error" {
+		t.Errorf("state after a failed rebuild = %q, want error", s.State)
+	}
+	if s.Error == "" {
+		t.Errorf("a failed rebuild reported no error: %+v", s)
+	}
+}
+
 // TestCloseTearsDownEveryListener covers supervisor shutdown: Close leaves no
 // live goroutine and closes every server, so the process can exit cleanly.
 func TestCloseTearsDownEveryListener(t *testing.T) {
