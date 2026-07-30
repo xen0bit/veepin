@@ -109,6 +109,27 @@ func ServerOptsFor(protocol string) ([]OptSpec, bool) {
 	return opts, ok
 }
 
+// PeerInfo is one peer a server protocol can describe. Fields that a protocol
+// does not track (e.g. last handshake for a stateless protocol) are left at
+// their zero value; the panel renders them with a consistent "unknown" marker.
+type PeerInfo struct {
+	ID            string `json:"id"`                       // protocol's own identifier (public key, cert CN, username)
+	Name          string `json:"name,omitempty"`           // optional human label
+	Address       string `json:"address"`                  // assigned tunnel address
+	State         string `json:"state"`                    // "connected" or "disconnected"
+	LastHandshake string `json:"last_handshake,omitempty"` // RFC 3339 time of last handshake, or empty
+}
+
+// PeerDescriber is an optional interface a Server may implement to expose its
+// peer list to the management API and panel. Protocols that do not implement it
+// still serve; their peer list in the panel shows nothing (not "empty", which
+// could be mistaken for "zero clients"). The interface is type-asserted by
+// the management API, so a Server that returns it from its parse function is
+// the one that contributes peer data; no registry change is needed.
+type PeerDescriber interface {
+	Peers() []PeerInfo
+}
+
 // RegisterServer makes a protocol serveable by name. Like Register, it is meant
 // to be called from a protocol package's init function and panics on a duplicate
 // or empty name — both are programming errors, detected at startup.

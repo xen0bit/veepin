@@ -162,7 +162,20 @@ func configChanged(a, b ListenerConfig) bool {
 			return true
 		}
 	}
-	return false
+	return !equalStringSlices(a.FirewallAllows, b.FirewallAllows)
+}
+
+// equalStringSlices compares two string slices element-wise.
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // statusFromLocked reads r's state under its mutex and returns it as a Status.
@@ -277,6 +290,22 @@ func (m *Manager) Close() error {
 		}
 	}
 	return firstErr
+}
+
+// Server returns the live *client.Server for a running listener, so the
+// management API can type-assert it against optional interfaces such as
+// client.PeerDescriber. Returns nil if the listener is not running or does
+// not exist.
+func (m *Manager) Server(name string) client.Server {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r, ok := m.listeners[name]
+	if !ok {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.srv
 }
 
 // build constructs a listener, installs its host networking, and launches it.

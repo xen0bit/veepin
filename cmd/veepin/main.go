@@ -52,6 +52,8 @@ func main() {
 		run(runConnect(os.Args[2:]))
 	case "serve":
 		run(runServe(os.Args[2:]))
+	case "profile":
+		run(runProfile(os.Args[2:]))
 	case "mgmt":
 		run(runMgmt(os.Args[2:]))
 	case "probe":
@@ -80,17 +82,15 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `veepin %s — a userspace VPN client and server
 
 Usage:
-  veepin connect   <protocol> [flags]   bring up a tunnel to a server
-  veepin serve     <protocol> [flags]   run a single VPN server
-  veepin serve     -config <dir>        run a fleet of servers (supervisor mode)
-  veepin mgmt      <subcmd> [flags]     talk to a running supervisor's API
-  veepin probe     <protocol> [flags]   diagnostic: handshake + one data packet
-  veepin udp-proxy [flags]              forward a local UDP socket via MASQUE CONNECT-UDP
-  veepin version                        print build information
+  veepin connect   <protocol|profile> [flags]  bring up a tunnel
+  veepin serve     <protocol> [flags]           run a single VPN server
+  veepin serve     -config <dir>                run a fleet of servers
+  veepin profile   <subcmd>                     manage client connection profiles
+  veepin mgmt      <subcmd> [flags]             talk to a running supervisor's API
+  veepin probe     <protocol> [flags]           diagnostic: handshake + one data packet
+  veepin udp-proxy [flags]                      forward a local UDP socket via MASQUE CONNECT-UDP
+  veepin version                                print build information
 
 Protocols: %s
-
-Run a command with -h for its flags, e.g.:
-  veepin connect ikev2 -h
 `, version, strings.Join(client.Protocols(), ", "))
 }

@@ -57,6 +57,7 @@ type ManagerBackend interface {
 	Rebuild(name string) error
 	Stop(name string) error
 	Close() error
+	Server(name string) client.Server
 }
 
 // Server is the management HTTP server.
@@ -115,6 +116,7 @@ func NewServer(dir string, mgr ManagerBackend, logger *log.Logger) (*Server, err
 	s.mux.HandleFunc("PATCH /api/listeners/{name}", s.handlePatchListener)
 	s.mux.HandleFunc("DELETE /api/listeners/{name}", s.handleDeleteListener)
 	s.mux.HandleFunc("POST /api/listeners/{name}/restart", s.handleRestartListener)
+	s.mux.HandleFunc("GET /api/listeners/{name}/peers", s.handlePeerList)
 	return s, nil
 }
 
@@ -449,6 +451,31 @@ func (s *Server) handleRestartListener(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.mgr.Status(name))
+}
+
+// handlePeerList returns the peer list for a running listener whose protocol
+// implements client.PeerDescriber. Protocols that do not implement it return
+// an empty array; the panel renders nothing rather than showing a misleading
+// "no peers" which could be read as "no clients".
+func (s *Server) handlePeerList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	name := r.PathValue("name")
+	srv := s.mgr.Server(name)
+	if srv == nil {
+		http.Error(w, "no such listener", http.StatusNotFound)
+		return
+	}
+	var peers []client.PeerInfo
+	if pd, ok := srv.(client.PeerDescriber); ok {
+		peers = pd.Peers()
+	}
+	if peers == nil {
+		peers = []client.PeerInfo{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"peers": peers})
 }
 
 // --- Helpers ---

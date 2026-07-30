@@ -17,6 +17,7 @@ import (
 	"github.com/xen0bit/veepin/internal/wireguard/noise"
 	"github.com/xen0bit/veepin/internal/wireguard/transport"
 	"github.com/xen0bit/veepin/internal/wireguard/wire"
+	"time"
 )
 
 // keySize is the length of a Curve25519 key, matching what decodeKey returns.
@@ -560,6 +561,42 @@ func (s *Server) Close() error {
 		close(s.closed)
 	})
 	return s.closeErr
+}
+
+// Peers returns every configured peer with their live state, implementing
+// client.PeerDescriber so the management panel shows a peer list for WireGuard
+// and AmneziaWG (which reuses this Server type). An unknown peer — one that
+// has never completed a handshake — reports State "disconnected" with an empty
+// LastHandshake. A connected peer's last-handshake time is the wall-clock time
+// at which the current tunnel session was installed (rekeyed sessions update
+// it). The public key is short-prefix-abbreviated for the panel; the full key
+// is always available in the listener config file.
+func (s *Server) Peers() []client.PeerInfo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]client.PeerInfo, 0, len(s.peers))
+	for _, p := range s.peers {
+		pk := base64.StdEncoding.EncodeToString(p.pubKey[:])
+		addr := ""
+		if len(p.allowedIPs) > 0 {
+			addr = p.allowedIPs[0].String()
+		}
+		info := client.PeerInfo{
+			ID:      pk,
+			Address: addr,
+			State:   "disconnected",
+		}
+		if t := p.tunnel; t != nil {
+			t.mu.RLock()
+			if !t.established.IsZero() {
+				info.State = "connected"
+				info.LastHandshake = t.established.UTC().Format(time.RFC3339)
+			}
+			t.mu.RUnlock()
+		}
+		out = append(out, info)
+	}
+	return out
 }
 
 // parseCIDR splits "10.10.0.1/24" into the host address and its network.

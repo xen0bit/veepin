@@ -54,6 +54,7 @@ type fakeMgr struct {
 	rebuildOf  string
 	stopOf     string
 	rebuildErr error
+	peerServer client.Server // optional, returned by Server()
 }
 
 func (f *fakeMgr) Apply() error { f.applyCalls++; return nil }
@@ -79,7 +80,8 @@ func (f *fakeMgr) Stop(name string) error {
 	delete(f.statuses, name)
 	return nil
 }
-func (f *fakeMgr) Close() error { return nil }
+func (f *fakeMgr) Close() error                     { return nil }
+func (f *fakeMgr) Server(name string) client.Server { return f.peerServer }
 
 // newTestServer wires a real mgmt.Server with a fake manager and a temp config
 // dir, returning the server and its token-bearing client. One helper covers
@@ -413,6 +415,50 @@ func TestRedactOptionsLeavesNonSecretKeysUntouched(t *testing.T) {
 		t.Errorf("non-secret address was redacted: %q", out["address"])
 	}
 }
+
+// TestPeerEndpointReturnsPeersForDescriber protocol that implements PeerDescriber
+// returns real peer data; a protocol that does not returns an empty array.
+func TestPeerEndpointReturnsPeersForDescriber(t *testing.T) {
+	statuses := map[string]supervisor.Status{"site-a": {Name: "site-a", Protocol: "wireguard", State: "running"}}
+	dir := t.TempDir()
+	for name := range statuses {
+		cfg := supervisor.ListenerConfig{Name: name, Protocol: "wireguard",
+			Options: map[string]string{"private-key": "k"}, Enabled: true}
+		body, _ := json.Marshal(cfg)
+		_ = os.WriteFile(filepath.Join(dir, name+".json"), body, 0o600)
+	}
+	mgr := &fakeMgr{
+		statuses:   statuses,
+		peerServer: &fakePeerDescriber{peers: []client.PeerInfo{{ID: "AAAA", Address: "10.10.0.2", State: "connected"}}},
+	}
+	srv, err := NewServer(dir, mgr, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, body := srv.do("GET", "/api/listeners/site-a/peers", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d body=%s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "AAAA") {
+		t.Errorf("peer list does not contain the fake peer: %s", body)
+	}
+}
+
+// fakePeerDescriber is a client.Server + client.PeerDescriber for testing
+// the peers endpoint without opening a real TUN.
+type fakePeerDescriber struct {
+	peers []client.PeerInfo
+}
+
+func (f *fakePeerDescriber) ListenAndServe() error { return nil }
+func (f *fakePeerDescriber) Close() error          { return nil }
+func (f *fakePeerDescriber) TUNName() string       { return "tun0" }
+func (f *fakePeerDescriber) Gateway() net.IP       { return net.IPv4(10, 10, 0, 1) }
+func (f *fakePeerDescriber) Network() *net.IPNet {
+	_, n, _ := net.ParseCIDR("10.10.0.0/24")
+	return n
+}
+func (f *fakePeerDescriber) Peers() []client.PeerInfo { return f.peers }
 
 // Suppress "unused" errors for net.IP we want to keep imported for parity with
 // a future IPv6 listener status field.

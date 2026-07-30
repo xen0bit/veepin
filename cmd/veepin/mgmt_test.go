@@ -16,6 +16,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/internal/mgmt"
 	"github.com/xen0bit/veepin/internal/supervisor"
 )
@@ -48,7 +49,8 @@ func (f *cliFakeMgr) Stop(name string) error {
 	delete(f.statuses, name)
 	return nil
 }
-func (f *cliFakeMgr) Close() error { return nil }
+func (f *cliFakeMgr) Close() error                     { return nil }
+func (f *cliFakeMgr) Server(name string) client.Server { return nil }
 
 // startMgmtTestServer launches a real mgmt.Server (with a fake manager) bound
 // to a httptest.Server and returns the URL + token. The CLI's env vars point at
