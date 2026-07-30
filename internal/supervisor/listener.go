@@ -19,6 +19,7 @@
 package supervisor
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -58,7 +59,26 @@ type ListenerConfig struct {
 	WAN string `json:"wan,omitempty"`
 	// Enabled false means parse it, list it, but do not start it. Lets a
 	// config disable a listener without deleting the file.
-	Enabled bool `json:"enabled,omitempty"`
+	//
+	// It defaults to TRUE for a file that does not mention it -- see
+	// NewListenerConfig and parseListenerBytes. A zero-value Go bool would
+	// default the other way, which meant the obvious minimal config
+	//
+	//	{"name": "site-a", "protocol": "wireguard", "options": {...}}
+	//
+	// parsed, validated, listed, and never started, with no error and no log
+	// line. No omitempty either: the field must survive a write-back, or
+	// disabling a listener would drop the key and read back as enabled.
+	Enabled bool `json:"enabled"`
+}
+
+// NewListenerConfig returns a ListenerConfig with the defaults a hand-written
+// file gets when it stays silent. Callers that decode into a fresh config --
+// the management API's create endpoint, and parseListenerBytes -- start from
+// this rather than from the zero value, because encoding/json only writes the
+// fields a document actually carries and so leaves these standing.
+func NewListenerConfig() ListenerConfig {
+	return ListenerConfig{Enabled: true}
 }
 
 // Validate checks that a ListenerConfig is internally consistent. It does not
@@ -91,11 +111,11 @@ func ParseListenerFile(path string) (ListenerConfig, error) {
 	return parseListenerBytes(body)
 }
 
-// parseListenerBytes is the allocation-free core that FuzzParseListenerFile
-// runs; it does no I/O so the fuzzer does not touch the disk.
+// parseListenerBytes is the core FuzzParseListenerFile runs; it does no I/O so
+// the fuzzer does not touch the disk.
 func parseListenerBytes(body []byte) (ListenerConfig, error) {
-	var c ListenerConfig
-	dec := json.NewDecoder(strings.NewReader(string(body)))
+	c := NewListenerConfig()
+	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&c); err != nil {
 		return ListenerConfig{}, fmt.Errorf("supervisor: parsing listener config: %w", err)

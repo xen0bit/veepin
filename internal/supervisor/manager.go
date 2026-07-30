@@ -378,6 +378,10 @@ func (m *Manager) build(cfg ListenerConfig) (*running, error) {
 // management API's reads for the duration.
 func (m *Manager) start(r *running, cfg ListenerConfig) error {
 	if !cfg.Enabled {
+		// Said out loud. A listener that is present, valid, and deliberately not
+		// running is indistinguishable at a glance from one that failed to start,
+		// and the operator's next question is always which of the two it is.
+		m.log.Printf("supervisor: %s/%s: disabled by config; not started", cfg.Name, cfg.Protocol)
 		r.setState(cfg, "disabled", nil)
 		return nil
 	}

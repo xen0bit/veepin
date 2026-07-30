@@ -16,13 +16,16 @@ See the [README](../../README.md#run) for the one-time `CAP_NET_ADMIN` /
 
 ## Layout
 
+The directory you pass to `-config` holds the listener files directly, and the
+supervisor keeps its own state in a `mgmt/` subdirectory of it — so one
+directory is the whole of the supervisor's on-disk state:
+
 ```
-/etc/veepin/
-  listeners/        one JSON file per listener
-    site-a.json
-    branch-office.json
+/etc/veepin/            <- the -config directory
+  site-a.json           one JSON file per listener
+  branch-office.json
   mgmt/
-    token           0600 bearer token for the API and panel (auto-generated)
+    token               0600 bearer token for the API and panel (auto-generated)
 ```
 
 Each listener file is `encoding/json` of:
@@ -34,7 +37,7 @@ Each listener file is `encoding/json` of:
   "options": {
     "private-key": "<base64>",
     "address": "10.10.0.1/24",
-    "listen-port": 51820,
+    "listen-port": "51820",
     "peer-public-key": "<base64>",
     "peer-allowed-ips": "10.10.0.2/32"
   },
@@ -49,6 +52,14 @@ flags produce. Each protocol's `Opt*` consts are the keys; the help text for
 each is available at `GET /api/protocols` on the management API (see
 [Running the management CLI](mgmt.md)).
 
+**Every option value is a JSON string**, including the numeric ones — the map is
+`map[string]string` and the protocol parses each value itself, exactly as it
+parses the flag the value came from. `"listen-port": 51820` without the quotes
+does not decode and the supervisor refuses the file.
+
+`enabled` may be omitted; it defaults to `true`. A file that names a protocol
+and its options describes a listener you want running.
+
 `name` must match `[a-z0-9][a-z0-9-]{0,31}` -- it is used verbatim as the
 `iptables --comment veepin:<name>` tag the supervisor's `setup_nat` path
 installs, so an unsafe character in `name` would be an unsafe shell fragment
@@ -57,13 +68,13 @@ when teardown runs.
 ## Starting the supervisor
 
 ```sh
-sudo mkdir -p /etc/veepin/listeners
+sudo mkdir -p /etc/veepin
 sudo ./veepin serve -config /etc/veepin -listen 127.0.0.1:8443
 ```
 
 On first start, the supervisor:
 
-1. Reads `/etc/veepin/listeners/*.json`, building one `client.Server` per file.
+1. Reads `/etc/veepin/*.json`, building one `client.Server` per file.
 2. For each listener with `setup_nat: true`, installs the host iptables /
    forwarding / interface configuration, tagged `veepin:<name>` so a rebuild
    or delete takes its rules with it.
@@ -87,8 +98,9 @@ runtime mutation methods on a Server, so reconfiguration is rebuild by design.
 ## Disabling vs deleting
 
 - `enabled: false` keeps the file on disk but the supervisor stops running the
-  listener. The status page shows it as `stopped`; a later patch flipping it
-  back to `true` rebuilds it.
+  listener. The status page shows it as `disabled`, and the log says so at
+  startup, so it is never confused with a listener that failed to start; a later
+  patch flipping it back to `true` rebuilds it.
 - `DELETE /api/listeners/<name>` (or `veepin mgmt rm <name>`) stops the server
   and removes its file AND its `veepin:<name>`-tagged iptables rules. Use it
   when the listener is gone for good.

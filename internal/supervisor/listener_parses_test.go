@@ -56,6 +56,50 @@ func TestParseListenerBytesRejectsUnknownFields(t *testing.T) {
 // TestValidateRejectsBadName covers the name grammar: each rejected case is
 // either an unsafe filename character or an unsafe iptables comment fragment.
 // The list is not exhaustive -- it names the categories that matter.
+// TestEnabledDefaultsToTrue: the obvious minimal config -- name, protocol,
+// options and nothing else -- describes a listener the operator wants running.
+// A zero-value Go bool defaulted the other way, so such a file parsed,
+// validated, listed, and never started, with no error and no log line.
+func TestEnabledDefaultsToTrue(t *testing.T) {
+	c, err := parseListenerBytes([]byte(`{"name":"site-a","protocol":"wireguard"}`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !c.Enabled {
+		t.Error("a config that does not mention enabled parsed as disabled")
+	}
+}
+
+// TestEnabledFalseIsHonoured: the default must not swallow an explicit opt-out.
+func TestEnabledFalseIsHonoured(t *testing.T) {
+	c, err := parseListenerBytes([]byte(`{"name":"site-a","protocol":"wireguard","enabled":false}`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if c.Enabled {
+		t.Error(`"enabled": false was ignored`)
+	}
+}
+
+// TestDisabledSurvivesAWriteReadRoundTrip is why the enabled tag carries no
+// omitempty. With omitempty a disabled listener's file would omit the key
+// entirely, and the default above would read it straight back as enabled -- so
+// disabling a listener through the API would not survive the write.
+func TestDisabledSurvivesAWriteReadRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	in := ListenerConfig{Name: "site-a", Protocol: "wireguard", Enabled: false}
+	if err := WriteListenerFile(dir, in); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	out, err := ParseListenerFile(filepath.Join(dir, "site-a.json"))
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if out.Enabled {
+		t.Error("a disabled listener came back enabled after a write/read round trip")
+	}
+}
+
 func TestValidateRejectsBadName(t *testing.T) {
 	for _, bad := range []string{
 		"", "UPPER", "with space", "with.dot", "with/slash", "with\\back",

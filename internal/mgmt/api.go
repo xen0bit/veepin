@@ -319,7 +319,10 @@ func (s *Server) handleCreateListener(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	var cfg supervisor.ListenerConfig
+	// Start from the same defaults a hand-written config file gets, so a create
+	// that stays silent about "enabled" produces a running listener rather than
+	// one that is stored, listed, and never started.
+	cfg := supervisor.NewListenerConfig()
 	if err := decodeJSON(r, &cfg); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
