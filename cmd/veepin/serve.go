@@ -1,15 +1,18 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/xen0bit/veepin/amneziawg"
 	"github.com/xen0bit/veepin/anyconnect"
@@ -18,6 +21,10 @@ import (
 	"github.com/xen0bit/veepin/fortinet"
 	"github.com/xen0bit/veepin/gp"
 	"github.com/xen0bit/veepin/ikev2"
+	"github.com/xen0bit/veepin/internal/hostnet"
+	"github.com/xen0bit/veepin/internal/mgmt"
+	"github.com/xen0bit/veepin/internal/mgmt/ui"
+	"github.com/xen0bit/veepin/internal/supervisor"
 	"github.com/xen0bit/veepin/l2tp"
 	"github.com/xen0bit/veepin/l2tpv3"
 	"github.com/xen0bit/veepin/masque"
@@ -35,9 +42,23 @@ import (
 // that produces the server's options; the rest — constructing the server,
 // configuring host networking, and the signal/serve lifecycle — is shared, the
 // mirror of runConnect.
+//
+// Two modes share one subcommand: `veepin serve <protocol> [flags]` is the
+// single-protocol command below, unchanged; `veepin serve -config <dir>` is
+// supervisor mode: read that directory's listener files, run each as a server
+// in one process, and expose a localhost management API plus web panel. The
+// supervisor mode is the home of in-process fleet management; bare mode is the
+// one-process-per-protocol path the interop matrix verifies.
 func runServe(args []string) error {
+	// Supervisor mode: `veepin serve -config <dir>` reads a directory of
+	// listener JSON files and serves them all in one process. Detect the
+	// flag positionally so per-protocol flag parsing is untouched below.
+	if len(args) >= 1 && (args[0] == "-config" || args[0] == "--config") {
+		return runSupervisorMode(args)
+	}
 	if len(args) == 0 {
-		return fmt.Errorf("usage: veepin serve <protocol> [flags]\nprotocols: %s",
+		return fmt.Errorf("usage: veepin serve <protocol> [flags]\nprotocols: %s\n"+
+			"       veepin serve -config <dir> [-listen <addr>]",
 			strings.Join(client.ServerProtocols(), ", "))
 	}
 	protocol, args := args[0], args[1:]
@@ -125,6 +146,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			psk      = fs.String("psk", "", "pre-shared key (required)")
 			id       = fs.String("id", "", "local identity (FQDN or IP address) presented to clients (required)")
 			pool     = fs.String("pool", "10.10.10.0/24", "internal address pool handed to clients")
+			pool6    = fs.String("pool6", "", "internal IPv6 address pool, CIDR (default fd00:10:10::/64)")
 			dns      = fs.String("dns", "1.1.1.1,8.8.8.8", "comma-separated DNS servers pushed to clients")
 			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks, e.g. tun0)")
 			eapUsers = fs.String("eap-users", "", "path to a username:password file enabling EAP-MSCHAPv2 auth (optional)")
@@ -142,6 +164,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 				ikev2.OptServerPSK:      *psk,
 				ikev2.OptServerIdentity: *id,
 				ikev2.OptServerPool:     *pool,
+				ikev2.OptServerPool6:    *pool6,
 				ikev2.OptServerDNS:      *dns,
 				ikev2.OptServerTUN:      *tun,
 				ikev2.OptServerEAPUsers: *eapUsers,
@@ -608,6 +631,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			user     = fs.String("user", "", "username to accept (required)")
 			pass     = fs.String("pass", "", "the user's password (required)")
 			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+			noDTLS   = fs.Bool("no-dtls", false, "serve the TLS tunnel only, leaving the UDP port unbound")
 			shape    = fs.Int("shape", 0, "per-flow downstream shaping budget in bytes: pads each inner flow's first N bytes to the tunnel MTU, hiding an inner TLS handshake's size pattern (0 = off, 16384 recommended)")
 		)
 		return func() map[string]string {
@@ -620,6 +644,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 				anyconnect.OptServerUser:     *user,
 				anyconnect.OptServerPassword: *pass,
 				anyconnect.OptServerTUN:      *tun,
+				anyconnect.OptServerNoDTLS:   fmt.Sprint(*noDTLS),
 			}
 			if *shape != 0 {
 				opts[anyconnect.OptServerShape] = fmt.Sprint(*shape)
@@ -736,31 +761,137 @@ func maskBits(n *net.IPNet) int {
 }
 
 // setupNetworking configures the TUN interface address, brings it up, enables
-// IPv4 forwarding and installs a MASQUERADE rule for the pool via the WAN
-// interface. It shells out to ip/iptables/sysctl, which must be present and
-// runnable with sufficient privileges.
+// IPv4 forwarding and installs MASQUERADE / FORWARD rules tagged for the bare
+// "serve" invocation. It is the single-protocol command's caller of
+// internal/hostnet, which owns the shared-with-supervisor implementation; the
+// operator name "serve" keeps bare-mode iptables comments visually distinct
+// from the supervisor's "<listener>" tags.
 func setupNetworking(tunName string, gateway net.IP, network *net.IPNet, wan string) error {
-	bits := maskBits(network)
-	cmds := [][]string{
-		{"ip", "addr", "add", fmt.Sprintf("%s/%d", gateway, bits), "dev", tunName},
-		{"ip", "link", "set", tunName, "up"},
-		{"sysctl", "-w", "net.ipv4.ip_forward=1"},
+	return hostnet.Apply("serve", hostnet.Config{
+		TUNName: tunName,
+		Gateway: gateway,
+		Network: network,
+		WAN:     wan,
+	})
+}
+
+// runSupervisorMode reads -config <dir> and runs the fleet: one client.Server
+// per listener file, each in its own goroutine, plus a localhost-only
+// management API + embedded panel. -listen overrides the default bind; -no-mgmt
+// disables the management plane entirely (the supervisor then just runs the
+// fleet and logs).
+//
+// Two of the bare command's concerns do not apply here: there is no per-protocol
+// flag set (the supervisor reads Options from the JSON files), and the signal
+// handling shuts down every listener through Manager.Close so SIGINT/SIGTERM
+// drain the whole fleet rather than one server.
+func runSupervisorMode(args []string) error {
+	if len(args) < 2 {
+		return fmt.Errorf("usage: veepin serve -config <dir> [-listen <addr>] [-no-mgmt]")
 	}
-	if wan != "" {
-		cmds = append(cmds,
-			[]string{"iptables", "-t", "nat", "-A", "POSTROUTING", "-s", network.String(), "-o", wan, "-j", "MASQUERADE"},
-			[]string{"iptables", "-A", "FORWARD", "-i", tunName, "-j", "ACCEPT"},
-			[]string{"iptables", "-A", "FORWARD", "-o", tunName, "-j", "ACCEPT"},
-		)
+	configDir := args[1]
+	rest := args[2:]
+	fs := flag.NewFlagSet("serve -config", flag.ContinueOnError)
+	listenAddr := fs.String("listen", "127.0.0.1:8443", "management API / panel bind address")
+	noMgmt := fs.Bool("no-mgmt", false, "run the supervisor without the management API")
+	if err := fs.Parse(rest); err != nil {
+		return err
 	}
-	for _, c := range cmds {
-		cmd := exec.Command(c[0], c[1:]...)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("%s: %v: %s", strings.Join(c, " "), err, strings.TrimSpace(string(out)))
+
+	logger := log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
+	mgr := supervisor.NewManager(configDir, logger, nil)
+	if err := mgr.Apply(); err != nil {
+		// A listener that will not start is left tracked in "error" state with
+		// its reason, and Apply reports every such failure joined together. That
+		// is a warning, not a reason to abort: the listeners that did come up are
+		// serving, and the panel is how an operator fixes the ones that did not.
+		//
+		// Nothing at all coming up is the fatal case -- an unreadable config
+		// directory, or every listener broken -- because then there is no fleet
+		// to manage and a panel would only obscure that.
+		if len(mgr.All()) == 0 {
+			_ = mgr.Close()
+			return fmt.Errorf("supervisor: %w", err)
 		}
+		logger.Printf("supervisor: %v", err)
 	}
-	if wan == "" {
-		return fmt.Errorf("interface configured but no -wan given, so no MASQUERADE installed")
+	total := len(mgr.All())
+	logger.Printf("supervisor ready: %d of %d listener(s) running", countRunning(mgr), total)
+
+	var httpSrv *http.Server
+	if !*noMgmt {
+		mgmtServer, err := mgmt.NewServer(configDir, mgr, logger)
+		if err != nil {
+			_ = mgr.Close()
+			return fmt.Errorf("mgmt: %w", err)
+		}
+		mux := http.NewServeMux()
+		mux.Handle("/api/", mgmtServer.Handler())
+		uiHandler, err := ui.NewHandler(string(mgmtServer.Token()))
+		if err != nil {
+			_ = mgr.Close()
+			return fmt.Errorf("ui: %w", err)
+		}
+		mux.Handle("/", uiHandler)
+		// The Host guard wraps panel and API together. The panel cannot require
+		// a token -- it is what hands the browser one -- so without this a page
+		// that rebinds its own hostname to the loopback address becomes
+		// same-origin with the panel, reads the token out of the DOM, and drives
+		// every endpoint. See mgmt.RequireHost.
+		httpSrv = &http.Server{
+			Addr:     *listenAddr,
+			Handler:  mgmt.RequireHost([]string{*listenAddr}, mux),
+			ErrorLog: logger,
+		}
+		go func() {
+			logger.Printf("management API + panel at http://%s/", *listenAddr)
+			if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Printf("management API: %v", err)
+			}
+		}()
+	}
+
+	// SIGHUP re-reads the config directory and reconciles the live set, the same
+	// pass the initial load runs -- so adding, editing, or removing a listener
+	// file does not need the API or a restart of the fleet.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	for sig := range sigCh {
+		if sig == syscall.SIGHUP {
+			logger.Printf("supervisor: SIGHUP; re-reading %s", configDir)
+			if err := mgr.Apply(); err != nil {
+				logger.Printf("supervisor: reload: %v", err)
+			}
+			logger.Printf("supervisor: %d of %d listener(s) running", countRunning(mgr), len(mgr.All()))
+			continue
+		}
+		break
+	}
+	logger.Printf("supervisor shutting down")
+	if httpSrv != nil {
+		// Stop answering before the listeners go away, so the panel does not
+		// serve a fleet that is halfway torn down.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := httpSrv.Shutdown(ctx); err != nil {
+			logger.Printf("management API shutdown: %v", err)
+		}
+		cancel()
+	}
+	if err := mgr.Close(); err != nil {
+		return fmt.Errorf("supervisor shutdown: %w", err)
 	}
 	return nil
+}
+
+// countRunning returns the number of listeners whose state is "running" for
+// the ready-line log. It reads All rather than checking the underlying map so
+// the count reflects what the panel will show.
+func countRunning(mgr *supervisor.Manager) int {
+	var n int
+	for _, s := range mgr.All() {
+		if s.State == "running" {
+			n++
+		}
+	}
+	return n
 }

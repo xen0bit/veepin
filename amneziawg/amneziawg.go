@@ -204,4 +204,25 @@ func splitList(val string) []string {
 func init() {
 	client.Register("amneziawg", parseOptions)
 	client.RegisterServer("amneziawg", parseServerOptions)
+	client.RegisterServerOpts("amneziawg", []client.OptSpec{
+		{Key: OptServerConfig, Kind: client.OptFilePath, Help: "wg-quick server config file (defines the interface and peers)"},
+		{Key: OptServerPrivateKey, Kind: client.OptStr, Secret: true, Help: "server static private key, base64 (required unless in -config)"},
+		{Key: OptServerListenIP, Kind: client.OptStr, Help: "local IP to bind the UDP socket on (default 0.0.0.0)"},
+		{Key: OptServerListenPort, Kind: client.OptInt, Help: "UDP port to listen on (default 51820)"},
+		{Key: OptServerAddress, Kind: client.OptCIDR, Help: "server tunnel address in CIDR form, e.g. 10.10.0.1/24"},
+		{Key: OptServerMTU, Kind: client.OptInt, Help: "inner MTU (default 1420)"},
+		{Key: OptServerTUNName, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
+		{Key: OptServerPeerPublicKey, Kind: client.OptStr, Help: "a single peer's static public key, base64 (adds one peer)"},
+		{Key: OptServerPeerPresharedKey, Kind: client.OptStr, Secret: true, Help: "the -peer-public-key peer's preshared key, base64 (optional)"},
+		{Key: OptServerPeerAllowedIPs, Kind: client.OptCommaList, Help: "the -peer-public-key peer's allowed IPs, comma-separated CIDRs"},
+		{Key: OptServerShape, Kind: client.OptInt, Help: "per-flow downstream shaping budget in bytes (0 = off)"},
+		{Key: OptTypeInit, Kind: client.OptInt, Help: "H1: message type replacing handshake initiation (0 = stock 1)"},
+		{Key: OptTypeResp, Kind: client.OptInt, Help: "H2: message type replacing handshake response (0 = stock 2)"},
+		{Key: OptTypeCookie, Kind: client.OptInt, Help: "H3: message type replacing cookie reply (0 = stock 3)"},
+		{Key: OptTypeTrans, Kind: client.OptInt, Help: "H4: message type replacing transport data (0 = stock 4)"},
+		{Key: OptPadInit, Kind: client.OptInt, Help: "S1: random bytes prepended to handshake initiation"},
+		{Key: OptPadResp, Kind: client.OptInt, Help: "S2: random bytes prepended to handshake response"},
+		{Key: OptPadCookie, Kind: client.OptInt, Help: "S3: random bytes prepended to cookie reply"},
+		{Key: OptPadTrans, Kind: client.OptInt, Help: "S4: random bytes prepended to transport data"},
+	})
 }

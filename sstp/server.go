@@ -541,7 +541,21 @@ const (
 	OptServerShape    = "shape" // per-flow downstream shaping budget in bytes (0 = off)
 )
 
-func init() { client.RegisterServer("sstp", parseServerOptions) }
+func init() {
+	client.RegisterServer("sstp", parseServerOptions)
+	client.RegisterServerOpts("sstp", []client.OptSpec{
+		{Key: OptServerCert, Kind: client.OptFilePath, Required: true, Help: "path to the server TLS certificate PEM"},
+		{Key: OptServerKey, Kind: client.OptFilePath, Required: true, Secret: true, Help: "path to the server TLS private key PEM"},
+		{Key: OptServerListenIP, Kind: client.OptStr, Help: "local IP to bind the TCP socket on (default 0.0.0.0)"},
+		{Key: OptServerPort, Kind: client.OptInt, Help: "TCP port to listen on (default 443)"},
+		{Key: OptServerPool, Kind: client.OptCIDR, Help: "internal address pool handed to clients (default 10.9.0.0/24)"},
+		{Key: OptServerDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers assigned to clients"},
+		{Key: OptServerUser, Kind: client.OptStr, Required: true, Help: "MS-CHAPv2 username to accept"},
+		{Key: OptServerPassword, Kind: client.OptStr, Required: true, Secret: true, Help: "the user's password"},
+		{Key: OptServerTUN, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
+		{Key: OptServerShape, Kind: client.OptInt, Help: "per-flow downstream shaping budget in bytes (0 = off)"},
+	})
+}
 
 // parseServerOptions builds an SSTP responder from string options. A single user
 // is configured via the user/password options.

@@ -5,9 +5,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -19,6 +21,7 @@ import (
 	"github.com/xen0bit/veepin/fortinet"
 	"github.com/xen0bit/veepin/gp"
 	"github.com/xen0bit/veepin/ikev2"
+	"github.com/xen0bit/veepin/internal/profile"
 	"github.com/xen0bit/veepin/l2tp"
 	"github.com/xen0bit/veepin/l2tpv3"
 	"github.com/xen0bit/veepin/masque"
@@ -33,15 +36,56 @@ import (
 )
 
 // runConnect brings up a tunnel and applies the negotiated configuration to the
-// system. The dial itself is protocol-agnostic — everything specific to a
-// protocol is in the flag set that produces its options.
+// system. The first argument is either a protocol name (bare mode) or a saved
+// profile name (profile mode, resolved from ~/.config/veepin/profiles/).
+//
+// In bare mode the dial is identical to the existing command: flags produce an
+// options map, client.Dial runs the handshake, routing is applied.
+// Profile mode loads the named profile file by name and dials with the protocol
+// and options stored inside it; per-protocol flags are not bound (the profile
+// IS the flag set), only the global -full-tunnel and -no-route flags apply.
 func runConnect(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: veepin connect <protocol> [flags]\nprotocols: %s",
+		return fmt.Errorf("usage: veepin connect <protocol|profile> [flags]\nprotocols: %s",
 			strings.Join(client.Protocols(), ", "))
 	}
-	protocol, args := args[0], args[1:]
+	name := args[0]
 
+	// Profile resolution: if the name is not a known protocol, look it up in
+	// ~/.config/veepin/profiles/. The registry is checked first so a profile
+	// that happens to share a name with a protocol resolves to the protocol.
+	if !knownProtocol(name) {
+		profDir, err := profile.DefaultDir()
+		if err != nil {
+			return fmt.Errorf("connect: profile directory: %w", err)
+		}
+		cfg, err := profile.ParseFile(profile.Path(profDir, name))
+		if err != nil {
+			// Only a missing file means "no such profile". A profile that exists
+			// but does not parse -- a hand-edited file with a typo, a key from a
+			// newer version -- must say so: reporting it as unknown sends the
+			// operator looking for a file that is sitting right there.
+			if errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("connect: %q is neither a protocol nor a saved profile\nprotocols: %s",
+					name, strings.Join(client.Protocols(), ", "))
+			}
+			return fmt.Errorf("connect: profile %q: %w", name, err)
+		}
+		return runConnectProfile(cfg, args[1:]...)
+	}
+
+	return runConnectBare(name, args[1:])
+}
+
+// knownProtocol reports whether name is in the client registry. It is the
+// gate between bare mode (name = protocol) and profile mode (name = profile).
+func knownProtocol(name string) bool {
+	return slices.Contains(client.Protocols(), name)
+}
+
+// runConnectBare is the existing single-protocol dial path, kept identical
+// so flags_test.go and every protocol's registered flag set are untouched.
+func runConnectBare(protocol string, args []string) error {
 	fs := flag.NewFlagSet("connect "+protocol, flag.ContinueOnError)
 	fullTunnel := fs.Bool("full-tunnel", true, "route all traffic through the VPN (default route)")
 	noRoute := fs.Bool("no-route", false, "do not modify routing/addresses (diagnostic)")
@@ -55,10 +99,31 @@ func runConnect(args []string) error {
 	}
 
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
+	return dialConnect(protocol, options(), *fullTunnel, *noRoute, logger)
+}
 
-	// 1. Handshake + data path. Dial installs no routes — that is this command's
-	// job, and the split is what lets NetworkManager reuse the same dial.
-	sess, res, err := client.Dial(context.Background(), protocol, options())
+// runConnectProfile loads the named profile and dials with its saved protocol
+// and options. Per-protocol flags are not bound: the profile file IS the flag
+// set; only the global -full-tunnel and -no-route flags in args apply.
+func runConnectProfile(cfg profile.Config, args ...string) error {
+	fs := flag.NewFlagSet("connect "+cfg.Name, flag.ContinueOnError)
+	fullTunnel := fs.Bool("full-tunnel", true, "route all traffic through the VPN")
+	noRoute := fs.Bool("no-route", false, "do not modify routing/addresses (diagnostic)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	logger := log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
+	return dialConnect(cfg.Protocol, cfg.Options, *fullTunnel, *noRoute, logger)
+}
+
+// dialConnect is the shared dial+route+serve tail that bare mode and profile
+// mode both call. It houses the body that runConnect had as its second half,
+// extracted so the two paths converge on the same runtime surface.
+func dialConnect(protocol string, opts map[string]string, fullTunnel, noRoute bool, logger *log.Logger) error {
+	// 1. Handshake + data path. Dial installs no routes -- that is this
+	// command's job, and the split is what lets NetworkManager reuse the same
+	// dial.
+	sess, res, err := client.Dial(context.Background(), protocol, opts)
 	if err != nil {
 		return err
 	}
@@ -75,7 +140,7 @@ func runConnect(args []string) error {
 	}
 
 	// 2. Routing.
-	if !*noRoute {
+	if !noRoute {
 		router := dataplane.NewClientRouter(dataplane.ClientNetConfig{
 			TUNName:     res.TUNName,
 			AssignedIP:  res.AssignedIP,
@@ -84,12 +149,12 @@ func runConnect(args []string) error {
 			Prefix6:     res.Prefix6,
 			ServerIP:    res.Gateway,
 			DNS:         res.DNS,
-			FullTunnel:  *fullTunnel,
+			FullTunnel:  fullTunnel,
 		})
 		if err := router.Apply(); err != nil {
 			logger.Printf("routing setup failed: %v (continuing without routes)", err)
 		} else {
-			logger.Printf("routing configured (full-tunnel=%v)", *fullTunnel)
+			logger.Printf("routing configured (full-tunnel=%v)", fullTunnel)
 			defer func() {
 				if rerr := router.Revert(); rerr != nil {
 					logger.Printf("route cleanup: %v", rerr)
@@ -103,10 +168,10 @@ func runConnect(args []string) error {
 	// 3. Wait for a signal or for the session to end on its own.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	// Report why the session ended. A tunnel that dies on its own — a dropped
-	// carrier, a peer teardown, a protocol error — is otherwise indistinguishable
-	// from a clean Ctrl-C, which makes a failure in the field or in CI nearly
-	// impossible to diagnose from the logs.
+	// Report why the session ended. A tunnel that dies on its own -- a dropped
+	// carrier, a peer teardown, a protocol error -- is otherwise
+	// indistinguishable from a clean Ctrl-C, which makes a failure in the field
+	// or in CI nearly impossible to diagnose from the logs.
 	err = sess.Wait(ctx)
 	switch {
 	case err == nil || errors.Is(err, context.Canceled):

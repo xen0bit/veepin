@@ -72,6 +72,25 @@
 // Two packages are shared by the PPP-carrying protocols: internal/ppp (LCP,
 // MS-CHAPv2, IPCP, both roles) and internal/mschap.
 //
+// # The supervisor and management plane
+//
+// internal/supervisor runs multiple client.Server instances in one process:
+// one JSON file per listener under a config directory, one goroutine per
+// Listener. Single-protocol `veepin serve <proto>` builds one Server and blocks
+// on it; `veepin serve -config <dir>` builds the fleet, opens a management
+// plane, and cold-rebuilds one listener on edit without disturbing the rest.
+//
+// internal/hostnet owns the host-side setup those two paths share: assigning
+// the TUN interface address, enabling forwarding, and installing the NAT /
+// FORWARD iptables rules tagged `veepin:<name>`. The supervisor is the only
+// veepin subsystem that mutates host state on rebuild.
+//
+// internal/mgmt and internal/mgmt/ui are the management API and the
+// server-rendered html/template panel that drives it. Both endpoints live on
+// a localhost-bound HTTP listener, authenticated by a 32-byte bearer token
+// generated on first run and stored 0600 root-only. doc/security.md states the
+// threat model of binding the panel off localhost.
+//
 // # The example protocol
 //
 // toy and internal/toy implement TOY, which is NOT one of the nineteen above and

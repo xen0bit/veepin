@@ -23,7 +23,25 @@ import (
 	icisco "github.com/xen0bit/veepin/internal/cisco"
 )
 
-func init() { client.RegisterServer("cisco", parseServerOptions) }
+func init() {
+	client.RegisterServer("cisco", parseServerOptions)
+	client.RegisterServerOpts("cisco", []client.OptSpec{
+		{Key: OptServerListen, Kind: client.OptStr, Help: "local IP to bind the IKE sockets on (default 0.0.0.0)"},
+		{Key: OptServerPort, Kind: client.OptInt, Help: "IKE port to listen on (default 500; the NAT-T port is always 4500)"},
+		{Key: OptServerGroup, Kind: client.OptStr, Required: true, Help: "group name clients must present"},
+		{Key: OptServerGroupPSK, Kind: client.OptStr, Required: true, Secret: true, Help: "the group's pre-shared key"},
+		{Key: OptServerUser, Kind: client.OptStr, Required: true, Help: "XAuth username to accept"},
+		{Key: OptServerPass, Kind: client.OptStr, Required: true, Secret: true, Help: "the user's password"},
+		{Key: OptServerPool, Kind: client.OptCIDR, Help: "internal address pool handed to clients (default 10.60.0.0/24)"},
+		{Key: OptServerDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers offered to clients"},
+		{Key: OptServerDomain, Kind: client.OptStr, Help: "default search domain offered to clients"},
+		{Key: OptServerBanner, Kind: client.OptStr, Help: "login banner shown to clients"},
+		{Key: OptServerSplitInclude, Kind: client.OptCommaList, Help: "comma-separated CIDRs clients should route into the tunnel (empty = everything)"},
+		{Key: OptServerPublicIP, Kind: client.OptStr, Help: "address clients reach this gateway on (empty = the bound address)"},
+		{Key: OptServerTUN, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
+		{Key: OptServerShape, Kind: client.OptInt, Help: "per-flow downstream shaping budget in bytes (0 = off)"},
+	})
+}
 
 const defaultPool = "10.60.0.0/24"
 

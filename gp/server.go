@@ -26,7 +26,24 @@ import (
 	igp "github.com/xen0bit/veepin/internal/gp"
 )
 
-func init() { client.RegisterServer("gp", parseServerOptions) }
+func init() {
+	client.RegisterServer("gp", parseServerOptions)
+	client.RegisterServerOpts("gp", []client.OptSpec{
+		{Key: OptServerCert, Kind: client.OptFilePath, Required: true, Help: "path to the server TLS certificate PEM"},
+		{Key: OptServerKey, Kind: client.OptFilePath, Required: true, Secret: true, Help: "path to the server TLS private key PEM"},
+		{Key: OptServerListen, Kind: client.OptStr, Help: "local IP to bind the HTTPS socket on (default 0.0.0.0)"},
+		{Key: OptServerPort, Kind: client.OptInt, Help: "HTTPS port to listen on (default 443)"},
+		{Key: OptServerESPPort, Kind: client.OptInt, Help: "UDP port for the ESP data path (default 4501)"},
+		{Key: OptServerPublicIP, Kind: client.OptStr, Help: "address clients reach this gateway on, advertised as the ESP endpoint (empty = the address their control connection arrived on)"},
+		{Key: OptServerPool, Kind: client.OptCIDR, Help: "internal address pool handed to clients (default 10.50.0.0/24)"},
+		{Key: OptServerDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers offered to clients"},
+		{Key: OptServerUser, Kind: client.OptStr, Required: true, Help: "username to accept"},
+		{Key: OptServerPass, Kind: client.OptStr, Required: true, Secret: true, Help: "the user's password"},
+		{Key: OptServerNoESP, Kind: client.OptBool, Help: "serve the SSL tunnel only, leaving the UDP port unbound"},
+		{Key: OptServerTUN, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
+		{Key: OptServerShape, Kind: client.OptInt, Help: "per-flow downstream shaping budget in bytes (0 = off)"},
+	})
+}
 
 const defaultPool = "10.50.0.0/24"
 

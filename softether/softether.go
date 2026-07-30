@@ -289,4 +289,14 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 
 func init() {
 	client.RegisterServer("softether", parseServerOptions)
+	client.RegisterServerOpts("softether", []client.OptSpec{
+		{Key: OptServerCert, Kind: client.OptFilePath, Required: true, Help: "path to TLS certificate PEM"},
+		{Key: OptServerKey, Kind: client.OptFilePath, Required: true, Secret: true, Help: "path to TLS private key PEM"},
+		{Key: OptServerUser, Kind: client.OptStr, Required: true, Help: "username to accept"},
+		{Key: OptServerPass, Kind: client.OptStr, Required: true, Secret: true, Help: "password to accept"},
+		{Key: OptServerTUN, Kind: client.OptStr, Help: "TAP interface name (empty = kernel picks)"},
+		{Key: OptServerPool, Kind: client.OptCIDR, Help: "address pool (default 10.70.0.0/24)"},
+		{Key: OptServerListen, Kind: client.OptStr, Help: "local IP to bind the TLS listener on (default 0.0.0.0)"},
+		{Key: OptServerPort, Kind: client.OptInt, Help: "TLS port to listen on (default 443)"},
+	})
 }

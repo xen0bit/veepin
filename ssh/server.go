@@ -398,7 +398,20 @@ const (
 	OptServerTUN            = "tun"
 )
 
-func init() { client.RegisterServer("ssh", parseServerOptions) }
+func init() {
+	client.RegisterServer("ssh", parseServerOptions)
+	client.RegisterServerOpts("ssh", []client.OptSpec{
+		{Key: OptServerHostKey, Kind: client.OptFilePath, Required: true, Secret: true, Help: "path to the server SSH host private key"},
+		{Key: OptServerListenIP, Kind: client.OptStr, Help: "local IP to bind the TCP socket on (default 0.0.0.0)"},
+		{Key: OptServerPort, Kind: client.OptInt, Help: "TCP port to listen on (default 22)"},
+		{Key: OptServerPool, Kind: client.OptCIDR, Help: "tunnel subnet clients use (default 10.200.0.0/24)"},
+		{Key: OptServerDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers (informational)"},
+		{Key: OptServerUser, Kind: client.OptStr, Help: "username to accept (password auth)"},
+		{Key: OptServerPassword, Kind: client.OptStr, Secret: true, Help: "the user's password"},
+		{Key: OptServerAuthorizedKeys, Kind: client.OptFilePath, Help: "path to an authorized_keys file (public-key auth)"},
+		{Key: OptServerTUN, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
+	})
+}
 
 // parseServerOptions builds an SSH responder from string options.
 func parseServerOptions(opts map[string]string) (client.Server, error) {

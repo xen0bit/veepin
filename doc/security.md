@@ -265,3 +265,80 @@ the name suggests. Do not rely on it for that until the sender lands.
 The negotiation is also not interop-tested against strongSwan yet, so by this
 repo's own standard the wire format is unproven: a veepin↔veepin test shows the
 two halves agree, not that either is right.
+
+## The management plane binds to localhost; do not bind it to a routable interface
+
+The supervisor (`veepin serve -config <dir>`) starts a management HTTP API and
+an embedded web panel, listening on `127.0.0.1:8443` by default. The API is
+authenticated with a bearer token generated on first run into
+`<config>/mgmt/token` mode `0600` root-only — the same filesystem-protection
+posture the protocol facades' PEM and key files already rely on. That posture
+holds because the panel is reachable only from the host itself.
+
+If you bind the management API to a routable interface, the token file's
+filesystem protection is no longer the boundary: anyone with network access can
+attempt it. The token is 256 bits of `crypto/rand` and the comparison is
+constant-time, so a blind online guess is not practical against a network peer
+with no auth. Still, the panel transit is plaintext HTTP unless you put mTLS or
+an SSH tunnel in front of it; a traffic observer then learns the token; the
+token in their hands is a write primitive to every listener's options,
+including protocol keys and PSKs.
+
+### The panel is unauthenticated, and the `Host` check is what makes that safe
+
+The panel at `/` is served without a bearer token, necessarily: it is the thing
+that hands the browser the token, which it does by writing it into the page. The
+token is then the per-request boundary for `/api/*`.
+
+That arrangement survives ordinary cross-origin abuse. JavaScript on another
+site cannot set an `Authorization` header without a CORS preflight the
+supervisor never grants, so it cannot call the API — and it cannot read `/`
+either, because the same-origin policy stops it seeing the response.
+
+It does not survive **DNS rebinding**. A page the operator visits can rebind its
+own hostname to `127.0.0.1`, at which point it is same-origin with the panel: it
+fetches `/`, reads the token straight out of the DOM, and drives every endpoint
+with the operator's full authority. No CORS involved.
+
+What gives a rebound request away is that the browser sends the name it dialled,
+so it arrives as `Host: attacker.example` rather than a loopback literal. The
+supervisor wraps its whole listener — panel and API together — in
+`mgmt.RequireHost`, which answers `403` unless the `Host` header names loopback,
+`localhost`, or the exact address passed to `-listen`. If you front the panel
+with a reverse proxy under some other name, that proxy must present one of those
+in the upstream `Host`.
+
+The dashboard escapes every value it renders into a row, `error` most of all:
+protocol errors quote the option values that caused them, so an operator-supplied
+path or hostname reaches the page as text. Since the page holds the token in its
+DOM, markup landing in a row would be a token-exfiltration path rather than a
+cosmetic bug.
+
+Operate the management plane behind one of:
+
+- **localhost only (default)** — the recommended posture. SSH to the host and
+  use the panel through a port-forward, or use `veepin mgmt` locally with
+  `VEEPIN_MGMT_TOKEN` in the environment.
+- **mTLS on the bound address** — terminate TLS in a reverse proxy in front of
+  the supervisor with client-certificate authentication. The supervisor's
+  bearer token remains the second factor.
+- **Unbound only behind a firewall** — acceptable in a controlled lab; document
+  it as such so a future operator inherits the boundary.
+
+The supervisor persists listener option maps to disk as mode `0600`, root-only
+JSON files. Secrets inside them (private keys, PSKs, passphrases, TOTP seeds)
+are plaintext at rest and redacted as the literal `<redacted>` on every API
+read. A PATCH that submits `<redacted>` for a secret key preserves the on-disk
+value rather than overwriting it with the placeholder, so a GET-then-PATCH
+round trip cannot destroy a stored key — but a copy-paste of the redacted
+value to a fresh POST will, which is the trade-off of a per-call bearer model.
+
+The supervisor is **the only `veepin` subsystem that mutates host state.**
+Single-protocol `veepin serve <proto>` opens a TUN and binds sockets but
+declines to touch iptables unless you pass `-setup-nat`; the supervisor, by
+contrast, **does** manage iptables for listeners that have `setup_nat: true`:
+every rule it installs is tagged `veepin:<name>` and is removed on rebuild and
+on `DELETE`. The exposure is bounded to its own rules (it does not own, for
+example, your existing FORWARD policy), but it does mean the supervisor
+process needs `CAP_NET_ADMIN` in addition to the `CAP_NET_ADMIN` every veepin
+process already needs to open a TUN.

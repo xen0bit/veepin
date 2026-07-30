@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
@@ -86,7 +87,28 @@ const (
 	OptServerShape            = "shape"              // per-flow downstream shaping budget in bytes (0 = off)
 )
 
-func init() { client.RegisterServer("wireguard", parseServerOptions) }
+func init() {
+	client.RegisterServer("wireguard", parseServerOptions)
+	client.RegisterServerOpts("wireguard", []client.OptSpec{
+		// Neither the private key nor the address is Required, despite both being
+		// mandatory for a working server: a wg-quick file supplied via
+		// OptServerConfig carries them, and parseServerOptions accepts that. A
+		// spec marked Required makes the panel refuse a form that a config file
+		// would have completed. AmneziaWG, which reuses this Server type and the
+		// same parse, marks neither -- the two must agree.
+		{Key: OptServerConfig, Kind: client.OptFilePath, Help: "wg-quick server config file (interface + peers)"},
+		{Key: OptServerPrivateKey, Kind: client.OptStr, Secret: true, Help: "server static private key, base64 (required unless in -config)"},
+		{Key: OptServerListenIP, Kind: client.OptStr, Help: "local IP to bind the UDP socket on (default 0.0.0.0)"},
+		{Key: OptServerListenPort, Kind: client.OptInt, Help: "UDP port to listen on (default 51820)"},
+		{Key: OptServerAddress, Kind: client.OptCIDR, Help: "server tunnel address in CIDR form (required unless in -config)"},
+		{Key: OptServerMTU, Kind: client.OptInt, Help: "inner MTU (default 1420)"},
+		{Key: OptServerTUN, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
+		{Key: OptServerPeerPublicKey, Kind: client.OptStr, Help: "a single peer's static public key, base64"},
+		{Key: OptServerPeerPresharedKey, Kind: client.OptStr, Secret: true, Help: "the -peer-public-key peer's preshared key, base64 (optional)"},
+		{Key: OptServerPeerAllowedIPs, Kind: client.OptCommaList, Help: "the -peer-public-key peer's allowed IPs, comma-separated CIDRs"},
+		{Key: OptServerShape, Kind: client.OptInt, Help: "per-flow downstream shaping budget in bytes (0 = off)"},
+	})
+}
 
 // parseServerOptions builds a WireGuard responder from string options, the
 // server-side counterpart of parseOptions. Peers come from a wg-quick -config
@@ -545,6 +567,42 @@ func (s *Server) Close() error {
 		close(s.closed)
 	})
 	return s.closeErr
+}
+
+// Peers returns every configured peer with their live state, implementing
+// client.PeerDescriber so the management panel shows a peer list for WireGuard
+// and AmneziaWG (which reuses this Server type). An unknown peer — one that
+// has never completed a handshake — reports State "disconnected" with an empty
+// LastHandshake. A connected peer's last-handshake time is the wall-clock time
+// at which the current tunnel session was installed (rekeyed sessions update
+// it). The public key is short-prefix-abbreviated for the panel; the full key
+// is always available in the listener config file.
+func (s *Server) Peers() []client.PeerInfo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]client.PeerInfo, 0, len(s.peers))
+	for _, p := range s.peers {
+		pk := base64.StdEncoding.EncodeToString(p.pubKey[:])
+		addr := ""
+		if len(p.allowedIPs) > 0 {
+			addr = p.allowedIPs[0].String()
+		}
+		info := client.PeerInfo{
+			ID:      pk,
+			Address: addr,
+			State:   "disconnected",
+		}
+		if t := p.tunnel; t != nil {
+			t.mu.RLock()
+			if !t.established.IsZero() {
+				info.State = "connected"
+				info.LastHandshake = t.established.UTC().Format(time.RFC3339)
+			}
+			t.mu.RUnlock()
+		}
+		out = append(out, info)
+	}
+	return out
 }
 
 // parseCIDR splits "10.10.0.1/24" into the host address and its network.
