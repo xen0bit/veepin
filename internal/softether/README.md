@@ -1,23 +1,33 @@
 # internal/softether — SoftEther VPN native protocol (SE-VPN)
 
 Ethernet frames over TLS, with the control exchange carried in SoftEther's own
-PACK serialisation. This is veepin's **only layer-2 protocol**: every other one
-tunnels IP packets over a TUN device, this one tunnels Ethernet frames over a
-TAP device and switches them between clients.
+PACK serialisation. This is one of veepin's two **layer-2** protocols — the other
+is [`internal/l2tpv3`](../l2tpv3) — where every other protocol here tunnels IP
+packets over a TUN device. SoftEther switches Ethernet frames between connected
+clients rather than bridging them to a host TAP, which is the gap the caveats
+below name: L2TPv3 is the one with a working TAP data path.
 
-```
-client                                        server
-  |------------- TLS handshake ----------------->|
-  |-- PACK{method=hello} ----------------------->|
-  |<-- PACK{method=hello, random=<20 bytes>} ----|
-  |-- PACK{method=login, username,               |
-  |        secure_password=SHA1(SHA1(u+p)^rnd)}->|
-  |<-- PACK{method=login, error=0, assigned_ip} -|
-  |=== [len:4le][Ethernet frame] both ways ======|
+```mermaid
+sequenceDiagram
+    participant C as client
+    participant S as server
+    Note over C,S: TLS handshake — every byte below travels inside it
+    C->>S: PACK{method=hello}
+    S->>C: PACK{method=hello, random=20 octets}
+    C->>S: PACK{method=login, username, hubname,<br/>secure_password=SHA1(SHA1(username+password) XOR random)}
+    alt digest matches
+        S->>C: PACK{method=login, error=0, hubname, assigned_ip}
+        Note over C,S: data path, both directions:<br/>4-octet little-endian length, then one Ethernet frame
+        C-->>S: Ethernet frame
+        S-->>C: Ethernet frame
+    else digest does not match
+        S->>C: PACK{method=login, error=1}
+    end
 ```
 
-The 20-byte server random is a per-session challenge: the password digest is
+The 20-octet server random is a per-session challenge: the password digest is
 bound to it, so a captured login cannot be replayed against a later session.
+`hubname` selects the virtual hub and is echoed back on success.
 
 ## Shape of the code
 
