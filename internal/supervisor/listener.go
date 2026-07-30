@@ -37,6 +37,12 @@ import (
 // builder never has to sanitise a name it would later pass to a shell.
 var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 
+// ValidName reports whether name is one the supervisor could have written: it
+// is the grammar above, exported so callers that turn a name into a filename --
+// the management API's path handlers -- can check it before the join rather
+// than trusting whatever routed to them.
+func ValidName(name string) bool { return nameRe.MatchString(name) }
+
 // ListenerConfig is one server, the on-disk form of one JSON file in the config
 // directory. It mirrors what `veepin serve <protocol>` reads from its flags:
 // Options is the same map[string]string the protocol's ServerParseFunc takes,

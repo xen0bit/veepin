@@ -284,6 +284,36 @@ an SSH tunnel in front of it; a traffic observer then learns the token; the
 token in their hands is a write primitive to every listener's options,
 including protocol keys and PSKs.
 
+### The panel is unauthenticated, and the `Host` check is what makes that safe
+
+The panel at `/` is served without a bearer token, necessarily: it is the thing
+that hands the browser the token, which it does by writing it into the page. The
+token is then the per-request boundary for `/api/*`.
+
+That arrangement survives ordinary cross-origin abuse. JavaScript on another
+site cannot set an `Authorization` header without a CORS preflight the
+supervisor never grants, so it cannot call the API — and it cannot read `/`
+either, because the same-origin policy stops it seeing the response.
+
+It does not survive **DNS rebinding**. A page the operator visits can rebind its
+own hostname to `127.0.0.1`, at which point it is same-origin with the panel: it
+fetches `/`, reads the token straight out of the DOM, and drives every endpoint
+with the operator's full authority. No CORS involved.
+
+What gives a rebound request away is that the browser sends the name it dialled,
+so it arrives as `Host: attacker.example` rather than a loopback literal. The
+supervisor wraps its whole listener — panel and API together — in
+`mgmt.RequireHost`, which answers `403` unless the `Host` header names loopback,
+`localhost`, or the exact address passed to `-listen`. If you front the panel
+with a reverse proxy under some other name, that proxy must present one of those
+in the upstream `Host`.
+
+The dashboard escapes every value it renders into a row, `error` most of all:
+protocol errors quote the option values that caused them, so an operator-supplied
+path or hostname reaches the page as text. Since the page holds the token in its
+DOM, markup landing in a row would be a token-exfiltration path rather than a
+cosmetic bug.
+
 Operate the management plane behind one of:
 
 - **localhost only (default)** — the recommended posture. SSH to the host and

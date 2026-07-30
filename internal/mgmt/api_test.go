@@ -515,6 +515,57 @@ func TestBootTokenGeneratesOnFirstRun(t *testing.T) {
 
 // TestBearerHeaderParsing pins the "Bearer " prefix parsing; a basic-auth-style
 // header or wrong scheme returns no token rather than a half-parse.
+// TestRequireHostRejectsRebinding is the DNS-rebinding guard. The panel cannot
+// require a token -- it is what hands the browser one -- so a page that rebinds
+// its own hostname to the loopback address would become same-origin with the
+// panel, read the token out of the DOM, and drive every endpoint. The rebound
+// request still carries the name the browser dialled in its Host header, which
+// is what this rejects.
+func TestRequireHostRejectsRebinding(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	h := RequireHost([]string{"10.0.0.5:8443"}, inner)
+
+	for _, tc := range []struct {
+		host string
+		want int
+	}{
+		{"127.0.0.1:8443", http.StatusOK},
+		{"127.0.0.1", http.StatusOK},
+		{"localhost:8443", http.StatusOK},
+		{"[::1]:8443", http.StatusOK},
+		{"10.0.0.5:8443", http.StatusOK}, // the address the operator bound to
+		{"attacker.example:8443", http.StatusForbidden},
+		{"attacker.example", http.StatusForbidden},
+		{"localhost.attacker.example", http.StatusForbidden},
+		{"10.0.0.9:8443", http.StatusForbidden}, // some other address on the host
+		{"", http.StatusForbidden},
+	} {
+		req := httptest.NewRequest("GET", "/api/health", nil)
+		req.Host = tc.host
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != tc.want {
+			t.Errorf("Host %q -> %d, want %d", tc.host, rec.Code, tc.want)
+		}
+	}
+}
+
+// TestPathNameIsValidatedBeforeItBecomesAFilename: only DeleteListenerFile
+// checked the name, so the GET and PATCH handlers joined whatever the router
+// matched into a path. Go's ServeMux makes that hard to abuse, but a string that
+// becomes a filename gets checked.
+func TestPathNameIsValidatedBeforeItBecomesAFilename(t *testing.T) {
+	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	for _, bad := range []string{"UPPERCASE", "has.dot", "-leading-hyphen", "with%20space"} {
+		resp, _ := s.do("GET", "/api/listeners/"+bad, nil)
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("GET name %q -> %d, want 404", bad, resp.StatusCode)
+		}
+	}
+}
+
 func TestBearerHeaderParsing(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
 		{"Bearer abc", "abc"},

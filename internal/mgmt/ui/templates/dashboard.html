@@ -40,18 +40,31 @@ const api = (path, opts) => {
   return fetch(path, opts).then(r => r.json().then(body => ({status: r.status, body})));
 };
 
+// esc makes a value safe to concatenate into innerHTML. Every field below goes
+// through it. Most are constrained -- a listener name matches [a-z0-9-]+, a TUN
+// name and an address come from the kernel -- but `error` is arbitrary text from
+// a protocol's own failure path, and protocol errors routinely quote the option
+// values that caused them: a file path, a hostname, whatever the operator typed
+// into the form. This page holds the bearer token in its DOM, so markup landing
+// in it is a token-exfiltration path, not a cosmetic bug.
+function esc(v) {
+  return String(v === undefined || v === null ? "" : v)
+    .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+}
+
 function renderRow(l) {
-  const cls = "st-" + (l.state||"unknown");
+  const cls = "st-" + esc(l.state || "unknown");
   const line = '<tr>' +
-    '<td><a href="/listeners/' + encodeURIComponent(l.name) + '">' + l.name + '</a></td>' +
-    '<td>' + l.protocol + '</td>' +
-    '<td class="' + cls + '">' + (l.state||"") + '</td>' +
-    '<td>' + (l.tun||"") + '</td>' +
-    '<td>' + (l.gateway||"") + '</td>' +
-    '<td>' + (l.network||"") + '</td>' +
-    '<td>' + (l.error||"") + '</td>' +
-    '<td><button data-restart="' + l.name + '">restart</button>' +
-    '<button data-delete="' + l.name + '">delete</button></td>' +
+    '<td><a href="/listeners/' + encodeURIComponent(l.name) + '">' + esc(l.name) + '</a></td>' +
+    '<td>' + esc(l.protocol) + '</td>' +
+    '<td class="' + cls + '">' + esc(l.state) + '</td>' +
+    '<td>' + esc(l.tun) + '</td>' +
+    '<td>' + esc(l.gateway) + '</td>' +
+    '<td>' + esc(l.network) + '</td>' +
+    '<td>' + esc(l.error) + '</td>' +
+    '<td><button data-restart="' + esc(l.name) + '">restart</button>' +
+    '<button data-delete="' + esc(l.name) + '">delete</button></td>' +
     '</tr>';
   return line;
 }

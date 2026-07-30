@@ -29,6 +29,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -127,10 +128,15 @@ func NewServer(dir string, mgr ManagerBackend, logger *log.Logger) (*Server, err
 }
 
 // Handler returns the mux so a caller can wrap it in TLS or run it through a
-// unix-domain socket. Auth middleware is baked in: ServeHTTP is preceded
-// everywhere by requireToken.
+// unix-domain socket. Auth middleware is baked in: every /api/ request goes
+// through requireToken.
+//
+// logRequest is on the outside, so a rejected request is logged too. With the
+// order reversed -- which it was -- requireToken short-circuited before the
+// logger ever ran, and failed authentication was the one thing the management
+// plane never wrote a line about.
 func (s *Server) Handler() http.Handler {
-	return s.requireToken(s.logRequest(s.mux))
+	return s.logRequest(s.requireToken(s.mux))
 }
 
 // Token returns the bearer token the panel uses to authenticate its /api
@@ -174,6 +180,66 @@ func bootToken(path string) ([]byte, bool, error) {
 }
 
 // --- Middleware ---
+
+// RequireHost rejects any request whose Host header names neither the loopback
+// interface nor one of the extra hosts the operator deliberately bound to. It
+// wraps the whole management listener -- panel and API together -- and the
+// caller in cmd/veepin passes its -listen address as the extra.
+//
+// This is the DNS-rebinding guard, and it protects the panel more than the API.
+// The panel is unauthenticated by necessity: it is the thing that hands the
+// browser the token, so it cannot itself require one. The bearer header stops
+// ordinary cross-origin abuse -- JavaScript on another site cannot set
+// Authorization without a CORS preflight the supervisor never grants -- but a
+// site that rebinds its own hostname to 127.0.0.1 stops being cross-origin at
+// all. It can then fetch "/", read the token straight out of the page, and drive
+// every endpoint with the operator's full authority.
+//
+// What gives it away is the Host header: the browser sends the name it dialled,
+// so the rebound request arrives as `Host: attacker.example`, never as a
+// loopback literal. Requiring one closes the hole. "localhost" is allowed
+// alongside the IP literals because operators type it and it is not a name an
+// attacker's DNS can claim.
+func RequireHost(extra []string, next http.Handler) http.Handler {
+	allow := make(map[string]bool, len(extra))
+	for _, a := range extra {
+		if h := hostOnly(a); h != "" {
+			allow[h] = true
+		}
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hostAllowed(hostOnly(r.Host), allow) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		http.Error(w, "forbidden: unrecognised Host header; the management plane "+
+			"answers on loopback and on its own bind address only", http.StatusForbidden)
+	})
+}
+
+// hostAllowed reports whether host may address the management plane.
+func hostAllowed(host string, allow map[string]bool) bool {
+	if host == "" {
+		return false
+	}
+	if allow[host] {
+		return true
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// hostOnly strips the port from a "host:port" authority, tolerating a bare host
+// and unwrapping the brackets around an IPv6 literal.
+func hostOnly(authority string) string {
+	if h, _, err := net.SplitHostPort(authority); err == nil {
+		return h
+	}
+	return strings.Trim(authority, "[]")
+}
 
 // requireToken is the auth layer. A request without a matching
 // "Authorization: Bearer <token>" header gets a 401. Token comparison is
@@ -232,6 +298,25 @@ func bearer(h string) []byte {
 }
 
 // --- Endpoints ---
+
+// pathName pulls the {name} segment out of the route and checks it against the
+// listener-name grammar before it is ever joined into a filesystem path. Only
+// DeleteListenerFile validated, so the GET and PATCH handlers built a filename
+// out of whatever the router happened to match. Go's ServeMux makes that hard to
+// abuse -- a {name} wildcard spans one segment and the request path is cleaned
+// before routing -- but "hard to abuse" is not the bar for a string that becomes
+// a filename, and the check is one line.
+//
+// Returns "" and writes the response when the name is not one the supervisor
+// could ever have written; the caller returns on an empty result.
+func (s *Server) pathName(w http.ResponseWriter, r *http.Request) string {
+	name := r.PathValue("name")
+	if !supervisor.ValidName(name) {
+		http.Error(w, "no such listener", http.StatusNotFound)
+		return ""
+	}
+	return name
+}
 
 // handleHealth answers a basic liveness probe.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -293,7 +378,10 @@ func (s *Server) handleGetListener(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	name := r.PathValue("name")
+	name := s.pathName(w, r)
+	if name == "" {
+		return
+	}
 	status := s.mgr.Status(name)
 	if status.State == "unknown" {
 		http.Error(w, "no such listener", http.StatusNotFound)
@@ -363,7 +451,10 @@ func (s *Server) handlePatchListener(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	name := r.PathValue("name")
+	name := s.pathName(w, r)
+	if name == "" {
+		return
+	}
 	existing, err := supervisor.ParseListenerFile(filepath.Join(s.dir, name+".json"))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -418,7 +509,10 @@ func (s *Server) handleDeleteListener(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	name := r.PathValue("name")
+	name := s.pathName(w, r)
+	if name == "" {
+		return
+	}
 	// Stop reports "no listener named X" if the running set does not have it;
 	// we proceed with the file removal so Delete is idempotent for a listener
 	// that crashed but whose file is still present.
@@ -439,7 +533,10 @@ func (s *Server) handleRestartListener(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	name := r.PathValue("name")
+	name := s.pathName(w, r)
+	if name == "" {
+		return
+	}
 	if err := s.mgr.Rebuild(name); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -456,7 +553,10 @@ func (s *Server) handlePeerList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	name := r.PathValue("name")
+	name := s.pathName(w, r)
+	if name == "" {
+		return
+	}
 	srv := s.mgr.Server(name)
 	if srv == nil {
 		http.Error(w, "no such listener", http.StatusNotFound)

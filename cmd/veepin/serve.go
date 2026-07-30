@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -10,6 +12,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/xen0bit/veepin/amneziawg"
 	"github.com/xen0bit/veepin/anyconnect"
@@ -811,10 +814,9 @@ func runSupervisorMode(args []string) error {
 	total := len(mgr.All())
 	logger.Printf("supervisor ready: %d of %d listener(s) running", countRunning(mgr), total)
 
-	var mgmtServer *mgmt.Server
+	var httpSrv *http.Server
 	if !*noMgmt {
-		var err error
-		mgmtServer, err = mgmt.NewServer(configDir, mgr, logger)
+		mgmtServer, err := mgmt.NewServer(configDir, mgr, logger)
 		if err != nil {
 			_ = mgr.Close()
 			return fmt.Errorf("mgmt: %w", err)
@@ -827,19 +829,50 @@ func runSupervisorMode(args []string) error {
 			return fmt.Errorf("ui: %w", err)
 		}
 		mux.Handle("/", uiHandler)
+		// The Host guard wraps panel and API together. The panel cannot require
+		// a token -- it is what hands the browser one -- so without this a page
+		// that rebinds its own hostname to the loopback address becomes
+		// same-origin with the panel, reads the token out of the DOM, and drives
+		// every endpoint. See mgmt.RequireHost.
+		httpSrv = &http.Server{
+			Addr:     *listenAddr,
+			Handler:  mgmt.RequireHost([]string{*listenAddr}, mux),
+			ErrorLog: logger,
+		}
 		go func() {
 			logger.Printf("management API + panel at http://%s/", *listenAddr)
-			if err := http.ListenAndServe(*listenAddr, mux); err != nil {
+			if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				logger.Printf("management API: %v", err)
 			}
 		}()
 	}
 
+	// SIGHUP re-reads the config directory and reconciles the live set, the same
+	// pass the initial load runs -- so adding, editing, or removing a listener
+	// file does not need the API or a restart of the fleet.
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	for sig := range sigCh {
+		if sig == syscall.SIGHUP {
+			logger.Printf("supervisor: SIGHUP; re-reading %s", configDir)
+			if err := mgr.Apply(); err != nil {
+				logger.Printf("supervisor: reload: %v", err)
+			}
+			logger.Printf("supervisor: %d of %d listener(s) running", countRunning(mgr), len(mgr.All()))
+			continue
+		}
+		break
+	}
 	logger.Printf("supervisor shutting down")
-	_ = mgmtServer
+	if httpSrv != nil {
+		// Stop answering before the listeners go away, so the panel does not
+		// serve a fleet that is halfway torn down.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := httpSrv.Shutdown(ctx); err != nil {
+			logger.Printf("management API shutdown: %v", err)
+		}
+		cancel()
+	}
 	if err := mgr.Close(); err != nil {
 		return fmt.Errorf("supervisor shutdown: %w", err)
 	}
