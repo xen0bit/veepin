@@ -146,6 +146,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			psk      = fs.String("psk", "", "pre-shared key (required)")
 			id       = fs.String("id", "", "local identity (FQDN or IP address) presented to clients (required)")
 			pool     = fs.String("pool", "10.10.10.0/24", "internal address pool handed to clients")
+			pool6    = fs.String("pool6", "", "internal IPv6 address pool, CIDR (default fd00:10:10::/64)")
 			dns      = fs.String("dns", "1.1.1.1,8.8.8.8", "comma-separated DNS servers pushed to clients")
 			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks, e.g. tun0)")
 			eapUsers = fs.String("eap-users", "", "path to a username:password file enabling EAP-MSCHAPv2 auth (optional)")
@@ -163,6 +164,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 				ikev2.OptServerPSK:      *psk,
 				ikev2.OptServerIdentity: *id,
 				ikev2.OptServerPool:     *pool,
+				ikev2.OptServerPool6:    *pool6,
 				ikev2.OptServerDNS:      *dns,
 				ikev2.OptServerTUN:      *tun,
 				ikev2.OptServerEAPUsers: *eapUsers,
@@ -629,6 +631,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			user     = fs.String("user", "", "username to accept (required)")
 			pass     = fs.String("pass", "", "the user's password (required)")
 			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+			noDTLS   = fs.Bool("no-dtls", false, "serve the TLS tunnel only, leaving the UDP port unbound")
 			shape    = fs.Int("shape", 0, "per-flow downstream shaping budget in bytes: pads each inner flow's first N bytes to the tunnel MTU, hiding an inner TLS handshake's size pattern (0 = off, 16384 recommended)")
 		)
 		return func() map[string]string {
@@ -641,6 +644,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 				anyconnect.OptServerUser:     *user,
 				anyconnect.OptServerPassword: *pass,
 				anyconnect.OptServerTUN:      *tun,
+				anyconnect.OptServerNoDTLS:   fmt.Sprint(*noDTLS),
 			}
 			if *shape != 0 {
 				opts[anyconnect.OptServerShape] = fmt.Sprint(*shape)

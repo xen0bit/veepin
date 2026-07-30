@@ -90,11 +90,17 @@ const (
 func init() {
 	client.RegisterServer("wireguard", parseServerOptions)
 	client.RegisterServerOpts("wireguard", []client.OptSpec{
+		// Neither the private key nor the address is Required, despite both being
+		// mandatory for a working server: a wg-quick file supplied via
+		// OptServerConfig carries them, and parseServerOptions accepts that. A
+		// spec marked Required makes the panel refuse a form that a config file
+		// would have completed. AmneziaWG, which reuses this Server type and the
+		// same parse, marks neither -- the two must agree.
 		{Key: OptServerConfig, Kind: client.OptFilePath, Help: "wg-quick server config file (interface + peers)"},
-		{Key: OptServerPrivateKey, Kind: client.OptStr, Required: true, Secret: true, Help: "server static private key, base64 (required unless in -config)"},
+		{Key: OptServerPrivateKey, Kind: client.OptStr, Secret: true, Help: "server static private key, base64 (required unless in -config)"},
 		{Key: OptServerListenIP, Kind: client.OptStr, Help: "local IP to bind the UDP socket on (default 0.0.0.0)"},
 		{Key: OptServerListenPort, Kind: client.OptInt, Help: "UDP port to listen on (default 51820)"},
-		{Key: OptServerAddress, Kind: client.OptCIDR, Required: true, Help: "server tunnel address, CIDR"},
+		{Key: OptServerAddress, Kind: client.OptCIDR, Help: "server tunnel address in CIDR form (required unless in -config)"},
 		{Key: OptServerMTU, Kind: client.OptInt, Help: "inner MTU (default 1420)"},
 		{Key: OptServerTUN, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
 		{Key: OptServerPeerPublicKey, Kind: client.OptStr, Help: "a single peer's static public key, base64"},

@@ -77,17 +77,9 @@ func TestEveryServerProtocolDeclaresOptions(t *testing.T) {
 	}
 }
 
-// TestEveryOptionSpecKeyHasAConstDecl is the back-half of the contract: a spec's
-// Key must be a real Opt* const the protocol's parseServerOptions actually
-// reads. A spec keyed by a string the facade never mentions would render a
-// field the panel sends but the protocol ignores, the same silent-drop shape
-// flags_test.go catches for the bare command.
-//
-// Rather than parse Go ASTs here, the test asserts the parseServerOptions
-// behaviour indirectly: it checks the spec's Key is at least one the proto
-// registers, which (since the spec is built alongside the Opt* const) the
-// parser then reads. A spec Key that does not match a const would be caught by
-// go vet's string-typed const compare in the facade code.
-
-// (Above test body stands in for the key/const contract; the AST-level check
-// is intentionally out of scope here to keep this test dependency-free.)
+// The back half of the contract -- that a spec's Key is one the protocol's
+// parseServerOptions actually reads, and that every key it reads has a spec --
+// lives in cmd/veepin/flags_test.go as
+// TestServerOptSpecsMatchTheKeysTheProtocolReads. It belongs there because the
+// reference it checks against is serveFlags' emitted option map, which is by
+// construction the set of keys `veepin serve <protocol>` can set.

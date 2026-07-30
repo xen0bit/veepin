@@ -258,3 +258,62 @@ func TestServeEmittedKeysAreDeclared(t *testing.T) {
 func TestConnectEmittedKeysAreDeclared(t *testing.T) {
 	assertEmittedKeysAreDeclared(t, "connect", client.Protocols(), connectFlags)
 }
+
+// TestServerOptSpecsMatchTheKeysTheProtocolReads is the same guard one layer
+// further out, for the metadata the management panel renders forms from.
+//
+// client.RegisterServerOpts is a third hand-written list of option keys, after
+// the facade's Opt* constants and serveFlags' option map. Nothing tied it to the
+// other two. A spec keyed by a string the protocol never reads renders a form
+// field an operator fills in and the server ignores — the same silent-drop shape
+// the tests above exist for, arriving by a different route. A key the protocol
+// does read but the metadata omits is worse in a quieter way: the panel offers
+// no field for it, so the option is unreachable from the panel and, if it is a
+// secret, GET /api/listeners/{name} does not know to redact it.
+//
+// serveFlags' emitted key set is the reference, because that is by construction
+// what `veepin serve <protocol>` can set and therefore what the protocol reads.
+func TestServerOptSpecsMatchTheKeysTheProtocolReads(t *testing.T) {
+	for _, protocol := range client.ServerProtocols() {
+		specs, ok := client.ServerOptsFor(protocol)
+		if !ok {
+			t.Errorf("%s: registered as a server but declared no OptSpec metadata", protocol)
+			continue
+		}
+
+		fs := newTestFlagSet()
+		options, err := serveFlags(protocol, fs)
+		if err != nil {
+			t.Errorf("%s: binding serve flags: %v", protocol, err)
+			continue
+		}
+		fs.VisitAll(func(f *flag.Flag) {
+			if value, ok := perturbed(f); ok {
+				_ = fs.Set(f.Name, value)
+			}
+		})
+		emitted := options()
+
+		declared := make(map[string]bool, len(specs))
+		for _, s := range specs {
+			declared[s.Key] = true
+			if _, reads := emitted[s.Key]; !reads {
+				t.Errorf("%s: OptSpec declares key %q, which `veepin serve %s` never emits — "+
+					"the panel renders a field the protocol does not read",
+					protocol, s.Key, protocol)
+			}
+		}
+
+		var missing []string
+		for key := range emitted {
+			if !declared[key] {
+				missing = append(missing, key)
+			}
+		}
+		sort.Strings(missing)
+		for _, key := range missing {
+			t.Errorf("%s: option %q has no OptSpec — it cannot be set from the panel, and if "+
+				"it is a secret the management API does not know to redact it", protocol, key)
+		}
+	}
+}
