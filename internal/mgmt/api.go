@@ -20,6 +20,7 @@
 package mgmt
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
@@ -29,6 +30,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -387,7 +389,7 @@ func (s *Server) handleGetListener(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no such listener", http.StatusNotFound)
 		return
 	}
-	cfg, err := supervisor.ParseListenerFile(filepath.Join(s.dir, name+".json"))
+	cfg, err := supervisor.ParseListenerFile(supervisor.ListenerPath(s.dir, name))
 	if err != nil {
 		// Status said it exists; if the file is gone, treat as 404 instead of
 		// surfacing a file-read error to the API caller.
@@ -398,7 +400,7 @@ func (s *Server) handleGetListener(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	cfg.Options = redactOptions(cfg.Protocol, cfg.Options, true)
+	cfg.Options = redactOptions(cfg.Protocol, cfg.Options)
 	writeJSON(w, http.StatusOK, listenerResponse{Status: status, Config: cfg})
 }
 
@@ -427,7 +429,7 @@ func (s *Server) handleCreateListener(w http.ResponseWriter, r *http.Request) {
 	// create -- a double-submitted form, a re-run script -- replaced a live
 	// listener's config, keys and all, and reported 201. Editing goes through
 	// PATCH, which preserves what it is not told to change.
-	if _, err := os.Stat(filepath.Join(s.dir, cfg.Name+".json")); err == nil {
+	if _, err := os.Stat(supervisor.ListenerPath(s.dir, cfg.Name)); err == nil {
 		http.Error(w, "a listener with that name already exists; PATCH it to edit",
 			http.StatusConflict)
 		return
@@ -455,7 +457,7 @@ func (s *Server) handlePatchListener(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		return
 	}
-	existing, err := supervisor.ParseListenerFile(filepath.Join(s.dir, name+".json"))
+	existing, err := supervisor.ParseListenerFile(supervisor.ListenerPath(s.dir, name))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			http.Error(w, "no such listener", http.StatusNotFound)
@@ -650,27 +652,37 @@ func mergeOptions(existing, patch map[string]string) map[string]string {
 	return out
 }
 
-// redactOptions replaces values of the secret keys a protocol declares with the
-// "<redacted>" sentinel. It does not modify an empty options map. Protocols
-// without an ServerOpts declaration are left untouched -- the API cannot tell
-// which of their keys are secret, and they are out of established coverage.
-func redactOptions(protocol string, opts map[string]string, _ bool) map[string]string {
+// redactOptions returns a copy of opts with the values of the secret keys a
+// protocol declares replaced by the "<redacted>" sentinel.
+//
+// A copy, not an edit in place: the caller's map is the one that was just parsed
+// off disk, and a function whose job is "hide the secrets" quietly overwriting
+// its input with placeholders is one refactor away from writing those
+// placeholders back to the file.
+//
+// Protocols without a ServerOpts declaration are returned unchanged -- the API
+// cannot tell which of their keys are secret. Every registered protocol declares
+// one, and cmd/veepin's TestServerOptSpecsMatchTheKeysTheProtocolReads keeps the
+// declarations honest, so this branch is a fallback rather than a live path.
+func redactOptions(protocol string, opts map[string]string) map[string]string {
 	if opts == nil {
 		return nil
 	}
+	out := make(map[string]string, len(opts))
+	maps.Copy(out, opts)
 	specs, ok := client.ServerOptsFor(protocol)
 	if !ok {
-		return opts
+		return out
 	}
 	for _, spec := range specs {
 		if !spec.Secret {
 			continue
 		}
-		if v, has := opts[spec.Key]; has && v != "" {
-			opts[spec.Key] = redacted
+		if v, has := out[spec.Key]; has && v != "" {
+			out[spec.Key] = redacted
 		}
 	}
-	return opts
+	return out
 }
 
 // decodeJSON reads a request body sized for the small config documents the API
@@ -687,7 +699,7 @@ func decodeJSON(r *http.Request, v any) error {
 	if len(body) > maxBody {
 		return fmt.Errorf("body exceeds 1 MiB")
 	}
-	dec := json.NewDecoder(strings.NewReader(string(body)))
+	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		return fmt.Errorf("decoding JSON: %w", err)

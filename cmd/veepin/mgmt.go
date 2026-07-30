@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 )
@@ -30,8 +31,8 @@ subcommands:
   ls                          list running listeners
   status <name>               status of one listener
   protocols                   protocols the supervisor can run
-  add <config.json>           create a listener from a JSON file on stdin
-  edit <name>                 re-read and PATCH <name> from a JSON file on stdin
+  add                         create a listener from a JSON config on stdin
+  edit <name>                 PATCH <name> from a partial JSON config on stdin
   restart <name>              rebuild <name> from its on-disk config
   rm <name>                   stop and delete <name>
 environment:
@@ -117,7 +118,9 @@ func prettyEncode(v any) string {
 }
 
 func mgmtList(args []string) error {
-	_ = flag.NewFlagSet("mgmt ls", flag.ContinueOnError)
+	if len(args) != 0 {
+		return fmt.Errorf("usage: veepin mgmt ls (takes no arguments)")
+	}
 	c, err := newMgmtClient()
 	if err != nil {
 		return err
@@ -142,7 +145,7 @@ func mgmtStatus(args []string) error {
 	if err != nil {
 		return err
 	}
-	v, err := c.do("GET", "/api/listeners/"+fs.Arg(0), nil)
+	v, err := c.do("GET", "/api/listeners/"+url.PathEscape(fs.Arg(0)), nil)
 	if err != nil {
 		return err
 	}
@@ -151,7 +154,9 @@ func mgmtStatus(args []string) error {
 }
 
 func mgmtProtocols(args []string) error {
-	_ = flag.NewFlagSet("mgmt protocols", flag.ContinueOnError)
+	if len(args) != 0 {
+		return fmt.Errorf("usage: veepin mgmt protocols (takes no arguments)")
+	}
 	c, err := newMgmtClient()
 	if err != nil {
 		return err
@@ -207,7 +212,7 @@ func mgmtEdit(args []string) error {
 	if err != nil {
 		return err
 	}
-	v, err := c.do("PATCH", "/api/listeners/"+fs.Arg(0), bytes.NewReader(body))
+	v, err := c.do("PATCH", "/api/listeners/"+url.PathEscape(fs.Arg(0)), bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -227,7 +232,7 @@ func mgmtRestart(args []string) error {
 	if err != nil {
 		return err
 	}
-	v, err := c.do("POST", "/api/listeners/"+fs.Arg(0)+"/restart", nil)
+	v, err := c.do("POST", "/api/listeners/"+url.PathEscape(fs.Arg(0))+"/restart", nil)
 	if err != nil {
 		return err
 	}
@@ -247,7 +252,7 @@ func mgmtRm(args []string) error {
 	if err != nil {
 		return err
 	}
-	v, err := c.do("DELETE", "/api/listeners/"+fs.Arg(0), nil)
+	v, err := c.do("DELETE", "/api/listeners/"+url.PathEscape(fs.Arg(0)), nil)
 	if err != nil {
 		return err
 	}

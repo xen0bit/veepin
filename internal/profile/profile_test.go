@@ -21,7 +21,7 @@ func TestParseBytesRoundTrip(t *testing.T) {
 		Options:  map[string]string{"private-key": "k", "address": "10.10.0.2/24"},
 	}
 	body, _ := json.MarshalIndent(in, "", "  ")
-	out, err := parseBytes(body)
+	out, err := ParseBytes(body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,7 +31,7 @@ func TestParseBytesRoundTrip(t *testing.T) {
 }
 
 func TestParseBytesRejectsUnknownFields(t *testing.T) {
-	if _, err := parseBytes([]byte(`{"name":"x","protocol":"wireguard","bogus":true}`)); err == nil {
+	if _, err := ParseBytes([]byte(`{"name":"x","protocol":"wireguard","bogus":true}`)); err == nil {
 		t.Errorf("accepted unknown field 'bogus'")
 	}
 }

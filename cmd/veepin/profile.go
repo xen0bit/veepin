@@ -10,14 +10,15 @@ package main
 //	ls          list saved profiles
 //	add         create a profile from stdin
 //	rm <name>   delete a profile
+//
+// VEEPIN_PROFILE_DIR overrides the directory, which is what the tests use and
+// what lets a profile set live somewhere other than the user's config home.
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
-	"strings"
 
 	"github.com/xen0bit/veepin/internal/profile"
 )
@@ -49,7 +50,9 @@ func profileDir() (string, error) {
 }
 
 func profileList(args []string) error {
-	_ = flag.NewFlagSet("profile ls", flag.ContinueOnError)
+	if len(args) != 0 {
+		return fmt.Errorf("usage: veepin profile ls (takes no arguments)")
+	}
 	dir, err := profileDir()
 	if err != nil {
 		return err
@@ -78,13 +81,10 @@ func profileAdd(args []string) error {
 	if len(body) == 0 {
 		return fmt.Errorf("profile add: read a profile JSON on stdin (got EOF)")
 	}
-	var cfg profile.Config
-	dec := json.NewDecoder(strings.NewReader(string(body)))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&cfg); err != nil {
-		return fmt.Errorf("profile add: %w", err)
-	}
-	if err := cfg.Validate(); err != nil {
+	// Parsed through the package rather than with a second decoder here, so the
+	// CLI and the on-disk reader cannot disagree about what a profile is.
+	cfg, err := profile.ParseBytes(body)
+	if err != nil {
 		return fmt.Errorf("profile add: %w", err)
 	}
 	dir, err := profileDir()

@@ -592,7 +592,7 @@ func TestBearerHeaderParsing(t *testing.T) {
 // touches keys declared Secret by the protocol's OptSpec metadata.
 func TestRedactOptionsLeavesNonSecretKeysUntouched(t *testing.T) {
 	opts := map[string]string{"private-key": "k", "address": "10.10.0.1/24"}
-	out := redactOptions("wireguard", opts, true)
+	out := redactOptions("wireguard", opts)
 	if out["private-key"] != redacted {
 		t.Errorf("private-key not redacted: %q", out["private-key"])
 	}

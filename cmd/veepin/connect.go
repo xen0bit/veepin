@@ -5,10 +5,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"os/signal"
-	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -58,9 +59,17 @@ func runConnect(args []string) error {
 		if err != nil {
 			return fmt.Errorf("connect: profile directory: %w", err)
 		}
-		cfg, err := profile.ParseFile(filepath.Join(profDir, name+".json"))
+		cfg, err := profile.ParseFile(profile.Path(profDir, name))
 		if err != nil {
-			return fmt.Errorf("connect: unknown protocol or profile %q", name)
+			// Only a missing file means "no such profile". A profile that exists
+			// but does not parse -- a hand-edited file with a typo, a key from a
+			// newer version -- must say so: reporting it as unknown sends the
+			// operator looking for a file that is sitting right there.
+			if errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("connect: %q is neither a protocol nor a saved profile\nprotocols: %s",
+					name, strings.Join(client.Protocols(), ", "))
+			}
+			return fmt.Errorf("connect: profile %q: %w", name, err)
 		}
 		return runConnectProfile(cfg, args[1:]...)
 	}
@@ -71,12 +80,7 @@ func runConnect(args []string) error {
 // knownProtocol reports whether name is in the client registry. It is the
 // gate between bare mode (name = protocol) and profile mode (name = profile).
 func knownProtocol(name string) bool {
-	for _, p := range client.Protocols() {
-		if p == name {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(client.Protocols(), name)
 }
 
 // runConnectBare is the existing single-protocol dial path, kept identical
@@ -95,7 +99,7 @@ func runConnectBare(protocol string, args []string) error {
 	}
 
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
-	return dialConnect(context.Background(), protocol, options(), *fullTunnel, *noRoute, logger)
+	return dialConnect(protocol, options(), *fullTunnel, *noRoute, logger)
 }
 
 // runConnectProfile loads the named profile and dials with its saved protocol
@@ -109,14 +113,16 @@ func runConnectProfile(cfg profile.Config, args ...string) error {
 		return err
 	}
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
-	return dialConnect(context.Background(), cfg.Protocol, cfg.Options, *fullTunnel, *noRoute, logger)
+	return dialConnect(cfg.Protocol, cfg.Options, *fullTunnel, *noRoute, logger)
 }
 
 // dialConnect is the shared dial+route+serve tail that bare mode and profile
 // mode both call. It houses the body that runConnect had as its second half,
 // extracted so the two paths converge on the same runtime surface.
-func dialConnect(_ context.Context, protocol string, opts map[string]string, fullTunnel, noRoute bool, logger *log.Logger) error {
-	// 1. Handshake + data path.
+func dialConnect(protocol string, opts map[string]string, fullTunnel, noRoute bool, logger *log.Logger) error {
+	// 1. Handshake + data path. Dial installs no routes -- that is this
+	// command's job, and the split is what lets NetworkManager reuse the same
+	// dial.
 	sess, res, err := client.Dial(context.Background(), protocol, opts)
 	if err != nil {
 		return err
@@ -125,6 +131,10 @@ func dialConnect(_ context.Context, protocol string, opts map[string]string, ful
 	logger.Printf("connected on %s, internal IP %s (v6 %s), netmask %s, DNS %v",
 		res.TUNName, res.AssignedIP, res.AssignedIP6, res.Netmask, res.DNS)
 
+	// Advisory only. A protocol may have a reason for something unusual, and
+	// refusing to bring up a working tunnel over a heuristic would be worse than
+	// the mistake being caught -- but a Result that cannot be right should say
+	// so here rather than manifest as traffic that silently goes nowhere.
 	if err := res.Validate(); err != nil {
 		logger.Printf("warning: %v", err)
 	}
@@ -158,6 +168,10 @@ func dialConnect(_ context.Context, protocol string, opts map[string]string, ful
 	// 3. Wait for a signal or for the session to end on its own.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	// Report why the session ended. A tunnel that dies on its own -- a dropped
+	// carrier, a peer teardown, a protocol error -- is otherwise
+	// indistinguishable from a clean Ctrl-C, which makes a failure in the field
+	// or in CI nearly impossible to diagnose from the logs.
 	err = sess.Wait(ctx)
 	switch {
 	case err == nil || errors.Is(err, context.Canceled):
