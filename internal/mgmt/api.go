@@ -24,8 +24,10 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -103,7 +105,11 @@ func NewServer(dir string, mgr ManagerBackend, logger *log.Logger) (*Server, err
 		log:   logger,
 		mux:   http.NewServeMux(),
 	}
-	s.startedAt.Store(0) // set on ListenAndServe
+	// Stamped here rather than on a serve call. The supervisor mounts Handler on
+	// its own mux (it also serves the panel at the root) and never went through
+	// a Start method, so an uptime the serve path was supposed to set stayed
+	// zero and /api/health reported the whole Unix epoch as uptime.
+	s.startedAt.Store(nowUnix())
 	if fresh {
 		logger.Printf("mgmt: no bearer token found; generated one at %s (mode 0600)", tokenPath)
 	}
@@ -132,20 +138,6 @@ func (s *Server) Handler() http.Handler {
 // the UI handler) can inject it into the embedded dashboard template.
 func (s *Server) Token() []byte { return s.token }
 
-// Start stamps the uptime epoch and serves. The caller (the supervisor in
-// cmd/veepin/serve.go) passes the bound address typically localhost-only.
-func (s *Server) Start(addr string) error {
-	if s.startedAt.Load() == 0 {
-		s.startedAt.Store(nowUnix())
-	}
-	srv := &http.Server{
-		Addr:     addr,
-		Handler:  s.Handler(),
-		ErrorLog: s.log,
-	}
-	return srv.ListenAndServe()
-}
-
 // Close delegates to the manager; it is exposed so a caller wiring the API
 // server into a wider HTTP mux can tear it down cleanly the same way the
 // management CLI does.
@@ -164,7 +156,7 @@ func bootToken(path string) ([]byte, bool, error) {
 			return nil, false, fmt.Errorf("token file %s is empty", path)
 		}
 		return []byte(trimmed), false, nil
-	} else if !os.IsNotExist(err) {
+	} else if !errors.Is(err, fs.ErrNotExist) {
 		return nil, false, err
 	}
 	// Generate 32 random bytes; hex-print to keep it printable and round-trip
@@ -311,7 +303,7 @@ func (s *Server) handleGetListener(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Status said it exists; if the file is gone, treat as 404 instead of
 		// surfacing a file-read error to the API caller.
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			http.Error(w, "no such listener", http.StatusNotFound)
 			return
 		}
@@ -340,6 +332,18 @@ func (s *Server) handleCreateListener(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown protocol", http.StatusBadRequest)
 		return
 	}
+	// POST creates. Without this check it also silently overwrote, so a repeated
+	// create -- a double-submitted form, a re-run script -- replaced a live
+	// listener's config, keys and all, and reported 201. Editing goes through
+	// PATCH, which preserves what it is not told to change.
+	if _, err := os.Stat(filepath.Join(s.dir, cfg.Name+".json")); err == nil {
+		http.Error(w, "a listener with that name already exists; PATCH it to edit",
+			http.StatusConflict)
+		return
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	if err := supervisor.WriteListenerFile(s.dir, cfg); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -359,41 +363,28 @@ func (s *Server) handlePatchListener(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	existing, err := supervisor.ParseListenerFile(filepath.Join(s.dir, name+".json"))
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			http.Error(w, "no such listener", http.StatusNotFound)
 			return
 		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	var in supervisor.ListenerConfig
+	var in listenerPatch
 	if err := decodeJSON(r, &in); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	// The PATCH body may be a partial update: only fields the client sent are
-	// applied. Go's json.RoundTripizer leaves unset fields at zero values, so
-	// a per-field "set if non-zero / present" merge is what distinguishes
-	// "clear" from "do not touch". For Options the key set is healed by sending
-	// back what the API just returned, with "<redacted>" standing in for
-	// unchanged secrets. We merge the incoming Options over the existing ones
-	// so a field that is not present in the request body is left alone; this
-	// is the safest shape for a hand-edited PATCH.
-	merged := existing
-	if in.Name != "" {
-		merged.Name = in.Name
+	// A rename would have to move the file and retire the old listener. The
+	// previous version did neither: it wrote <newname>.json, left <oldname>.json
+	// in place, and rebuilt the old name -- so one edit produced two listeners.
+	// Refuse it and say what to do instead.
+	if in.Name != nil && *in.Name != name {
+		http.Error(w, "renaming a listener is not supported: create the new one and delete the old",
+			http.StatusBadRequest)
+		return
 	}
-	if in.Protocol != "" {
-		merged.Protocol = in.Protocol
-	}
-	if in.Options != nil {
-		merged.Options = mergeOptions(existing.Options, in.Options)
-	}
-	merged.SetupNAT = in.SetupNAT || existing.SetupNAT
-	if in.WAN != "" {
-		merged.WAN = in.WAN
-	}
-	merged.Enabled = in.Enabled || existing.Enabled
+	merged := in.applyTo(existing)
 	if err := merged.Validate(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -430,7 +421,7 @@ func (s *Server) handleDeleteListener(w http.ResponseWriter, r *http.Request) {
 	// that crashed but whose file is still present.
 	_ = s.mgr.Stop(name)
 	if err := supervisor.DeleteListenerFile(s.dir, name); err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			http.Error(w, "no such listener", http.StatusNotFound)
 			return
 		}
@@ -480,20 +471,78 @@ func (s *Server) handlePeerList(w http.ResponseWriter, r *http.Request) {
 
 // --- Helpers ---
 
-// mergeOptions combines existing with the patch: each key in patch overrides
-// the matching key in existing, and a patch value of "<redacted>" means "do not
-// change" -- the API never reveals the real secret, so a round-trip PATCH
-// cannot clobber a real value with the redaction literal.
+// listenerPatch is a presence-aware view of a PATCH body.
+//
+// A plain supervisor.ListenerConfig cannot serve as one: encoding/json leaves an
+// absent field at its zero value, so `"enabled": false` and an omitted "enabled"
+// decode identically. The merge then has no way to tell "leave it alone" from
+// "turn it off", and the previous version resolved that with
+//
+//	merged.Enabled = in.Enabled || existing.Enabled
+//
+// which made every boolean one-way: unchecking "enabled" or "-setup-nat" in the
+// panel silently did nothing, and there was no way to disable a listener through
+// the API at all. Pointers distinguish the two cases, which is the whole reason
+// they are here.
+type listenerPatch struct {
+	Name     *string            `json:"name,omitempty"`
+	Protocol *string            `json:"protocol,omitempty"`
+	Options  *map[string]string `json:"options,omitempty"`
+	SetupNAT *bool              `json:"setup_nat,omitempty"`
+	WAN      *string            `json:"wan,omitempty"`
+	Enabled  *bool              `json:"enabled,omitempty"`
+}
+
+// applyTo merges the fields the request actually carried onto existing, leaving
+// every field it did not mention alone.
+func (p listenerPatch) applyTo(existing supervisor.ListenerConfig) supervisor.ListenerConfig {
+	out := existing
+	if p.Name != nil {
+		out.Name = *p.Name
+	}
+	if p.Protocol != nil {
+		out.Protocol = *p.Protocol
+	}
+	if p.Options != nil {
+		out.Options = mergeOptions(existing.Options, *p.Options)
+	}
+	if p.SetupNAT != nil {
+		out.SetupNAT = *p.SetupNAT
+	}
+	if p.WAN != nil {
+		out.WAN = *p.WAN
+	}
+	if p.Enabled != nil {
+		out.Enabled = *p.Enabled
+	}
+	return out
+}
+
+// mergeOptions combines existing with the patch. A key the patch does not
+// mention is left alone, which is what makes a hand-written curl PATCH carrying
+// one option safe. Two values are special:
+//
+//	"<redacted>"  keep the stored value. The API never reveals a real secret, so
+//	              a GET-then-PATCH round trip must not clobber the key with the
+//	              placeholder it was shown.
+//	""            delete the key. This is how the panel clears a field, since it
+//	              submits every option the protocol declares on every save and
+//	              needs a way to say "unset". Overloading empty is safe because
+//	              the server parse functions already read a missing key and an
+//	              empty one identically.
 func mergeOptions(existing, patch map[string]string) map[string]string {
 	out := make(map[string]string, len(existing)+len(patch))
 	for k, v := range existing {
 		out[k] = v
 	}
 	for k, v := range patch {
-		if v == redacted {
-			continue
+		switch v {
+		case redacted:
+		case "":
+			delete(out, k)
+		default:
+			out[k] = v
 		}
-		out[k] = v
 	}
 	return out
 }

@@ -259,6 +259,140 @@ func TestCreateListenerPersistsAndApplies(t *testing.T) {
 	}
 }
 
+// TestCreateListenerRefusesToOverwrite: POST creates. Without the existence
+// check it also silently overwrote, so a double-submitted form or a re-run
+// script replaced a live listener's config -- keys and all -- and answered 201.
+func TestCreateListenerRefusesToOverwrite(t *testing.T) {
+	s, _, _ := newTestServer(t, map[string]supervisor.Status{"site-a": {Name: "site-a", State: "running"}})
+	cfg := supervisor.ListenerConfig{Name: "site-a", Protocol: "wireguard",
+		Options: map[string]string{"private-key": "different", "address": "10.9.0.1/24"}, Enabled: true}
+	resp, _ := s.do("POST", "/api/listeners", cfg)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", resp.StatusCode)
+	}
+	// The stored config must be untouched.
+	got := readListenerFile(t, s.dir, "site-a")
+	if got.Options["private-key"] != "real-secret-value" {
+		t.Errorf("a refused create still overwrote the key: %q", got.Options["private-key"])
+	}
+}
+
+// readListenerFile reads a listener config straight off disk, so a test can
+// assert what was persisted rather than what the API reported.
+func readListenerFile(t *testing.T, dir, name string) supervisor.ListenerConfig {
+	t.Helper()
+	cfg, err := supervisor.ParseListenerFile(filepath.Join(dir, name+".json"))
+	if err != nil {
+		t.Fatalf("reading %s: %v", name, err)
+	}
+	return cfg
+}
+
+// TestPatchCanTurnABooleanOff is the defect this whole presence-aware patch
+// shape exists for. The merge used to be `in.Enabled || existing.Enabled`, so
+// every boolean was one-way: unchecking "enabled" in the panel silently did
+// nothing, and there was no way to disable a listener through the API at all.
+func TestPatchCanTurnABooleanOff(t *testing.T) {
+	s, _, _ := newTestServer(t, map[string]supervisor.Status{"site-a": {Name: "site-a", State: "running"}})
+	resp, body := s.do("PATCH", "/api/listeners/site-a", map[string]any{"enabled": false})
+	if resp.StatusCode >= 300 {
+		t.Fatalf("status = %d: %s", resp.StatusCode, body)
+	}
+	if got := readListenerFile(t, s.dir, "site-a"); got.Enabled {
+		t.Error("PATCH {\"enabled\": false} left the listener enabled")
+	}
+}
+
+// TestPatchLeavesUnmentionedFieldsAlone is the other half of the same contract:
+// a partial PATCH -- the shape a hand-written curl sends -- must not reset the
+// fields it did not mention to their zero values.
+func TestPatchLeavesUnmentionedFieldsAlone(t *testing.T) {
+	s, _, _ := newTestServer(t, map[string]supervisor.Status{"site-a": {Name: "site-a", State: "running"}})
+	resp, body := s.do("PATCH", "/api/listeners/site-a", map[string]any{"wan": "eth1"})
+	if resp.StatusCode >= 300 {
+		t.Fatalf("status = %d: %s", resp.StatusCode, body)
+	}
+	got := readListenerFile(t, s.dir, "site-a")
+	if got.WAN != "eth1" {
+		t.Errorf("wan = %q, want eth1", got.WAN)
+	}
+	if !got.Enabled {
+		t.Error("a PATCH that never mentioned enabled disabled the listener")
+	}
+	if got.Options["address"] != "10.10.0.1/24" {
+		t.Errorf("options lost: %+v", got.Options)
+	}
+	if got.Protocol != "wireguard" {
+		t.Errorf("protocol = %q, want wireguard", got.Protocol)
+	}
+}
+
+// TestPatchRedactedSecretKeepsTheStoredValue: the API answers a GET with
+// "<redacted>" for secret options, and the panel submits the form it was shown.
+// Reading that literal back as "keep what you have" is what stops a
+// GET-then-PATCH round trip from replacing a private key with the placeholder.
+func TestPatchRedactedSecretKeepsTheStoredValue(t *testing.T) {
+	s, _, _ := newTestServer(t, map[string]supervisor.Status{"site-a": {Name: "site-a", State: "running"}})
+	resp, body := s.do("PATCH", "/api/listeners/site-a", map[string]any{
+		"options": map[string]string{"private-key": redacted, "address": "10.11.0.1/24"},
+	})
+	if resp.StatusCode >= 300 {
+		t.Fatalf("status = %d: %s", resp.StatusCode, body)
+	}
+	got := readListenerFile(t, s.dir, "site-a")
+	if got.Options["private-key"] != "real-secret-value" {
+		t.Errorf("private-key = %q, want the stored value", got.Options["private-key"])
+	}
+	if got.Options["address"] != "10.11.0.1/24" {
+		t.Errorf("address = %q, want the patched value", got.Options["address"])
+	}
+}
+
+// TestPatchEmptyOptionValueClearsTheKey: the panel submits every option the
+// protocol declares on every save, so it needs a way to say "unset". Empty is
+// that way, and it is safe to overload because the server parse functions
+// already read a missing key and an empty one identically.
+func TestPatchEmptyOptionValueClearsTheKey(t *testing.T) {
+	s, _, _ := newTestServer(t, map[string]supervisor.Status{"site-a": {Name: "site-a", State: "running"}})
+	resp, body := s.do("PATCH", "/api/listeners/site-a", map[string]any{
+		"options": map[string]string{"address": ""},
+	})
+	if resp.StatusCode >= 300 {
+		t.Fatalf("status = %d: %s", resp.StatusCode, body)
+	}
+	got := readListenerFile(t, s.dir, "site-a")
+	if _, still := got.Options["address"]; still {
+		t.Errorf("an empty value did not clear the key: %+v", got.Options)
+	}
+	if got.Options["private-key"] != "real-secret-value" {
+		t.Errorf("clearing one key disturbed another: %+v", got.Options)
+	}
+}
+
+// TestPatchRefusesARename: a rename would have to move the config file and
+// retire the old listener. The previous version did neither -- it wrote
+// <newname>.json, left <oldname>.json in place, and rebuilt the old name -- so
+// one edit produced two listeners.
+func TestPatchRefusesARename(t *testing.T) {
+	s, _, _ := newTestServer(t, map[string]supervisor.Status{"site-a": {Name: "site-a", State: "running"}})
+	resp, _ := s.do("PATCH", "/api/listeners/site-a", map[string]any{"name": "site-b"})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	if _, err := os.Stat(filepath.Join(s.dir, "site-b.json")); !os.IsNotExist(err) {
+		t.Errorf("a refused rename still created site-b.json")
+	}
+}
+
+// TestPatchUnknownListenerReturns404 pins that PATCH does not create.
+func TestPatchUnknownListenerReturns404(t *testing.T) {
+	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	resp, _ := s.do("PATCH", "/api/listeners/nope", map[string]any{"wan": "eth0"})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
 func TestCreateListenerValidatesName(t *testing.T) {
 	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
 	bad := supervisor.ListenerConfig{Name: "UPPERCASE", Protocol: "wireguard"}

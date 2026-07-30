@@ -93,6 +93,13 @@ function renderFields(protocol, values) {
   }
 }
 
+// collect builds the request body from the form. Every option the protocol
+// declares is submitted, including the ones left blank or unchecked: the API
+// reads an empty value as "unset this key" and leaves keys it is not sent
+// alone. Sending only the non-empty ones -- which this used to do -- meant
+// clearing a field or unchecking a box was a no-op, because the API then kept
+// the stored value. A secret field still round-trips safely: the form shows
+// "<redacted>", and the API reads that back as "keep what you have".
 function collect() {
   const name = document.getElementById("name").value.trim();
   const protocol = document.getElementById("protocol").value;
@@ -101,12 +108,7 @@ function collect() {
   for (const f of fields) {
     const el = document.getElementById("opt-" + f.key);
     if (!el) continue;
-    if (f.kind === "bool") {
-      if (el.checked) opts[f.key] = "true";
-    } else {
-      const v = el.value;
-      if (v !== "") opts[f.key] = v;
-    }
+    opts[f.key] = f.kind === "bool" ? (el.checked ? "true" : "") : el.value;
   }
   return {
     name, protocol, options: opts,
@@ -129,6 +131,11 @@ function loadListener(name) {
   return api("/api/listeners/" + encodeURIComponent(name)).then(({body}) => {
     document.getElementById("title").textContent = "edit listener — " + name;
     document.getElementById("name").value = body.config.name;
+    // Renaming is not a PATCH: it would have to move the config file and retire
+    // the old listener, and the API rejects it. Say so here rather than let the
+    // operator type a new name and get a 400 back.
+    document.getElementById("name").readOnly = true;
+    document.getElementById("name").title = "a listener cannot be renamed; create a new one and delete this";
     document.getElementById("protocol").value = body.config.protocol;
     document.getElementById("setup_nat").checked = !!body.config.setup_nat;
     document.getElementById("wan").value = body.config.wan || "";
@@ -184,7 +191,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   document.getElementById("delete").addEventListener("click", async () => {
     const name = document.getElementById("name").value.trim();
-    if (!confirm("delete listner " + name + "?")) return;
+    if (!confirm("delete listener " + name + "?")) return;
     const {status} = await api("/api/listeners/" + encodeURIComponent(name), {method: "DELETE"});
     document.getElementById("status").textContent = "delete -> " + status;
     if (status < 300) window.location = "/";
