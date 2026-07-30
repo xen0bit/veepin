@@ -13,6 +13,7 @@ package supervisor
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"sort"
@@ -87,6 +88,11 @@ type Manager struct {
 	dir  string
 	ctor Constructor
 	log  *log.Logger
+	// run is the commander hostnet shells out through. Nil means the real
+	// ip/iptables/sysctl; tests set it with SetCommander so the host-networking
+	// half of a build is exercised without privileges, the same way ctor covers
+	// the server half.
+	run hostnet.Commander
 
 	mu        sync.Mutex // guards listeners map
 	listeners map[string]*running
@@ -99,9 +105,7 @@ func NewManager(dir string, logger *log.Logger, ctor Constructor) *Manager {
 		ctor = client.NewServer
 	}
 	if logger == nil {
-		logger = log.New(log.New(nil, "", 0).Writer(), "", 0) // avoid nil log
-		_ = logger
-		logger = log.New(&stringsBuilder{}, "", 0)
+		logger = log.New(io.Discard, "", 0)
 	}
 	return &Manager{
 		dir:       dir,
@@ -111,11 +115,31 @@ func NewManager(dir string, logger *log.Logger, ctor Constructor) *Manager {
 	}
 }
 
-// stringsBuilder lets NewManager cope with a nil logger without importing
-// bytes; it eats writes without producing output.
-type stringsBuilder struct{}
+// SetCommander replaces the external command runner the host-networking calls
+// use. It exists for tests -- production leaves it unset, which means
+// ip/iptables/sysctl via os/exec. Call it before Apply.
+func (m *Manager) SetCommander(run hostnet.Commander) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.run = run
+}
 
-func (*stringsBuilder) Write(p []byte) (int, error) { return len(p), nil }
+// applyHostnet installs a listener's host networking through whichever commander
+// this Manager was given.
+func (m *Manager) applyHostnet(name string, cfg hostnet.Config) error {
+	if m.run == nil {
+		return hostnet.Apply(name, cfg)
+	}
+	return hostnet.ApplyWithName(name, cfg, m.run)
+}
+
+// teardownHostnet is applyHostnet's inverse, through the same commander.
+func (m *Manager) teardownHostnet(name string, cfg hostnet.Config) error {
+	if m.run == nil {
+		return hostnet.Teardown(name, cfg)
+	}
+	return hostnet.TeardownWithName(name, cfg, m.run)
+}
 
 // Apply reconciles the live set to the directory. New configs are built;
 // removed configs are torn down; changed configs are cold-rebuilt; disabled
@@ -125,6 +149,16 @@ func (*stringsBuilder) Write(p []byte) (int, error) { return len(p), nil }
 // The whole diff is computed under Manager.mu, then each per-listener action
 // happens via methods that re-acquire the lock -- so a long build does not
 // hold the manager lock for other listeners' status reads.
+//
+// A listener that will not start is reported but does not abort the pass. Apply
+// returns every such failure joined together, and each failed listener stays
+// tracked in "error" state carrying its reason, so it appears in the API and the
+// next Apply retries it. Returning on the first failure -- which this used to do
+// -- meant one listener with a bad option took the whole fleet down at startup,
+// including the listeners that had already come up in the same pass.
+//
+// An unreadable config directory is different, and still fatal: LoadDir reports
+// it before any listener has been touched.
 func (m *Manager) Apply() error {
 	cfgs, err := LoadDir(m.dir)
 	if err != nil {
@@ -132,6 +166,8 @@ func (m *Manager) Apply() error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	var errs []error
 
 	// 1. Stop and remove listeners that are gone or now disabled.
 	for name, r := range m.listeners {
@@ -143,9 +179,7 @@ func (m *Manager) Apply() error {
 		}
 		if configChanged(r.cfg, cfg) {
 			if err := m.rebuildLocked(r, cfg); err != nil {
-				// The rebuild failed but the listener is still tracked, with
-				// its state set to error; subsequent Apply passes will retry.
-				m.log.Printf("supervisor: rebuild %s failed: %v", name, err)
+				errs = append(errs, fmt.Errorf("rebuilding %q: %w", name, err))
 			}
 		}
 	}
@@ -161,9 +195,15 @@ func (m *Manager) Apply() error {
 		}
 		r, err := m.build(cfg)
 		if err != nil {
-			return fmt.Errorf("supervisor: building %q: %w", name, err)
+			errs = append(errs, fmt.Errorf("building %q: %w", name, err))
 		}
+		// Tracked either way: start published the failure on the handle, and a
+		// listener that is listed as broken is more use to an operator than one
+		// that silently does not exist.
 		m.listeners[name] = r
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("supervisor: %w", errors.Join(errs...))
 	}
 	return nil
 }
@@ -317,15 +357,14 @@ func (m *Manager) Server(name string) client.Server {
 	return r.srv
 }
 
-// build allocates a fresh handle and starts it. Called under Manager.mu; the
-// goroutine start launches does not need the manager lock, only r.mu, so a
-// long-lived Server never pins the manager.
+// build allocates a fresh handle and starts it. The handle is returned whether
+// the start succeeded or not -- on failure it carries the "error" state and the
+// reason -- so a caller can track a listener that would not come up. Called
+// under Manager.mu; the goroutine start launches does not need the manager lock,
+// only r.mu, so a long-lived Server never pins the manager.
 func (m *Manager) build(cfg ListenerConfig) (*running, error) {
 	r := &running{}
-	if err := m.start(r, cfg); err != nil {
-		return nil, err
-	}
-	return r, nil
+	return r, m.start(r, cfg)
 }
 
 // start constructs the listener's server, installs its host networking, and
@@ -349,12 +388,26 @@ func (m *Manager) start(r *running, cfg ListenerConfig) error {
 		return err
 	}
 	if cfg.SetupNAT {
-		if aerr := hostnet.Apply(cfg.Name, hostnet.Config{
+		hn := hostnet.Config{
 			TUNName: srv.TUNName(),
 			Gateway: srv.Gateway(),
 			Network: srv.Network(),
 			WAN:     cfg.WAN,
-		}); aerr != nil {
+		}
+		switch aerr := m.applyHostnet(cfg.Name, hn); {
+		case aerr == nil:
+		case errors.Is(aerr, hostnet.ErrNoWAN):
+			// The listener is addressed, up, and forwarding; it just has no
+			// route off the host. That is a misconfiguration worth saying out
+			// loud, not a reason to refuse to serve -- and certainly not a
+			// reason to take the rest of the fleet down, which is what
+			// returning here used to do at startup.
+			m.log.Printf("supervisor: %s: %v; clients will reach this host but nothing beyond it", cfg.Name, aerr)
+		default:
+			// Apply may have installed part of its state before failing. Take it
+			// back out so a retry starts from a clean host rather than from
+			// whatever half of the rule set landed.
+			_ = m.teardownHostnet(cfg.Name, hn)
 			_ = srv.Close()
 			aerr = fmt.Errorf("host networking: %w", aerr)
 			r.setState(cfg, "error", aerr)
@@ -417,7 +470,7 @@ func (m *Manager) stopLocked(r *running) {
 		// and may have freed the TUN). Re-derive from the config's Options
 		// where possible; otherwise the rules' removal survives on the comment
 		// tag alone (which carries the name).
-		_ = hostnet.Teardown(cfg.Name, hostnet.Config{
+		_ = m.teardownHostnet(cfg.Name, hostnet.Config{
 			TUNName: cfg.Options["tun"],
 			WAN:     cfg.WAN,
 		})

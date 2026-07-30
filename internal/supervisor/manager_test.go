@@ -6,12 +6,15 @@ package supervisor
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -290,16 +293,146 @@ func TestApplyChangedConfigRebuildsListener(t *testing.T) {
 }
 
 // TestApplyConstructionErrorFailsLoudly verifies that a ctor returning an error
-// aborts Apply entirely so the management API reports the failure; no
-// subsequent listeners in the same Apply pass are tentatively built.
+// is reported by Apply rather than swallowed, and that the listener stays
+// tracked in "error" state carrying the reason -- so the management API shows
+// an operator a broken listener instead of one that silently does not exist.
 func TestApplyConstructionErrorFailsLoudly(t *testing.T) {
 	dir := t.TempDir()
 	writeCfg(t, dir, "site-a", "wireguard")
 	ctor := &fakeCtor{nextErr: fmt.Errorf("simulated protocol failure")}
 	mgr := NewManager(dir, testLogger(t), ctor.construct)
 	t.Cleanup(func() { _ = mgr.Close() })
-	if err := mgr.Apply(); err == nil {
+	err := mgr.Apply()
+	if err == nil {
 		t.Fatalf("Apply succeeded against a failing ctor")
+	}
+	if !strings.Contains(err.Error(), "simulated protocol failure") {
+		t.Errorf("Apply error does not name the underlying cause: %v", err)
+	}
+	s := mgr.Status("site-a")
+	if s.State != "error" {
+		t.Errorf("listener state = %q, want error", s.State)
+	}
+}
+
+// TestOneBadListenerDoesNotTakeTheFleetDown is the contract that matters at
+// startup. Apply used to return on the first construction failure, so a single
+// listener with a bad option aborted the pass -- and because cmd/veepin then
+// called Close, it took down every listener that had already come up. Since the
+// build loop ranges a map, which listener broke the fleet was down to map
+// iteration order.
+//
+// Now every listener is attempted, the failures are joined into Apply's return,
+// and the good ones serve.
+func TestOneBadListenerDoesNotTakeTheFleetDown(t *testing.T) {
+	dir := t.TempDir()
+	writeCfg(t, dir, "site-a", "wireguard")
+	writeCfg(t, dir, "site-bad", "wireguard")
+	writeCfg(t, dir, "site-c", "ikev2")
+	ctor := &fakeCtor{}
+	mgr := NewManager(dir, testLogger(t),
+		func(protocol string, opts map[string]string) (client.Server, error) {
+			if opts["__name"] == "site-bad" {
+				return nil, fmt.Errorf("simulated protocol failure")
+			}
+			return ctor.construct(protocol, opts)
+		})
+	t.Cleanup(func() { _ = mgr.Close() })
+
+	err := mgr.Apply()
+	if err == nil {
+		t.Fatal("Apply did not report the broken listener")
+	}
+	if !strings.Contains(err.Error(), "site-bad") {
+		t.Errorf("Apply error does not name the broken listener: %v", err)
+	}
+	for _, name := range []string{"site-a", "site-c"} {
+		if s := mgr.Status(name); s.State != "running" {
+			t.Errorf("%s: state = %q, want running -- a sibling's failure took it down", name, s.State)
+		}
+	}
+	if s := mgr.Status("site-bad"); s.State != "error" {
+		t.Errorf("site-bad: state = %q, want error", s.State)
+	}
+}
+
+// TestSetupNATWithoutWANStillServes: a listener with setup_nat but no wan is
+// configured, up, and forwarding -- it just has no route off the host. hostnet
+// reports that as ErrNoWAN, and the supervisor logs it and carries on. It used
+// to be an opaque error that failed the build, which (before the change above)
+// aborted the fleet.
+func TestSetupNATWithoutWANStillServes(t *testing.T) {
+	dir := t.TempDir()
+	cfg := ListenerConfig{Name: "site-a", Protocol: "wireguard",
+		Options: map[string]string{"__name": "site-a"}, SetupNAT: true, Enabled: true}
+	body, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, filepath.Join(dir, "site-a.json"), "site-a.json", string(body))
+
+	ctor := &fakeCtor{}
+	mgr := NewManager(dir, testLogger(t), ctor.construct)
+	// Every ip/iptables/sysctl call succeeds; the missing WAN is the only fault.
+	mgr.SetCommander(func(string, ...string) ([]byte, error) { return nil, nil })
+	t.Cleanup(func() { _ = mgr.Close() })
+
+	if err := mgr.Apply(); err != nil {
+		t.Fatalf("Apply refused a listener whose only fault was a missing wan: %v", err)
+	}
+	if s := mgr.Status("site-a"); s.State != "running" {
+		t.Errorf("state = %q, want running: %+v", s.State, s)
+	}
+}
+
+// TestHostNetworkingFailureTearsDownWhatItInstalled: a host-networking failure
+// that is not ErrNoWAN fails the build, and the partial rule set Apply managed
+// to install before failing is taken back out, so a retry starts from a clean
+// host rather than from whatever half landed.
+func TestHostNetworkingFailureTearsDownWhatItInstalled(t *testing.T) {
+	dir := t.TempDir()
+	cfg := ListenerConfig{Name: "site-a", Protocol: "wireguard",
+		Options: map[string]string{"__name": "site-a"}, SetupNAT: true, WAN: "eth0", Enabled: true}
+	body, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, filepath.Join(dir, "site-a.json"), "site-a.json", string(body))
+
+	var mu sync.Mutex
+	var ran []string
+	ctor := &fakeCtor{}
+	mgr := NewManager(dir, testLogger(t), ctor.construct)
+	mgr.SetCommander(func(name string, args ...string) ([]byte, error) {
+		mu.Lock()
+		ran = append(ran, name+" "+strings.Join(args, " "))
+		mu.Unlock()
+		// Fail the MASQUERADE add; -C (the existence check) must keep failing
+		// too, or removeRule would think there is nothing to take out.
+		if name == "iptables" && slices.Contains(args, "MASQUERADE") && !slices.Contains(args, "-D") {
+			return []byte("iptables: Permission denied"), errors.New("exit 1")
+		}
+		return nil, nil
+	})
+	t.Cleanup(func() { _ = mgr.Close() })
+
+	if err := mgr.Apply(); err == nil {
+		t.Fatal("Apply succeeded against a failing iptables")
+	}
+	if s := mgr.Status("site-a"); s.State != "error" {
+		t.Errorf("state = %q, want error", s.State)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	var sawDelete bool
+	for _, c := range ran {
+		if strings.HasPrefix(c, "iptables") && strings.Contains(c, "-D") {
+			sawDelete = true
+		}
+	}
+	if !sawDelete {
+		t.Errorf("a failed host-networking apply left its rules behind; ran:\n%s",
+			strings.Join(ran, "\n"))
 	}
 }
 

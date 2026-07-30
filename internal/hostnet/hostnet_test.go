@@ -241,16 +241,70 @@ func TestMaskBitsHandlesALayer2Server(t *testing.T) {
 	}
 }
 
-// TestApplyLayer2IsAddsNothing pins that Apply on a layer-2 listener issues no
-// commands -- it bridgeless: the operator manages the host side themselves.
-func TestApplyLayer2AddsNothing(t *testing.T) {
+// TestApplyLayer2BringsTheLinkUpAndNothingElse pins the layer-2 (L2TPv3) path.
+// There is no tunnel subnet, so there is no address to assign and no NAT to
+// install -- the operator owns bridging and addressing. The interface still has
+// to come up, or the pseudowire carries nothing. An earlier version returned
+// before the link-up and left the interface DOWN while reporting success.
+func TestApplyLayer2BringsTheLinkUpAndNothingElse(t *testing.T) {
 	rec := &recCommander{}
 	cfg := Config{TUNName: "tap0", Network: nil}
 	if err := ApplyWithName("x", cfg, rec.run); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if len(rec.logs) != 0 {
-		t.Errorf("layer-2 Apply issued commands: %v", rec.logs)
+	want := []call{"ip link set tap0 up"}
+	if len(rec.logs) != len(want) || rec.logs[0] != want[0] {
+		t.Errorf("layer-2 Apply ran %v, want exactly %v", rec.logs, want)
+	}
+}
+
+// TestApplyLayer2ReportsAFailedLinkUp: the one command the layer-2 path does run
+// must not fail silently, or the listener serves over an interface that is down.
+func TestApplyLayer2ReportsAFailedLinkUp(t *testing.T) {
+	rec := &recCommander{
+		errs:    map[call]error{call("ip link set tap0 up"): errors.New("exit 1")},
+		replies: map[call][]byte{call("ip link set tap0 up"): []byte("Operation not permitted")},
+	}
+	err := ApplyWithName("x", Config{TUNName: "tap0"}, rec.run)
+	if err == nil {
+		t.Fatal("Apply succeeded against a failing ip link")
+	}
+	if !strings.Contains(err.Error(), "Operation not permitted") {
+		t.Errorf("error does not surface ip output: %v", err)
+	}
+}
+
+// TestApplyWithoutWANReportsErrNoWAN pins the contract the supervisor depends on:
+// a listener with a tunnel subnet but no WAN is configured and forwarding, but
+// has no route off the host. That is worth reporting -- an operator must not be
+// told a tunnel reaches the internet when it does not -- and it must be
+// recognisable, because it is not a reason to refuse to serve. Before ErrNoWAN
+// it was an opaque error, and one such listener aborted the whole fleet's Apply.
+func TestApplyWithoutWANReportsErrNoWAN(t *testing.T) {
+	rec := &recCommander{}
+	cfg := Config{
+		TUNName: "tun0",
+		Gateway: net.ParseIP("10.10.0.1"),
+		Network: mustCIDR(t, "10.10.0.0/24"),
+	}
+	err := ApplyWithName("site-a", cfg, rec.run)
+	if !errors.Is(err, ErrNoWAN) {
+		t.Fatalf("Apply without a WAN returned %v, want ErrNoWAN", err)
+	}
+	// The address and link-up still happened: the failure is only about NAT.
+	var got []string
+	for _, c := range rec.logs {
+		got = append(got, string(c))
+	}
+	for _, want := range []string{"ip addr add 10.10.0.1/24 dev tun0", "ip link set tun0 up"} {
+		if !containsPrefix(got, want) {
+			t.Errorf("missing %q; ran:\n%s", want, strings.Join(got, "\n"))
+		}
+	}
+	for _, g := range got {
+		if strings.HasPrefix(g, "iptables") {
+			t.Errorf("no WAN was named but an iptables rule was installed: %q", g)
+		}
 	}
 }
 

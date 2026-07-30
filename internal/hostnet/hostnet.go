@@ -47,6 +47,19 @@ func realCommander(name string, args ...string) ([]byte, error) {
 	return exec.Command(name, args...).CombinedOutput()
 }
 
+// ErrNoWAN reports that the interface was addressed and forwarding enabled, but
+// no MASQUERADE rule was installed because Config.WAN was empty. The listener is
+// serving and its clients can reach the host; they cannot reach anything beyond
+// it.
+//
+// It is deliberately an error — the caller must not tell an operator that a
+// tunnel carries traffic to the internet when it does not — and deliberately a
+// distinguishable one, because it is equally not a reason to refuse to serve.
+// Callers that can carry on should test errors.Is(err, ErrNoWAN) and log rather
+// than abort; the supervisor does exactly that, so one listener missing its
+// `wan` does not take the rest of the fleet down with it.
+var ErrNoWAN = errors.New("hostnet: interface configured but no wan given, so no MASQUERADE installed")
+
 // Config is the host-network state for one listener.
 type Config struct {
 	// TUNName is the interface to bring up.
@@ -105,9 +118,17 @@ func applyWith(name string, cfg Config, run Commander) error {
 	if cfg.TUNName == "" {
 		return errors.New("hostnet: TUNName is required")
 	}
+
+	// A layer-2 server (L2TPv3) has no tunnel subnet, so there is no address to
+	// assign and no NAT to install -- the operator owns bridging and addressing.
+	// The interface still has to come up, though, or the pseudowire carries
+	// nothing: an earlier version returned here before the link-up below and
+	// left the interface DOWN while reporting success.
 	if cfg.Network == nil {
-		// Layer-2 server: no address, no NAT. The interface still needs to
-		// come up, but the operator manages bridging and addressing.
+		if out, err := run("ip", "link", "set", cfg.TUNName, "up"); err != nil {
+			return fmt.Errorf("hostnet: ip link set %s up: %v: %s",
+				cfg.TUNName, err, strings.TrimSpace(string(out)))
+		}
 		return nil
 	}
 	bits := MaskBits(cfg.Network)
@@ -157,14 +178,13 @@ func applyWith(name string, cfg Config, run Commander) error {
 		if err := ensureRule(run, fwdOut); err != nil {
 			return fmt.Errorf("hostnet: FORWARD out: %w", err)
 		}
-	} else {
-		// If no WAN is named, the interface gets an address and forwarding,
-		// but nothing leaves it -- surface that so the supervisor / command
-		// does not advertise a tunnel that has no internet. This matches the
-		// old behaviour verbatim: it was an error in serve.go.
-		return fmt.Errorf("hostnet: interface configured but no wan given, so no MASQUERADE installed")
+		return nil
 	}
-	return nil
+	// No WAN named: the interface has an address and forwarding, but nothing
+	// leaves it. Report it, so neither the supervisor nor the bare command
+	// advertises a tunnel that reaches the internet when it does not -- but
+	// report it as ErrNoWAN, which a caller can recognise and carry on from.
+	return ErrNoWAN
 }
 
 func teardownWith(name string, cfg Config, run Commander) error {

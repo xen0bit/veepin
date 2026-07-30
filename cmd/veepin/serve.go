@@ -794,13 +794,22 @@ func runSupervisorMode(args []string) error {
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
 	mgr := supervisor.NewManager(configDir, logger, nil)
 	if err := mgr.Apply(); err != nil {
-		// Apply is the first thing that touches disk and opens TUNs; a failure
-		// here aborts before the mgmt API comes up so an operator is not given a
-		// panel for a fleet that has no listeners.
-		_ = mgr.Close()
-		return fmt.Errorf("supervisor: %w", err)
+		// A listener that will not start is left tracked in "error" state with
+		// its reason, and Apply reports every such failure joined together. That
+		// is a warning, not a reason to abort: the listeners that did come up are
+		// serving, and the panel is how an operator fixes the ones that did not.
+		//
+		// Nothing at all coming up is the fatal case -- an unreadable config
+		// directory, or every listener broken -- because then there is no fleet
+		// to manage and a panel would only obscure that.
+		if len(mgr.All()) == 0 {
+			_ = mgr.Close()
+			return fmt.Errorf("supervisor: %w", err)
+		}
+		logger.Printf("supervisor: %v", err)
 	}
-	logger.Printf("supervisor ready: %d listener(s) running", countRunning(mgr))
+	total := len(mgr.All())
+	logger.Printf("supervisor ready: %d of %d listener(s) running", countRunning(mgr), total)
 
 	var mgmtServer *mgmt.Server
 	if !*noMgmt {
