@@ -6,7 +6,10 @@
 package dataplane
 
 import (
+	"encoding/binary"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"unsafe"
 
@@ -37,12 +40,32 @@ type ifReq struct {
 // TUN is an open TUN network device operating in IFF_NO_PI mode, so reads and
 // writes are bare IP packets with no 4-byte packet-info prefix.
 //
-// The device is held as a raw, blocking file descriptor and read/written with
-// direct syscalls rather than an *os.File. A TUN fd registered with Go's runtime
+// The device is held as a raw file descriptor and read/written with direct
+// syscalls rather than an *os.File. A TUN fd registered with Go's runtime
 // netpoller returns "not pollable" from a blocking Read on an idle interface
 // (the poller cannot deliver readiness for the character device), which would
-// kill the data-path read loop. A dedicated goroutine doing blocking reads is
-// exactly what the pump wants, so bypassing the poller is both correct and lean.
+// kill the data-path read loop. So the poller is bypassed and readiness is
+// waited for here:
+//
+//	Read: read(2) ──packet──▶ return
+//	        │
+//	     EAGAIN
+//	        │
+//	        ▼
+//	     poll(2) on { tun: POLLIN, wake: POLLIN } ──┬── tun ready ─▶ read again
+//	                                               └── wake ──────▶ ErrClosed
+//
+// The wake fd is why this shape exists. Held as a *blocking* fd — which is what
+// this was until it caused a real deadlock — a parked read(2) cannot be
+// interrupted: close(2) on Linux does not wake a thread already blocked reading
+// that fd, so a protocol whose Close waits for its packet pump did not return
+// until a packet happened to arrive, which on an idle tunnel may be never. That
+// is invisible to `veepin serve <proto>`, which calls Close and exits, and fatal
+// to anything that keeps running afterwards and holds a lock while it waits.
+//
+// The fast path is unchanged in syscall count: a device with a packet ready
+// returns it from the first read(2) and never polls. Only an idle device pays
+// the extra poll, and an idle device has no packet to slow down.
 type TUN struct {
 	fd   int
 	name string
@@ -51,14 +74,53 @@ type TUN struct {
 	// every write must carry one. Only the pump's vnet-aware loop drives a TUN
 	// in this mode.
 	vnet bool
+
+	// wake is an eventfd Close latches to interrupt a parked poll. It is
+	// written once and never drained, so it stays readable: every later poll
+	// returns immediately rather than racing to observe a one-shot signal.
+	wake int
+
+	// closed is the latch itself, readable without mu so a woken poll can tell
+	// why it woke without waiting for Close to finish.
+	closed atomic.Bool
+
+	// mu guards the validity of fd and wake, not access to the device: Read and
+	// Write hold it for reading across their syscalls, Close takes it
+	// exclusively before closing either fd. Without it a reader between poll and
+	// read(2) could issue that read against a descriptor number the kernel had
+	// already recycled into some unrelated file — the quiet, occasional variety
+	// of use-after-free that a data path should not have.
+	//
+	// Close signals wake *before* taking mu, which is what keeps this from
+	// being the deadlock it replaces; see Close.
+	mu sync.RWMutex
+}
+
+// newTUN wraps a freshly opened device fd: non-blocking, so a read on an idle
+// interface returns EAGAIN and reaches the poll above instead of parking
+// uninterruptibly in the kernel, plus the eventfd Close latches to wake it.
+func newTUN(fd int, name string, vnet bool) (*TUN, error) {
+	if err := unix.SetNonblock(fd, true); err != nil {
+		_ = syscall.Close(fd)
+		return nil, fmt.Errorf("dataplane: set TUN non-blocking: %w", err)
+	}
+	wake, err := unix.Eventfd(0, unix.EFD_CLOEXEC|unix.EFD_NONBLOCK)
+	if err != nil {
+		_ = syscall.Close(fd)
+		return nil, fmt.Errorf("dataplane: eventfd: %w", err)
+	}
+	return &TUN{fd: fd, name: name, vnet: vnet, wake: wake}, nil
 }
 
 // OpenTUN opens /dev/net/tun and configures a TUN interface. If name is empty
 // the kernel picks one (tunN). Requires CAP_NET_ADMIN (run as root, or grant
 // the binary the capability with: sudo setcap cap_net_admin+ep ./ikev2d).
 func OpenTUN(name string) (*TUN, error) {
-	// A raw syscall.Open fd is blocking and is never handed to the netpoller.
-	fd, err := syscall.Open("/dev/net/tun", syscall.O_RDWR, 0)
+	// A raw syscall.Open fd is never handed to the netpoller; newTUN below makes
+	// it non-blocking. O_CLOEXEC keeps it out of the children the server shells
+	// out to (internal/hostnet runs ip and iptables), where an inherited copy
+	// would hold the device open past our own Close.
+	fd, err := syscall.Open("/dev/net/tun", syscall.O_RDWR|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("dataplane: open /dev/net/tun: %w (need CAP_NET_ADMIN)", err)
 	}
@@ -80,13 +142,13 @@ func OpenTUN(name string) (*TUN, error) {
 		assigned = string(req.Name[:i])
 	}
 
-	return &TUN{fd: fd, name: assigned}, nil
+	return newTUN(fd, assigned, false)
 }
 
 // OpenTAP opens /dev/net/tun in TAP (Ethernet) mode. It reads and writes raw
 // Ethernet frames (no packet-info header). Requires CAP_NET_ADMIN.
 func OpenTAP(name string) (*TUN, error) {
-	fd, err := syscall.Open("/dev/net/tun", syscall.O_RDWR, 0)
+	fd, err := syscall.Open("/dev/net/tun", syscall.O_RDWR|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("dataplane: open /dev/net/tun: %w (need CAP_NET_ADMIN)", err)
 	}
@@ -107,7 +169,7 @@ func OpenTAP(name string) (*TUN, error) {
 		assigned = string(req.Name[:i])
 	}
 
-	return &TUN{fd: fd, name: assigned}, nil
+	return newTUN(fd, assigned, false)
 }
 
 // OpenTUNGSO opens a TUN like OpenTUN, but negotiates the virtio-net header
@@ -122,7 +184,7 @@ func OpenTAP(name string) (*TUN, error) {
 // dataplane.Pump knows how to drive a GSO device; a protocol with its own TUN
 // loop must keep OpenTUN.
 func OpenTUNGSO(name string) (*TUN, error) {
-	fd, err := syscall.Open("/dev/net/tun", syscall.O_RDWR, 0)
+	fd, err := syscall.Open("/dev/net/tun", syscall.O_RDWR|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("dataplane: open /dev/net/tun: %w (need CAP_NET_ADMIN)", err)
 	}
@@ -155,7 +217,7 @@ func OpenTUNGSO(name string) (*TUN, error) {
 	if i := indexZero(req.Name[:]); i >= 0 {
 		assigned = string(req.Name[:i])
 	}
-	return &TUN{fd: fd, name: assigned, vnet: true}, nil
+	return newTUN(fd, assigned, true)
 }
 
 // Name returns the interface name (e.g. "tun0").
@@ -181,8 +243,14 @@ func (t *TUN) writeVnet(pkt []byte) (int, error) {
 // super-frame with its GSO metadata. writev keeps the frame uncopied.
 func (t *TUN) writeVnetGSO(hdr, pkt []byte) (int, error) {
 	for {
-		n, err := unix.Writev(t.fd, [][]byte{hdr, pkt})
-		if err == unix.EINTR {
+		n, err := t.writev(hdr, pkt)
+		if err == syscall.EINTR {
+			continue
+		}
+		if err == syscall.EAGAIN {
+			if werr := t.wait(unix.POLLOUT); werr != nil {
+				return 0, werr
+			}
 			continue
 		}
 		if n >= len(hdr) {
@@ -192,32 +260,143 @@ func (t *TUN) writeVnetGSO(hdr, pkt []byte) (int, error) {
 	}
 }
 
-// Read reads one IP packet from the tunnel into buf. EINTR (e.g. from Go's
-// asynchronous goroutine preemption signal interrupting the blocking read) is
-// retried transparently.
+// Read reads one IP packet from the tunnel into buf.
+//
+// EINTR (e.g. from Go's asynchronous goroutine preemption signal landing on the
+// read) is retried transparently. EAGAIN — an idle device with nothing to give —
+// parks in poll until there is a packet or Close latches the wake fd, and
+// returns ErrClosed for the latter. See the type comment for why that indirection
+// exists rather than a blocking read(2).
 func (t *TUN) Read(buf []byte) (int, error) {
 	for {
-		n, err := syscall.Read(t.fd, buf)
+		n, err := t.read(buf)
 		if err == syscall.EINTR {
+			continue
+		}
+		if err == syscall.EAGAIN {
+			if werr := t.wait(unix.POLLIN); werr != nil {
+				return 0, werr
+			}
 			continue
 		}
 		return n, err
 	}
 }
 
-// Write writes one IP packet to the tunnel.
+// Write writes one IP packet to the tunnel. A full device queue (EAGAIN, which
+// a blocking fd would have absorbed by parking in the kernel) waits for room the
+// same way Read waits for a packet, so a wedged interface cannot outlast Close
+// here either.
 func (t *TUN) Write(pkt []byte) (int, error) {
 	for {
-		n, err := syscall.Write(t.fd, pkt)
+		n, err := t.write(pkt)
 		if err == syscall.EINTR {
+			continue
+		}
+		if err == syscall.EAGAIN {
+			if werr := t.wait(unix.POLLOUT); werr != nil {
+				return 0, werr
+			}
 			continue
 		}
 		return n, err
 	}
 }
 
-// Close closes the device.
-func (t *TUN) Close() error { return syscall.Close(t.fd) }
+// read, write and writev are the three device syscalls, each under the fd guard.
+// Holding mu for reading is what makes the descriptor safe to name: Close cannot
+// complete — and therefore cannot recycle the number out from under us — while
+// any of them is in flight.
+func (t *TUN) read(buf []byte) (int, error) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if t.closed.Load() {
+		return 0, ErrClosed
+	}
+	return syscall.Read(t.fd, buf)
+}
+
+func (t *TUN) write(pkt []byte) (int, error) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if t.closed.Load() {
+		return 0, ErrClosed
+	}
+	return syscall.Write(t.fd, pkt)
+}
+
+func (t *TUN) writev(hdr, pkt []byte) (int, error) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if t.closed.Load() {
+		return 0, ErrClosed
+	}
+	return unix.Writev(t.fd, [][]byte{hdr, pkt})
+}
+
+// wait parks until the device is ready for events (POLLIN for Read, POLLOUT for
+// Write) or Close latches the wake fd, which it reports as ErrClosed.
+func (t *TUN) wait(events int16) error {
+	// The poll set is built per call rather than kept on the TUN: Read and Write
+	// run on different goroutines — the pump's single TUN reader, and whichever
+	// tunnel is decapsulating inbound — so a shared one would need a lock of its
+	// own. This is the idle path, where the device had nothing to give or no room
+	// to take, so the cost lands where there is no packet to slow down.
+	pfds := [2]unix.PollFd{
+		{Fd: int32(t.fd), Events: events},
+		{Fd: int32(t.wake), Events: unix.POLLIN},
+	}
+	for {
+		if err := t.poll(pfds[:]); err != nil {
+			if err == syscall.EINTR {
+				continue
+			}
+			return err
+		}
+		// The wake fd is never drained, so once Close has latched it this is
+		// true on every pass — no second reader can miss the signal.
+		if t.closed.Load() || pfds[1].Revents != 0 {
+			return ErrClosed
+		}
+		return nil
+	}
+}
+
+// poll is the wait syscall under the same fd guard as the others.
+func (t *TUN) poll(pfds []unix.PollFd) error {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if t.closed.Load() {
+		return ErrClosed
+	}
+	_, err := unix.Poll(pfds, -1)
+	return err
+}
+
+// Close closes the device and wakes anything parked on it. It is idempotent: a
+// second call is a no-op rather than a close(2) of whatever file has since
+// inherited the descriptor number.
+func (t *TUN) Close() error {
+	if t.closed.Swap(true) {
+		return nil
+	}
+	// Signal first, lock second, and the order is the whole point. A reader
+	// parked in poll holds mu for reading, so taking mu here before waking it
+	// would wait for exactly the read this is trying to interrupt — the deadlock
+	// this mechanism exists to remove. Latching the eventfd unparks that poll,
+	// which drops the read lock, which lets the exclusive lock below through.
+	var one [8]byte
+	binary.NativeEndian.PutUint64(one[:], 1)
+	_, _ = unix.Write(t.wake, one[:])
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	err := syscall.Close(t.fd)
+	if werr := syscall.Close(t.wake); err == nil {
+		err = werr
+	}
+	return err
+}
 
 func indexZero(b []byte) int {
 	for i, c := range b {
