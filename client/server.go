@@ -42,6 +42,73 @@ var (
 	serverParse = map[string]ServerParseFunc{}
 )
 
+// OptSpec is metadata about one key a protocol accepts in its options map. The
+// supervisor and management panel face use it to enumerate a protocol's surface
+// -- render a form, validate an upload, redact secrets -- without constructing
+// an instance, which (because NewServer opens a TUN) the panel cannot do.
+//
+// A spec is a static description of the protocol's surface. Its Key is the same
+// string the Opt* const carries; it does not need to be echoed here from the
+// facade code as a name, only as a value. Required marks the keys the parse
+// function refuses to run without, so the panel can mark them required on the
+// form. Secret marks the keys the management API redacts on read -- those that
+// hold protocol keys, passphrases, and PSKs -- so a `curl /api/listeners/site-a`
+// cannot leak them by accident.
+type OptSpec struct {
+	Key      string
+	Help     string
+	Kind     OptKind
+	Required bool
+	Secret   bool
+}
+
+// OptKind is the panel-side type of an option value. It is loose -- the server
+// parse functions read everything as string -- so that the kind is only a
+// rendering hint, never a parse concern. A value sent over the API still
+// arrives as a string the underlying protocol accepts as-is.
+type OptKind string
+
+const (
+	OptStr       OptKind = "string"
+	OptInt       OptKind = "int"
+	OptBool      OptKind = "bool"
+	OptCIDR      OptKind = "cidr"
+	OptFilePath  OptKind = "file"
+	OptCommaList OptKind = "list"
+)
+
+var (
+	serverOpts = map[string][]OptSpec{}
+)
+
+// RegisterServerOpts declares option metadata for a protocol, alongside its
+// RegisterServer side-effect call. It is optional -- a protocol that skips this
+// is still dial- and serve-able, but the management panel falls back to a
+// free-form JSON editor for it. Like RegisterServer it is meant for an init().
+// Panics on a duplicate name to surface a registration bug at startup.
+func RegisterServerOpts(protocol string, opts []OptSpec) {
+	if protocol == "" {
+		panic("client: RegisterServerOpts with an empty protocol name")
+	}
+	serverMu.Lock()
+	defer serverMu.Unlock()
+	if _, dup := serverOpts[protocol]; dup {
+		panic("client: server opts registered twice: " + protocol)
+	}
+	serverOpts[protocol] = opts
+}
+
+// ServerOptsFor returns the claimed metadata for a registered server protocol,
+// or nil/false when the facade did not declare any. Callers (the management API,
+// the panel) use the second result to pick between a typed form and a free-form
+// fallback; both paths are first-class.
+func ServerOptsFor(protocol string) ([]OptSpec, bool) {
+	serverMu.RLock()
+	defer serverMu.RUnlock()
+	opts, ok := serverOpts[protocol]
+	return opts, ok
+}
+
 // RegisterServer makes a protocol serveable by name. Like Register, it is meant
 // to be called from a protocol package's init function and panics on a duplicate
 // or empty name — both are programming errors, detected at startup.

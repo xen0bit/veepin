@@ -1,0 +1,195 @@
+{{/* form.html is the add-and-edit page. The protocol selector drives the form
+     fields rendered from /api/protocols. The page's "initial" JS hint
+     ({.InitialJS}) tells the page whether to draw the form blank ("new") or
+     pre-load an existing listener's config ("edit:<name>"). */}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>veepin supervisor — listener</title>
+  <style>
+    body { font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; }
+    h1 { font-size: 18px; }
+    form { margin: 12px 0; }
+    label { display: block; margin: 8px 0; }
+    input, textarea { width: 30em; font: inherit; }
+    textarea { height: 8em; }
+    .required::after { content: " *"; color: #c00; }
+    .secret-hint::after { content: " (redacted on read; send the real value to set)"; color: #888; font-size: smaller; }
+    fieldset { margin: 8px 0; border: 1px solid #ddd; padding: 8px; }
+    legend { font-weight: 600; }
+    pre { background: #f6f6f6; padding: 6px; overflow-x: auto; }
+    .muted { color: #888; }
+  </style>
+</head>
+<body>
+  <h1 id="title">new listener</h1>
+  <form id="listener">
+    <label>Name<input id="name" type="text" placeholder="site-a"></label>
+    <label>Protocol<select id="protocol"></select></label>
+    <fieldset>
+      <legend>Options</legend>
+      <div id="options-fields"></div>
+    </fieldset>
+    <label><input id="enabled" type="checkbox" checked> enabled</label>
+    <label><input id="setup_nat" type="checkbox"> -setup-nat (manage host iptables/routing)</label>
+    <label>WAN interface<input id="wan" type="text" placeholder="eth0"></label>
+    <input id="save" type="submit" value="save">
+    <button id="apply" type="button">restart listener</button>
+    <button id="delete" type="button">delete</button>
+    <p class="muted">Status: <span id="status">—</span></p>
+  </form>
+<script>
+window.VEEPIN_TOKEN = "{{.Token}}";
+const INITIAL = {{.InitialJS}};
+const api = (path, opts) => {
+  opts = Object.assign({}, opts || {});
+  opts.headers = Object.assign({"Authorization": "Bearer " + window.VEEPIN_TOKEN}, opts.headers || {});
+  if (opts.body !== undefined && typeof opts.body !== "string") {
+    opts.headers["Content-Type"] = "application/json";
+    opts.body = JSON.stringify(opts.body);
+  }
+  return fetch(path, opts).then(r => r.json().then(body => ({status: r.status, body})));
+};
+
+let protocols = [];
+
+function fieldsFor(protocol) {
+  return protocols.find(p => p.name === protocol)?.options || [];
+}
+
+function renderFields(protocol, values) {
+  const wrap = document.getElementById("options-fields");
+  wrap.innerHTML = "";
+  for (const f of fieldsFor(protocol)) {
+    const lbl = document.createElement("label");
+    const key = "opt-" + f.key;
+    let input;
+    if (f.kind === "bool") {
+      input = document.createElement("input");
+      input.type = "checkbox";
+      input.name = key;
+      if (values && values[f.key] === "true") input.checked = true;
+    } else {
+      input = document.createElement("input");
+      input.type = "text";
+      input.name = key;
+      input.value = (values && values[f.key]) ? values[f.key] : "";
+      if (f.kind === "list") { input = document.createElement("textarea"); input.name = key; input.value = (values && values[f.key]) ? values[f.key] : ""; }
+    }
+    input.id = key;
+    input.dataset.key = f.key;
+    const text = document.createTextNode(f.key);
+    lbl.appendChild(text);
+    if (f.required) lbl.classList.add("required");
+    if (f.secret) lbl.classList.add("secret-hint");
+    lbl.title = f.help || "";
+    const help = document.createElement("small");
+    help.className = "muted";
+    help.textContent = " " + (f.help || "");
+    lbl.appendChild(input);
+    lbl.appendChild(help);
+    wrap.appendChild(lbl);
+  }
+}
+
+function collect() {
+  const name = document.getElementById("name").value.trim();
+  const protocol = document.getElementById("protocol").value;
+  const opts = {};
+  const fields = fieldsFor(protocol);
+  for (const f of fields) {
+    const el = document.getElementById("opt-" + f.key);
+    if (!el) continue;
+    if (f.kind === "bool") {
+      if (el.checked) opts[f.key] = "true";
+    } else {
+      const v = el.value;
+      if (v !== "") opts[f.key] = v;
+    }
+  }
+  return {
+    name, protocol, options: opts,
+    enabled: document.getElementById("enabled").checked,
+    setup_nat: document.getElementById("setup_nat").checked,
+    wan: document.getElementById("wan").value.trim(),
+  };
+}
+
+function loadProtocols() {
+  return api("/api/protocols").then(({body}) => {
+    protocols = body.protocols || [];
+    const sel = document.getElementById("protocol");
+    sel.innerHTML = protocols.map(p => '<option value="' + p.name + '">' + p.name + '</option>').join("");
+    return protocols.length ? protocols[0].name : null;
+  });
+}
+
+function loadListener(name) {
+  return api("/api/listeners/" + encodeURIComponent(name)).then(({body}) => {
+    document.getElementById("title").textContent = "edit listener — " + name;
+    document.getElementById("name").value = body.config.name;
+    document.getElementById("protocol").value = body.config.protocol;
+    document.getElementById("setup_nat").checked = !!body.config.setup_nat;
+    document.getElementById("wan").value = body.config.wan || "";
+    document.getElementById("enabled").checked = body.config.enabled !== false;
+    renderFields(body.config.protocol, body.config.options || {});
+    document.getElementById("status").textContent =
+      "state=" + (body.state||"") + " tun=" + (body.tun||"") + " gateway=" + (body.gateway||"");
+  });
+}
+
+function switchProtocol() {
+  // Preserve the in-form values across a protocol change.
+  const cur = {};
+  document.getElementById("options-fields").querySelectorAll("[data-key]").forEach(el => {
+    const k = el.dataset.key;
+    if (el.type === "checkbox") { if (el.checked) cur[k] = "true"; }
+    else if (el.value !== "") cur[k] = el.value;
+  });
+  renderFields(document.getElementById("protocol").value, cur);
+}
+
+document.addEventListener("DOMContentLoaded", async () => {
+  await loadProtocols();
+  document.getElementById("protocol").addEventListener("change", switchProtocol);
+  const proto = document.getElementById("protocol").value;
+  renderFields(proto, {});
+  if (INITIAL && INITIAL.startsWith && INITIAL.startsWith("edit:")) {
+    const name = INITIAL.substring("edit:".length);
+    try {
+      await loadListener(name);
+    } catch (e) { document.getElementById("status").textContent = "load failed: " + e; }
+  }
+  document.getElementById("listener").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const cfg = collect();
+    let path, method;
+    if (INITIAL && INITIAL.startsWith("edit:")) {
+      path = "/api/listeners/" + encodeURIComponent(cfg.name);
+      method = "PATCH";
+    } else {
+      path = "/api/listeners";
+      method = "POST";
+    }
+    const {status, body} = await api(path, {method, body: cfg});
+    document.getElementById("status").textContent =
+      "saved -> " + status + (body.error ? " " + body.error : "");
+    if (status < 300) window.location = "/";
+  });
+  document.getElementById("apply").addEventListener("click", async () => {
+    const name = document.getElementById("name").value.trim();
+    const {status, body} = await api("/api/listeners/" + encodeURIComponent(name) + "/restart", {method: "POST"});
+    document.getElementById("status").textContent = "restart -> " + status;
+  });
+  document.getElementById("delete").addEventListener("click", async () => {
+    const name = document.getElementById("name").value.trim();
+    if (!confirm("delete listner " + name + "?")) return;
+    const {status} = await api("/api/listeners/" + encodeURIComponent(name), {method: "DELETE"});
+    document.getElementById("status").textContent = "delete -> " + status;
+    if (status < 300) window.location = "/";
+  });
+});
+</script>
+</body>
+</html>

@@ -277,7 +277,25 @@ const (
 	OptServerIPTFS    = "iptfs"     // permit AGGFRAG (RFC 9347) for clients that request it
 )
 
-func init() { client.RegisterServer("ikev2", parseServerOptions) }
+func init() {
+	client.RegisterServer("ikev2", parseServerOptions)
+	client.RegisterServerOpts("ikev2", []client.OptSpec{
+		{Key: OptServerListen, Kind: client.OptStr, Help: "local IP to bind IKE sockets on (default 0.0.0.0)"},
+		{Key: OptServerPublic, Kind: client.OptStr, Help: "server's public IP as seen by clients (for NAT detection); defaults to -listen if concrete"},
+		{Key: OptServerPSK, Kind: client.OptStr, Required: true, Secret: true, Help: "pre-shared key"},
+		{Key: OptServerIdentity, Kind: client.OptStr, Required: true, Help: "local identity (FQDN or IP address) presented to clients"},
+		{Key: OptServerPool, Kind: client.OptCIDR, Help: "internal address pool handed to clients (default 10.10.10.0/24)"},
+		{Key: OptServerPool6, Kind: client.OptCIDR, Help: "internal IPv6 address pool, CIDR"},
+		{Key: OptServerDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers pushed to clients"},
+		{Key: OptServerTUN, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
+		{Key: OptServerEAPUsers, Kind: client.OptFilePath, Help: "path to a username:password file enabling EAP-MSCHAPv2 auth"},
+		{Key: OptServerCert, Kind: client.OptFilePath, Help: "server certificate PEM (enables certificate auth instead of PSK)"},
+		{Key: OptServerKey, Kind: client.OptFilePath, Secret: true, Help: "server private-key PEM (with cert)"},
+		{Key: OptServerClientCA, Kind: client.OptFilePath, Help: "CA bundle PEM enabling client certificate auth"},
+		{Key: OptServerShape, Kind: client.OptInt, Help: "per-flow downstream shaping budget in bytes (0 = off)"},
+		{Key: OptServerIPTFS, Kind: client.OptBool, Help: "permit AGGFRAG / IP-TFS (RFC 9347) for clients that request it"},
+	})
+}
 
 // parseServerOptions builds an IKEv2 responder from string options, the
 // server-side counterpart of parseOptions. It applies the same defaults the CLI

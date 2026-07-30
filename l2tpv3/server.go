@@ -226,4 +226,18 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 
 func init() {
 	client.RegisterServer("l2tpv3", parseServerOptions)
+	client.RegisterServerOpts("l2tpv3", []client.OptSpec{
+		{Key: OptServerListen, Kind: client.OptStr, Help: "local IP to bind (default 0.0.0.0)"},
+		{Key: OptPort, Kind: client.OptInt, Help: "UDP port (default 1701)"},
+		{Key: OptTUN, Kind: client.OptStr, Help: "TAP interface name (empty = kernel picks)"},
+		{Key: OptSessionID, Kind: client.OptInt, Required: true, Help: "our session ID: what the peer sends to"},
+		{Key: OptPeerSession, Kind: client.OptInt, Required: true, Help: "the peer's session ID: what we send to"},
+		{Key: OptCookie, Kind: client.OptStr, Secret: true, Help: "hex cookie WE chose, verified on inbound packets (0, 4 or 8 octets)"},
+		{Key: OptPeerCookie, Kind: client.OptStr, Secret: true, Help: "hex cookie the PEER chose, written on outbound packets"},
+		{Key: OptSublayer, Kind: client.OptBool, Help: "carry the Default L2-Specific Sublayer (the Linux kernel sends one)"},
+		{Key: OptServerShape, Kind: client.OptInt, Help: "per-flow downstream shaping budget in bytes; pads IP-bearing frames only (0 = off)"},
+		{Key: OptCCID, Kind: client.OptInt, Help: "our Control Connection ID; with -peer-ccid, enables HELLO keepalives (RFC 3931 quiescent tunnel)"},
+		{Key: OptPeerCCID, Kind: client.OptInt, Help: "the peer's Control Connection ID"},
+		{Key: OptKeepalive, Kind: client.OptInt, Help: "HELLO interval in seconds (default 30)"},
+	})
 }

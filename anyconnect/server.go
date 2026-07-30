@@ -15,7 +15,22 @@ import (
 	engine "github.com/xen0bit/veepin/internal/anyconnect"
 )
 
-func init() { client.RegisterServer("anyconnect", parseServerOptions) }
+func init() {
+	client.RegisterServer("anyconnect", parseServerOptions)
+	client.RegisterServerOpts("anyconnect", []client.OptSpec{
+		{Key: OptServerCert, Kind: client.OptFilePath, Required: true, Help: "path to the server TLS certificate PEM"},
+		{Key: OptServerKey, Kind: client.OptFilePath, Required: true, Secret: true, Help: "path to the server TLS private key PEM"},
+		{Key: OptServerListen, Kind: client.OptStr, Help: "local IP to bind the TCP socket on (default 0.0.0.0)"},
+		{Key: OptServerPort, Kind: client.OptInt, Help: "TCP port to listen on (default 443)"},
+		{Key: OptServerPool, Kind: client.OptCIDR, Help: "internal address pool handed to clients (default 10.11.0.0/24)"},
+		{Key: OptServerDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers assigned to clients"},
+		{Key: OptServerUser, Kind: client.OptStr, Required: true, Help: "username to accept"},
+		{Key: OptServerPassword, Kind: client.OptStr, Required: true, Secret: true, Help: "the user's password"},
+		{Key: OptServerTUN, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
+		{Key: OptServerNoDTLS, Kind: client.OptBool, Help: "serve the TLS tunnel only, leaving the UDP port unbound"},
+		{Key: OptServerShape, Kind: client.OptInt, Help: "per-flow downstream shaping budget in bytes (0 = off)"},
+	})
+}
 
 // Server option keys for client.NewServer("anyconnect", opts).
 const (

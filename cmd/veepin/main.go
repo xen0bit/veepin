@@ -52,6 +52,8 @@ func main() {
 		run(runConnect(os.Args[2:]))
 	case "serve":
 		run(runServe(os.Args[2:]))
+	case "mgmt":
+		run(runMgmt(os.Args[2:]))
 	case "probe":
 		run(runProbe(os.Args[2:]))
 	case "udp-proxy":
@@ -79,7 +81,9 @@ func usage() {
 
 Usage:
   veepin connect   <protocol> [flags]   bring up a tunnel to a server
-  veepin serve     <protocol> [flags]   run a VPN server
+  veepin serve     <protocol> [flags]   run a single VPN server
+  veepin serve     -config <dir>        run a fleet of servers (supervisor mode)
+  veepin mgmt      <subcmd> [flags]     talk to a running supervisor's API
   veepin probe     <protocol> [flags]   diagnostic: handshake + one data packet
   veepin udp-proxy [flags]              forward a local UDP socket via MASQUE CONNECT-UDP
   veepin version                        print build information

@@ -307,6 +307,11 @@ formats, and what it interoperates with — has its own page:
 | AmneziaWG | [doc/usage/amneziawg.md](doc/usage/amneziawg.md) |
 | L2TPv3 Ethernet pseudowire | [doc/usage/l2tpv3.md](doc/usage/l2tpv3.md) |
 
+To run **a fleet of servers** in one process with a localhost management API
+and embedded web panel, the supervisor mode is additive to the bare
+single-protocol command: see [Running the supervisor](doc/usage/supervisor.md)
+and [the `veepin mgmt` CLI](doc/usage/mgmt.md).
+
 To use veepin **as a client**, the
 [NetworkManager plugin](#desktop-integration-networkmanager) is the simplest path
 on a Linux desktop — it configures all fifteen protocols from the native VPN UI. The

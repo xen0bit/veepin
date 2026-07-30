@@ -1,0 +1,419 @@
+package mgmt
+
+// Tests for the management API. They use httptest and a fake supervisor
+// (a *fakeMgr implementing the manager-ish surface the API calls) so the
+// endpoint behavior is verified without sockets or TUNs.
+
+import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/xen0bit/veepin/client"
+	"github.com/xen0bit/veepin/internal/supervisor"
+
+	// Blank-import the production facades so the registry the API reads from
+	// (client.ServerProtocols, client.ServerOptsFor) knows every server
+	// protocol, matching the binary's runtime surface. Without these, the
+	// registry appears empty and the protocol/redaction paths would silently
+	// take their fallback branches during tests.
+	_ "github.com/xen0bit/veepin/amneziawg"
+	_ "github.com/xen0bit/veepin/anyconnect"
+	_ "github.com/xen0bit/veepin/cisco"
+	_ "github.com/xen0bit/veepin/fortinet"
+	_ "github.com/xen0bit/veepin/gp"
+	_ "github.com/xen0bit/veepin/ikev2"
+	_ "github.com/xen0bit/veepin/l2tp"
+	_ "github.com/xen0bit/veepin/l2tpv3"
+	_ "github.com/xen0bit/veepin/masque"
+	_ "github.com/xen0bit/veepin/nebula"
+	_ "github.com/xen0bit/veepin/openvpn"
+	_ "github.com/xen0bit/veepin/pulse"
+	_ "github.com/xen0bit/veepin/softether"
+	_ "github.com/xen0bit/veepin/ssh"
+	_ "github.com/xen0bit/veepin/sstp"
+	_ "github.com/xen0bit/veepin/toy"
+	_ "github.com/xen0bit/veepin/wireguard"
+)
+
+// fakeMgr stands in for *supervisor.Manager so the API tests don't need a
+// directory of listener files or a real ctor. The methods the API uses are
+// ticked-through; the test asserts the API calls them as expected by reading the
+// counters and the recorded calls back.
+type fakeMgr struct {
+	applyCalls int
+	statuses   map[string]supervisor.Status
+	rebuildOf  string
+	stopOf     string
+	rebuildErr error
+}
+
+func (f *fakeMgr) Apply() error { f.applyCalls++; return nil }
+func (f *fakeMgr) All() []supervisor.Status {
+	out := make([]supervisor.Status, 0, len(f.statuses))
+	for _, s := range f.statuses {
+		out = append(out, s)
+	}
+	return out
+}
+func (f *fakeMgr) Status(name string) supervisor.Status {
+	if s, ok := f.statuses[name]; ok {
+		return s
+	}
+	return supervisor.Status{Name: name, State: "unknown"}
+}
+func (f *fakeMgr) Rebuild(name string) error {
+	f.rebuildOf = name
+	return f.rebuildErr
+}
+func (f *fakeMgr) Stop(name string) error {
+	f.stopOf = name
+	delete(f.statuses, name)
+	return nil
+}
+func (f *fakeMgr) Close() error { return nil }
+
+// newTestServer wires a real mgmt.Server with a fake manager and a temp config
+// dir, returning the server and its token-bearing client. One helper covers
+// every test in this file.
+func newTestServer(t *testing.T, statuses map[string]supervisor.Status) (*Server, string, []byte) {
+	t.Helper()
+	dir := t.TempDir()
+	// Pre-seed a couple of listener files for the GET endpoints to find.
+	for name := range statuses {
+		cfg := supervisor.ListenerConfig{Name: name, Protocol: "wireguard",
+			Options: map[string]string{"private-key": "real-secret-value", "address": "10.10.0.1/24"},
+			Enabled: true}
+		body, _ := json.Marshal(cfg)
+		_ = os.WriteFile(filepath.Join(dir, name+".json"), body, 0o600)
+	}
+	mgr := &fakeMgr{statuses: statuses}
+	srv, err := NewServer(dir, mgr, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.mgr.Close() })
+	return srv, "http://test", srv.token
+}
+
+// do sends an authenticated request and returns the response status plus body.
+func (s *Server) do(method, path string, body any) (*http.Response, []byte) {
+	var r io.Reader
+	if body != nil {
+		b, _ := json.Marshal(body)
+		r = bytes.NewReader(b)
+	}
+	req := httptest.NewRequest(method, path, r)
+	if r != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("Authorization", "Bearer "+string(s.token))
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	return rec.Result(), rec.Body.Bytes()
+}
+
+// unauth exercises the missing-token path.
+func (s *Server) doNoToken(method, path string, body any) *http.Response {
+	var r io.Reader
+	if body != nil {
+		b, _ := json.Marshal(body)
+		r = bytes.NewReader(b)
+	}
+	req := httptest.NewRequest(method, path, r)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	return rec.Result()
+}
+
+func TestHealthEndpoint(t *testing.T) {
+	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	resp, body := s.do("GET", "/api/health", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), `"status"`) || !strings.Contains(string(body), `"ok"`) {
+		t.Errorf("body = %s", body)
+	}
+}
+
+func TestUnknownEndpointReturnsMuxDefault(t *testing.T) {
+	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	resp, _ := s.do("GET", "/api/missing", nil)
+	if resp.StatusCode != 404 {
+		t.Errorf("status = %d, want 404 (no route)", resp.StatusCode)
+	}
+}
+
+func TestMissingTokenReturns401(t *testing.T) {
+	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	resp := s.doNoToken("GET", "/api/health", nil)
+	if resp.StatusCode != 401 {
+		t.Errorf("status = %d, want 401 (no auth)", resp.StatusCode)
+	}
+}
+
+func TestBadTokenReturns401(t *testing.T) {
+	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	req := httptest.NewRequest("GET", "/api/health", nil)
+	req.Header.Set("Authorization", "Bearer wrong-token-of-deceptive-length")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != 401 {
+		t.Errorf("status = %d, want 401 (bad token)", rec.Code)
+	}
+}
+
+// TestProtocolsEndpointListsEveryRegisteredProtocol pins that the protocols
+// endpoint reports each registered server protocol alongside its declared
+// OptSpec metadata. Since the test file's imports populate the registry, this
+// verifies the API and the facade side-effect both cover the full set.
+func TestProtocolsEndpointListsEveryRegisteredProtocol(t *testing.T) {
+	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	resp, body := s.do("GET", "/api/protocols", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var out ProtocolsResp
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, body)
+	}
+	names := make(map[string]bool, len(out.Protocols))
+	for _, p := range out.Protocols {
+		names[p.Name] = true
+		if !p.Known {
+			t.Errorf("protocol %q reported Known=false", p.Name)
+		}
+	}
+	// Cross-check against the registry; the two lists must be equal as sets.
+	for _, reg := range client.ServerProtocols() {
+		if !names[reg] {
+			t.Errorf("registered protocol %q missing from /api/protocols", reg)
+		}
+	}
+}
+
+func TestListListenersReturnsStatuses(t *testing.T) {
+	statuses := map[string]supervisor.Status{
+		"site-a": {Name: "site-a", Protocol: "wireguard", State: "running"},
+		"site-b": {Name: "site-b", Protocol: "ikev2", State: "running"},
+	}
+	s, _, _ := newTestServer(t, statuses)
+	resp, body := s.do("GET", "/api/listeners", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d body=%s", resp.StatusCode, body)
+	}
+	// Both statuses should appear, sorted by name.
+	if !strings.Contains(string(body), "site-a") || !strings.Contains(string(body), "site-b") {
+		t.Errorf("body misses a listener: %s", body)
+	}
+}
+
+func TestGetListenerStatusUnknownReturns404(t *testing.T) {
+	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	resp, _ := s.do("GET", "/api/listeners/never-existed", nil)
+	if resp.StatusCode != 404 {
+		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestGetListenerReturnsConfigWithSecretsRedacted(t *testing.T) {
+	statuses := map[string]supervisor.Status{"site-a": {Name: "site-a", Protocol: "wireguard", State: "running"}}
+	s, _, _ := newTestServer(t, statuses)
+	resp, body := s.do("GET", "/api/listeners/site-a", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d body=%s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), redacted) {
+		t.Errorf("response body lacks redaction marker (private-key should be redacted):\n%s", body)
+	}
+	if strings.Contains(string(body), "real-secret-value") {
+		t.Errorf("response body leaks the real private-key value:\n%s", body)
+	}
+}
+
+func TestCreateListenerPersistsAndApplies(t *testing.T) {
+	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	cfg := supervisor.ListenerConfig{Name: "new-one", Protocol: "wireguard",
+		Options: map[string]string{"private-key": "k", "address": "10.10.0.1/24"}, Enabled: true}
+	resp, _ := s.do("POST", "/api/listeners", cfg)
+	if resp.StatusCode != 201 {
+		t.Fatalf("status = %d, want 201", resp.StatusCode)
+	}
+	if _, err := os.Stat(filepath.Join(s.dir, "new-one.json")); err != nil {
+		t.Errorf("persists: %v", err)
+	}
+	fake := s.mgr.(*fakeMgr)
+	if fake.applyCalls == 0 {
+		t.Errorf("Apply was not called after Create")
+	}
+}
+
+func TestCreateListenerValidatesName(t *testing.T) {
+	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	bad := supervisor.ListenerConfig{Name: "UPPERCASE", Protocol: "wireguard"}
+	resp, _ := s.do("POST", "/api/listeners", bad)
+	if resp.StatusCode != 400 {
+		t.Errorf("status = %d, want 400 (bad name)", resp.StatusCode)
+	}
+}
+
+func TestCreateListenerRejectsUnknownProtocol(t *testing.T) {
+	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	cfg := supervisor.ListenerConfig{Name: "x", Protocol: "nonsense-example"}
+	resp, _ := s.do("POST", "/api/listeners", cfg)
+	if resp.StatusCode != 400 {
+		t.Errorf("status = %d, want 400 (unknown protocol)", resp.StatusCode)
+	}
+}
+
+func TestCreateListenerRequiresAuth(t *testing.T) {
+	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	resp := s.doNoToken("POST", "/api/listeners", supervisor.ListenerConfig{Name: "x"})
+	if resp.StatusCode != 401 {
+		t.Errorf("status = %d, want 401 (no auth)", resp.StatusCode)
+	}
+}
+
+// TestDeleteListenerRemovesFileAndCallsStop covers the DELETE endpoint: it
+// calls Stop on the manager and deletes the on-disk config, leaving the API
+// idempotent for a listener whose server crashed but whose file is still
+// present.
+func TestDeleteListenerRemovesFileAndCallsStop(t *testing.T) {
+	statuses := map[string]supervisor.Status{"site-a": {Name: "site-a", State: "running"}}
+	s, _, _ := newTestServer(t, statuses)
+	resp, _ := s.do("DELETE", "/api/listeners/site-a", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if _, err := os.Stat(filepath.Join(s.dir, "site-a.json")); !os.IsNotExist(err) {
+		t.Errorf("listener file not removed after DELETE: %v", err)
+	}
+	if s.mgr.(*fakeMgr).stopOf != "site-a" {
+		t.Errorf("Stop was called on %q, want site-a", s.mgr.(*fakeMgr).stopOf)
+	}
+}
+
+func TestRestartEndpointCallsRebuild(t *testing.T) {
+	statuses := map[string]supervisor.Status{"site-a": {Name: "site-a", State: "running"}}
+	s, _, _ := newTestServer(t, statuses)
+	resp, _ := s.do("POST", "/api/listeners/site-a/restart", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if s.mgr.(*fakeMgr).rebuildOf != "site-a" {
+		t.Errorf("Rebuild was called on %q, want site-a", s.mgr.(*fakeMgr).rebuildOf)
+	}
+}
+
+// TestMergeOptionsRedactedPreservesExisting verifies that a round-trip GET-
+// then-PATCH does not clobber a secret: a "<redacted>" value in the patch is
+// "do not touch" rather than "replace with <redacted>".
+func TestMergeOptionsRedactedPreservesExisting(t *testing.T) {
+	existing := map[string]string{"private-key": "the-real-secret", "address": "10.10.0.1/24"}
+	patch := map[string]string{"private-key": redacted, "address": "10.20.0.1/24"}
+	out := mergeOptions(existing, patch)
+	if out["private-key"] != "the-real-secret" {
+		t.Errorf("redacted secret was replaced: got %q want the-real-secret", out["private-key"])
+	}
+	if out["address"] != "10.20.0.1/24" {
+		t.Errorf("non-secret patch was not applied: got %q want 10.20.0.1/24", out["address"])
+	}
+}
+
+// TestBootTokenReadsExistingFile pins the read path: if /path/token exists,
+// NewServer uses it; if absent, it mint one with the right perms.
+func TestBootTokenReadsExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	mgmtDir := filepath.Join(dir, "mgmt")
+	_ = os.MkdirAll(mgmtDir, 0o700)
+	tokenPath := filepath.Join(mgmtDir, tokenName)
+	_ = os.WriteFile(tokenPath, []byte("operator-chosen\n"), 0o600)
+	tok, fresh, err := bootToken(tokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh {
+		t.Errorf("bootToken reported 'fresh' for an existing file")
+	}
+	if string(tok) != "operator-chosen" {
+		t.Errorf("token = %q, want operator-chosen", tok)
+	}
+}
+
+// TestBootTokenGeneratesOnFirstRun pins the mint path: the API server boots a
+// supervisor against an empty config dir, and the bearer token is created,
+// hex-encoded, and 0600 root-only.
+func TestBootTokenGeneratesOnFirstRun(t *testing.T) {
+	dir := t.TempDir()
+	// bootToken's parent is created by NewServer normally; the test reaches it
+	// directly so it must create the dir, matching NewServer's contract.
+	_ = os.MkdirAll(filepath.Join(dir, "mgmt"), 0o700)
+	tokenPath := filepath.Join(dir, "mgmt", tokenName)
+	tok, fresh, err := bootToken(tokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fresh {
+		t.Errorf("bootToken reported not-fresh for a missing file")
+	}
+	if len(tok) != 64 {
+		t.Errorf("token len = %d, want 64 (32 bytes hex-encoded)", len(tok))
+	}
+	info, err := os.Stat(tokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("token file mode = %v, want 0600", info.Mode().Perm())
+	}
+}
+
+// TestBearerHeaderParsing pins the "Bearer " prefix parsing; a basic-auth-style
+// header or wrong scheme returns no token rather than a half-parse.
+func TestBearerHeaderParsing(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"Bearer abc", "abc"},
+		{"bearer abc", "abc"},
+		{"BEARER abc", "abc"},
+		{"Bearer abc ", "abc"},
+		{"Bearer  abc ", "abc"},
+		{"Token abc", ""},
+		{"", ""},
+		{"abc", ""},
+	} {
+		got := bearer(tc.in)
+		if tc.want == "" {
+			if got != nil {
+				t.Errorf("%q: got %q, want nil", tc.in, got)
+			}
+		} else if string(got) != tc.want {
+			t.Errorf("%q: got %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestRedactOptionsLeavesNonSecretKeysUntouched verifies redaction only
+// touches keys declared Secret by the protocol's OptSpec metadata.
+func TestRedactOptionsLeavesNonSecretKeysUntouched(t *testing.T) {
+	opts := map[string]string{"private-key": "k", "address": "10.10.0.1/24"}
+	out := redactOptions("wireguard", opts, true)
+	if out["private-key"] != redacted {
+		t.Errorf("private-key not redacted: %q", out["private-key"])
+	}
+	if out["address"] != "10.10.0.1/24" {
+		t.Errorf("non-secret address was redacted: %q", out["address"])
+	}
+}
+
+// Suppress "unused" errors for net.IP we want to keep imported for parity with
+// a future IPv6 listener status field.
+var _ = net.IP{}

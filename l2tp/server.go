@@ -13,7 +13,21 @@ import (
 	engine "github.com/xen0bit/veepin/internal/l2tp"
 )
 
-func init() { client.RegisterServer("l2tp", parseServerOptions) }
+func init() {
+	client.RegisterServer("l2tp", parseServerOptions)
+	client.RegisterServerOpts("l2tp", []client.OptSpec{
+		{Key: OptServerListen, Kind: client.OptStr, Help: "local IP to bind the IKE/ESP sockets on (default 0.0.0.0)"},
+		{Key: OptServerPublic, Kind: client.OptStr, Help: "server's public IP as clients reach it (IKE identity and traffic selector); required when -listen is the wildcard"},
+		{Key: OptServerPort, Kind: client.OptInt, Help: "UDP port to listen on (default 500)"},
+		{Key: OptServerPSK, Kind: client.OptStr, Required: true, Secret: true, Help: "IPsec pre-shared key"},
+		{Key: OptServerPool, Kind: client.OptCIDR, Help: "internal address pool handed to clients (default 10.20.0.0/24)"},
+		{Key: OptServerDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers assigned to clients"},
+		{Key: OptServerUser, Kind: client.OptStr, Required: true, Help: "MS-CHAPv2 username to accept"},
+		{Key: OptServerPassword, Kind: client.OptStr, Required: true, Secret: true, Help: "the user's password"},
+		{Key: OptServerTUN, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
+		{Key: OptServerShape, Kind: client.OptInt, Help: "per-flow downstream shaping budget in bytes (0 = off)"},
+	})
+}
 
 // Server option keys for client.NewServer("l2tp", opts).
 const (

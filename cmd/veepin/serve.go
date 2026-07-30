@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -18,6 +18,10 @@ import (
 	"github.com/xen0bit/veepin/fortinet"
 	"github.com/xen0bit/veepin/gp"
 	"github.com/xen0bit/veepin/ikev2"
+	"github.com/xen0bit/veepin/internal/hostnet"
+	"github.com/xen0bit/veepin/internal/mgmt"
+	"github.com/xen0bit/veepin/internal/mgmt/ui"
+	"github.com/xen0bit/veepin/internal/supervisor"
 	"github.com/xen0bit/veepin/l2tp"
 	"github.com/xen0bit/veepin/l2tpv3"
 	"github.com/xen0bit/veepin/masque"
@@ -35,9 +39,23 @@ import (
 // that produces the server's options; the rest — constructing the server,
 // configuring host networking, and the signal/serve lifecycle — is shared, the
 // mirror of runConnect.
+//
+// Two modes share one subcommand: `veepin serve <protocol> [flags]` is the
+// single-protocol command below, unchanged; `veepin serve -config <dir>` is
+// supervisor mode: read that directory's listener files, run each as a server
+// in one process, and expose a localhost management API plus web panel. The
+// supervisor mode is the home of in-process fleet management; bare mode is the
+// one-process-per-protocol path the interop matrix verifies.
 func runServe(args []string) error {
+	// Supervisor mode: `veepin serve -config <dir>` reads a directory of
+	// listener JSON files and serves them all in one process. Detect the
+	// flag positionally so per-protocol flag parsing is untouched below.
+	if len(args) >= 1 && (args[0] == "-config" || args[0] == "--config") {
+		return runSupervisorMode(args)
+	}
 	if len(args) == 0 {
-		return fmt.Errorf("usage: veepin serve <protocol> [flags]\nprotocols: %s",
+		return fmt.Errorf("usage: veepin serve <protocol> [flags]\nprotocols: %s\n"+
+			"       veepin serve -config <dir> [-listen <addr>]",
 			strings.Join(client.ServerProtocols(), ", "))
 	}
 	protocol, args := args[0], args[1:]
@@ -736,31 +754,98 @@ func maskBits(n *net.IPNet) int {
 }
 
 // setupNetworking configures the TUN interface address, brings it up, enables
-// IPv4 forwarding and installs a MASQUERADE rule for the pool via the WAN
-// interface. It shells out to ip/iptables/sysctl, which must be present and
-// runnable with sufficient privileges.
+// IPv4 forwarding and installs MASQUERADE / FORWARD rules tagged for the bare
+// "serve" invocation. It is the single-protocol command's caller of
+// internal/hostnet, which owns the shared-with-supervisor implementation; the
+// operator name "serve" keeps bare-mode iptables comments visually distinct
+// from the supervisor's "<listener>" tags.
 func setupNetworking(tunName string, gateway net.IP, network *net.IPNet, wan string) error {
-	bits := maskBits(network)
-	cmds := [][]string{
-		{"ip", "addr", "add", fmt.Sprintf("%s/%d", gateway, bits), "dev", tunName},
-		{"ip", "link", "set", tunName, "up"},
-		{"sysctl", "-w", "net.ipv4.ip_forward=1"},
+	return hostnet.Apply("serve", hostnet.Config{
+		TUNName: tunName,
+		Gateway: gateway,
+		Network: network,
+		WAN:     wan,
+	})
+}
+
+// runSupervisorMode reads -config <dir> and runs the fleet: one client.Server
+// per listener file, each in its own goroutine, plus a localhost-only
+// management API + embedded panel. -listen overrides the default bind; -no-mgmt
+// disables the management plane entirely (the supervisor then just runs the
+// fleet and logs).
+//
+// Two of the bare command's concerns do not apply here: there is no per-protocol
+// flag set (the supervisor reads Options from the JSON files), and the signal
+// handling shuts down every listener through Manager.Close so SIGINT/SIGTERM
+// drain the whole fleet rather than one server.
+func runSupervisorMode(args []string) error {
+	if len(args) < 2 {
+		return fmt.Errorf("usage: veepin serve -config <dir> [-listen <addr>] [-no-mgmt]")
 	}
-	if wan != "" {
-		cmds = append(cmds,
-			[]string{"iptables", "-t", "nat", "-A", "POSTROUTING", "-s", network.String(), "-o", wan, "-j", "MASQUERADE"},
-			[]string{"iptables", "-A", "FORWARD", "-i", tunName, "-j", "ACCEPT"},
-			[]string{"iptables", "-A", "FORWARD", "-o", tunName, "-j", "ACCEPT"},
-		)
+	configDir := args[1]
+	rest := args[2:]
+	fs := flag.NewFlagSet("serve -config", flag.ContinueOnError)
+	listenAddr := fs.String("listen", "127.0.0.1:8443", "management API / panel bind address")
+	noMgmt := fs.Bool("no-mgmt", false, "run the supervisor without the management API")
+	if err := fs.Parse(rest); err != nil {
+		return err
 	}
-	for _, c := range cmds {
-		cmd := exec.Command(c[0], c[1:]...)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("%s: %v: %s", strings.Join(c, " "), err, strings.TrimSpace(string(out)))
+
+	logger := log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
+	mgr := supervisor.NewManager(configDir, logger, nil)
+	if err := mgr.Apply(); err != nil {
+		// Apply is the first thing that touches disk and opens TUNs; a failure
+		// here aborts before the mgmt API comes up so an operator is not given a
+		// panel for a fleet that has no listeners.
+		_ = mgr.Close()
+		return fmt.Errorf("supervisor: %w", err)
+	}
+	logger.Printf("supervisor ready: %d listener(s) running", countRunning(mgr))
+
+	var mgmtServer *mgmt.Server
+	if !*noMgmt {
+		var err error
+		mgmtServer, err = mgmt.NewServer(configDir, mgr, logger)
+		if err != nil {
+			_ = mgr.Close()
+			return fmt.Errorf("mgmt: %w", err)
 		}
+		mux := http.NewServeMux()
+		mux.Handle("/api/", mgmtServer.Handler())
+		uiHandler, err := ui.NewHandler(string(mgmtServer.Token()))
+		if err != nil {
+			_ = mgr.Close()
+			return fmt.Errorf("ui: %w", err)
+		}
+		mux.Handle("/", uiHandler)
+		go func() {
+			logger.Printf("management API + panel at http://%s/", *listenAddr)
+			if err := http.ListenAndServe(*listenAddr, mux); err != nil {
+				logger.Printf("management API: %v", err)
+			}
+		}()
 	}
-	if wan == "" {
-		return fmt.Errorf("interface configured but no -wan given, so no MASQUERADE installed")
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	<-sigCh
+	logger.Printf("supervisor shutting down")
+	_ = mgmtServer
+	if err := mgr.Close(); err != nil {
+		return fmt.Errorf("supervisor shutdown: %w", err)
 	}
 	return nil
+}
+
+// countRunning returns the number of listeners whose state is "running" for
+// the ready-line log. It reads All rather than checking the underlying map so
+// the count reflects what the panel will show.
+func countRunning(mgr *supervisor.Manager) int {
+	var n int
+	for _, s := range mgr.All() {
+		if s.State == "running" {
+			n++
+		}
+	}
+	return n
 }

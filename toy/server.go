@@ -24,7 +24,19 @@ import (
 	itoy "github.com/xen0bit/veepin/internal/toy"
 )
 
-func init() { client.RegisterServer("toy", parseServerOptions) }
+func init() {
+	client.RegisterServer("toy", parseServerOptions)
+	client.RegisterServerOpts("toy", []client.OptSpec{
+		{Key: OptServerListen, Kind: client.OptStr, Help: "local IP to bind (default 0.0.0.0)"},
+		{Key: OptServerPort, Kind: client.OptInt, Help: "UDP port (default 5555)"},
+		{Key: OptServerPool, Kind: client.OptCIDR, Help: "client address pool CIDR"},
+		{Key: OptServerDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers offered to clients"},
+		{Key: OptServerUser, Kind: client.OptStr, Required: true, Help: "the one username to accept"},
+		{Key: OptServerSecret, Kind: client.OptStr, Required: true, Secret: true, Help: "that user's secret; provides no real protection"},
+		{Key: OptServerMTU, Kind: client.OptInt, Help: "inner MTU offered to clients"},
+		{Key: OptServerTUN, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
+	})
+}
 
 // Server option keys accepted by client.NewServer("toy", opts).
 const (
