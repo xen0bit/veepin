@@ -441,9 +441,35 @@ func (m *Manager) rebuildLocked(r *running, cfg ListenerConfig) error {
 	return m.start(r, cfg)
 }
 
+// stopGrace bounds how long a single listener may take to shut down before the
+// supervisor stops waiting for it. It covers Close and the serve goroutine's
+// exit together, so one listener's teardown cannot exceed it.
+const stopGrace = 5 * time.Second
+
 // stopLocked closes the listener's server and waits for the goroutine to exit,
 // then tears down any host-networking rules it owned. Called under Manager.mu;
 // acquires r.mu.
+//
+// Both waits are bounded, and Close is called on a goroutine rather than inline,
+// because Close can block indefinitely. dataplane.TUN.Read is a raw blocking
+// read(2) on an fd the Go runtime does not poll, and TUN.Close is a raw close(2)
+// -- which on Linux does not wake a thread already blocked reading that fd. So a
+// protocol whose Close waits for its packet pump to finish (internal/toy does,
+// and the shape is common) does not return until a packet happens to arrive on
+// the interface, which on an idle tunnel may be never.
+//
+// That is invisible to `veepin serve <proto>`: it calls Close and exits, and the
+// kernel cleans up. It is not invisible here. stopLocked runs under Manager.mu,
+// so an unbounded Close would freeze every Status, Apply, and Rebuild in the
+// fleet behind it -- one listener wedging the entire management plane, which is
+// the failure this whole package exists to avoid. Bounded, the listener is
+// abandoned with a log line and the rest of the fleet keeps serving.
+//
+// Abandoning leaks the pump goroutine and its fd until the process exits. That
+// is the lesser of the two evils here and is named in
+// internal/supervisor/README.md; the real fix is for dataplane to make a blocked
+// TUN read interruptible, which is a change to the allocation-guarded data path
+// and belongs on its own.
 func (m *Manager) stopLocked(r *running) {
 	r.mu.Lock()
 	srv, done, cfg := r.srv, r.done, r.cfg
@@ -456,14 +482,32 @@ func (m *Manager) stopLocked(r *running) {
 	r.since = time.Now()
 	r.mu.Unlock()
 
+	// One deadline for the whole teardown, shared by both waits below.
+	deadline := time.After(stopGrace)
+	var abandoned bool
 	if srv != nil {
-		_ = srv.Close()
+		closed := make(chan struct{})
+		go func() {
+			defer close(closed)
+			_ = srv.Close()
+		}()
+		select {
+		case <-closed:
+		case <-deadline:
+			abandoned = true
+			m.log.Printf("supervisor: %s: Close did not return within %s; abandoning the listener "+
+				"(its packet pump is blocked reading the TUN and will exit when a packet arrives)",
+				cfg.Name, stopGrace)
+		}
 	}
-	if done != nil {
+	// No point waiting on the serve goroutine if Close has not even returned:
+	// ListenAndServe cannot unblock before the thing it is serving is closed.
+	if done != nil && !abandoned {
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
-			m.log.Printf("supervisor: %s: serve goroutine still running after 5s; carrying on", cfg.Name)
+		case <-deadline:
+			m.log.Printf("supervisor: %s: serve goroutine still running after %s; carrying on",
+				cfg.Name, stopGrace)
 		}
 	}
 	// Host-state teardown for the listener's own rules; layer-2 / no-WAN

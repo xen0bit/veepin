@@ -647,6 +647,68 @@ func TestFailedRebuildKeepsTheListenerAndReportsWhy(t *testing.T) {
 	}
 }
 
+// wedgedServer is a client.Server whose Close never returns, modelling the real
+// behaviour realserver_test.go found: dataplane.TUN.Read is a raw blocking
+// read(2) on an fd the Go runtime does not poll, and TUN.Close is a raw close(2),
+// which on Linux does not wake a thread already blocked reading that fd. A
+// protocol whose Close waits for its packet pump -- internal/toy does, and the
+// shape is common -- therefore does not return until a packet arrives on the
+// interface, which on an idle tunnel may be never.
+type wedgedServer struct {
+	fakeServer
+	release chan struct{}
+}
+
+func (s *wedgedServer) Close() error {
+	<-s.release
+	return nil
+}
+
+// TestAWedgedCloseDoesNotFreezeTheFleet is the containment. stopLocked runs
+// under Manager.mu, so an unbounded Close would hold the manager lock forever
+// and every Status, Apply, and Rebuild in the fleet would block behind it: one
+// listener taking down the entire management plane, which is the failure this
+// package exists to prevent.
+//
+// Found by running the real-listener test with CAP_NET_ADMIN, where Manager.Close
+// hung indefinitely rather than returning. It is invisible to
+// `veepin serve <proto>`, which calls Close and exits.
+func TestAWedgedCloseDoesNotFreezeTheFleet(t *testing.T) {
+	dir := t.TempDir()
+	writeCfg(t, dir, "site-a", "wireguard")
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+
+	mgr := NewManager(dir, testLogger(t),
+		func(protocol string, opts map[string]string) (client.Server, error) {
+			return &wedgedServer{
+				fakeServer: fakeServer{name: opts["__name"], tun: "tun0", serveCh: make(chan struct{})},
+				release:    release,
+			}, nil
+		})
+	if err := mgr.Apply(); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = mgr.Stop("site-a")
+	}()
+	select {
+	case <-done:
+	case <-time.After(stopGrace + 5*time.Second):
+		t.Fatal("Stop did not return; a listener whose Close blocks has wedged the manager " +
+			"lock, and with it every other listener's status and rebuild")
+	}
+
+	// And the manager is still usable afterwards, which is the point of bounding
+	// rather than merely logging.
+	if s := mgr.Status("site-a"); s.State != "unknown" {
+		t.Errorf("after Stop: state = %q, want unknown", s.State)
+	}
+}
+
 // TestCloseTearsDownEveryListener covers supervisor shutdown: Close leaves no
 // live goroutine and closes every server, so the process can exit cleanly.
 func TestCloseTearsDownEveryListener(t *testing.T) {
