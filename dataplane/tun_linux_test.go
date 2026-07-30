@@ -201,27 +201,33 @@ func TestWriteWaitsForRoomRatherThanFailing(t *testing.T) {
 	}
 
 	// Drain, and the parked write must complete.
+	//
+	// The peer end is non-blocking for the same reason the device is: draining a
+	// pipe dry and then reading it once more parks the test itself, and how many
+	// reads that takes depends on when the parked write lands -- a race this lost
+	// under -race in CI while passing locally. EAGAIN here means "drained for
+	// now", not an error.
+	if err := unix.SetNonblock(peer, true); err != nil {
+		t.Fatalf("set peer non-blocking: %v", err)
+	}
 	drain := make([]byte, 8192)
-	for range 16 {
-		if _, err := unix.Read(peer, drain); err != nil {
-			break
-		}
+	deadline := time.After(5 * time.Second)
+	for {
 		select {
 		case err := <-done:
 			if err != nil {
 				t.Fatalf("Write after the queue drained: %v", err)
 			}
 			return
+		case <-deadline:
+			t.Fatal("Write stayed parked after the queue drained")
 		default:
 		}
-	}
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Write after the queue drained: %v", err)
+		if _, err := unix.Read(peer, drain); err == unix.EAGAIN {
+			time.Sleep(time.Millisecond)
+		} else if err != nil {
+			t.Fatalf("draining the pipe: %v", err)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Write stayed parked after the queue drained")
 	}
 }
 
