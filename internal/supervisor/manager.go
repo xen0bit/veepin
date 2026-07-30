@@ -162,20 +162,7 @@ func configChanged(a, b ListenerConfig) bool {
 			return true
 		}
 	}
-	return !equalStringSlices(a.FirewallAllows, b.FirewallAllows)
-}
-
-// equalStringSlices compares two string slices element-wise.
-func equalStringSlices(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
+	return false
 }
 
 // statusFromLocked reads r's state under its mutex and returns it as a Status.

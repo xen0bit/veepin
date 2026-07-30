@@ -56,12 +56,6 @@ type ListenerConfig struct {
 	SetupNAT bool `json:"setup_nat,omitempty"`
 	// WAN is the upstream interface for NAT, passed to hostnet.
 	WAN string `json:"wan,omitempty"`
-	// FirewallAllows, when non-empty, installs per-listener iptables rules
-	// restricting the tunnel subnet's outbound traffic. Each entry is an IP
-	// or CIDR the listener's clients are allowed to reach; everything else is
-	// blocked. Empty means no firewall apart from the NAT rules hostnet
-	// already installs with SetupNAT.
-	FirewallAllows []string `json:"firewall_allows,omitempty"`
 	// Enabled false means parse it, list it, but do not start it. Lets a
 	// config disable a listener without deleting the file.
 	Enabled bool `json:"enabled,omitempty"`
