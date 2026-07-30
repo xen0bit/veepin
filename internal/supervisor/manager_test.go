@@ -84,6 +84,27 @@ func (f *fakeCtor) construct(protocol string, opts map[string]string) (client.Se
 	return serv, nil
 }
 
+// byName returns the fakeServer most recently constructed for a listener,
+// identified by the "__name" option writeCfg plants in the options map.
+//
+// Tests must look servers up this way rather than indexing ctor.built
+// positionally: Apply builds new listeners by ranging the map LoadDir returns,
+// so construction order is randomised per run and has nothing to do with the
+// order the test wrote the files. Two tests here used to index built[0] and
+// built[1] "by file write order" and failed roughly one run in seven.
+func (f *fakeCtor) byName(t *testing.T, name string) *fakeServer {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := len(f.built) - 1; i >= 0; i-- {
+		if f.built[i].name == name {
+			return f.built[i]
+		}
+	}
+	t.Fatalf("no fake server was constructed for listener %q", name)
+	return nil
+}
+
 func mustParseCIDR(s string) *net.IPNet {
 	_, n, err := net.ParseCIDR(s)
 	if err != nil {
@@ -148,7 +169,7 @@ func TestApplyKeepsRunningListenersUntouched(t *testing.T) {
 	if err := mgr.Apply(); err != nil {
 		t.Fatal(err)
 	}
-	built := ctor.built[0]
+	built := ctor.byName(t, "site-a")
 	if err := mgr.Apply(); err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +194,7 @@ func TestApplyRemovedConfigTearsDownListener(t *testing.T) {
 	if err := mgr.Apply(); err != nil {
 		t.Fatal(err)
 	}
-	b := ctor.built[1] // second-built listener, by file write order
+	b := ctor.byName(t, "site-b")
 	if err := os.Remove(filepath.Join(dir, "site-b.json")); err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +269,7 @@ func TestApplyChangedConfigRebuildsListener(t *testing.T) {
 	if err := mgr.Apply(); err != nil {
 		t.Fatal(err)
 	}
-	origA := ctor.built[0]
+	origA := ctor.byName(t, "site-a")
 	// Change options for site-a only.
 	cfg := ListenerConfig{Name: "site-a", Protocol: "wireguard",
 		Options: map[string]string{"__name": "site-a", "renamed": "value"}, Enabled: true}
@@ -313,7 +334,7 @@ func TestRebuildForcesColdRebuild(t *testing.T) {
 	if err := mgr.Apply(); err != nil {
 		t.Fatal(err)
 	}
-	orig := ctor.built[0]
+	orig := ctor.byName(t, "site-a")
 	if err := mgr.Rebuild("site-a"); err != nil {
 		t.Fatalf("Rebuild: %v", err)
 	}
@@ -347,7 +368,7 @@ func TestStopRemovesListener(t *testing.T) {
 	if err := mgr.Apply(); err != nil {
 		t.Fatal(err)
 	}
-	orig := ctor.built[0]
+	orig := ctor.byName(t, "site-a")
 	if err := mgr.Stop("site-a"); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
