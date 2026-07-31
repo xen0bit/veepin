@@ -27,9 +27,9 @@ import (
 func init() {
 	client.RegisterServer("toy", parseServerOptions)
 	client.RegisterServerOpts("toy", []client.OptSpec{
-		{Key: OptServerListen, Kind: client.OptStr, Help: "local IP to bind (default 0.0.0.0)"},
-		{Key: OptServerPort, Kind: client.OptInt, Help: "UDP port (default 5555)"},
-		{Key: OptServerPool, Kind: client.OptCIDR, Help: "client address pool CIDR"},
+		{Key: OptServerListen, Kind: client.OptStr, Default: "0.0.0.0", Help: "local IP to bind (default 0.0.0.0)"},
+		{Key: OptServerPort, Kind: client.OptInt, Default: "5555", Help: "UDP port (default 5555)"},
+		{Key: OptServerPool, Kind: client.OptCIDR, Default: "10.9.0.0/24", Help: "client address pool CIDR"},
 		{Key: OptServerDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers offered to clients"},
 		{Key: OptServerUser, Kind: client.OptStr, Required: true, Help: "the one username to accept"},
 		{Key: OptServerSecret, Kind: client.OptStr, Required: true, Secret: true, Help: "that user's secret; provides no real protection"},

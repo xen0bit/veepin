@@ -775,19 +775,19 @@ func serverDataDemux(pkt []byte) (uint32, bool) {
 func init() {
 	client.RegisterServer("openvpn", parseServerOptions)
 	client.RegisterServerOpts("openvpn", []client.OptSpec{
-		{Key: OptServerCA, Kind: client.OptFilePath, Required: true, Help: "path to the CA certificate PEM"},
-		{Key: OptServerCert, Kind: client.OptFilePath, Required: true, Help: "path to the server certificate PEM"},
-		{Key: OptServerKey, Kind: client.OptFilePath, Required: true, Secret: true, Help: "path to the server private key PEM"},
+		{Key: OptServerCA, Kind: client.OptFilePath, Required: true, Generate: "x509-chain", Help: "path to the CA certificate PEM"},
+		{Key: OptServerCert, Kind: client.OptFilePath, Required: true, Generate: "x509-chain", Help: "path to the server certificate PEM"},
+		{Key: OptServerKey, Kind: client.OptFilePath, Required: true, Secret: true, Generate: "x509-chain", Help: "path to the server private key PEM"},
 		{Key: OptServerTLSAuth, Kind: client.OptFilePath, Secret: true, Help: "static key adding an HMAC to every control packet"},
 		{Key: OptServerTLSCrypt, Kind: client.OptFilePath, Secret: true, Help: "static key encrypting and authenticating every control packet"},
 		{Key: OptServerAuth, Kind: client.OptStr, Help: "HMAC digest for -tls-auth: SHA1 (default) or SHA256"},
-		{Key: OptServerKeyDirection, Kind: client.OptInt, Help: "the client's --key-direction for -tls-auth: 0, 1, or -1 for a bidirectional key"},
-		{Key: OptServerListenIP, Kind: client.OptStr, Help: "local IP to bind the UDP socket on (default 0.0.0.0)"},
-		{Key: OptServerListenPort, Kind: client.OptInt, Help: "UDP port to listen on (default 1194)"},
-		{Key: OptServerPool, Kind: client.OptCIDR, Help: "internal address pool handed to clients (default 10.8.0.0/24)"},
+		{Key: OptServerKeyDirection, Kind: client.OptInt, Default: "-1", Help: "the client's --key-direction for -tls-auth: 0, 1, or -1 for a bidirectional key"},
+		{Key: OptServerListenIP, Kind: client.OptStr, Default: "0.0.0.0", Help: "local IP to bind the UDP socket on (default 0.0.0.0)"},
+		{Key: OptServerListenPort, Kind: client.OptInt, Default: "1194", Help: "UDP port to listen on (default 1194)"},
+		{Key: OptServerPool, Kind: client.OptCIDR, Default: "10.8.0.0/24", Help: "internal address pool handed to clients (default 10.8.0.0/24)"},
 		{Key: OptServerDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers pushed to clients"},
 		{Key: OptServerTUN, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
-		{Key: OptServerShape, Kind: client.OptInt, Help: "per-flow downstream shaping budget in bytes (0 = off)"},
+		{Key: OptServerShape, Kind: client.OptInt, Default: "0", Help: "per-flow downstream shaping budget in bytes (0 = off)"},
 	})
 }
 

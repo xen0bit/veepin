@@ -65,17 +65,19 @@ function renderFields(protocol, values) {
     const lbl = document.createElement("label");
     const key = "opt-" + f.key;
     let input;
+    const saved = values && values[f.key] !== undefined ? values[f.key] : undefined;
     if (f.kind === "bool") {
       input = document.createElement("input");
       input.type = "checkbox";
       input.name = key;
-      if (values && values[f.key] === "true") input.checked = true;
+      if (saved !== undefined) { input.checked = (saved === "true"); }
+      else if (f.default) { input.checked = (f.default === "true"); }
     } else {
       input = document.createElement("input");
       input.type = "text";
       input.name = key;
-      input.value = (values && values[f.key]) ? values[f.key] : "";
-      if (f.kind === "list") { input = document.createElement("textarea"); input.name = key; input.value = (values && values[f.key]) ? values[f.key] : ""; }
+      input.value = (saved !== undefined ? saved : (f.default || ""));
+      if (f.kind === "list") { input = document.createElement("textarea"); input.name = key; input.value = (saved !== undefined ? saved : (f.default || "")); }
     }
     input.id = key;
     input.dataset.key = f.key;
@@ -89,6 +91,12 @@ function renderFields(protocol, values) {
     help.textContent = " " + (f.help || "");
     lbl.appendChild(input);
     lbl.appendChild(help);
+    if (f.generate) {
+      const gen = document.createElement("small");
+      gen.className = "muted";
+      gen.textContent = " (auto-generated)";
+      lbl.appendChild(gen);
+    }
     wrap.appendChild(lbl);
   }
 }

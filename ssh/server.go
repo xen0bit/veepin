@@ -401,10 +401,10 @@ const (
 func init() {
 	client.RegisterServer("ssh", parseServerOptions)
 	client.RegisterServerOpts("ssh", []client.OptSpec{
-		{Key: OptServerHostKey, Kind: client.OptFilePath, Required: true, Secret: true, Help: "path to the server SSH host private key"},
-		{Key: OptServerListenIP, Kind: client.OptStr, Help: "local IP to bind the TCP socket on (default 0.0.0.0)"},
-		{Key: OptServerPort, Kind: client.OptInt, Help: "TCP port to listen on (default 22)"},
-		{Key: OptServerPool, Kind: client.OptCIDR, Help: "tunnel subnet clients use (default 10.200.0.0/24)"},
+		{Key: OptServerHostKey, Kind: client.OptFilePath, Required: true, Secret: true, Generate: "ed25519-key", Help: "path to the server SSH host private key"},
+		{Key: OptServerListenIP, Kind: client.OptStr, Default: "0.0.0.0", Help: "local IP to bind the TCP socket on (default 0.0.0.0)"},
+		{Key: OptServerPort, Kind: client.OptInt, Default: "22", Help: "TCP port to listen on (default 22)"},
+		{Key: OptServerPool, Kind: client.OptCIDR, Default: "10.200.0.0/24", Help: "tunnel subnet clients use (default 10.200.0.0/24)"},
 		{Key: OptServerDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers (informational)"},
 		{Key: OptServerUser, Kind: client.OptStr, Help: "username to accept (password auth)"},
 		{Key: OptServerPassword, Kind: client.OptStr, Secret: true, Help: "the user's password"},

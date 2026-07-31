@@ -29,10 +29,10 @@ func init() {
 		{Key: OptCA, Kind: client.OptFilePath, Required: true, Help: "path to the CA certificate bundle"},
 		{Key: OptCert, Kind: client.OptFilePath, Required: true, Help: "path to this lighthouse's certificate"},
 		{Key: OptKey, Kind: client.OptFilePath, Required: true, Secret: true, Help: "path to this lighthouse's X25519 private key"},
-		{Key: OptListen, Kind: client.OptStr, Help: "local UDP address to bind (default :4242)"},
+		{Key: OptListen, Kind: client.OptStr, Default: ":4242", Help: "local UDP address to bind (default :4242)"},
 		{Key: OptStaticHosts, Kind: client.OptStr, Help: "peer locations: 10.42.0.1=192.0.2.10:4242[,...];..."},
 		{Key: OptCipher, Kind: client.OptStr, Help: "aes (default) or chachapoly; must match the mesh"},
-		{Key: OptMTU, Kind: client.OptInt, Help: "inner MTU (default 1300)"},
+		{Key: OptMTU, Kind: client.OptInt, Default: "1300", Help: "inner MTU (default 1300)"},
 		{Key: OptTUN, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
 	})
 }

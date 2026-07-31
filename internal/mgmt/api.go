@@ -40,6 +40,7 @@ import (
 	"time"
 
 	"github.com/xen0bit/veepin/client"
+	"github.com/xen0bit/veepin/internal/keygen"
 	"github.com/xen0bit/veepin/internal/supervisor"
 )
 
@@ -437,6 +438,13 @@ func (s *Server) handleCreateListener(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Auto-generate any key material the protocol declares through OptSpec.Generate
+	// before writing the config. Keys the operator supplied explicitly are left
+	// untouched because the keygen dispatcher skips entries with existing values.
+	if err := generateListenerKeys(s.dir, &cfg); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	if err := supervisor.WriteListenerFile(s.dir, cfg); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -527,6 +535,8 @@ func (s *Server) handleDeleteListener(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Clean up any generated key material stored alongside the listener.
+	_ = os.RemoveAll(filepath.Join(s.dir, name))
 	writeJSON(w, http.StatusOK, map[string]string{"deleted": name})
 }
 
@@ -572,6 +582,47 @@ func (s *Server) handlePeerList(w http.ResponseWriter, r *http.Request) {
 		peers = []client.PeerInfo{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"peers": peers})
+}
+
+// generateListenerKeys inspects the protocol's OptSpec declarations for entries
+// with a non-empty Generate field. For each such entry whose value is currently
+// empty in cfg.Options, it calls keygen.Generate to create key material on disk
+// and updates cfg.Options with the resulting file paths or inline values.
+//
+// Multi-file generators (e.g. "tls" returns both "cert" and "key") set every key
+// they produce, so the handler does not need to deduce which keys were affected.
+func generateListenerKeys(configDir string, cfg *supervisor.ListenerConfig) error {
+	decl, ok := client.ServerOptsFor(cfg.Protocol)
+	if !ok {
+		return nil
+	}
+	seen := map[string]bool{}
+	for _, spec := range decl {
+		if spec.Generate == "" {
+			continue
+		}
+		if cfg.Options == nil {
+			cfg.Options = map[string]string{}
+		}
+		if cfg.Options[spec.Key] != "" {
+			continue
+		}
+		if seen[spec.Generate] {
+			continue
+		}
+		seen[spec.Generate] = true
+
+		kv, err := keygen.Generate(cfg.Name, configDir, spec.Generate, spec.Key, cfg.Options)
+		if err != nil {
+			return fmt.Errorf("mgmt: keygen %q for %q: %w", spec.Generate, cfg.Name, err)
+		}
+		for k, v := range kv {
+			if cfg.Options[k] == "" {
+				cfg.Options[k] = v
+			}
+		}
+	}
+	return nil
 }
 
 // --- Helpers ---

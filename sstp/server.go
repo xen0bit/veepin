@@ -544,16 +544,16 @@ const (
 func init() {
 	client.RegisterServer("sstp", parseServerOptions)
 	client.RegisterServerOpts("sstp", []client.OptSpec{
-		{Key: OptServerCert, Kind: client.OptFilePath, Required: true, Help: "path to the server TLS certificate PEM"},
-		{Key: OptServerKey, Kind: client.OptFilePath, Required: true, Secret: true, Help: "path to the server TLS private key PEM"},
-		{Key: OptServerListenIP, Kind: client.OptStr, Help: "local IP to bind the TCP socket on (default 0.0.0.0)"},
-		{Key: OptServerPort, Kind: client.OptInt, Help: "TCP port to listen on (default 443)"},
-		{Key: OptServerPool, Kind: client.OptCIDR, Help: "internal address pool handed to clients (default 10.9.0.0/24)"},
+		{Key: OptServerCert, Kind: client.OptFilePath, Required: true, Generate: "tls", Help: "path to the server TLS certificate PEM"},
+		{Key: OptServerKey, Kind: client.OptFilePath, Required: true, Secret: true, Generate: "tls", Help: "path to the server TLS private key PEM"},
+		{Key: OptServerListenIP, Kind: client.OptStr, Default: "0.0.0.0", Help: "local IP to bind the TCP socket on (default 0.0.0.0)"},
+		{Key: OptServerPort, Kind: client.OptInt, Default: "443", Help: "TCP port to listen on (default 443)"},
+		{Key: OptServerPool, Kind: client.OptCIDR, Default: "10.9.0.0/24", Help: "internal address pool handed to clients (default 10.9.0.0/24)"},
 		{Key: OptServerDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers assigned to clients"},
 		{Key: OptServerUser, Kind: client.OptStr, Required: true, Help: "MS-CHAPv2 username to accept"},
 		{Key: OptServerPassword, Kind: client.OptStr, Required: true, Secret: true, Help: "the user's password"},
 		{Key: OptServerTUN, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
-		{Key: OptServerShape, Kind: client.OptInt, Help: "per-flow downstream shaping budget in bytes (0 = off)"},
+		{Key: OptServerShape, Kind: client.OptInt, Default: "0", Help: "per-flow downstream shaping budget in bytes (0 = off)"},
 	})
 }
 
