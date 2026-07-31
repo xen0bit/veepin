@@ -60,6 +60,8 @@ type OptSpec struct {
 	Kind     OptKind `json:"kind,omitempty"`
 	Required bool    `json:"required,omitempty"`
 	Secret   bool    `json:"secret,omitempty"`
+	Default  string  `json:"default,omitempty"`
+	Generate string  `json:"generate,omitempty"`
 }
 
 // OptKind is the panel-side type of an option value. It is loose -- the server

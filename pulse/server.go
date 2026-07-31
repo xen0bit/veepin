@@ -27,13 +27,13 @@ import (
 func init() {
 	client.RegisterServer("pulse", parseServerOptions)
 	client.RegisterServerOpts("pulse", []client.OptSpec{
-		{Key: OptServerCert, Kind: client.OptFilePath, Required: true, Help: "path to the server TLS certificate PEM"},
-		{Key: OptServerKey, Kind: client.OptFilePath, Required: true, Secret: true, Help: "path to the server TLS private key PEM"},
-		{Key: OptServerListen, Kind: client.OptStr, Help: "local IP to bind the HTTPS socket on (default 0.0.0.0)"},
-		{Key: OptServerPort, Kind: client.OptInt, Help: "HTTPS port to listen on (default 443)"},
-		{Key: OptServerESPPort, Kind: client.OptInt, Help: "UDP port for the ESP data path (default 4500)"},
+		{Key: OptServerCert, Kind: client.OptFilePath, Required: true, Generate: "tls", Help: "path to the server TLS certificate PEM"},
+		{Key: OptServerKey, Kind: client.OptFilePath, Required: true, Secret: true, Generate: "tls", Help: "path to the server TLS private key PEM"},
+		{Key: OptServerListen, Kind: client.OptStr, Default: "0.0.0.0", Help: "local IP to bind the HTTPS socket on (default 0.0.0.0)"},
+		{Key: OptServerPort, Kind: client.OptInt, Default: "443", Help: "HTTPS port to listen on (default 443)"},
+		{Key: OptServerESPPort, Kind: client.OptInt, Default: "4500", Help: "UDP port for the ESP data path (default 4500)"},
 		{Key: OptServerPublicIP, Kind: client.OptStr, Help: "address clients reach this gateway on (empty = the bound address)"},
-		{Key: OptServerPool, Kind: client.OptCIDR, Help: "internal address pool handed to clients (default 10.70.0.0/24)"},
+		{Key: OptServerPool, Kind: client.OptCIDR, Default: "10.70.0.0/24", Help: "internal address pool handed to clients (default 10.70.0.0/24)"},
 		{Key: OptServerDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers offered to clients"},
 		{Key: OptServerDomain, Kind: client.OptStr, Help: "DNS search domain offered to clients"},
 		{Key: OptServerSplitInclude, Kind: client.OptCommaList, Help: "comma-separated CIDRs clients should route into the tunnel (empty = everything)"},
@@ -41,7 +41,7 @@ func init() {
 		{Key: OptServerPass, Kind: client.OptStr, Required: true, Secret: true, Help: "the user's password"},
 		{Key: OptServerNoESP, Kind: client.OptBool, Help: "serve the IF-T/TLS data path only, leaving the UDP port unbound"},
 		{Key: OptServerTUN, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
-		{Key: OptServerShape, Kind: client.OptInt, Help: "per-flow downstream shaping budget in bytes (0 = off)"},
+		{Key: OptServerShape, Kind: client.OptInt, Default: "0", Help: "per-flow downstream shaping budget in bytes (0 = off)"},
 	})
 }
 

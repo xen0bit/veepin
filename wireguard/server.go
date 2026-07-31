@@ -97,16 +97,16 @@ func init() {
 		// would have completed. AmneziaWG, which reuses this Server type and the
 		// same parse, marks neither -- the two must agree.
 		{Key: OptServerConfig, Kind: client.OptFilePath, Help: "wg-quick server config file (interface + peers)"},
-		{Key: OptServerPrivateKey, Kind: client.OptStr, Secret: true, Help: "server static private key, base64 (required unless in -config)"},
-		{Key: OptServerListenIP, Kind: client.OptStr, Help: "local IP to bind the UDP socket on (default 0.0.0.0)"},
-		{Key: OptServerListenPort, Kind: client.OptInt, Help: "UDP port to listen on (default 51820)"},
+		{Key: OptServerPrivateKey, Kind: client.OptStr, Secret: true, Generate: "wg-keypair", Help: "server static private key, base64 (required unless in -config)"},
+		{Key: OptServerListenIP, Kind: client.OptStr, Default: "0.0.0.0", Help: "local IP to bind the UDP socket on (default 0.0.0.0)"},
+		{Key: OptServerListenPort, Kind: client.OptInt, Default: "51820", Help: "UDP port to listen on (default 51820)"},
 		{Key: OptServerAddress, Kind: client.OptCIDR, Help: "server tunnel address in CIDR form (required unless in -config)"},
-		{Key: OptServerMTU, Kind: client.OptInt, Help: "inner MTU (default 1420)"},
+		{Key: OptServerMTU, Kind: client.OptInt, Default: "1420", Help: "inner MTU (default 1420)"},
 		{Key: OptServerTUN, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
 		{Key: OptServerPeerPublicKey, Kind: client.OptStr, Help: "a single peer's static public key, base64"},
 		{Key: OptServerPeerPresharedKey, Kind: client.OptStr, Secret: true, Help: "the -peer-public-key peer's preshared key, base64 (optional)"},
 		{Key: OptServerPeerAllowedIPs, Kind: client.OptCommaList, Help: "the -peer-public-key peer's allowed IPs, comma-separated CIDRs"},
-		{Key: OptServerShape, Kind: client.OptInt, Help: "per-flow downstream shaping budget in bytes (0 = off)"},
+		{Key: OptServerShape, Kind: client.OptInt, Default: "0", Help: "per-flow downstream shaping budget in bytes (0 = off)"},
 	})
 }
 
