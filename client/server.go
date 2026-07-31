@@ -55,11 +55,11 @@ var (
 // hold protocol keys, passphrases, and PSKs -- so a `curl /api/listeners/site-a`
 // cannot leak them by accident.
 type OptSpec struct {
-	Key      string
-	Help     string
-	Kind     OptKind
-	Required bool
-	Secret   bool
+	Key      string  `json:"key"`
+	Help     string  `json:"help,omitempty"`
+	Kind     OptKind `json:"kind,omitempty"`
+	Required bool    `json:"required,omitempty"`
+	Secret   bool    `json:"secret,omitempty"`
 }
 
 // OptKind is the panel-side type of an option value. It is loose -- the server
