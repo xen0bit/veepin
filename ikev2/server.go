@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
@@ -257,6 +258,28 @@ func (s *Server) Close() error {
 	err := s.ike.Close()
 	s.tun.Close()
 	return err
+}
+
+// Peers implements client.PeerDescriber so the management panel shows who is
+// connected. One entry per established Child SA: the client's IKE identity, the
+// tunnel address Config Mode assigned it, and the time of its last protected
+// exchange -- not the time the SA was established, which would make a peer idle
+// for an hour indistinguishable from one that just connected.
+func (s *Server) Peers() []client.PeerInfo {
+	peers := s.ike.Peers()
+	out := make([]client.PeerInfo, 0, len(peers))
+	for _, p := range peers {
+		info := client.PeerInfo{
+			ID:      p.ID,
+			Address: p.Address,
+			State:   "connected",
+		}
+		if !p.LastActive.IsZero() {
+			info.LastHandshake = p.LastActive.UTC().Format(time.RFC3339)
+		}
+		out = append(out, info)
+	}
+	return out
 }
 
 // Server option keys for client.NewServer("ikev2", opts).

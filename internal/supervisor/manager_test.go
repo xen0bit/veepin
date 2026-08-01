@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/xen0bit/veepin/client"
+	"github.com/xen0bit/veepin/internal/hostnet"
 )
 
 // fakeServer is an injectable client.Server for manager tests. It blocks in
@@ -433,6 +434,234 @@ func TestHostNetworkingFailureTearsDownWhatItInstalled(t *testing.T) {
 	if !sawDelete {
 		t.Errorf("a failed host-networking apply left its rules behind; ran:\n%s",
 			strings.Join(ran, "\n"))
+	}
+}
+
+// TestStopTearsDownFromThePersistedState: a rebuild or delete must remove the
+// iptables rules Apply actually installed. An earlier version re-derived the
+// teardown config from the listener's options after the server was closed --
+// with a nil Network, which made hostnet.Teardown a silent no-op and left every
+// tagged rule behind on every rebuild and delete. The supervisor now persists
+// the applied host State and tears down from that.
+func TestStopTearsDownFromThePersistedState(t *testing.T) {
+	dir := t.TempDir()
+	cfg := ListenerConfig{Name: "site-a", Protocol: "wireguard",
+		Options: map[string]string{"__name": "site-a"}, SetupNAT: true, WAN: "eth0", Enabled: true}
+	body, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, filepath.Join(dir, "site-a.json"), "site-a.json", string(body))
+
+	var mu sync.Mutex
+	var ran []string
+	ctor := &fakeCtor{}
+	mgr := NewManager(dir, testLogger(t), ctor.construct)
+	mgr.SetCommander(func(name string, args ...string) ([]byte, error) {
+		mu.Lock()
+		ran = append(ran, name+" "+strings.Join(args, " "))
+		mu.Unlock()
+		return nil, nil
+	})
+	t.Cleanup(func() { _ = mgr.Close() })
+
+	if err := mgr.Apply(); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if s := mgr.Status("site-a"); s.State != "running" {
+		t.Fatalf("state = %q, want running", s.State)
+	}
+	stateFile := filepath.Join(dir, "mgmt", "hostnet", "site-a.json")
+	if _, err := os.Stat(stateFile); err != nil {
+		t.Fatalf("no persisted host state after Apply: %v", err)
+	}
+
+	// Stop, then a rebuild would reinstall; a delete must leave no rules.
+	if err := mgr.Stop("site-a"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	var sawDelete bool
+	for _, c := range ran {
+		if strings.HasPrefix(c, "iptables") && strings.Contains(c, "-D POSTROUTING") {
+			sawDelete = true
+		}
+	}
+	if !sawDelete {
+		t.Errorf("Stop issued no MASQUERADE teardown; tagged rules would persist. ran:\n%s",
+			strings.Join(ran, "\n"))
+	}
+	if _, err := os.Stat(stateFile); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("host state file survives teardown: %v", err)
+	}
+}
+
+// TestStopTearsDownTheInterfaceAndSubnetNoConfigEverNamed is what the persisted
+// state actually buys. The listener's config names neither its TUN interface nor
+// its tunnel subnet -- the kernel assigned the first and the server chose the
+// second -- and once the server is closed those live only in the persisted
+// record. A teardown re-derived from the config has nothing to name and removes
+// nothing.
+//
+// (Its previous form rewrote the config on disk and claimed to prove teardown
+// ignored the edit. stopLocked reads r.cfg, the config captured at build time,
+// and Stop never reloads, so the rewrite had no effect on the code under test
+// and the test was a duplicate of the one above under a name that promised
+// otherwise.)
+func TestStopTearsDownTheInterfaceAndSubnetNoConfigEverNamed(t *testing.T) {
+	dir := t.TempDir()
+	cfg := ListenerConfig{Name: "site-a", Protocol: "wireguard",
+		Options: map[string]string{"__name": "site-a"}, SetupNAT: true, WAN: "eth0", Enabled: true}
+	body, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, filepath.Join(dir, "site-a.json"), "site-a.json", string(body))
+
+	var mu sync.Mutex
+	var ran []string
+	ctor := &fakeCtor{}
+	mgr := NewManager(dir, testLogger(t), ctor.construct)
+	mgr.SetCommander(func(name string, args ...string) ([]byte, error) {
+		mu.Lock()
+		ran = append(ran, name+" "+strings.Join(args, " "))
+		mu.Unlock()
+		return nil, nil
+	})
+	t.Cleanup(func() { _ = mgr.Close() })
+
+	if err := mgr.Apply(); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	srv := ctor.byName(t, "site-a")
+	tun, network := srv.tun, srv.network.String()
+	if cfg.Options["tun"] != "" {
+		t.Fatalf("the config names a TUN; this test needs the kernel-assigned case")
+	}
+
+	if err := mgr.Stop("site-a"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	var sawMasq, sawFwd bool
+	for _, c := range ran {
+		if !strings.Contains(c, "-D") {
+			continue
+		}
+		if strings.Contains(c, "-s "+network) && strings.Contains(c, "-o eth0") && strings.Contains(c, "MASQUERADE") {
+			sawMasq = true
+		}
+		if strings.Contains(c, "-i "+tun) && strings.Contains(c, "FORWARD") {
+			sawFwd = true
+		}
+	}
+	if !sawMasq {
+		t.Errorf("teardown did not remove the MASQUERADE for subnet %s; ran:\n%s", network, strings.Join(ran, "\n"))
+	}
+	if !sawFwd {
+		t.Errorf("teardown did not remove the FORWARD rule for %s; ran:\n%s", tun, strings.Join(ran, "\n"))
+	}
+}
+
+// TestTeardownFallsBackToTheCommentTagWhenNoStateSurvives: the fallback runs in
+// exactly the case that leaks rules -- a state file lost to a crash -- so it has
+// to actually remove something. The version it replaces re-derived a config with
+// a nil Network, whose State() has an empty Network, which TeardownState returns
+// from immediately: a recovery path guaranteed to be a no-op, under a comment
+// saying it worked.
+func TestTeardownFallsBackToTheCommentTagWhenNoStateSurvives(t *testing.T) {
+	dir := t.TempDir()
+	cfg := ListenerConfig{Name: "site-a", Protocol: "wireguard",
+		Options: map[string]string{"__name": "site-a"}, SetupNAT: true, WAN: "eth0", Enabled: true}
+	body, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, filepath.Join(dir, "site-a.json"), "site-a.json", string(body))
+
+	var mu sync.Mutex
+	var ran []string
+	ctor := &fakeCtor{}
+	mgr := NewManager(dir, testLogger(t), ctor.construct)
+	mgr.SetCommander(func(name string, args ...string) ([]byte, error) {
+		mu.Lock()
+		ran = append(ran, name+" "+strings.Join(args, " "))
+		mu.Unlock()
+		// Answer the tag scan with a rule carrying this listener's comment.
+		if len(args) >= 4 && args[0] == "-t" && args[2] == "-S" {
+			switch args[3] {
+			case "POSTROUTING":
+				return []byte("-A POSTROUTING -s 10.1.0.0/24 -o eth0 -m comment --comment veepin:site-a -j MASQUERADE\n"), nil
+			case "FORWARD":
+				return []byte("-A FORWARD -i tun0 -m comment --comment veepin:site-a -j ACCEPT\n" +
+					"-A FORWARD -i tun9 -m comment --comment veepin:site-ab -j ACCEPT\n"), nil
+			}
+		}
+		return nil, nil
+	})
+	t.Cleanup(func() { _ = mgr.Close() })
+
+	if err := mgr.Apply(); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	// Lose the record, exactly as a crash mid-write would.
+	if err := os.Remove(filepath.Join(dir, "mgmt", "hostnet", "site-a.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Stop("site-a"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	var deletedMasq, deletedFwd, deletedOther bool
+	for _, c := range ran {
+		if !strings.Contains(c, " -D ") {
+			continue
+		}
+		if strings.Contains(c, "MASQUERADE") && strings.Contains(c, "veepin:site-a ") {
+			deletedMasq = true
+		}
+		if strings.Contains(c, "-i tun0") {
+			deletedFwd = true
+		}
+		if strings.Contains(c, "site-ab") {
+			deletedOther = true
+		}
+	}
+	if !deletedMasq || !deletedFwd {
+		t.Errorf("tagged fallback removed nothing (masq=%v fwd=%v); ran:\n%s",
+			deletedMasq, deletedFwd, strings.Join(ran, "\n"))
+	}
+	if deletedOther {
+		t.Error("the tag for site-a matched site-ab's rule: the comment must be compared as a whole field")
+	}
+}
+
+// TestHostnetStateIsInstalledAtomically: os.WriteFile truncates in place, so a
+// crash between truncate and write leaves parseable-length garbage that sends
+// teardown down the recovery path for no reason. The write goes through a temp
+// file and a rename, like every other config this daemon owns.
+func TestHostnetStateIsInstalledAtomically(t *testing.T) {
+	dir := t.TempDir()
+	mgr := NewManager(dir, testLogger(t), (&fakeCtor{}).construct)
+	t.Cleanup(func() { _ = mgr.Close() })
+	mgr.persistHostnetState("site-a", hostnet.State{TUNName: "tun0", WAN: "eth0", Network: "10.1.0.0/24"})
+
+	path := hostnetStatePath(dir, "site-a")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("no state file: %v", err)
+	}
+	if _, err := os.Stat(path + ".tmp"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the temp file survived the install: %v", err)
+	}
+	st := mgr.loadHostnetState("site-a")
+	if st == nil || st.TUNName != "tun0" || st.WAN != "eth0" || st.Network != "10.1.0.0/24" {
+		t.Errorf("round-trip lost the state: %+v", st)
 	}
 }
 

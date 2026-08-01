@@ -317,3 +317,144 @@ func TestServerOptSpecsMatchTheKeysTheProtocolReads(t *testing.T) {
 		}
 	}
 }
+
+// TestClientOptSpecsMatchTheKeysTheProtocolReads is the client-side mirror of
+// TestServerOptSpecsMatchTheKeysTheProtocolReads: the metadata the profile
+// forms and `veepin profile add` render Dial options from must agree with what
+// connectFlags actually emits (which is, by construction, what the protocol
+// reads). A spec keyed by a string the parse never sees renders a field the
+// operator fills in and the dial ignores.
+func TestClientOptSpecsMatchTheKeysTheProtocolReads(t *testing.T) {
+	for _, protocol := range client.Protocols() {
+		specs, ok := client.ClientOptsFor(protocol)
+		if !ok {
+			t.Errorf("%s: registered as a client but declared no client OptSpec metadata", protocol)
+			continue
+		}
+
+		fs := newTestFlagSet()
+		options, err := connectFlags(protocol, fs)
+		if err != nil {
+			t.Errorf("%s: binding connect flags: %v", protocol, err)
+			continue
+		}
+		fs.VisitAll(func(f *flag.Flag) {
+			if value, ok := perturbed(f); ok {
+				_ = fs.Set(f.Name, value)
+			}
+		})
+		emitted := options()
+
+		declared := make(map[string]bool, len(specs))
+		for _, s := range specs {
+			declared[s.Key] = true
+			if _, reads := emitted[s.Key]; !reads {
+				t.Errorf("%s: client OptSpec declares key %q, which `veepin connect %s` never emits",
+					protocol, s.Key, protocol)
+			}
+		}
+
+		var missing []string
+		for key := range emitted {
+			if !declared[key] {
+				missing = append(missing, key)
+			}
+		}
+		sort.Strings(missing)
+		for _, key := range missing {
+			t.Errorf("%s: option %q has no client OptSpec — it cannot be set from a profile form", protocol, key)
+		}
+	}
+}
+
+// plausibleValue is a value the given spec's kind will parse. The Required
+// guard has to hand each protocol a map it would otherwise accept, or every
+// parse fails for the wrong reason and the test proves nothing.
+func plausibleValue(sp client.OptSpec) string {
+	if sp.Default != "" && sp.Kind != client.OptFilePath {
+		return sp.Default
+	}
+	switch sp.Kind {
+	case client.OptInt:
+		return "1"
+	case client.OptBool:
+		return "false"
+	case client.OptCIDR:
+		return "10.0.0.2/32"
+	case client.OptCommaList:
+		return "10.0.0.0/8"
+	case client.OptFilePath:
+		return "/nonexistent/veepin-test"
+	default:
+		return "veepin-test"
+	}
+}
+
+// requiredOptions builds the full option map a protocol's spec describes, so
+// each key can be removed from it one at a time.
+//
+// "config" is left out deliberately. openvpn, wireguard and amneziawg accept a
+// whole profile file through it, and every other option becomes optional the
+// moment one is named — so including it would make the parse tolerate every
+// absence and this guard would prove nothing.
+func requiredOptions(specs []client.OptSpec) map[string]string {
+	out := make(map[string]string, len(specs))
+	for _, sp := range specs {
+		if sp.Key == "config" {
+			continue
+		}
+		out[sp.Key] = plausibleValue(sp)
+	}
+	return out
+}
+
+// missingKeyError reports whether err reads as "this option was not supplied"
+// rather than "this option's value is wrong". The parse functions phrase it as
+// "<key> is required" / "<key> and <key> are required", which is the whole
+// vocabulary this needs to recognise.
+func missingKeyError(err error, key string) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "required") && strings.Contains(msg, key)
+}
+
+// TestRequiredClientOptsAreTheOnesTheParseRejects catches options the parse
+// hard-rejects the absence of while the OptSpec calls them optional. Nothing
+// checked this: TestClientOptSpecsMatchTheKeysTheProtocolReads compares key sets
+// only, so Required, Secret and Kind sat outside every guard — and three
+// protocols under-claimed their password, letting the panel save a profile that
+// could not dial and the management plane generate one.
+//
+// Only "is required"-shaped failures count. A parse that rejects a placeholder
+// value for being unparseable is saying something else entirely, and reading
+// that as a required-option error would make this test agree with anything.
+//
+// The converse -- Required set where the parse tolerates absence -- is
+// deliberately NOT checked, because it is not a defect. Required is a claim
+// about the form ("insist on this"), and a parse can legitimately accept a
+// missing value because a profile file supplied it, because another option
+// substitutes for it, or because the check happens at dial rather than at
+// parse. Asserting it mechanically would mean weakening the flag on protocols
+// where it is telling operators something true.
+func TestRequiredClientOptsAreTheOnesTheParseRejects(t *testing.T) {
+	for _, protocol := range client.Protocols() {
+		specs, ok := client.ClientOptsFor(protocol)
+		if !ok {
+			continue // covered by TestClientOptSpecsMatchTheKeysTheProtocolReads
+		}
+		full := requiredOptions(specs)
+		for _, sp := range specs {
+			if sp.Required || sp.Key == "config" {
+				continue
+			}
+			without := maps.Clone(full)
+			delete(without, sp.Key)
+			if err := client.ValidateOptions(protocol, without); missingKeyError(err, sp.Key) {
+				t.Errorf("%s: the parse rejects a config without %q (%v) but the OptSpec does not mark it "+
+					"Required — the panel will happily save a profile that cannot dial", protocol, sp.Key, err)
+			}
+		}
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"maps"
 	"os"
 	"os/signal"
 	"slices"
@@ -104,16 +105,54 @@ func runConnectBare(protocol string, args []string) error {
 
 // runConnectProfile loads the named profile and dials with its saved protocol
 // and options. Per-protocol flags are not bound: the profile file IS the flag
-// set; only the global -full-tunnel and -no-route flags in args apply.
+// set; only the global -full-tunnel and -no-route flags, and -set overrides,
+// apply in args.
 func runConnectProfile(cfg profile.Config, args ...string) error {
 	fs := flag.NewFlagSet("connect "+cfg.Name, flag.ContinueOnError)
 	fullTunnel := fs.Bool("full-tunnel", true, "route all traffic through the VPN")
 	noRoute := fs.Bool("no-route", false, "do not modify routing/addresses (diagnostic)")
+	var sets setList
+	fs.Var(&sets, "set", "override a profile option for this dial, key=value (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("connect: unexpected argument %q", fs.Arg(0))
+	}
+	opts, err := applyOverrides(cfg.Options, sets)
+	if err != nil {
+		return err
+	}
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
-	return dialConnect(cfg.Protocol, cfg.Options, *fullTunnel, *noRoute, logger)
+	return dialConnect(cfg.Protocol, opts, *fullTunnel, *noRoute, logger)
+}
+
+// applyOverrides merges repeatable -set key=value pairs onto opts, so a profile
+// dial can override one option without editing the file. An entry that is not
+// key=value is an error, not a silent no-op.
+func applyOverrides(opts map[string]string, sets []string) (map[string]string, error) {
+	out := maps.Clone(opts)
+	if out == nil {
+		out = map[string]string{}
+	}
+	for _, kv := range sets {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok || k == "" {
+			return nil, fmt.Errorf("connect: -set %q is not key=value", kv)
+		}
+		out[k] = v
+	}
+	return out, nil
+}
+
+// setList is a repeatable -set flag: each occurrence appends one key=value.
+type setList []string
+
+func (s *setList) String() string { return strings.Join(*s, ", ") }
+
+func (s *setList) Set(v string) error {
+	*s = append(*s, v)
+	return nil
 }
 
 // dialConnect is the shared dial+route+serve tail that bare mode and profile
@@ -249,6 +288,7 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 			keepalive = fs.Int("persistent-keepalive", 0, "keepalive interval in seconds (0 = off)")
 			rekey     = fs.Int("rekey-seconds", 0, "seconds between key refreshes (0 = protocol default, 120)")
 			tun       = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
+			listen    = fs.Int("listen-port", 0, "local UDP port to bind (0 = ephemeral; fixes the source port for a stable NAT pinhole)")
 			shape     = fs.Int("shape", 0, "per-flow upstream shaping budget in bytes: pads each inner flow's first N bytes to the tunnel MTU (0 = off; the server shapes downstream independently)")
 		)
 		return func() map[string]string {
@@ -272,6 +312,9 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 			}
 			if *rekey != 0 {
 				opts[wireguard.OptRekeySeconds] = fmt.Sprint(*rekey)
+			}
+			if *listen != 0 {
+				opts[wireguard.OptListenPort] = fmt.Sprint(*listen)
 			}
 			return opts
 		}, nil

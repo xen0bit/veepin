@@ -85,7 +85,7 @@ const (
 	OptAddress      = "address"              // our tunnel address(es), CIDR
 	OptDNS          = "dns"                  // DNS servers
 	OptMTU          = "mtu"                  // inner MTU
-	OptListenPort   = "listen-port"          // UDP port to listen on (server)
+	OptListenPort   = "listen-port"          // local UDP port to bind (0 = ephemeral)
 	OptRekeySeconds = "rekey-seconds"        // client rekey interval (0 = default)
 	OptPublicKey    = "public-key"           // peer static public key, base64
 	OptPresharedKey = "preshared-key"        // optional preshared key, base64

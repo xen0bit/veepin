@@ -153,9 +153,9 @@ func (c *Config) setInterface(key, val string) error {
 	case "privatekey":
 		c.PrivateKey = val
 	case "address":
-		c.Address = append(c.Address, splitList(val)...)
+		c.Address = append(c.Address, SplitList(val)...)
 	case "dns":
-		c.DNS = append(c.DNS, splitList(val)...)
+		c.DNS = append(c.DNS, SplitList(val)...)
 	case "mtu":
 		n, err := strconv.Atoi(val)
 		if err != nil {
@@ -192,7 +192,7 @@ func (c *Config) setPeer(p *Peer, key, val string) error {
 	case "endpoint":
 		p.Endpoint = val
 	case "allowedips":
-		p.AllowedIPs = append(p.AllowedIPs, splitList(val)...)
+		p.AllowedIPs = append(p.AllowedIPs, SplitList(val)...)
 	case "persistentkeepalive":
 		n, err := strconv.Atoi(val)
 		if err != nil {
@@ -228,9 +228,14 @@ func splitKV(line string) (key, val string, ok bool) {
 	return key, val, true
 }
 
-// splitList splits a value on commas and whitespace, dropping empties, so
+// SplitList splits a value on commas and whitespace, dropping empties, so
 // "AllowedIPs = 10.0.0.0/24, 192.168.1.0/24" and repeated keys both work.
-func splitList(val string) []string {
+//
+// Exported because the management plane has to agree with it exactly: it reads
+// a listener's allowed-ips to work out which tunnel addresses are already
+// claimed before allocating one for a new peer, and a splitter that disagreed
+// with this one would hand out an address the server already routes elsewhere.
+func SplitList(val string) []string {
 	return strings.FieldsFunc(val, func(r rune) bool {
 		return r == ',' || r == ' ' || r == '\t'
 	})
@@ -254,10 +259,10 @@ func (c *Config) applyOverrides(opts map[string]string) error {
 		c.PrivateKey = v
 	}
 	if v := opts[OptAddress]; v != "" {
-		c.Address = splitList(v)
+		c.Address = SplitList(v)
 	}
 	if v := opts[OptDNS]; v != "" {
-		c.DNS = splitList(v)
+		c.DNS = SplitList(v)
 	}
 	if v := opts[OptMTU]; v != "" {
 		n, err := strconv.Atoi(v)
@@ -297,7 +302,7 @@ func (c *Config) applyOverrides(opts map[string]string) error {
 		c.firstPeer().Endpoint = v
 	}
 	if v := opts[OptAllowedIPs]; v != "" {
-		c.firstPeer().AllowedIPs = splitList(v)
+		c.firstPeer().AllowedIPs = SplitList(v)
 	}
 	if v := opts[OptKeepalive]; v != "" {
 		n, err := strconv.Atoi(v)

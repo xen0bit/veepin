@@ -9,15 +9,75 @@ library, so one `*log.Logger` writes a line per request.
 
 ```
 GET    /api/health                     liveness + uptime
-GET    /api/protocols                  every server protocol + its OptSpec metadata
+GET    /api/protocols                  every server + client protocol + its OptSpec metadata
 GET    /api/listeners                  status of each listener
-POST   /api/listeners                  create (409 if it exists)
+POST   /api/listeners                  create (409 if it exists); returns {status, generated}
 GET    /api/listeners/{name}           status + config, secrets redacted
 PATCH  /api/listeners/{name}           partial update, then cold-rebuild
 DELETE /api/listeners/{name}           stop + remove the file and its iptables rules
 POST   /api/listeners/{name}/restart   rebuild from the on-disk config
 GET    /api/listeners/{name}/peers     peers, if the protocol implements PeerDescriber
+POST   /api/listeners/{name}/client-config  generate a client profile (provisions a peer + rebuilds for WireGuard-family protocols)
+GET    /api/audit                      recent mutations, newest first (in-memory, bounded)
+GET    /api/profiles                   list client profiles (when a profile dir is configured)
+POST   /api/profiles                   create a profile
+GET    /api/profiles/{name}            get a profile, secrets redacted
+PATCH  /api/profiles/{name}            partial update
+DELETE /api/profiles/{name}            delete a profile
 ```
+
+## Profiles
+
+Client connection profiles — the same confstore shape as listeners, for the Dial
+side — are a second entity type under the same API. The endpoints are only
+mounted when the supervisor configured a profile directory (`-profiles`, default
+`<config>/profiles`), and they are pure CRUD: a profile is not a running thing,
+so there is no state, restart, or peer list. Secrets are redacted on read the
+same way, and PATCH has the same presence-aware semantics and sentinels. The
+panel's profile forms render from `client.RegisterClientOpts` metadata, the
+mirror of the listener forms' server-side specs.
+
+## The audit log
+
+Every create / patch / delete / restart — listener or profile — records one
+line into a bounded (200-entry) in-memory ring: action, entity, and outcome.
+`GET /api/audit` returns it newest-first, and the panel renders it as "recent
+activity". It answers "what has changed since the supervisor started", not
+"what happened last month" — persistence is the supervisor's own log file's job.
+
+## Client config generation
+
+`POST /api/listeners/{name}/client-config` assembles a client connection
+profile from the listener's stored config — real secrets, never redacted
+placeholders — plus the operator-supplied endpoint. It is protocol-aware only
+where it must be: most protocols are a straight carry-over of the listener's
+options (see the `clientProtoMaps` table, guarded by
+`TestClientConfigMapKeysAreDeclared`); file-path options are bundled as
+companions with the profile paths rewritten. WireGuard and AmneziaWG are the
+mutating case: they mint a client keypair, allocate a free address from the
+server's `address` subnet (scanning the `peers` option for what is taken),
+append the peer, and cold-rebuild the listener. That mutation is why the
+endpoint is a POST and is audit-logged as `listener.client-config`.
+
+The derivation table's keys, ports and defaults are tied to the registry's
+OptSpecs by a test; the endpoint requirement, the bundle, and the WireGuard
+provisioning path each have API-level coverage.
+
+Only paths the *listener's own config* supplied are opened and bundled. A
+file-path option supplied as an override is copied into the profile verbatim
+and never read — the endpoint would otherwise be an authenticated arbitrary
+file read, as root, for any protocol declaring a file-path option.
+
+What it cannot derive it refuses to guess. A client option the facade marks
+`Required` that the listener does not supply — an ikev2 local identity, a nebula
+per-host certificate — fails the generation with a 400 naming the keys, so the
+operator re-runs with them as overrides. The alternative is a profile that looks
+complete, saves cleanly, and fails at dial with nothing pointing back here.
+
+nebula is the narrow case: only the mesh CA carries across. A host's own
+certificate and X25519 key are its identity, and copying the lighthouse's would
+clone the lighthouse rather than provision a peer. Issuing a per-host
+certificate is a CA operation veepin does not perform.
 
 ## Auth, and the two boundaries
 
@@ -61,11 +121,27 @@ protocol reads has a spec, but nothing can check that a spec's `Secret` flag is
 fine; anywhere else the token crosses the wire in the clear and a reverse proxy
 with TLS is not optional.
 
-**No rate limiting, no audit log, no accounts.** One token, full authority, and
-the request log is a line per request with no record of what changed. A fleet
-where several people hold the token cannot tell afterwards which of them edited
-a listener.
+**No rate limiting, no accounts.** One token, full authority, and the request
+log is a line per request. The audit log does record *what* changed and *whether
+it worked*, but not *who* — every authenticated mutation shares the one token,
+so a fleet where several people hold it still cannot attribute an edit. That is
+a deliberate boundary: accounts and per-user authorization are a separate
+problem from running a VPN fleet, and the token file's filesystem protection is
+the real gate.
 
 **`Server.Close` closes the whole fleet**, not just the HTTP server — it
 delegates to the manager. The name is a trap and the caller in `cmd/veepin` does
 not use it.
+
+**Mutations are serialized by one lock over the whole config directory.** Every
+handler that reads a listener file, changes it and writes it back holds
+`Server.mutate`, because two concurrent client-config generations against one
+WireGuard listener would otherwise each allocate the same tunnel address and the
+second write would discard the first peer. It is one lock rather than one per
+listener: these are operator actions at human rates and the critical sections
+already contain a cold rebuild. Reads do not take it.
+
+**A generated client profile is the only copy of that client's private key.**
+It exists in the response body and nowhere else — the server stores only the
+public half, as a peer. If the response is lost, the peer is stranded: delete it
+from the listener's `peers` and generate again.

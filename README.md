@@ -270,7 +270,8 @@ veepin serve   <protocol> [flags]   run a VPN server
 veepin probe   <protocol> [flags]   diagnostic: handshake + one data packet
 ```
 
-All fifteen protocols are registered for both `connect` and `serve`; `veepin` with no
+Every protocol — the sixteen production ones and the TOY example — is registered
+for both `connect` and `serve`; `veepin` with no
 arguments lists what is registered.
 
 ## Run
@@ -314,7 +315,7 @@ and [the `veepin mgmt` CLI](doc/usage/mgmt.md).
 
 To use veepin **as a client**, the
 [NetworkManager plugin](#desktop-integration-networkmanager) is the simplest path
-on a Linux desktop — it configures all fifteen protocols from the native VPN UI. The
+on a Linux desktop — it configures all sixteen protocols from the native VPN UI. The
 [Using the bundled client](#using-the-bundled-client) section below walks the CLI
 client through end to end. Stock OS built-in VPN clients (Windows, macOS/iOS,
 Android, strongSwan) can also connect to the veepin IKEv2 server directly — see
@@ -406,7 +407,7 @@ address pool and data path, and leaves host routing/NAT to the caller.
 A NetworkManager VPN plugin brings the tunnel up and down from a Linux desktop's
 native VPN UI (GNOME / Pop!\_OS), with **no** dependency on strongSwan. It lives
 in the nested `nm/` module — kept out of the core build so the `veepin` binary
-does not inherit its D-Bus and GTK dependencies — and registers **all ten
+does not inherit its D-Bus and GTK dependencies — and registers **all sixteen
 protocols as separate VPN types**, so each is its own entry in the desktop's
 *Add VPN* list rather than a "veepin" entry that asks which protocol next:
 

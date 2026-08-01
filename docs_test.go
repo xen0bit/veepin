@@ -16,10 +16,13 @@ package veepin
 
 import (
 	"fmt"
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
+	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
@@ -149,4 +152,89 @@ func TestREADMECountsProtocolsCorrectly(t *testing.T) {
 	}
 	assertEveryCount(t, readme, "registered protocol", toyWord,
 		"TOY is registered alongside the production protocols")
+}
+
+// TestEveryOptConstIsDescribedByAnOptSpec closes the hole the flag-driven
+// guards cannot see. TestClientOptSpecsMatchTheKeysTheProtocolReads compares a
+// facade's spec table against what connectFlags emits, and its doc comment
+// calls that "by construction, what the protocol reads" -- but an option the
+// parse reads for which no flag exists is absent from BOTH sides, so the two
+// agree and the key is invisible.
+//
+// That is not hypothetical: wireguard.OptListenPort is read on the client path
+// by Config.applyOverrides and had no flag and no client OptSpec, so a profile
+// could carry it, the dial would honour it, and the panel could neither show
+// nor set it.
+//
+// The check is on the source rather than the registry because the registry
+// stores strings: OptListenPort and OptServerListenPort are both "listen-port",
+// so a by-value check would find the server's entry and call it covered. What
+// has to hold is that every Opt* CONSTANT a facade declares is named as a Key
+// in one of that facade's two OptSpec tables.
+func TestEveryOptConstIsDescribedByAnOptSpec(t *testing.T) {
+	for _, proto := range client.Protocols() {
+		declared, used, err := optConstsAndSpecKeys(proto)
+		if err != nil {
+			t.Errorf("%s: %v", proto, err)
+			continue
+		}
+		var missing []string
+		for name := range declared {
+			if !used[name] {
+				missing = append(missing, name)
+			}
+		}
+		sort.Strings(missing)
+		for _, name := range missing {
+			t.Errorf("%s: the facade declares %s but no OptSpec table names it as a Key — "+
+				"the parse may read it while the panel, the profile form and -set cannot reach it",
+				proto, name)
+		}
+	}
+}
+
+// optConstsAndSpecKeys parses one facade package and returns the names of every
+// Opt* constant it declares and the names of every identifier it uses as an
+// OptSpec Key.
+func optConstsAndSpecKeys(proto string) (declared, used map[string]bool, err error) {
+	entries, err := os.ReadDir(proto)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading %s: %w", proto, err)
+	}
+	// Files are parsed one at a time rather than with parser.ParseDir, which is
+	// deprecated, and the alternative it points at (x/tools/go/packages) is a
+	// dependency this module does not take.
+	fset := token.NewFileSet()
+	declared, used = map[string]bool{}, map[string]bool{}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, filepath.Join(proto, name), nil, 0)
+		if err != nil {
+			return nil, nil, fmt.Errorf("parsing %s/%s: %w", proto, name, err)
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			switch v := n.(type) {
+			case *ast.ValueSpec:
+				for _, id := range v.Names {
+					if strings.HasPrefix(id.Name, "Opt") && id.Name != "Opt" {
+						declared[id.Name] = true
+					}
+				}
+			case *ast.KeyValueExpr:
+				// The `Key: OptFoo` field of a client.OptSpec literal.
+				k, ok := v.Key.(*ast.Ident)
+				if !ok || k.Name != "Key" {
+					return true
+				}
+				if id, ok := v.Value.(*ast.Ident); ok {
+					used[id.Name] = true
+				}
+			}
+			return true
+		})
+	}
+	return declared, used, nil
 }

@@ -41,3 +41,39 @@ into primitives. Those seams are what keep the boundary honest.
 client app → client OS ESP → UDP:4500 → veepin serve → decapsulate → TUN → kernel routing → internet
 internet → kernel → TUN → veepin serve → encapsulate → UDP:4500 → client OS → client app
 ```
+
+## The management plane
+
+The supervisor (`veepin serve -config <dir>`) is a second, higher layer: it does
+not run one protocol, it runs a *fleet* of `client.Server`s in one process and
+exposes a management plane over them. The packages form a clean stack, each with
+one job:
+
+- **`internal/confstore`** — the one-JSON-file-per-entity directory that both
+  the listener set and the client profile set are. Strict decode, the name
+  grammar, the duplicate check, and the atomic fsync-then-rename write live here
+  once, not twice.
+- **`internal/supervisor`** — the engine. `Manager` reconciles the live set of
+  `client.Server`s to the on-disk directory, cold-rebuilds one listener when its
+  config changes without touching the others, and tears a blocked listener down
+  within a bound. It is the only veepin subsystem that mutates host state,
+  through `internal/hostnet`, and it persists what hostnet installed so teardown
+  is the inverse of what actually happened.
+- **`internal/mgmt`** — the REST API over that: listeners and profiles CRUD,
+  the key-material generators (`internal/keygen`) behind `OptSpec.Generate`, an
+  audit log of mutations, and the bearer-token / `RequireHost` boundary.
+- **`internal/mgmt/ui`** — the server-rendered panel. Plain `html/template` and
+  inline JavaScript over an `embed.FS`; the browser drives the same `/api/*` the
+  CLI does.
+- **`internal/profile`** — the client-side analogue of the listener directory:
+  named connection configurations under `~/.config/veepin/profiles/`, dialed by
+  name with `veepin connect <name>`.
+
+Both halves of the panel-facing surface are schema-driven: `client.RegisterServerOpts`
+describes what a server protocol reads, and `client.RegisterClientOpts` the same
+for a Dial — so a protocol added to the registry is automatically renderable as
+a form, key-generatable, and redaction-aware without the panel knowing it exists.
+The API contract, the PATCH semantics (`<redacted>` / `""` sentinels), and the
+security posture are in `internal/mgmt/README.md`; the operator's view is
+[`doc/usage/supervisor.md`](usage/supervisor.md) and
+[`doc/usage/mgmt.md`](usage/mgmt.md).

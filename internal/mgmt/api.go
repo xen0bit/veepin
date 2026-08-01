@@ -36,6 +36,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -44,11 +45,11 @@ import (
 	"github.com/xen0bit/veepin/internal/supervisor"
 )
 
-// redacted is the value the API writes in place of a secret option. It
-// cannot collide with a real protocol value: it is not a valid key, not a
-// valid PSK, not a valid base64; sending it back is treated as "leave
-// unchanged".
-const redacted = "<redacted>"
+// redacted is the package-local spelling of client.Redacted: the value the API
+// writes in place of a secret option. It cannot collide with a real protocol
+// value -- not a valid key, not a valid PSK, not valid base64 -- and sending it
+// back on a PATCH is treated as "leave unchanged".
+const redacted = client.Redacted
 
 // tokenName is the mgmt-bearer-token file name within the config dir.
 const tokenName = "token"
@@ -66,6 +67,19 @@ type ManagerBackend interface {
 	Server(name string) client.Server
 }
 
+// Option adjusts a Server before its routes are wired. NewServer takes none,
+// leaving every field at its default (notably no profile directory, which
+// disables the /api/profiles endpoints).
+type Option func(*Server)
+
+// WithProfileDir points the /api/profiles endpoints at a directory of client
+// connection profiles (the supervisor's -profiles flag). The API writes them
+// with the same strict, atomic, mode-0600 confstore machinery the listener
+// directory uses. Without it the profile endpoints answer 404.
+func WithProfileDir(dir string) Option {
+	return func(s *Server) { s.profiles = dir }
+}
+
 // Server is the management HTTP server.
 type Server struct {
 	mgr   ManagerBackend
@@ -73,6 +87,28 @@ type Server struct {
 	token []byte
 	log   *log.Logger
 	mux   *http.ServeMux
+
+	// audit is the bounded, in-memory mutation log (see audit.go). Every
+	// create/patch/delete/restart records into it; GET /api/audit reads it.
+	audit *auditLog
+
+	// mutate serializes every read-modify-write of a listener file. Each of
+	// those handlers reads the config, changes it, writes it back and rebuilds,
+	// which is a lost update if two run at once: two concurrent client-config
+	// calls on one WireGuard listener each read the same peer array, each
+	// allocate the same tunnel address, and the second write silently discards
+	// the first peer -- leaving a client holding a private key the server has
+	// never heard of.
+	//
+	// One lock for the whole directory rather than one per listener: these are
+	// operator actions at human rates, the critical sections include a cold
+	// rebuild anyway, and a per-listener map is state to reap. Reads (list, get,
+	// peers, audit) do not take it; they tolerate seeing either side of a write.
+	mutate sync.Mutex
+
+	// profiles is the on-disk profile directory, or "" when the supervisor did
+	// not configure one (the /api/profiles endpoints then answer 404).
+	profiles string
 
 	// startedAt is the supervisor uptime start the health endpoint reports.
 	startedAt atomic.Int64
@@ -84,12 +120,12 @@ type Server struct {
 // PATCH/DELETE endpoints persist to. NewServer is the canonical place the token
 // is generated; it writes the token file once and reads it thereafter, so the
 // operator can extract it from disk if the once-only log line was missed.
-func NewServer(dir string, mgr ManagerBackend, logger *log.Logger) (*Server, error) {
+func NewServer(dir string, mgr ManagerBackend, logger *log.Logger, opts ...Option) (*Server, error) {
 	if dir == "" {
-		return nil, fmt.Errorf("mgmt: config dir is required")
+		return nil, errors.New("mgmt: config dir is required")
 	}
 	if mgr == nil {
-		return nil, fmt.Errorf("mgmt: supervisor manager is required")
+		return nil, errors.New("mgmt: supervisor manager is required")
 	}
 	if err := os.MkdirAll(filepath.Join(dir, "mgmt"), 0o700); err != nil {
 		return nil, fmt.Errorf("mgmt: creating mgmt dir: %w", err)
@@ -108,6 +144,10 @@ func NewServer(dir string, mgr ManagerBackend, logger *log.Logger) (*Server, err
 		token: token,
 		log:   logger,
 		mux:   http.NewServeMux(),
+		audit: newAuditLog(),
+	}
+	for _, opt := range opts {
+		opt(s)
 	}
 	// Stamped here rather than on a serve call. The supervisor mounts Handler on
 	// its own mux (it also serves the panel at the root) and never went through
@@ -127,6 +167,15 @@ func NewServer(dir string, mgr ManagerBackend, logger *log.Logger) (*Server, err
 	s.mux.HandleFunc("DELETE /api/listeners/{name}", s.handleDeleteListener)
 	s.mux.HandleFunc("POST /api/listeners/{name}/restart", s.handleRestartListener)
 	s.mux.HandleFunc("GET /api/listeners/{name}/peers", s.handlePeerList)
+	s.mux.HandleFunc("POST /api/listeners/{name}/client-config", s.handleClientConfig)
+	s.mux.HandleFunc("GET /api/audit", s.handleAudit)
+	if s.profiles != "" {
+		s.mux.HandleFunc("GET /api/profiles", s.handleListProfiles)
+		s.mux.HandleFunc("POST /api/profiles", s.handleCreateProfile)
+		s.mux.HandleFunc("GET /api/profiles/{name}", s.handleGetProfile)
+		s.mux.HandleFunc("PATCH /api/profiles/{name}", s.handlePatchProfile)
+		s.mux.HandleFunc("DELETE /api/profiles/{name}", s.handleDeleteProfile)
+	}
 	return s, nil
 }
 
@@ -331,9 +380,26 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "uptime": nowUnix() - start})
 }
 
+// handleAudit returns the recent mutation log, newest first. It is the answer
+// to "what changed on this fleet since it started" — the panel renders it as
+// recent activity, and an operator investigating a misconfiguration can see
+// which listener was edited and whether the edit took.
+func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"events": s.audit.recent(auditCapacity)})
+}
+
 // ProtocolsResp is the body of GET /api/protocols.
 type ProtocolsResp struct {
+	// Protocols are the server protocols the supervisor can run listeners for.
 	Protocols []ProtocolDesc `json:"protocols"`
+	// ClientProtocols are the dial protocols the profile endpoints can store a
+	// profile for, with their option schemas — the same form-rendering surface
+	// as Protocols, for the client side.
+	ClientProtocols []ProtocolDesc `json:"client_protocols,omitempty"`
 }
 
 // ProtocolDesc is one protocol's surface the panel can render.
@@ -353,6 +419,12 @@ func (s *Server) handleProtocols(w http.ResponseWriter, r *http.Request) {
 	for _, name := range names {
 		opts, _ := client.ServerOptsFor(name)
 		out.Protocols = append(out.Protocols, ProtocolDesc{Name: name, Options: opts, Known: true})
+	}
+	clientNames := client.Protocols()
+	out.ClientProtocols = make([]ProtocolDesc, 0, len(clientNames))
+	for _, name := range clientNames {
+		opts, _ := client.ClientOptsFor(name)
+		out.ClientProtocols = append(out.ClientProtocols, ProtocolDesc{Name: name, Options: opts, Known: true})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -410,19 +482,28 @@ func (s *Server) handleCreateListener(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	s.mutate.Lock()
+	defer s.mutate.Unlock()
+	var name string
+	var res error
+	defer func() { s.audit.record("listener.create", name, res) }()
 	// Start from the same defaults a hand-written config file gets, so a create
 	// that stays silent about "enabled" produces a running listener rather than
 	// one that is stored, listed, and never started.
 	cfg := supervisor.NewListenerConfig()
 	if err := decodeJSON(r, &cfg); err != nil {
+		res = err
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	name = cfg.Name
 	if err := cfg.Validate(); err != nil {
+		res = err
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	if !supervisor.KnownProtocol(cfg.Protocol) {
+		res = fmt.Errorf("mgmt: unknown protocol %q", cfg.Protocol)
 		http.Error(w, "unknown protocol", http.StatusBadRequest)
 		return
 	}
@@ -431,29 +512,43 @@ func (s *Server) handleCreateListener(w http.ResponseWriter, r *http.Request) {
 	// listener's config, keys and all, and reported 201. Editing goes through
 	// PATCH, which preserves what it is not told to change.
 	if _, err := os.Stat(supervisor.ListenerPath(s.dir, cfg.Name)); err == nil {
+		res = fmt.Errorf("mgmt: listener %q already exists", cfg.Name)
 		http.Error(w, "a listener with that name already exists; PATCH it to edit",
 			http.StatusConflict)
 		return
 	} else if !errors.Is(err, fs.ErrNotExist) {
+		res = err
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	// Auto-generate any key material the protocol declares through OptSpec.Generate
 	// before writing the config. Keys the operator supplied explicitly are left
-	// untouched because the keygen dispatcher skips entries with existing values.
-	if err := generateListenerKeys(s.dir, &cfg); err != nil {
+	// untouched because generateListenerKeys skips any spec whose option already
+	// has a value -- the dispatcher itself checks nothing.
+	generated, err := generateListenerKeys(s.dir, &cfg)
+	if err != nil {
+		res = err
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if err := supervisor.WriteListenerFile(s.dir, cfg); err != nil {
+		res = err
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if err := s.mgr.Apply(); err != nil {
+		res = err
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusCreated, s.mgr.Status(cfg.Name))
+	// The generated map is surfaced once, on the create response: it carries the
+	// values an operator must act on -- a WireGuard server's public key, which
+	// has to be distributed to clients -- and which the config file stores but
+	// the panel's declared-option form does not render.
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"status":    s.mgr.Status(cfg.Name),
+		"generated": generated,
+	})
 }
 
 func (s *Server) handlePatchListener(w http.ResponseWriter, r *http.Request) {
@@ -465,17 +560,24 @@ func (s *Server) handlePatchListener(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		return
 	}
+	s.mutate.Lock()
+	defer s.mutate.Unlock()
+	var res error
+	defer func() { s.audit.record("listener.patch", name, res) }()
 	existing, err := supervisor.ParseListenerFile(supervisor.ListenerPath(s.dir, name))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
+			res = err
 			http.Error(w, "no such listener", http.StatusNotFound)
 			return
 		}
+		res = err
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	var in listenerPatch
 	if err := decodeJSON(r, &in); err != nil {
+		res = err
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -484,20 +586,24 @@ func (s *Server) handlePatchListener(w http.ResponseWriter, r *http.Request) {
 	// in place, and rebuilt the old name -- so one edit produced two listeners.
 	// Refuse it and say what to do instead.
 	if in.Name != nil && *in.Name != name {
+		res = errors.New("mgmt: rename refused")
 		http.Error(w, "renaming a listener is not supported: create the new one and delete the old",
 			http.StatusBadRequest)
 		return
 	}
 	merged := in.applyTo(existing)
 	if err := merged.Validate(); err != nil {
+		res = err
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	if !supervisor.KnownProtocol(merged.Protocol) {
+		res = fmt.Errorf("mgmt: unknown protocol %q", merged.Protocol)
 		http.Error(w, "unknown protocol", http.StatusBadRequest)
 		return
 	}
 	if err := supervisor.WriteListenerFile(s.dir, merged); err != nil {
+		res = err
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -507,6 +613,7 @@ func (s *Server) handlePatchListener(w http.ResponseWriter, r *http.Request) {
 		// The new config file is on disk; the rebuild error is reported but
 		// the operator can retry via POST .../restart. HTTP 202 conveys
 		// "accepted, partially applied".
+		res = err
 		writeJSON(w, http.StatusAccepted,
 			map[string]any{"status": "saved", "build_error": err.Error()})
 		return
@@ -523,15 +630,23 @@ func (s *Server) handleDeleteListener(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		return
 	}
+	s.mutate.Lock()
+	defer s.mutate.Unlock()
+	var res error
+	defer func() { s.audit.record("listener.delete", name, res) }()
 	// Stop reports "no listener named X" if the running set does not have it;
 	// we proceed with the file removal so Delete is idempotent for a listener
-	// that crashed but whose file is still present.
+	// that crashed but whose file is still present. Deliberately discarded, not
+	// recorded: routing it into res made every delete of a stopped or disabled
+	// listener show up in the audit log as a red failure next to its own 200.
 	_ = s.mgr.Stop(name)
 	if err := supervisor.DeleteListenerFile(s.dir, name); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
+			res = err
 			http.Error(w, "no such listener", http.StatusNotFound)
 			return
 		}
+		res = err
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -549,7 +664,12 @@ func (s *Server) handleRestartListener(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		return
 	}
+	s.mutate.Lock()
+	defer s.mutate.Unlock()
+	var res error
+	defer func() { s.audit.record("listener.restart", name, res) }()
 	if err := s.mgr.Rebuild(name); err != nil {
+		res = err
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -591,11 +711,21 @@ func (s *Server) handlePeerList(w http.ResponseWriter, r *http.Request) {
 //
 // Multi-file generators (e.g. "tls" returns both "cert" and "key") set every key
 // they produce, so the handler does not need to deduce which keys were affected.
-func generateListenerKeys(configDir string, cfg *supervisor.ListenerConfig) error {
+//
+// The returned map is the generated material the protocol does NOT declare as an
+// option (a WireGuard public key, which the parse never reads but the operator
+// must distribute): the handler merges it into cfg.Options so it persists with
+// the config, and surfaces it separately for the create response.
+func generateListenerKeys(configDir string, cfg *supervisor.ListenerConfig) (map[string]string, error) {
 	decl, ok := client.ServerOptsFor(cfg.Protocol)
 	if !ok {
-		return nil
+		return nil, nil
 	}
+	declared := make(map[string]bool, len(decl))
+	for _, spec := range decl {
+		declared[spec.Key] = true
+	}
+	generated := map[string]string{}
 	seen := map[string]bool{}
 	for _, spec := range decl {
 		if spec.Generate == "" {
@@ -612,17 +742,23 @@ func generateListenerKeys(configDir string, cfg *supervisor.ListenerConfig) erro
 		}
 		seen[spec.Generate] = true
 
-		kv, err := keygen.Generate(cfg.Name, configDir, spec.Generate, spec.Key, cfg.Options)
+		kv, err := keygen.Generate(cfg.Name, configDir, spec.Generate, spec.Key)
 		if err != nil {
-			return fmt.Errorf("mgmt: keygen %q for %q: %w", spec.Generate, cfg.Name, err)
+			return nil, fmt.Errorf("mgmt: keygen %q for %q: %w", spec.Generate, cfg.Name, err)
 		}
 		for k, v := range kv {
 			if cfg.Options[k] == "" {
 				cfg.Options[k] = v
 			}
+			if !declared[k] {
+				generated[k] = v
+			}
 		}
 	}
-	return nil
+	if len(generated) == 0 {
+		return nil, nil
+	}
+	return generated, nil
 }
 
 // --- Helpers ---
@@ -688,9 +824,7 @@ func (p listenerPatch) applyTo(existing supervisor.ListenerConfig) supervisor.Li
 //	              empty one identically.
 func mergeOptions(existing, patch map[string]string) map[string]string {
 	out := make(map[string]string, len(existing)+len(patch))
-	for k, v := range existing {
-		out[k] = v
-	}
+	maps.Copy(out, existing)
 	for k, v := range patch {
 		switch v {
 		case redacted:
@@ -716,24 +850,8 @@ func mergeOptions(existing, patch map[string]string) map[string]string {
 // one, and cmd/veepin's TestServerOptSpecsMatchTheKeysTheProtocolReads keeps the
 // declarations honest, so this branch is a fallback rather than a live path.
 func redactOptions(protocol string, opts map[string]string) map[string]string {
-	if opts == nil {
-		return nil
-	}
-	out := make(map[string]string, len(opts))
-	maps.Copy(out, opts)
-	specs, ok := client.ServerOptsFor(protocol)
-	if !ok {
-		return out
-	}
-	for _, spec := range specs {
-		if !spec.Secret {
-			continue
-		}
-		if v, has := out[spec.Key]; has && v != "" {
-			out[spec.Key] = redacted
-		}
-	}
-	return out
+	specs, _ := client.ServerOptsFor(protocol)
+	return client.Redact(specs, opts)
 }
 
 // decodeJSON reads a request body sized for the small config documents the API

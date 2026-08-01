@@ -61,6 +61,7 @@ const (
 	OptServerPeerPublicKey    = "peer-public-key"
 	OptServerPeerPresharedKey = "peer-preshared-key"
 	OptServerPeerAllowedIPs   = "peer-allowed-ips"
+	OptServerPeers            = "peers"
 
 	// The obfuscation keys are deliberately spelled the same on both sides:
 	// the two ends must be configured identically, and divergent names invite
@@ -215,6 +216,9 @@ func init() {
 		{Key: OptServerPeerPublicKey, Kind: client.OptStr, Help: "a single peer's static public key, base64 (adds one peer)"},
 		{Key: OptServerPeerPresharedKey, Kind: client.OptStr, Secret: true, Help: "the -peer-public-key peer's preshared key, base64 (optional)"},
 		{Key: OptServerPeerAllowedIPs, Kind: client.OptCommaList, Help: "the -peer-public-key peer's allowed IPs, comma-separated CIDRs"},
+		// OptStr, not OptCommaList: a JSON document, which a comma-list editor
+		// in the panel would split on the commas inside it.
+		{Key: OptServerPeers, Kind: client.OptStr, Help: "additional peers as a JSON array (managed by client-config generation)"},
 		{Key: OptServerShape, Kind: client.OptInt, Default: "0", Help: "per-flow downstream shaping budget in bytes (0 = off)"},
 		{Key: OptTypeInit, Kind: client.OptInt, Help: "H1: message type replacing handshake initiation (0 = stock 1)"},
 		{Key: OptTypeResp, Kind: client.OptInt, Help: "H2: message type replacing handshake response (0 = stock 2)"},

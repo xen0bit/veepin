@@ -1,0 +1,31 @@
+package ikev2
+
+// Client option metadata: the panel and `veepin profile` render ikev2's Dial
+// surface from this, so every key must stay in step with what parseOptions
+// reads (cmd/veepin's TestClientOptSpecsMatchTheKeysTheProtocolReads enforces
+// exactly that). Required and Secret mirror the NetworkManager plugin's
+// requireKeys/secretMissing for the same protocol.
+
+import "github.com/xen0bit/veepin/client"
+
+func init() {
+	client.RegisterClientOpts("ikev2", []client.OptSpec{
+		{Key: OptGateway, Kind: client.OptStr, Required: true, Help: "VPN server host or IP"},
+		{Key: OptPort, Kind: client.OptInt, Default: "500", Help: "server IKE port (default 500)"},
+		{Key: OptPSK, Kind: client.OptStr, Secret: true, Help: "pre-shared key"},
+		{Key: OptLocalID, Kind: client.OptStr, Required: true, Help: "local identity presented to the server"},
+		{Key: OptServerID, Kind: client.OptStr, Help: "expected server identity (verified if set)"},
+		{Key: OptUser, Kind: client.OptStr, Help: "EAP-MSCHAPv2 username (enables EAP instead of client PSK)"},
+		{Key: OptPassword, Kind: client.OptStr, Secret: true, Help: "EAP-MSCHAPv2 password"},
+		{Key: OptCert, Kind: client.OptFilePath, Help: "client certificate PEM (enables certificate auth instead of PSK)"},
+		{Key: OptKey, Kind: client.OptFilePath, Secret: true, Help: "client private-key PEM (with cert)"},
+		{Key: OptCA, Kind: client.OptFilePath, Help: "CA bundle PEM to verify the server (default system roots)"},
+		{Key: OptRekey, Kind: client.OptInt, Default: "3600", Help: "Child SA rekey interval in seconds (0 = default 3600)"},
+		{Key: OptIKERekey, Kind: client.OptInt, Default: "14400", Help: "IKE SA rekey interval in seconds (0 = default 14400)"},
+		{Key: OptShape, Kind: client.OptInt, Default: "0", Help: "per-flow upstream shaping budget in bytes (0 = off)"},
+		{Key: OptPQ, Kind: client.OptBool, Help: "offer ML-KEM-768 as an additional key exchange (RFC 9370)"},
+		{Key: OptIPTFS, Kind: client.OptBool, Help: "enable AGGFRAG aggregation and fragmentation (RFC 9347)"},
+		{Key: OptIPTFSRate, Kind: client.OptInt, Default: "0", Help: "constant-rate IP-TFS transmission in bytes/sec; 0 = aggregation only"},
+		{Key: OptTUNName, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
+	})
+}

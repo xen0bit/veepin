@@ -24,7 +24,10 @@ directory is the whole of the supervisor's on-disk state:
 /etc/veepin/            <- the -config directory
   site-a.json           one JSON file per listener
   branch-office.json
+  profiles/             client profiles the panel manages (from `-profiles`)
+    home.json           one JSON file per profile
   mgmt/
+    hostnet/            what hostnet.Apply installed per listener (for teardown)
     token               0600 bearer token for the API and panel (auto-generated)
 ```
 
@@ -84,7 +87,24 @@ On first start, the supervisor:
 
 The dashboard is at `http://127.0.0.1:8443/`. Status, the listeners list, and
 restart / delete actions are there; new and existing listener forms are
-server-rendered directly from each protocol's option metadata.
+server-rendered directly from each protocol's option metadata. Each row expands
+to show the listener's redacted config and its connected peers (for a protocol
+that reports them), and the page shows the fleet's recent activity from the
+audit log. The *client config* button on a row generates a ready-to-dial client
+profile for that listener (see [Generating a client config](mgmt.md#generating-a-client-config)).
+Client connection profiles are a second entity type the panel
+manages — see [Client profiles](mgmt.md#client-profiles) and the `-profiles`
+flag below.
+
+## Profiles
+
+`-profiles <dir>` points the panel's profile endpoints at a directory of client
+connection profiles (default `<config>/profiles`). The profile form renders from
+each protocol's client option metadata, exactly as the listener form does from
+its server metadata; a profile saved there is dialable on the supervisor host
+with `veepin connect <name>` (profiles under a per-user `~/.config/veepin`
+remain CLI-managed and are not visible here — this surface is for the operator's
+provisioning, not the end user's laptop).
 
 ## Reconfiguring a listener
 
@@ -110,9 +130,12 @@ runtime mutation methods on a Server, so reconfiguration is rebuild by design.
 - It does not generate or rotate protocol keys. Key material arrives in the
   `options` map and is written to disk mode `0600`, root-only, the same posture
   PEM files and the IKEv2 EAP user file already rely on.
-- It does not hot-add peers to a running WireGuard server. WireGuard's peer
-  set is fixed at `NewServer` time; a peer change is a rebuild, not a live
-  edit.
+- It does not hot-add peers to a running WireGuard server by hand. WireGuard's
+  peer set is fixed at `NewServer` time, so a peer change is a rebuild — which
+  is exactly what client-config generation does for you: it appends the peer to
+  the listener's `peers` option and cold-rebuilds, so a generated config works
+  the moment it is downloaded. Hand-editing remains: edit the `peers` JSON (or
+  the wg-quick `-config` file) and `POST .../restart`.
 - It does not tear down interface addresses or `ip_forward=1` on shutdown --
   only its own tagged iptables rules. The TUN release itself is implicit via
   `Close` and `ip_forward=1` is host-wide and shared with other VPN daemons.
