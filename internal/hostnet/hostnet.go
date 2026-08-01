@@ -88,6 +88,36 @@ func MaskBits(n *net.IPNet) int {
 	return ones
 }
 
+// State is the record of what Apply installed for one listener, sufficient for
+// a later Teardown to remove exactly that. It is deliberately not the caller's
+// current Config: the listener's config may have been edited since (WAN dropped,
+// address changed), and a TUN name the kernel assigned is present only in the
+// State, never in the listener's options. The caller persists it -- the
+// supervisor writes <config>/mgmt/hostnet/<name>.json after Apply and reads it
+// back on teardown -- so teardown is the inverse of what actually happened, not
+// of what the config file now says.
+type State struct {
+	// TUNName is the interface the rules name. Kernel-assigned names ("tun0")
+	// live only here once the server that owned them is closed.
+	TUNName string `json:"tun"`
+	// WAN is the interface MASQUERADE was installed for; empty means nothing
+	// rule-shaped was installed.
+	WAN string `json:"wan,omitempty"`
+	// Network is the tunnel subnet the MASQUERADE source selector names, in
+	// CIDR form; empty for a layer-2 server, which installs no rules.
+	Network string `json:"network,omitempty"`
+}
+
+// State returns the record a Teardown needs for the config Apply is about to
+// install.
+func (c Config) State() State {
+	st := State{TUNName: c.TUNName, WAN: c.WAN}
+	if c.Network != nil {
+		st.Network = c.Network.String()
+	}
+	return st
+}
+
 // Apply configures the TUN address, brings the interface up, enables IPv4
 // forwarding, and installs tagged MASQUERADE/FORWARD rules if a WAN was given.
 // It is idempotent: every iptables rule it adds is checked first so a second
@@ -99,8 +129,23 @@ func Apply(name string, cfg Config) error {
 // Teardown removes every host-side rule tagged for name, in reverse of Apply's
 // order. It is bounded (at most 64 deletes per chain) so a runaway rule list
 // cannot hang the supervisor; a healthy host has one row per listener.
+//
+// It derives the teardown set from cfg, which is correct for the bare command
+// (whose config cannot have changed while it was running) and for tests. A
+// caller that manages a fleet -- the supervisor -- must not do that: the
+// listener's config may have been edited, or its TUN name kernel-assigned, so
+// it persists the State that Apply installed and tears down from that instead.
+// See TeardownState.
 func Teardown(name string, cfg Config) error {
-	return teardownWith(name, cfg, realCommander)
+	return TeardownState(name, cfg.State())
+}
+
+// TeardownState is the persisted-state form of Teardown: it removes exactly the
+// rules the recorded State describes, whether or not the listener's current
+// config still matches. A State with an empty WAN or Network (no NAT was ever
+// installed) is a no-op.
+func TeardownState(name string, st State) error {
+	return teardownStateWith(name, st, realCommander)
 }
 
 // ApplyWithName is Apply using an explicit commander. It exists for tests; non-
@@ -111,7 +156,12 @@ func ApplyWithName(name string, cfg Config, run Commander) error {
 
 // TeardownWithName is Teardown using an explicit commander.
 func TeardownWithName(name string, cfg Config, run Commander) error {
-	return teardownWith(name, cfg, run)
+	return TeardownStateWithName(name, cfg.State(), run)
+}
+
+// TeardownStateWithName is TeardownState using an explicit commander.
+func TeardownStateWithName(name string, st State, run Commander) error {
+	return teardownStateWith(name, st, run)
 }
 
 func applyWith(name string, cfg Config, run Commander) error {
@@ -187,33 +237,98 @@ func applyWith(name string, cfg Config, run Commander) error {
 	return ErrNoWAN
 }
 
-func teardownWith(name string, cfg Config, run Commander) error {
-	if cfg.Network == nil || cfg.WAN == "" {
-		// Nothing was installed for this listener; teardown is a no-op.
+// teardownStateWith deletes the rules the recorded State describes, using the
+// given commander. A State with no WAN or no Network installed nothing
+// rule-shaped, so teardown is a no-op -- the layer-2 path (Network empty) and
+// the no-WAN path (ErrNoWAN from Apply) both land here. Teardown is safe to
+// call unconditionally for any listener.
+func teardownStateWith(name string, st State, run Commander) error {
+	if st.Network == "" || st.WAN == "" {
 		return nil
 	}
 	tag := comment(name)
 	natRule := []string{
 		"-t", "nat", "-D", "POSTROUTING",
-		"-s", cfg.Network.String(),
-		"-o", cfg.WAN,
+		"-s", st.Network,
+		"-o", st.WAN,
 		"-j", "MASQUERADE",
 		"-m", "comment", "--comment", tag,
 	}
 	if err := removeRule(run, natRule); err != nil {
 		return fmt.Errorf("hostnet: NAT teardown: %w", err)
 	}
-	fwdIn := []string{"-D", "FORWARD", "-i", cfg.TUNName, "-j", "ACCEPT",
+	fwdIn := []string{"-D", "FORWARD", "-i", st.TUNName, "-j", "ACCEPT",
 		"-m", "comment", "--comment", tag}
 	if err := removeRule(run, fwdIn); err != nil {
 		return fmt.Errorf("hostnet: FORWARD in teardown: %w", err)
 	}
-	fwdOut := []string{"-D", "FORWARD", "-o", cfg.TUNName, "-j", "ACCEPT",
+	fwdOut := []string{"-D", "FORWARD", "-o", st.TUNName, "-j", "ACCEPT",
 		"-m", "comment", "--comment", tag}
 	if err := removeRule(run, fwdOut); err != nil {
 		return fmt.Errorf("hostnet: FORWARD out teardown: %w", err)
 	}
 	return nil
+}
+
+// TeardownByTag removes every rule carrying this listener's comment tag,
+// whatever its other fields say. It is the recovery path for when the recorded
+// State is missing or unreadable: the tag is the one thing every rule Apply
+// installs is guaranteed to carry, so it can find them when nothing else can.
+//
+// Deliberately not the normal path. TeardownState names the exact rules it
+// expects and fails loudly if the host disagrees; this one deletes whatever it
+// finds under the tag, which is right for recovery and too blunt for routine
+// use.
+func TeardownByTag(name string) error {
+	return teardownByTagWith(name, realCommander)
+}
+
+// TeardownByTagWithName is TeardownByTag using an explicit commander.
+func TeardownByTagWithName(name string, run Commander) error {
+	return teardownByTagWith(name, run)
+}
+
+func teardownByTagWith(name string, run Commander) error {
+	tag := comment(name)
+	for _, c := range []struct{ table, chain string }{
+		{"nat", "POSTROUTING"},
+		{"filter", "FORWARD"},
+	} {
+		out, err := run("iptables", "-t", c.table, "-S", c.chain)
+		if err != nil {
+			// A chain that does not exist is not an error worth failing on: the
+			// host simply has nothing of ours in it.
+			continue
+		}
+		for line := range strings.SplitSeq(string(out), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 2 || fields[0] != "-A" || !ruleHasTag(fields, tag) {
+				continue
+			}
+			args := append([]string{"-t", c.table}, fields...)
+			args[2] = "-D"
+			if o, derr := run("iptables", args...); derr != nil {
+				return fmt.Errorf("hostnet: tagged teardown: iptables %s: %v: %s",
+					strings.Join(args, " "), derr, strings.TrimSpace(string(o)))
+			}
+		}
+	}
+	return nil
+}
+
+// ruleHasTag reports whether an `iptables -S` rule carries exactly this tag as
+// its comment. Compared field-by-field rather than by substring so the tag for
+// "site-a" does not match the rule belonging to "site-ab".
+func ruleHasTag(fields []string, tag string) bool {
+	for i, f := range fields {
+		if f != "--comment" || i+1 >= len(fields) {
+			continue
+		}
+		if strings.Trim(fields[i+1], `"`) == tag {
+			return true
+		}
+	}
+	return false
 }
 
 // ensureRule adds rule to iptables if it is not already there. The check uses

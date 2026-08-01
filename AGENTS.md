@@ -1,6 +1,6 @@
 # veepin — working notes for coding agents
 
-A from-scratch userspace VPN in pure Go. Thirteen production protocols, **client
+A from-scratch userspace VPN in pure Go. Sixteen production protocols, **client
 and server for every one**, each verified in Docker against a real third-party
 implementation *and* against itself.
 
@@ -68,10 +68,13 @@ round trip:
 | Guard | What it requires |
 |---|---|
 | `docs_test.go` — `TestPackageDocNamesEveryProtocol` | `doc.go`'s package comment names every registered package |
-| `docs_test.go` — `TestREADMECountsProtocolsCorrectly` | **every** occurrence of "*N* production protocols" and "*Nth* registered protocol" in the README agrees with the registry — spelled out ("thirteen", "fourteenth") |
+| `docs_test.go` — `TestREADMECountsProtocolsCorrectly` | **every** occurrence of "*N* production protocols" and "*Nth* registered protocol" in the README agrees with the registry — spelled out ("sixteen", "seventeenth") |
 | `fuzztargets_test.go` — `TestFuzzTargetsAreAllListed` | every `Fuzz*` in the tree is in the `TARGETS` heredoc in `.github/workflows/ci.yml`, and `expected=N` matches the count |
 | `cmd/veepin/main_test.go` | every registered protocol has a `connect` case |
 | `cmd/veepin/flags_test.go` | every registered server protocol has a `serve` case; every bound flag reaches the option map (it perturbs each one and requires the map to change); every emitted key has a matching `Opt*` const |
+| `cmd/veepin/flags_test.go` — `TestClientOptSpecsMatchTheKeysTheProtocolReads` | every registered client protocol declares `RegisterClientOpts`, and its spec keys and `connect` flags are the same set |
+| `cmd/veepin/flags_test.go` — `TestRequiredClientOptsAreTheOnesTheParseRejects` | an option whose absence the parse rejects with "is required" is marked `Required: true` |
+| `docs_test.go` — `TestEveryOptConstIsDescribedByAnOptSpec` | every `Opt*` const a facade declares is named as a `Key` in one of its two OptSpec tables — this is what catches an option the parse reads that no flag emits, which both flag-driven guards above are blind to |
 | `internal/livingreadme/interop_test.go` | every test named in the matrix exists, and every `TestInterop*` is in the matrix — **a test absent from the matrix runs in no CI shard and therefore never runs** |
 | `nm/cmd/.../TestAllSupportedProtocolsRegistered` | `nmconfig.SupportedProtocols` and the service's blank imports agree |
 
@@ -93,6 +96,14 @@ Roughly the order that works. One commit per phase.
    implementing `client.Dialer`, `func init() { client.Register(...) }`; and
    `server.go` with the same shape for `client.RegisterServer`. Implement
    `client.Prober` on any path that can go quiet.
+   Then **`<proto>/opts.go`** — one `client.OptSpec` per client option, through
+   `client.RegisterClientOpts`, alongside the server's `client.RegisterServerOpts`
+   in `server.go`. This is what the management panel renders a form from and what
+   `veepin profile add` and client-config generation validate against; without it
+   the protocol is dialable but unmanageable. Mark `Secret` on anything that is
+   key material *or a path to it*, and `Required` on anything the parse rejects
+   the absence of. Three guards in the table above enforce all of this, and the
+   third catches the case the other two structurally cannot.
 4. **CLI cases** in `cmd/veepin/connect.go` and `serve.go`, plus direct imports.
 5. **Docs**: `doc.go`, the README protocol table + usage-runbook table + the
    spelled-out counts, `doc/usage/<proto>.md`, `internal/<proto>/README.md`, and

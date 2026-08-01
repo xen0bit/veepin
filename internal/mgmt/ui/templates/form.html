@@ -1,7 +1,12 @@
-{{/* form.html is the add-and-edit page. The protocol selector drives the form
-     fields rendered from /api/protocols. The page's "initial" JS hint
-     ({.InitialJS}) tells the page whether to draw the form blank ("new") or
-     pre-load an existing listener's config ("edit:<name>"). */}}
+{{/* form.html is the add-and-edit page for listeners AND profiles. The
+     protocol selector drives the fields rendered from /api/protocols (server
+     specs for listeners, client specs for profiles). The page's "initial" JS
+     hint ({.InitialJS}) tells the page which surface it is and whether to draw
+     blank or pre-load an existing entity:
+       "new"               new listener
+       "edit:<name>"       edit a listener
+       "new-profile"       new profile
+       "edit-profile:<n>"  edit a profile   */}}
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -13,27 +18,32 @@
     form { margin: 12px 0; }
     label { display: block; margin: 8px 0; }
     input, textarea { width: 30em; font: inherit; }
-    textarea { height: 8em; }
+    textarea { height: 6em; }
     .required::after { content: " *"; color: #c00; }
     .secret-hint::after { content: " (redacted on read; send the real value to set)"; color: #888; font-size: smaller; }
     fieldset { margin: 8px 0; border: 1px solid #ddd; padding: 8px; }
     legend { font-weight: 600; }
     pre { background: #f6f6f6; padding: 6px; overflow-x: auto; }
     .muted { color: #888; }
+    .banner { display: none; margin: 12px 0; padding: 8px 10px; border: 1px solid #c00; background: #fdd; }
+    .banner.visible { display: block; }
+    .generated-key { display: none; margin: 8px 0; padding: 8px; background: #eef; border: 1px solid #ccd; font-family: monospace; white-space: pre-wrap; word-break: break-all; }
   </style>
 </head>
 <body>
   <h1 id="title">new listener</h1>
-  <form id="listener">
+  <div id="banner" class="banner"></div>
+  <div id="generated" class="generated-key"></div>
+  <form id="entity">
     <label>Name<input id="name" type="text" placeholder="site-a"></label>
     <label>Protocol<select id="protocol"></select></label>
     <fieldset>
       <legend>Options</legend>
       <div id="options-fields"></div>
     </fieldset>
-    <label><input id="enabled" type="checkbox" checked> enabled</label>
-    <label><input id="setup_nat" type="checkbox"> -setup-nat (manage host iptables/routing)</label>
-    <label>WAN interface<input id="wan" type="text" placeholder="eth0"></label>
+    <label id="row-enabled"><input id="enabled" type="checkbox" checked> enabled</label>
+    <label id="row-setup-nat"><input id="setup_nat" type="checkbox"> -setup-nat (manage host iptables/routing)</label>
+    <label id="row-wan">WAN interface<input id="wan" type="text" placeholder="eth0"></label>
     <input id="save" type="submit" value="save">
     <button id="apply" type="button">restart listener</button>
     <button id="delete" type="button">delete</button>
@@ -42,17 +52,29 @@
 <script>
 window.VEEPIN_TOKEN = "{{.Token}}";
 const INITIAL = {{.InitialJS}};
-const api = (path, opts) => {
-  opts = Object.assign({}, opts || {});
-  opts.headers = Object.assign({"Authorization": "Bearer " + window.VEEPIN_TOKEN}, opts.headers || {});
-  if (opts.body !== undefined && typeof opts.body !== "string") {
-    opts.headers["Content-Type"] = "application/json";
-    opts.body = JSON.stringify(opts.body);
-  }
-  return fetch(path, opts).then(r => r.json().then(body => ({status: r.status, body})));
-};
+</script>
+<script src="/assets/panel.js"></script>
+<script>
+// KIND is "listener" or "profile", and NAME is the entity being edited ("" for
+// new). The initial hint is the same string the routes hand us: "new",
+// "edit:<name>", "new-profile", "edit-profile:<name>".
+// Matched on the hint's own grammar, not on whether "profile" appears anywhere
+// in it. Listener names match ^[a-z0-9][a-z0-9-]{0,31}$, so "profiles" and
+// "vpn-profile" are legal listener names; a substring test sent the whole form
+// -- load, save, delete -- at /api/profiles for those.
+const KIND = (INITIAL === "new-profile" || INITIAL.startsWith("edit-profile:")) ? "profile" : "listener";
+const EDIT_NAME = INITIAL.startsWith("edit:")
+  ? INITIAL.substring(INITIAL.indexOf(":") + 1)
+  : INITIAL.startsWith("edit-profile:")
+    ? INITIAL.substring("edit-profile:".length)
+    : "";
+
+const LISTENER_API = "/api/listeners";
+const PROFILE_API = "/api/profiles";
 
 let protocols = [];
+
+function isProfile() { return KIND === "profile"; }
 
 function fieldsFor(protocol) {
   return protocols.find(p => p.name === protocol)?.options || [];
@@ -77,7 +99,11 @@ function renderFields(protocol, values) {
       input.type = "text";
       input.name = key;
       input.value = (saved !== undefined ? saved : (f.default || ""));
-      if (f.kind === "list") { input = document.createElement("textarea"); input.name = key; input.value = (saved !== undefined ? saved : (f.default || "")); }
+      if (f.kind === "list") {
+        input = document.createElement("textarea");
+        input.name = key;
+        input.value = (saved !== undefined ? saved : (f.default || ""));
+      }
     }
     input.id = key;
     input.dataset.key = f.key;
@@ -104,53 +130,72 @@ function renderFields(protocol, values) {
 // collect builds the request body from the form. Every option the protocol
 // declares is submitted, including the ones left blank or unchecked: the API
 // reads an empty value as "unset this key" and leaves keys it is not sent
-// alone. Sending only the non-empty ones -- which this used to do -- meant
-// clearing a field or unchecking a box was a no-op, because the API then kept
-// the stored value. A secret field still round-trips safely: the form shows
-// "<redacted>", and the API reads that back as "keep what you have".
+// alone. A secret field still round-trips safely: the form shows "<redacted>",
+// and the API reads that back as "keep what you have".
 function collect() {
   const name = document.getElementById("name").value.trim();
   const protocol = document.getElementById("protocol").value;
   const opts = {};
-  const fields = fieldsFor(protocol);
-  for (const f of fields) {
+  for (const f of fieldsFor(protocol)) {
     const el = document.getElementById("opt-" + f.key);
     if (!el) continue;
     opts[f.key] = f.kind === "bool" ? (el.checked ? "true" : "") : el.value;
   }
-  return {
-    name, protocol, options: opts,
-    enabled: document.getElementById("enabled").checked,
-    setup_nat: document.getElementById("setup_nat").checked,
-    wan: document.getElementById("wan").value.trim(),
-  };
+  const body = {name, protocol, options: opts};
+  if (isProfile()) return body;
+  body.enabled = document.getElementById("enabled").checked;
+  body.setup_nat = document.getElementById("setup_nat").checked;
+  body.wan = document.getElementById("wan").value.trim();
+  return body;
 }
+
+function apiBase() { return isProfile() ? PROFILE_API : LISTENER_API; }
 
 function loadProtocols() {
   return api("/api/protocols").then(({body}) => {
-    protocols = body.protocols || [];
+    protocols = (isProfile() ? (body.client_protocols || []) : (body.protocols || []));
     const sel = document.getElementById("protocol");
-    sel.innerHTML = protocols.map(p => '<option value="' + p.name + '">' + p.name + '</option>').join("");
+    // Through esc() like every other interpolation on these pages. Protocol
+    // names come from the registry so this is not reachable today, but "escape
+    // everything" only holds as a rule if it has no exceptions to remember.
+    sel.innerHTML = protocols.map(p => '<option value="' + esc(p.name) + '">' + esc(p.name) + '</option>').join("");
     return protocols.length ? protocols[0].name : null;
   });
 }
 
-function loadListener(name) {
-  return api("/api/listeners/" + encodeURIComponent(name)).then(({body}) => {
-    document.getElementById("title").textContent = "edit listener — " + name;
-    document.getElementById("name").value = body.config.name;
-    // Renaming is not a PATCH: it would have to move the config file and retire
-    // the old listener, and the API rejects it. Say so here rather than let the
-    // operator type a new name and get a 400 back.
+// configureBody shows or hides the listener-only rows (enabled / setup-nat /
+// wan) and the restart button, and retitles the page.
+function configureBody() {
+  const isNewProfile = INITIAL === "new-profile";
+  document.getElementById("row-enabled").style.display = isProfile() ? "none" : "";
+  document.getElementById("row-setup-nat").style.display = isProfile() ? "none" : "";
+  document.getElementById("row-wan").style.display = isProfile() ? "none" : "";
+  document.getElementById("apply").style.display = isProfile() ? "none" : "";
+  document.getElementById("title").textContent =
+    (isProfile() ? "profile" : "listener") + (isNewProfile || INITIAL === "new" ? "" : " — " + EDIT_NAME);
+}
+
+function loadEntity() {
+  return api(apiBase() + "/" + encodeURIComponent(EDIT_NAME)).then(({status, body}) => {
+    if (status >= 300) throw new Error(typeof body === "string" ? body : JSON.stringify(body));
+    document.getElementById("name").value = body.name || body.config?.name || "";
     document.getElementById("name").readOnly = true;
-    document.getElementById("name").title = "a listener cannot be renamed; create a new one and delete this";
-    document.getElementById("protocol").value = body.config.protocol;
-    document.getElementById("setup_nat").checked = !!body.config.setup_nat;
-    document.getElementById("wan").value = body.config.wan || "";
-    document.getElementById("enabled").checked = body.config.enabled !== false;
-    renderFields(body.config.protocol, body.config.options || {});
+    document.getElementById("name").title = "an entity cannot be renamed; create a new one and delete this";
+    const protocol = body.protocol || body.config?.protocol;
+    if (protocol) document.getElementById("protocol").value = protocol;
+    const opts = body.options || body.config?.options || {};
+    const setupNat = body.setup_nat || body.config?.setup_nat;
+    const wan = body.wan || body.config?.wan;
+    const enabled = body.enabled !== undefined ? body.enabled : body.config?.enabled;
+    if (!isProfile()) {
+      document.getElementById("setup_nat").checked = !!setupNat;
+      document.getElementById("wan").value = wan || "";
+      document.getElementById("enabled").checked = enabled !== false;
+    }
+    renderFields(document.getElementById("protocol").value, opts);
+    const st = body.state || body.status || "";
     document.getElementById("status").textContent =
-      "state=" + (body.state||"") + " tun=" + (body.tun||"") + " gateway=" + (body.gateway||"");
+      (st ? "state=" + st + " " : "") + "tun=" + (body.tun || "") + " gateway=" + (body.gateway || "");
   });
 }
 
@@ -166,43 +211,90 @@ function switchProtocol() {
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
-  await loadProtocols();
-  document.getElementById("protocol").addEventListener("change", switchProtocol);
-  const proto = document.getElementById("protocol").value;
-  renderFields(proto, {});
-  if (INITIAL && INITIAL.startsWith && INITIAL.startsWith("edit:")) {
-    const name = INITIAL.substring("edit:".length);
-    try {
-      await loadListener(name);
-    } catch (e) { document.getElementById("status").textContent = "load failed: " + e; }
+  configureBody();
+  try {
+    await loadProtocols();
+  } catch (err) {
+    showBanner(document.getElementById("banner"), "protocols load failed: " + err);
   }
-  document.getElementById("listener").addEventListener("submit", async (e) => {
+  document.getElementById("protocol").addEventListener("change", switchProtocol);
+  renderFields(document.getElementById("protocol").value, {});
+  if (EDIT_NAME) {
+    try {
+      await loadEntity();
+    } catch (e) { showBanner(document.getElementById("banner"), "load failed: " + e); }
+  }
+  document.getElementById("entity").addEventListener("submit", async (e) => {
     e.preventDefault();
-    const cfg = collect();
-    let path, method;
-    if (INITIAL && INITIAL.startsWith("edit:")) {
-      path = "/api/listeners/" + encodeURIComponent(cfg.name);
-      method = "PATCH";
-    } else {
-      path = "/api/listeners";
-      method = "POST";
+    try {
+      const cfg = collect();
+      const editing = !!EDIT_NAME;
+      const path = editing ? apiBase() + "/" + encodeURIComponent(cfg.name) : apiBase();
+      const method = editing ? "PATCH" : "POST";
+      const {status, body} = await api(path, {method, body: cfg});
+      if (status >= 300) {
+        showBanner(document.getElementById("banner"), typeof body === "string" ? body : JSON.stringify(body));
+        return;
+      }
+      // A 202 from a listener PATCH means "config saved, but the rebuild
+      // failed" (body.build_error). Stay on the page so the operator sees it.
+      if (status === 202 && body && body.build_error) {
+        showBanner(document.getElementById("banner"), "saved, but the rebuild failed: " + body.build_error);
+        return;
+      }
+      // A listener create that auto-generated key material returns it as
+      // body.generated; show it once, because it is the operator's only copy of
+      // the public half before the config is written to disk.
+      const gen = body && body.generated;
+      const genText = document.getElementById("generated");
+      document.getElementById("status").textContent = "saved -> " + status;
+      if (gen && Object.keys(gen).length) {
+        // Wait for the operator, do not race them. This is the only time the
+        // panel ever shows a generated public key, and a timed redirect took it
+        // away five seconds after telling them to copy it.
+        genText.textContent = "generated key material:\n" +
+          Object.entries(gen).map(([k, v]) => k + ": " + v).join("\n") +
+          "\n\ncopy it now — this is the only time it is shown";
+        genText.style.display = "block";
+        const done = document.createElement("button");
+        done.type = "button";
+        done.textContent = "I have copied it — continue";
+        done.addEventListener("click", () => { window.location = "/"; });
+        genText.appendChild(document.createElement("br"));
+        genText.appendChild(done);
+        return;
+      }
+      window.location = "/";
+    } catch (err) {
+      showBanner(document.getElementById("banner"), "save failed: " + err);
     }
-    const {status, body} = await api(path, {method, body: cfg});
-    document.getElementById("status").textContent =
-      "saved -> " + status + (body.error ? " " + body.error : "");
-    if (status < 300) window.location = "/";
   });
   document.getElementById("apply").addEventListener("click", async () => {
-    const name = document.getElementById("name").value.trim();
-    const {status, body} = await api("/api/listeners/" + encodeURIComponent(name) + "/restart", {method: "POST"});
-    document.getElementById("status").textContent = "restart -> " + status;
+    try {
+      const name = document.getElementById("name").value.trim();
+      const {status, body} = await api("/api/listeners/" + encodeURIComponent(name) + "/restart", {method: "POST"});
+      if (status >= 300) {
+        showBanner(document.getElementById("banner"), "restart failed: " + (typeof body === "string" ? body : JSON.stringify(body)));
+        return;
+      }
+      clearBanner(document.getElementById("banner"));
+      document.getElementById("status").textContent = "restart -> " + status;
+    } catch (err) { showBanner(document.getElementById("banner"), "restart failed: " + err); }
   });
   document.getElementById("delete").addEventListener("click", async () => {
     const name = document.getElementById("name").value.trim();
-    if (!confirm("delete listener " + name + "?")) return;
-    const {status} = await api("/api/listeners/" + encodeURIComponent(name), {method: "DELETE"});
-    document.getElementById("status").textContent = "delete -> " + status;
-    if (status < 300) window.location = "/";
+    const what = isProfile() ? "profile" : "listener";
+    if (!confirm("delete " + what + " " + name + "?")) return;
+    try {
+      const {status, body} = await api(apiBase() + "/" + encodeURIComponent(name), {method: "DELETE"});
+      if (status >= 300) {
+        showBanner(document.getElementById("banner"), "delete failed: " + (typeof body === "string" ? body : JSON.stringify(body)));
+        return;
+      }
+      clearBanner(document.getElementById("banner"));
+      document.getElementById("status").textContent = "delete -> " + status;
+      window.location = "/";
+    } catch (err) { showBanner(document.getElementById("banner"), "delete failed: " + err); }
   });
 });
 </script>

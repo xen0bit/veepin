@@ -11,11 +11,14 @@ package supervisor
 // without ever needing a TUN. The actual veepin binary uses the real ctor.
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -139,6 +142,87 @@ func (m *Manager) teardownHostnet(name string, cfg hostnet.Config) error {
 		return hostnet.Teardown(name, cfg)
 	}
 	return hostnet.TeardownWithName(name, cfg, m.run)
+}
+
+// teardownHostnetState is the persisted-state form of teardownHostnet, used by
+// stopLocked so rules are removed for what Apply actually installed, not for
+// whatever the listener's config now says.
+func (m *Manager) teardownHostnetState(name string, st hostnet.State) error {
+	if m.run == nil {
+		return hostnet.TeardownState(name, st)
+	}
+	return hostnet.TeardownStateWithName(name, st, m.run)
+}
+
+// teardownHostnetByTag is the recovery form, used when no persisted state
+// survives to say what was installed.
+func (m *Manager) teardownHostnetByTag(name string) error {
+	if m.run == nil {
+		return hostnet.TeardownByTag(name)
+	}
+	return hostnet.TeardownByTagWithName(name, m.run)
+}
+
+// hostnetStatePath is where the supervisor persists what hostnet.Apply installed
+// for one listener. Teardown reads it back because a listener's config may have
+// been edited since (WAN dropped, address changed) and a kernel-assigned TUN
+// name exists only in this record once the server that owned it is closed; a
+// teardown re-derived from the config would remove nothing.
+func hostnetStatePath(dir, name string) string {
+	return filepath.Join(dir, "mgmt", "hostnet", name+".json")
+}
+
+// persistHostnetState records the host state Apply just installed, so a later
+// stop/rebuild/delete can remove exactly that. Only reached for listeners with
+// SetupNAT; a state with an empty WAN or Network installed no rules, and
+// TeardownState treats it as a no-op, so the file lifecycle is uniform. Failure
+// to persist is logged, not fatal -- the listener is up and serving either way.
+//
+// Written through a temp file and renamed, like every other config this daemon
+// owns. os.WriteFile truncates in place, so a crash between truncate and write
+// leaves valid-length garbage that loadHostnetState cannot parse, which drops
+// teardown onto the tag-scan recovery path for no reason.
+func (m *Manager) persistHostnetState(name string, st hostnet.State) {
+	body, err := json.Marshal(st)
+	if err != nil {
+		m.log.Printf("supervisor: %s: persisting host state: %v", name, err)
+		return
+	}
+	path := hostnetStatePath(m.dir, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		m.log.Printf("supervisor: %s: creating host-state dir: %v", name, err)
+		return
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, body, 0o600); err != nil {
+		m.log.Printf("supervisor: %s: writing host state: %v", name, err)
+		return
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		m.log.Printf("supervisor: %s: installing host state: %v", name, err)
+	}
+}
+
+// loadHostnetState reads back what Apply installed for name, or nil when nothing
+// was persisted -- a listener that predates this feature, or one that never
+// installed host state.
+func (m *Manager) loadHostnetState(name string) *hostnet.State {
+	body, err := os.ReadFile(hostnetStatePath(m.dir, name))
+	if err != nil {
+		return nil
+	}
+	var st hostnet.State
+	if err := json.Unmarshal(body, &st); err != nil {
+		m.log.Printf("supervisor: %s: host state unreadable; tearing down from config: %v", name, err)
+		return nil
+	}
+	return &st
+}
+
+// removeHostnetState drops the persisted record once teardown has consumed it.
+func (m *Manager) removeHostnetState(name string) {
+	_ = os.Remove(hostnetStatePath(m.dir, name))
 }
 
 // Apply reconciles the live set to the directory. New configs are built;
@@ -400,13 +484,17 @@ func (m *Manager) start(r *running, cfg ListenerConfig) error {
 		}
 		switch aerr := m.applyHostnet(cfg.Name, hn); {
 		case aerr == nil:
+			m.persistHostnetState(cfg.Name, hn.State())
 		case errors.Is(aerr, hostnet.ErrNoWAN):
 			// The listener is addressed, up, and forwarding; it just has no
 			// route off the host. That is a misconfiguration worth saying out
 			// loud, not a reason to refuse to serve -- and certainly not a
 			// reason to take the rest of the fleet down, which is what
-			// returning here used to do at startup.
+			// returning here used to do at startup. The state is still
+			// persisted, so a later rebuild that adds a WAN tears the rules
+			// it then installs down correctly.
 			m.log.Printf("supervisor: %s: %v; clients will reach this host but nothing beyond it", cfg.Name, aerr)
+			m.persistHostnetState(cfg.Name, hn.State())
 		default:
 			// Apply may have installed part of its state before failing. Take it
 			// back out so a retry starts from a clean host rather than from
@@ -514,14 +602,32 @@ func (m *Manager) stopLocked(r *running) {
 	// configs are a no-op in hostnet.Teardown, so it is safe to call
 	// unconditionally.
 	if cfg.SetupNAT {
-		// We no longer have srv's TUNName/Gateway/Network (srv was just closed
-		// and may have freed the TUN). Re-derive from the config's Options
-		// where possible; otherwise the rules' removal survives on the comment
-		// tag alone (which carries the name).
-		_ = m.teardownHostnet(cfg.Name, hostnet.Config{
-			TUNName: cfg.Options["tun"],
-			WAN:     cfg.WAN,
-		})
+		// Teardown from the persisted State, not from the current config: it
+		// records the TUNName/Gateway/Network/WAN that Apply actually used,
+		// where the config may have been edited since (WAN dropped) or never
+		// named the interface (kernel-assigned tunN). An earlier version
+		// re-derived a Config here with a nil Network, which made hostnet's
+		// Teardown a silent no-op and left every tagged rule behind on
+		// rebuild and delete.
+		if st := m.loadHostnetState(cfg.Name); st != nil {
+			_ = m.teardownHostnetState(cfg.Name, *st)
+		} else {
+			// No persisted record: a listener that predates this feature, or a
+			// state file lost to a crash mid-write. Fall back to deleting by
+			// the comment tag every rule Apply installs carries.
+			//
+			// The previous fallback re-derived a hostnet.Config here with a nil
+			// Network, whose State() has an empty Network, which TeardownState
+			// treats as "nothing rule-shaped was installed" and returns from
+			// immediately. So the branch reached only in the case that leaks
+			// rules was itself guaranteed to remove nothing -- the very bug the
+			// persisted state was added to fix, preserved as a no-op under a
+			// comment claiming it worked.
+			if err := m.teardownHostnetByTag(cfg.Name); err != nil {
+				m.log.Printf("supervisor: %s: tagged host-state teardown: %v", cfg.Name, err)
+			}
+		}
+		m.removeHostnetState(cfg.Name)
 	}
 }
 

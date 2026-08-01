@@ -14,11 +14,13 @@ serious candidate where the interop matrix can have a real third-party peer in
 
 ## Why it is worth the effort: veepin has no layer 2
 
-Every one of the thirteen protocols in the tree is layer 3. This was checked, not
-assumed — the `EtherType` constants in `internal/gp/frame.go` and
+Every one of the then-thirteen protocols in the tree was layer 3. That was
+checked, not assumed — the `EtherType` constants in `internal/gp/frame.go` and
 `internal/anyconnect/wire.go` only *name* the payload family inside a framing
 header; nothing anywhere constructs or parses an Ethernet header, and
-`dataplane` opens a TUN.
+`dataplane` opened a TUN. L2TPv3's Ethernet pseudowire has since landed as the
+tree's first layer-2 carrier, and it is exactly the "genuinely new machinery"
+this plan predicted.
 
 SoftEther carries **real Ethernet frames**. That forces genuinely new machinery
 into the shared layer rather than another protocol package beside the existing
@@ -39,7 +41,7 @@ ones:
   server needs at least to answer ARP for its own address and either run DHCP or
   document that the caller supplies addressing.
 
-None of that is reusable from the existing thirteen. That is the argument for
+None of that was reusable from the then-existing thirteen. That is the argument for
 doing it, and equally the argument for its cost.
 
 ## Wire details — status: **not yet verified**

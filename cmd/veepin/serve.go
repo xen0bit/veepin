@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -189,6 +190,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			peerPub    = fs.String("peer-public-key", "", "a single peer's static public key, base64 (adds one peer)")
 			peerPSK    = fs.String("peer-preshared-key", "", "the -peer-public-key peer's preshared key, base64 (optional)")
 			peerIPs    = fs.String("peer-allowed-ips", "", "the -peer-public-key peer's allowed IPs, comma-separated CIDRs")
+			peers      = fs.String("peers", "", "additional peers as a JSON array (managed by client-config generation)")
 			shape      = fs.Int("shape", 0, "per-flow downstream shaping budget in bytes (0 = off)")
 			typeInit   = fs.Uint("type-init", 0, "H1: message type replacing handshake initiation (0 = stock 1)")
 			typeResp   = fs.Uint("type-resp", 0, "H2: message type replacing handshake response (0 = stock 2)")
@@ -209,6 +211,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 				amneziawg.OptServerPeerPublicKey:    *peerPub,
 				amneziawg.OptServerPeerPresharedKey: *peerPSK,
 				amneziawg.OptServerPeerAllowedIPs:   *peerIPs,
+				amneziawg.OptServerPeers:            *peers,
 				amneziawg.OptServerShape:            fmt.Sprint(*shape),
 				amneziawg.OptTypeInit:               fmt.Sprint(*typeInit),
 				amneziawg.OptTypeResp:               fmt.Sprint(*typeResp),
@@ -239,6 +242,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			peerPub    = fs.String("peer-public-key", "", "a single peer's static public key, base64 (adds one peer)")
 			peerPSK    = fs.String("peer-preshared-key", "", "the -peer-public-key peer's preshared key, base64 (optional)")
 			peerIPs    = fs.String("peer-allowed-ips", "", "the -peer-public-key peer's allowed IPs, comma-separated CIDRs")
+			peers      = fs.String("peers", "", "additional peers as a JSON array, e.g. [{\"public-key\":\"...\",\"allowed-ips\":[\"10.0.0.2/32\"]}]")
 			shape      = fs.Int("shape", 0, "per-flow downstream shaping budget in bytes: pads each inner flow's first N bytes to the tunnel MTU, hiding an inner TLS handshake's size pattern (0 = off, 16384 recommended)")
 		)
 		return func() map[string]string {
@@ -251,6 +255,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 				wireguard.OptServerPeerPublicKey:    *peerPub,
 				wireguard.OptServerPeerPresharedKey: *peerPSK,
 				wireguard.OptServerPeerAllowedIPs:   *peerIPs,
+				wireguard.OptServerPeers:            *peers,
 			}
 			if *listenPort != 0 {
 				opts[wireguard.OptServerListenPort] = fmt.Sprint(*listenPort)
@@ -794,6 +799,7 @@ func runSupervisorMode(args []string) error {
 	fs := flag.NewFlagSet("serve -config", flag.ContinueOnError)
 	listenAddr := fs.String("listen", "127.0.0.1:8443", "management API / panel bind address")
 	noMgmt := fs.Bool("no-mgmt", false, "run the supervisor without the management API")
+	profilesDir := fs.String("profiles", "", "directory of client connection profiles for the panel (default: <config>/profiles)")
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
@@ -820,7 +826,15 @@ func runSupervisorMode(args []string) error {
 
 	var httpSrv *http.Server
 	if !*noMgmt {
-		mgmtServer, err := mgmt.NewServer(configDir, mgr, logger)
+		mgmtOpts := []mgmt.Option{}
+		// The profile directory defaults to the same config root the listeners
+		// live under, so /api/profiles works out of the box and a fleet's
+		// profiles sit next to its listeners.
+		if *profilesDir == "" {
+			*profilesDir = filepath.Join(configDir, "profiles")
+		}
+		mgmtOpts = append(mgmtOpts, mgmt.WithProfileDir(*profilesDir))
+		mgmtServer, err := mgmt.NewServer(configDir, mgr, logger, mgmtOpts...)
 		if err != nil {
 			_ = mgr.Close()
 			return fmt.Errorf("mgmt: %w", err)

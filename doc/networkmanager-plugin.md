@@ -293,7 +293,7 @@ Three couplings this file cannot enforce on its own, each checked by
 - **`name=` is what the GUI lists**, and is kept identical to the plugin's own
   name property, because which of the two a given GUI reads is not something the
   plugin can observe.
-- **`program=` is the same binary for all ten.** NetworkManager passes the
+- **`program=` is the same binary for all sixteen.** NetworkManager passes the
   matched `service=` as `--bus-name`, so one process serves whichever type it
   was spawned for.
 

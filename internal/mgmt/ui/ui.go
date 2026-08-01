@@ -21,7 +21,7 @@ import (
 	"strings"
 )
 
-//go:embed templates/*.html
+//go:embed templates/*
 var templatesFS embed.FS
 
 // Handler is the http.Handler that serves the panel pages.
@@ -49,18 +49,25 @@ type pageData struct {
 	InitialJS string
 }
 
-// ServeHTTP routes the dashboard and per-listener form pages. The router is
-// minimal by design, since /api/* is owned by api.go; this handler only sees
-// requests that did not match the api (the manager's outer mux runs /api/*
-// first). Three paths: "/" renders the dashboard; "/listeners/new" the add
-// form; "/listeners/{name}" the edit form. Anything else falls through to a
-// plain 404 so the management API's own 404 for /api/missing is unaffected.
+// ServeHTTP routes the dashboard, the add/edit form pages (for listeners and
+// profiles), and the shared panel.js asset. /api/* is owned by api.go; this
+// handler only sees requests that did not match the api. Form paths:
+//
+//	/listeners/new, /listeners/{name}    listener add / edit
+//	/profiles/new, /profiles/{name}      profile add / edit
+//
+// Anything else falls through to a plain 404 so the management API's own 404
+// for /api/missing is unaffected.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch p := r.URL.Path; {
 	case p == "/" || p == "":
 		h.render(w, "dashboard.html")
+	case p == "/assets/panel.js":
+		h.serveAsset(w, r, "templates/panel.js", "text/javascript; charset=utf-8")
 	case p == "/listeners/new":
 		h.render(w, "form.html", pageData{Token: h.token, InitialJS: "new"})
+	case p == "/profiles/new":
+		h.render(w, "form.html", pageData{Token: h.token, InitialJS: "new-profile"})
 	case strings.HasPrefix(p, "/listeners/"):
 		name := p[len("/listeners/"):]
 		if name == "" || strings.Contains(name, "/") {
@@ -68,9 +75,31 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.render(w, "form.html", pageData{Token: h.token, InitialJS: "edit:" + name})
+	case strings.HasPrefix(p, "/profiles/"):
+		name := p[len("/profiles/"):]
+		if name == "" || strings.Contains(name, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		h.render(w, "form.html", pageData{Token: h.token, InitialJS: "edit-profile:" + name})
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// serveAsset writes one file from the embedded tree with the given content type.
+// nosniff because the declared type is the correct one and a browser that
+// second-guesses it on a page holding the bearer token is not a trade worth
+// making.
+func (h *Handler) serveAsset(w http.ResponseWriter, r *http.Request, name, ctype string) {
+	body, err := templatesFS.ReadFile(name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", ctype)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	_, _ = w.Write(body)
 }
 
 func (h *Handler) render(w http.ResponseWriter, name string, data ...pageData) {

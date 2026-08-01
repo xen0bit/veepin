@@ -1,5 +1,7 @@
-{{/* dashboard.html is the supervisor's listing page: every tracked listener
-     with its state and quick actions, plus a "new listener" button. */}}
+{{/* dashboard.html is the supervisor's management page: health, the listener
+     fleet (filterable, with expandable detail showing peers and config), and
+     the profile set. Shared helpers live in panel.js; this page holds the
+     bearer token and injects it for the browser's /api fetches. */}}
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -7,95 +9,328 @@
   <title>veepin supervisor</title>
   <style>
     body { font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; }
-    h1 { font-size: 18px; }
-    table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+    h1 { font-size: 18px; display: inline-block; margin-right: 12px; }
+    h2 { font-size: 15px; margin: 20px 0 4px; }
+    table { width: 100%; border-collapse: collapse; margin: 8px 0; }
     th, td { border: 1px solid #ddd; padding: 6px 10px; text-align: left; }
+    th { background: #f6f6f6; }
+    table.inner { width: auto; margin: 0; }
+    table.inner th, table.inner td { border-color: #eee; padding: 3px 8px; font-size: 13px; }
     .st-running { color: #0a0; font-weight: 600; }
     .st-error, .st-unknown { color: #c00; }
     .st-stopped, .st-disabled { color: #888; }
     .st-building { color: #08c; }
     button { margin-right: 6px; cursor: pointer; }
-    .new-btn { font-weight: 600; }
     a { color: #06c; }
-    pre { background: #f6f6f6; padding: 6px; overflow-x: auto; }
+    pre { background: #f6f6f6; padding: 6px; overflow-x: auto; max-height: 24em; }
     .muted { color: #888; }
+    .banner { display: none; margin: 12px 0; padding: 8px 10px; border: 1px solid #c00; background: #fdd; }
+    .banner.visible { display: block; }
+    .toolbar { margin: 8px 0; }
+    .toolbar button { font-weight: 600; }
+    .detail-cell { padding: 10px; background: #fafafa; }
+    .detail-cell .section-title { font-weight: 600; margin: 6px 0 2px; }
   </style>
 </head>
 <body>
   <h1>veepin supervisor</h1>
-  <p>Listener directory &mdash; <a href="/listeners/new" class="new-btn">new listener</a></p>
+  <span id="health" class="muted">status: loading&hellip;</span>
+  <div id="banner" class="banner"></div>
+  <p class="toolbar">
+    <a href="/listeners/new"><button class="new-btn">new listener</button></a>
+    <a href="/profiles/new"><button class="new-btn">new profile</button></a>
+    <label class="muted">state filter
+      <select id="filter">
+        <option value="">all</option>
+        <option value="running">running</option>
+        <option value="error">error</option>
+        <option value="stopped">stopped</option>
+        <option value="disabled">disabled</option>
+        <option value="building">building</option>
+      </select>
+    </label>
+  </p>
+
+  <h2>Listeners</h2>
   <table id="listeners">
     <thead><tr>
-      <th>name</th><th>protocol</th><th>state</th>
+      <th></th><th>name</th><th>protocol</th><th>state</th>
       <th>tun</th><th>gateway</th><th>network</th><th>error</th><th>actions</th>
     </tr></thead>
-    <tbody><tr><td colspan="8" class="muted">loading…</td></tr></tbody>
+    <tbody><tr><td colspan="9" class="muted">loading&hellip;</td></tr></tbody>
   </table>
-  <p class="muted">Token: <code title="the bearer sent on each /api fetch">{{.Token}}</code></p>
+
+  <h2>Profiles</h2>
+  <table id="profiles">
+    <thead><tr><th>name</th><th>protocol</th><th>actions</th></tr></thead>
+    <tbody><tr><td colspan="3" class="muted">loading&hellip;</td></tr></tbody>
+  </table>
+
+  <h2>Recent activity</h2>
+  <table id="audit">
+    <thead><tr><th>time</th><th>action</th><th>name</th><th>outcome</th></tr></thead>
+    <tbody><tr><td colspan="4" class="muted">loading&hellip;</td></tr></tbody>
+  </table>
 <script>
 window.VEEPIN_TOKEN = "{{.Token}}";
-const api = (path, opts) => {
-  opts = Object.assign({}, opts || {});
-  opts.headers = Object.assign({"Authorization": "Bearer " + window.VEEPIN_TOKEN}, opts.headers || {});
-  return fetch(path, opts).then(r => r.json().then(body => ({status: r.status, body})));
-};
+</script>
+<script src="/assets/panel.js"></script>
+<script>
+// expanded is the set of listener names whose detail row is open, preserved
+// across the 5s poll so a refresh does not collapse the operator's view.
+const expanded = {};
 
-// esc makes a value safe to concatenate into innerHTML. Every field below goes
-// through it. Most are constrained -- a listener name matches [a-z0-9-]+, a TUN
-// name and an address come from the kernel -- but `error` is arbitrary text from
-// a protocol's own failure path, and protocol errors routinely quote the option
-// values that caused them: a file path, a hostname, whatever the operator typed
-// into the form. This page holds the bearer token in its DOM, so markup landing
-// in it is a token-exfiltration path, not a cosmetic bug.
-function esc(v) {
-  return String(v === undefined || v === null ? "" : v)
-    .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;").replaceAll("'", "&#39;");
-}
+// ccResults holds a just-generated client config per listener, rendered at the
+// top of that listener's expanded detail. Keeping it separate from the poll
+// means a refresh re-renders it without re-running the generation.
+const ccResults = {};
 
 function renderRow(l) {
   const cls = "st-" + esc(l.state || "unknown");
-  const line = '<tr>' +
+  return '<tr>' +
+    '<td><button data-expand="' + esc(l.name) + '">' + (expanded[l.name] ? "−" : "+") + '</button></td>' +
     '<td><a href="/listeners/' + encodeURIComponent(l.name) + '">' + esc(l.name) + '</a></td>' +
     '<td>' + esc(l.protocol) + '</td>' +
     '<td class="' + cls + '">' + esc(l.state) + '</td>' +
     '<td>' + esc(l.tun) + '</td>' +
     '<td>' + esc(l.gateway) + '</td>' +
     '<td>' + esc(l.network) + '</td>' +
-    '<td>' + esc(l.error) + '</td>' +
+    '<td class="st-error">' + esc(l.error) + '</td>' +
     '<td><button data-restart="' + esc(l.name) + '">restart</button>' +
+    '<button data-clientcfg="' + esc(l.name) + '">client config</button>' +
     '<button data-delete="' + esc(l.name) + '">delete</button></td>' +
     '</tr>';
-  return line;
+}
+
+function peersHTML(peers) {
+  if (!peers || peers.length === 0) {
+    return '<p class="muted">no peer data (this protocol does not report peers)</p>';
+  }
+  return '<table class="inner"><thead><tr><th>identity</th><th>address</th><th>state</th><th>last handshake</th></tr></thead><tbody>' +
+    peers.map(p => '<tr><td>' + esc(p.id) + '</td><td>' + esc(p.address) + '</td><td>' + esc(p.state) + '</td><td>' + esc(p.last_handshake) + '</td></tr>').join("") +
+    '</tbody></table>';
+}
+
+// loadDetail fills one expanded row: any just-generated client config, the
+// redacted config, any error, and the peer table. Every field is escaped;
+// `error` and config values are arbitrary text and this page holds the bearer
+// token.
+function loadDetail(name) {
+  const cell = document.querySelector('[data-detail="' + encodeURIComponent(name) + '"]');
+  if (!cell) return;
+  Promise.all([
+    api("/api/listeners/" + encodeURIComponent(name)),
+    api("/api/listeners/" + encodeURIComponent(name) + "/peers"),
+  ]).then(([cfgRes, peersRes]) => {
+    const cfg = cfgRes.body && cfgRes.body.config ? cfgRes.body.config : {};
+    const peers = peersRes.body && peersRes.body.peers ? peersRes.body.peers : [];
+    let html = "";
+    if (ccResults[name]) {
+      html = '<div class="section-title">client config</div>' + ccResults[name];
+    }
+    // body.error, not body.state.error: listenerResponse embeds
+    // supervisor.Status, so the JSON is flat — `state` is a string and `error`
+    // sits beside it. Reaching through `state` made this branch dead, and with
+    // no error column in the table above it a failed listener showed its error
+    // nowhere at all.
+    if (cfgRes.body && cfgRes.body.error) {
+      html += '<div class="section-title">error</div><p class="st-error">' + esc(cfgRes.body.error) + '</p>';
+    }
+    html += '<div class="section-title">config</div>' +
+      '<pre>' + esc(JSON.stringify(cfg, null, 2)) + '</pre>' +
+      '<div class="section-title">peers</div>' + peersHTML(peers);
+    cell.innerHTML = html;
+  }).catch(err => {
+    cell.innerHTML = '<p class="st-error">detail load failed: ' + esc(err) + '</p>';
+  });
+}
+
+// clientConfigHTML renders a generation response: the profile as a downloadable
+// JSON file, any companion files as download links, and the provisioning
+// notice. The profile contains the client's private key, which is why this is
+// inside the token-bearing detail view and not a static page.
+function clientConfigHTML(body, status) {
+  if (status >= 300) {
+    return '<p class="st-error">client config failed: ' + esc(typeof body === "string" ? body : JSON.stringify(body)) + '</p>';
+  }
+  const prof = body.profile || {};
+  const json = JSON.stringify(prof, null, 2);
+  const profHref = "data:application/json;charset=utf-8," + encodeURIComponent(json);
+  const files = (body.files || []).map(f =>
+    ' <a download="' + esc(f.name) + '" href="data:text/plain;charset=utf-8,' + encodeURIComponent(f.content) + '">' + esc(f.name) + '</a>').join("");
+  let html = '<p><a download="profile.json" href="' + profHref + '">profile.json</a> — dial it with <code>veepin connect &lt;name&gt;</code>' +
+    (body.peers_added ? ' &middot; <span class="muted">provisioned ' + body.peers_added + ' peer onto the listener (cold-rebuilt)</span>' : '') + '</p>';
+  if (files) {
+    html += '<p class="muted">companion files (place next to profile.json): ' + files + '</p>';
+  }
+  html += '<pre>' + esc(json) + '</pre>';
+  return html;
 }
 
 function refresh() {
   api("/api/listeners").then(({status, body}) => {
     const tbody = document.querySelector("#listeners tbody");
-    if (!body.listeners || body.listeners.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="8" class="muted">no listeners</td></tr>';
+    if (status >= 300) {
+      tbody.innerHTML = '<tr><td colspan="9" class="muted">' + esc(body) + '</td></tr>';
       return;
     }
-    tbody.innerHTML = body.listeners.map(renderRow).join("");
+    const list = body.listeners || [];
+    const filter = document.getElementById("filter").value;
+    const visible = list.filter(l => !filter || l.state === filter);
+    if (visible.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="9" class="muted">' +
+        (list.length ? "no listeners match the filter" : "no listeners") + '</td></tr>';
+      return;
+    }
+    tbody.innerHTML = visible.map(renderRow).join("") +
+      visible.filter(l => expanded[l.name]).map(l =>
+        '<tr class="detail-row"><td colspan="9" class="detail-cell" data-detail="' +
+        encodeURIComponent(l.name) + '">loading&hellip;</td></tr>').join("");
+    visible.filter(l => expanded[l.name]).forEach(loadDetail);
+  }).catch(err => {
+    const tbody = document.querySelector("#listeners tbody");
+    tbody.innerHTML = '<tr><td colspan="9" class="muted">load failed: ' + esc(err) + '</td></tr>';
+  });
+}
+
+function renderProfileRow(p) {
+  return '<tr>' +
+    '<td><a href="/profiles/' + encodeURIComponent(p.name) + '">' + esc(p.name) + '</a></td>' +
+    '<td>' + esc(p.protocol) + '</td>' +
+    '<td><button data-delprofile="' + esc(p.name) + '">delete</button></td>' +
+    '</tr>';
+}
+
+function refreshProfiles() {
+  api("/api/profiles").then(({status, body}) => {
+    const tbody = document.querySelector("#profiles tbody");
+    if (status >= 300) {
+      tbody.innerHTML = '<tr><td colspan="3" class="muted">' + esc(body) + '</td></tr>';
+      return;
+    }
+    const list = body.profiles || [];
+    if (list.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="3" class="muted">no profiles</td></tr>';
+      return;
+    }
+    tbody.innerHTML = list.map(renderProfileRow).join("");
+  }).catch(err => {
+    document.querySelector("#profiles tbody").innerHTML =
+      '<tr><td colspan="3" class="muted">load failed: ' + esc(err) + '</td></tr>';
+  });
+}
+
+function refreshHealth() {
+  api("/api/health").then(({status, body}) => {
+    const el = document.getElementById("health");
+    if (status >= 300) {
+      el.textContent = "status: " + (typeof body === "string" ? body : "unavailable");
+      return;
+    }
+    el.textContent = "status: " + body.status + " · uptime " +
+      Math.floor((body.uptime || 0) / 60) + "m";
+  }).catch(err => {
+    document.getElementById("health").textContent = "status: unavailable (" + err + ")";
+  });
+}
+
+// renderAuditRow: the outcome column marks a failed mutation in red so a
+// failure is visible in the fleet's recent activity, not just in the error
+// state of one row.
+function renderAuditRow(e) {
+  const oc = e.outcome === "ok" ? "" : " st-error";
+  return '<tr><td>' + esc(e.time) + '</td><td>' + esc(e.action) + '</td><td>' + esc(e.name) +
+    '</td><td class="' + oc + '">' + esc(e.outcome) + '</td></tr>';
+}
+
+function refreshAudit() {
+  api("/api/audit").then(({status, body}) => {
+    const tbody = document.querySelector("#audit tbody");
+    if (status >= 300) {
+      tbody.innerHTML = '<tr><td colspan="4" class="muted">' + esc(body) + '</td></tr>';
+      return;
+    }
+    const events = body.events || [];
+    if (events.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="4" class="muted">no activity yet</td></tr>';
+      return;
+    }
+    tbody.innerHTML = events.map(renderAuditRow).join("");
+  }).catch(err => {
+    document.querySelector("#audit tbody").innerHTML =
+      '<tr><td colspan="4" class="muted">load failed: ' + esc(err) + '</td></tr>';
   });
 }
 
 document.addEventListener("click", e => {
-  const name = e.target.dataset.restart;
+  const name = e.target.dataset.expand;
   if (name !== undefined) {
-    api("/api/listeners/" + encodeURIComponent(name) + "/restart", {method: "POST"})
-      .then(() => refresh());
+    expanded[name] = !expanded[name];
+    refresh();
+  }
+  const restart = e.target.dataset.restart;
+  if (restart !== undefined) {
+    api("/api/listeners/" + encodeURIComponent(restart) + "/restart", {method: "POST"})
+      .then(({status, body}) => {
+        if (status >= 300) showBanner(document.getElementById("banner"), "restart " + restart + " failed: " + (typeof body === "string" ? body : JSON.stringify(body)));
+        else refresh();
+      })
+      .catch(err => showBanner(document.getElementById("banner"), "restart " + restart + " failed: " + err));
   }
   const delName = e.target.dataset.delete;
   if (delName !== undefined) {
     if (!confirm("delete listener " + delName + "?")) return;
     api("/api/listeners/" + encodeURIComponent(delName), {method: "DELETE"})
-      .then(() => refresh());
+      .then(({status, body}) => {
+        if (status >= 300) showBanner(document.getElementById("banner"), "delete " + delName + " failed: " + (typeof body === "string" ? body : JSON.stringify(body)));
+        else refresh();
+      })
+      .catch(err => showBanner(document.getElementById("banner"), "delete " + delName + " failed: " + err));
+  }
+  const ccName = e.target.dataset.clientcfg;
+  if (ccName !== undefined) {
+    // The endpoint is the one thing generation cannot know: the listener config
+    // does not carry its own public hostname.
+    const endpoint = window.prompt("Server address clients dial (host[:port]):", "");
+    if (endpoint === null) return;
+    api("/api/listeners/" + encodeURIComponent(ccName) + "/client-config",
+        {method: "POST", body: {endpoint}})
+      .then(({status, body}) => {
+        if (status >= 300) {
+          showBanner(document.getElementById("banner"), "client config failed: " + (typeof body === "string" ? body : JSON.stringify(body)));
+          return;
+        }
+        ccResults[ccName] = clientConfigHTML(body, status);
+        expanded[ccName] = true;
+        refresh();
+      })
+      .catch(err => showBanner(document.getElementById("banner"), "client config failed: " + err));
+  }
+  const delProfile = e.target.dataset.delprofile;
+  if (delProfile !== undefined) {
+    if (!confirm("delete profile " + delProfile + "?")) return;
+    api("/api/profiles/" + encodeURIComponent(delProfile), {method: "DELETE"})
+      .then(({status, body}) => {
+        if (status >= 300) showBanner(document.getElementById("banner"), "delete profile " + delProfile + " failed: " + (typeof body === "string" ? body : JSON.stringify(body)));
+        else refreshProfiles();
+      })
+      .catch(err => showBanner(document.getElementById("banner"), "delete profile " + delProfile + " failed: " + err));
   }
 });
 
+document.getElementById("filter").addEventListener("change", refresh);
+
 refresh();
+refreshProfiles();
+refreshHealth();
+// On the same interval as the rest: a management plane that has died is the one
+// thing this header exists to show, and fetching it once froze the uptime at
+// page load and left a dead plane looking healthy.
+setInterval(refreshHealth, 5000);
+refreshAudit();
 setInterval(refresh, 5000);
+setInterval(refreshProfiles, 5000);
+setInterval(refreshAudit, 5000);
 </script>
 </body>
 </html>

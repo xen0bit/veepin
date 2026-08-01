@@ -232,6 +232,54 @@ func TestTeardownEmptyConfigIsNoOp(t *testing.T) {
 	}
 }
 
+// TestTeardownStateRemovesWhatTheConfigNoLongerSays: the persisted State, not
+// the current config, is what teardown removes. A supervisor listener whose
+// config was edited after Apply (WAN dropped, address changed) or whose TUN
+// name the kernel assigned still has its originally-installed rules taken out
+// when it stops. This is the regression pin for the supervisor's no-op teardown:
+// re-deriving from a config with nil Network made Teardown return early and
+// leave every tagged rule behind.
+func TestTeardownStateRemovesWhatTheConfigNoLongerSays(t *testing.T) {
+	rec := &recCommander{}
+	st := State{TUNName: "tun3", WAN: "eth0", Network: "10.10.0.0/24"}
+	if err := TeardownStateWithName("site-a", st, rec.run); err != nil {
+		t.Fatalf("TeardownState: %v", err)
+	}
+	wantTag := "veepin:site-a"
+	var got []string
+	for _, c := range rec.logs {
+		got = append(got, string(c))
+	}
+	if len(got) == 0 {
+		t.Fatal("no teardown commands issued for a recorded State")
+	}
+	for _, want := range []string{
+		"-o eth0", "-s 10.10.0.0/24", "-i tun3", "-o tun3", wantTag,
+	} {
+		if !strings.Contains(strings.Join(got, " "), want) {
+			t.Errorf("teardown from State omitted %q; ran:\n%s", want, strings.Join(got, "\n"))
+		}
+	}
+}
+
+// TestTeardownStateEmptyIsNoOp pins that a State with no WAN or no Network
+// removes nothing -- the layer-2 path and the no-WAN path both land here, and
+// the supervisor calls teardown unconditionally.
+func TestTeardownStateEmptyIsNoOp(t *testing.T) {
+	for _, st := range []State{
+		{TUNName: "tap0", Network: ""},                    // layer-2
+		{TUNName: "tun0", WAN: "", Network: "10.0.0.0/8"}, // no WAN
+	} {
+		rec := &recCommander{}
+		if err := TeardownStateWithName("x", st, rec.run); err != nil {
+			t.Errorf("TeardownState: %v", err)
+		}
+		if len(rec.logs) != 0 {
+			t.Errorf("expected no ops for %+v, got:\n%s", st, rec.logs)
+		}
+	}
+}
+
 // TestMaskBitsHandlesALayer2Server is the lifted regression test from
 // cmd/veepin/serve_layer2_test.go: a layer-2 server has nil Network, maskBits
 // must not deref it.

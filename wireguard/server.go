@@ -2,6 +2,7 @@ package wireguard
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -65,11 +66,14 @@ type ServerConfig struct {
 }
 
 // ServerPeer is one client the server will accept: its static public key, the
-// inner addresses it may use, and an optional preshared key.
+// inner addresses it may use, and an optional preshared key. The JSON tags are
+// the on-disk shape of the OptServerPeers option: the management plane appends
+// a peer to that array when it provisions a client config, and the parse below
+// reads the same shape back.
 type ServerPeer struct {
-	PublicKey    string   // the client's static public key, base64 (required)
-	PresharedKey string   // optional symmetric key, base64
-	AllowedIPs   []string // inner destinations routed to and accepted from this peer
+	PublicKey    string   `json:"public-key"`              // the client's static public key, base64 (required)
+	PresharedKey string   `json:"preshared-key,omitempty"` // optional symmetric key, base64
+	AllowedIPs   []string `json:"allowed-ips"`             // inner destinations routed to and accepted from this peer
 }
 
 // Server option keys for client.NewServer("wireguard", opts).
@@ -84,6 +88,7 @@ const (
 	OptServerPeerPublicKey    = "peer-public-key"    // a single peer's static public key, base64
 	OptServerPeerPresharedKey = "peer-preshared-key" // that peer's preshared key, base64 (optional)
 	OptServerPeerAllowedIPs   = "peer-allowed-ips"   // that peer's allowed IPs, comma-separated CIDRs
+	OptServerPeers            = "peers"              // additional peers as a JSON array of ServerPeer
 	OptServerShape            = "shape"              // per-flow downstream shaping budget in bytes (0 = off)
 )
 
@@ -106,6 +111,9 @@ func init() {
 		{Key: OptServerPeerPublicKey, Kind: client.OptStr, Help: "a single peer's static public key, base64"},
 		{Key: OptServerPeerPresharedKey, Kind: client.OptStr, Secret: true, Help: "the -peer-public-key peer's preshared key, base64 (optional)"},
 		{Key: OptServerPeerAllowedIPs, Kind: client.OptCommaList, Help: "the -peer-public-key peer's allowed IPs, comma-separated CIDRs"},
+		// OptStr, not OptCommaList: the value is a JSON document, and a
+		// comma-list editor in the panel would split it on the commas inside it.
+		{Key: OptServerPeers, Kind: client.OptStr, Help: "additional peers as a JSON array, e.g. [{\"public-key\":\"...\",\"allowed-ips\":[\"10.0.0.2/32\"]}] (managed by client-config generation)"},
 		{Key: OptServerShape, Kind: client.OptInt, Default: "0", Help: "per-flow downstream shaping budget in bytes (0 = off)"},
 	})
 }
@@ -166,8 +174,18 @@ func ServerConfigFromOptions(opts map[string]string) (ServerConfig, error) {
 		sc.Peers = append(sc.Peers, ServerPeer{
 			PublicKey:    v,
 			PresharedKey: opts[OptServerPeerPresharedKey],
-			AllowedIPs:   splitList(opts[OptServerPeerAllowedIPs]),
+			AllowedIPs:   SplitList(opts[OptServerPeerAllowedIPs]),
 		})
+	}
+	// The management plane appends provisioned clients here as a JSON array; a
+	// wg-quick -config file's peers (above) and these merge, so a listener can
+	// mix a static file with dynamically provisioned clients.
+	if v := opts[OptServerPeers]; v != "" {
+		var extra []ServerPeer
+		if err := json.Unmarshal([]byte(v), &extra); err != nil {
+			return sc, fmt.Errorf("wireguard: invalid %s JSON: %w", OptServerPeers, err)
+		}
+		sc.Peers = append(sc.Peers, extra...)
 	}
 	sc.ListenIP = opts[OptServerListenIP]
 	sc.Logger = log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)

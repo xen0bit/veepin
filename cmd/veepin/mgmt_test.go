@@ -133,6 +133,89 @@ func TestMgmtRequiresToken(t *testing.T) {
 
 // TestMgmtUnknownSubcommandErrors: an unknown subcommand reports its name
 // rather than silently doing nothing.
+// TestMgmtTokenFromFile: VEEPIN_MGMT_TOKEN unset falls back to the token file
+// the supervisor mints, so `sudo veepin mgmt ls` works with no export. The
+// explicit environment variable wins when both are present.
+func TestMgmtTokenFromFile(t *testing.T) {
+	t.Setenv("VEEPIN_MGMT_URL", "http://127.0.0.1:9")
+	file := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(file, []byte("from-file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("VEEPIN_MGMT_TOKEN", "")
+	t.Setenv("VEEPIN_MGMT_TOKEN_FILE", file)
+	c, err := newMgmtClient()
+	if err != nil {
+		t.Fatalf("newMgmtClient with a token file: %v", err)
+	}
+	if c.token != "from-file" {
+		t.Errorf("token = %q, want from-file", c.token)
+	}
+
+	t.Setenv("VEEPIN_MGMT_TOKEN", "from-env")
+	c, err = newMgmtClient()
+	if err != nil {
+		t.Fatalf("newMgmtClient with env token: %v", err)
+	}
+	if c.token != "from-env" {
+		t.Errorf("token = %q, want from-env (env must win)", c.token)
+	}
+}
+
+// TestMgmtClientConfigWritesBundle drives the client-config CLI against a real
+// mgmt server: the generated profile.json lands in -o with the listener's
+// secrets filled in, so an operator can hand it straight to `veepin connect`.
+func TestMgmtClientConfigWritesBundle(t *testing.T) {
+	dir := t.TempDir()
+	cfg := supervisor.ListenerConfig{Name: "site-a", Protocol: "toy", Enabled: true,
+		Options: map[string]string{"user": "alice", "secret": "s3cret"}}
+	body, _ := json.Marshal(cfg)
+	_ = os.WriteFile(filepath.Join(dir, "site-a.json"), body, 0o600)
+	mgr := &cliFakeMgr{statuses: map[string]supervisor.Status{}}
+	srv, err := mgmt.NewServer(dir, mgr, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatalf("mgmt.NewServer: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(func() { _ = srv.Close(); ts.Close() })
+	t.Setenv("VEEPIN_MGMT_URL", ts.URL)
+	t.Setenv("VEEPIN_MGMT_TOKEN", string(srv.Token()))
+
+	outDir := t.TempDir()
+	if err := runMgmt([]string{"client-config", "site-a", "-endpoint", "vpn.example.com", "-o", outDir}); err != nil {
+		t.Fatalf("client-config: %v", err)
+	}
+	profBody, err := os.ReadFile(filepath.Join(outDir, "profile.json"))
+	if err != nil {
+		t.Fatalf("no profile.json written: %v", err)
+	}
+	var prof map[string]any
+	if err := json.Unmarshal(profBody, &prof); err != nil {
+		t.Fatalf("profile.json not JSON: %v", err)
+	}
+	opts, _ := prof["options"].(map[string]any)
+	if opts["server"] != "vpn.example.com" {
+		t.Errorf("endpoint did not reach the profile: %+v", opts)
+	}
+	if opts["secret"] != "s3cret" {
+		t.Errorf("listener secret did not carry over: %+v", opts)
+	}
+	if strings.Contains(string(profBody), "<redacted>") {
+		t.Errorf("written profile contains a redaction placeholder: %s", profBody)
+	}
+}
+
+// TestMgmtRequiresTokenErrorsWithoutBoth: with neither env token nor a readable
+// token file, the CLI refuses to start rather than sending an unauthenticated
+// request that leaks its existence.
+func TestMgmtRequiresTokenErrorsWithoutBoth(t *testing.T) {
+	t.Setenv("VEEPIN_MGMT_TOKEN", "")
+	t.Setenv("VEEPIN_MGMT_TOKEN_FILE", filepath.Join(t.TempDir(), "missing"))
+	if _, err := newMgmtClient(); err == nil {
+		t.Errorf("newMgmtClient succeeded without any token source")
+	}
+}
+
 func TestMgmtUnknownSubcommandErrors(t *testing.T) {
 	if err := runMgmt([]string{"totally-unknown"}); err == nil {
 		t.Errorf("unknown subcommand accepted")

@@ -7,25 +7,31 @@ package main
 //
 // Subcommands:
 //
-//	ls          list saved profiles
-//	add         create a profile from stdin
-//	rm <name>   delete a profile
+//	ls                       list saved profiles
+//	add <name> <protocol>    create a profile from connect flags (or stdin JSON)
+//	show <name>              print a profile (secrets redacted)
+//	rm <name>                delete a profile
 //
 // VEEPIN_PROFILE_DIR overrides the directory, which is what the tests use and
 // what lets a profile set live somewhere other than the user's config home.
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"slices"
+	"strings"
 
+	"github.com/xen0bit/veepin/client"
+	"github.com/xen0bit/veepin/internal/confstore"
 	"github.com/xen0bit/veepin/internal/profile"
 )
 
 func runProfile(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: veepin profile <subcommand>\nsubcommands: ls, add, rm")
+		return fmt.Errorf("usage: veepin profile <subcommand>\nsubcommands: ls, add, show, rm")
 	}
 	sub := args[0]
 	rest := args[1:]
@@ -34,6 +40,8 @@ func runProfile(args []string) error {
 		return profileList(rest)
 	case "add":
 		return profileAdd(rest)
+	case "show":
+		return profileShow(rest)
 	case "rm":
 		return profileRm(rest)
 	default:
@@ -74,6 +82,16 @@ func profileAdd(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	// Flag-driven form: `profile add <name> <protocol> [-flag ...]`. The
+	// per-protocol flags are bound and parsed below, reusing connectFlags so the
+	// profile takes exactly what `veepin connect <protocol>` takes.
+	if fs.NArg() >= 2 {
+		return profileAddFlags(fs.Arg(0), fs.Arg(1), fs.Args()[2:])
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: veepin profile add <name> <protocol> [flags]\n" +
+			"       (or: veepin profile add < a-profile.json)")
+	}
 	body, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		return err
@@ -96,6 +114,79 @@ func profileAdd(args []string) error {
 	}
 	fmt.Printf("saved %q (protocol %s)\n", cfg.Name, cfg.Protocol)
 	return nil
+}
+
+// profileAddFlags is the flag-driven create: the protocol's own connect flags
+// become the profile's options, so `veepin profile add home ikev2 -gateway
+// vpn.example.com -psk ...` reads exactly like `veepin connect ikev2 ...`.
+func profileAddFlags(name, protocol string, args []string) error {
+	if !confstore.ValidName(name) {
+		return fmt.Errorf("profile add: name %q must match %s", name, confstore.NameGrammar())
+	}
+	if !slices.Contains(client.Protocols(), protocol) {
+		return fmt.Errorf("profile add: unknown protocol %q (available: %s)",
+			protocol, strings.Join(client.Protocols(), ", "))
+	}
+	fs := flag.NewFlagSet("profile add "+name, flag.ContinueOnError)
+	options, err := connectFlags(protocol, fs)
+	if err != nil {
+		return err
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("profile add: unexpected argument %q", fs.Arg(0))
+	}
+	cfg := profile.Config{Name: name, Protocol: protocol, Options: options()}
+	dir, err := profileDir()
+	if err != nil {
+		return err
+	}
+	if err := profile.Write(dir, cfg); err != nil {
+		return err
+	}
+	fmt.Printf("saved %q (protocol %s)\n", name, protocol)
+	return nil
+}
+
+func profileShow(args []string) error {
+	// The -secrets flag may precede or follow the name: Go's flag package stops
+	// at the first positional, so pull it out first rather than document an
+	// order requirement.
+	showSecrets := false
+	rest := make([]string, 0, len(args))
+	for _, a := range args {
+		if a == "-secrets" || a == "--secrets" {
+			showSecrets = true
+			continue
+		}
+		rest = append(rest, a)
+	}
+	if len(rest) != 1 {
+		return fmt.Errorf("usage: veepin profile show <name> [-secrets]")
+	}
+	dir, err := profileDir()
+	if err != nil {
+		return err
+	}
+	cfg, err := profile.ParseFile(profile.Path(dir, rest[0]))
+	if err != nil {
+		return err
+	}
+	// Redact secrets unless asked not to: a PSK or password echoed to the
+	// terminal (and shell history) is a leak vector with no upside, since the
+	// config file itself is mode 0600 on the operator's own disk.
+	if !showSecrets {
+		specs, _ := client.ClientOptsFor(cfg.Protocol)
+		cfg.Options = client.Redact(specs, cfg.Options)
+	}
+	// SetEscapeHTML(false) keeps the "<redacted>" sentinel readable, the same
+	// choice the management API's writeJSON makes for the same reason.
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	return enc.Encode(cfg)
 }
 
 func profileRm(args []string) error {
