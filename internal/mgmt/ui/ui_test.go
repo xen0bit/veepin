@@ -378,6 +378,24 @@ func TestUnknownPathReturns404(t *testing.T) {
 	}
 }
 
+// TestDetailLoadIsCalledWithTheName: refresh() drives loadDetail through
+// Array.prototype.forEach, which passes the ELEMENT to the callback, so a bare
+// `forEach(loadDetail)` hands loadDetail a listener OBJECT whose
+// encodeURIComponent is the literal "[object Object]" — which matches no
+// data-detail cell and leaves every expanded row stuck on "loading…". The
+// callback must pick out the listener's name. The browser suite caught this;
+// this guard keeps the source shape from regressing it.
+func TestDetailLoadIsCalledWithTheName(t *testing.T) {
+	body, err := templatesFS.ReadFile("templates/dashboard.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), ".forEach(loadDetail)") {
+		t.Error("dashboard.html calls loadDetail with the listener object; " +
+			"encodeURIComponent(obj) matches no data-detail cell and the detail view never renders")
+	}
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a
