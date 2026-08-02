@@ -22,7 +22,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
+
+// mgmtHTTPTimeout bounds every request the management CLI makes. The API's
+// mutation endpoints can block on a rebuild that waits out the supervisor's
+// 5-second close grace, so a wedged listener should cost the operator a clear
+// timeout error, not a CLI that hangs until they kill it.
+const mgmtHTTPTimeout = 30 * time.Second
 
 // runMgmt dispatches to a subcommand. With no subcommand it prints usage.
 func runMgmt(args []string) error {
@@ -35,7 +42,7 @@ subcommands:
   add                         create a listener from a JSON config on stdin [-json]
   edit <name>                 PATCH <name> from a partial JSON config on stdin [-json]
   restart <name>              rebuild <name> from its on-disk config [-json]
-  rm <name>                   stop and delete <name> [-json]
+  rm <name>                   stop and delete <name> [-y] [-json]
   audit                       recent management-plane activity [-json]
   client-config <name>        generate a client profile for a listener [-endpoint host[:port]] [-set k=v] [-o dir] [-json]
 environment:
@@ -75,6 +82,7 @@ environment:
 type mgmtClient struct {
 	base  string
 	token string
+	http  *http.Client
 }
 
 func newMgmtClient() (*mgmtClient, error) {
@@ -101,7 +109,11 @@ func newMgmtClient() (*mgmtClient, error) {
 		return nil, fmt.Errorf("mgmt: VEEPIN_MGMT_TOKEN is required (export it, or run as a user " +
 			"who can read /etc/veepin/mgmt/token)")
 	}
-	return &mgmtClient{base: strings.TrimRight(base, "/"), token: tok}, nil
+	return &mgmtClient{
+		base:  strings.TrimRight(base, "/"),
+		token: tok,
+		http:  &http.Client{Timeout: mgmtHTTPTimeout},
+	}, nil
 }
 
 // do sends a request and returns the parsed body alongside the HTTP status. On
@@ -115,7 +127,7 @@ func (c *mgmtClient) do(method, path string, body io.Reader) (any, error) {
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -129,6 +141,19 @@ func (c *mgmtClient) do(method, path string, body io.Reader) (any, error) {
 		_ = json.Unmarshal(raw, &v)
 	}
 	return v, nil
+}
+
+// buildErrorOf digs the API's "accepted, partially applied" marker out of a
+// decoded response body. PATCH /api/listeners/{name} answers 202 with a
+// build_error field when the config was saved but the cold rebuild failed; the
+// caller must surface it as the failure it is, not swallow it as a 2xx success.
+func buildErrorOf(v any) string {
+	if m, ok := v.(map[string]any); ok {
+		if be, ok := m["build_error"].(string); ok && be != "" {
+			return be
+		}
+	}
+	return ""
 }
 
 // prettyEncode pretty-prints v to the writer.
@@ -178,6 +203,28 @@ func splitPositional(args []string) (string, []string) {
 		}
 	}
 	return "", args
+}
+
+// confirmDelete gates a destructive subcommand (mgmt rm, profile rm) on an
+// interactive yes. A pipe or redirection means a script, and a script that got
+// this far has already decided -- prompting would hang it -- so non-terminal
+// stdin proceeds without asking. At a terminal, only an explicit yes answers
+// the prompt. force (the -y flag) skips the question everywhere.
+func confirmDelete(what string, force bool) bool {
+	if force {
+		return true
+	}
+	fi, err := os.Stdin.Stat()
+	if err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+		return true
+	}
+	fmt.Fprintf(os.Stderr, "%s? [y/N] ", what)
+	var ans string
+	if _, err := fmt.Fscanln(os.Stdin, &ans); err != nil {
+		return false
+	}
+	ans = strings.ToLower(strings.TrimSpace(ans))
+	return ans == "y" || ans == "yes"
 }
 
 func mgmtList(args []string) error {
@@ -319,6 +366,15 @@ func mgmtEdit(args []string) error {
 	if err != nil {
 		return err
 	}
+	// The API answers 202 with build_error when the config was saved but the
+	// rebuild failed. The listener is down and the operator has to act; the
+	// response still prints (so a -json script sees the envelope) but the CLI
+	// must not report a success it cannot stand behind.
+	if be := buildErrorOf(v); be != "" {
+		mgmtPrint(jsonOut, v)
+		return fmt.Errorf("mgmt edit %s: config saved, but the rebuild failed: %s (retry with `veepin mgmt restart %s`)",
+			name, be, name)
+	}
 	mgmtPrint(jsonOut, v)
 	return nil
 }
@@ -347,13 +403,29 @@ func mgmtRestart(args []string) error {
 
 func mgmtRm(args []string) error {
 	name, rest := splitPositional(args)
+	// -y is read positionally rather than registered with the flag set: Go's
+	// flag package stops at the first positional, so a -y AFTER the name would
+	// otherwise be silently unparsed, and a -y BEFORE it would be rejected as
+	// undefined by mgmtFlags. Pull it out of the remainder before parsing.
+	yes := false
+	filtered := make([]string, 0, len(rest))
+	for _, a := range rest {
+		if a == "-y" || a == "--y" {
+			yes = true
+			continue
+		}
+		filtered = append(filtered, a)
+	}
 	fs := flag.NewFlagSet("mgmt rm", flag.ContinueOnError)
-	jsonOut, err := mgmtFlags(fs, rest)
+	jsonOut, err := mgmtFlags(fs, filtered)
 	if err != nil {
 		return err
 	}
 	if name == "" {
-		return fmt.Errorf("usage: veepin mgmt rm <name> [-json]")
+		return fmt.Errorf("usage: veepin mgmt rm <name> [-y] [-json]")
+	}
+	if !confirmDelete("delete listener "+name, yes) {
+		return fmt.Errorf("mgmt rm %s: cancelled", name)
 	}
 	c, err := newMgmtClient()
 	if err != nil {
@@ -429,6 +501,13 @@ func mgmtClientConfig(args []string) error {
 // writeClientConfigBundle writes the generated profile.json and its companion
 // files into dir. Companion names come from the server as base names, and are
 // re-based defensively here before they become paths.
+//
+// The directory is filled all-or-nothing: every file is staged into a sibling
+// temp directory and moved in by rename, and a failure anywhere after the first
+// write takes the already-installed files back out. Writing profile.json first
+// and then the companions in place -- the earlier shape -- left a half-bundle
+// (profile without CA) whenever a companion write failed, which an operator
+// then handed to `veepin connect` and got a profile that pointed at nothing.
 func writeClientConfigBundle(dir string, v any) error {
 	m, ok := v.(map[string]any)
 	if !ok {
@@ -438,19 +517,12 @@ func writeClientConfigBundle(dir string, v any) error {
 	if !ok {
 		return fmt.Errorf("mgmt: response has no profile")
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	body, err := json.MarshalIndent(prof, "", "  ")
-	if err != nil {
-		return err
-	}
-	profilePath := filepath.Join(dir, "profile.json")
-	if err := os.WriteFile(profilePath, body, 0o600); err != nil {
-		return err
-	}
-	if files, ok := m["files"].([]any); ok {
-		for _, f := range files {
+	// Collect everything into memory before touching the directory, so no
+	// marshalling or shape failure can leave files behind either.
+	type bundleFile struct{ name, content string }
+	var files []bundleFile
+	if list, ok := m["files"].([]any); ok {
+		for _, f := range list {
 			fm, ok := f.(map[string]any)
 			if !ok {
 				continue
@@ -460,11 +532,48 @@ func writeClientConfigBundle(dir string, v any) error {
 			if fname == "" {
 				continue
 			}
-			if err := os.WriteFile(filepath.Join(dir, filepath.Base(fname)), []byte(content), 0o600); err != nil {
-				return err
-			}
+			files = append(files, bundleFile{name: filepath.Base(fname), content: content})
 		}
 	}
-	fmt.Printf("wrote %s (and any companion files)\n", profilePath)
+	profBody, err := json.MarshalIndent(prof, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	staging, err := os.MkdirTemp(filepath.Dir(dir), ".client-config-*")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(staging) }()
+	installed := []string{}
+	rollback := func() {
+		for _, n := range installed {
+			_ = os.Remove(filepath.Join(dir, n))
+		}
+	}
+	install := func(name string, body []byte) error {
+		staged := filepath.Join(staging, name)
+		if err := os.WriteFile(staged, body, 0o600); err != nil {
+			return err
+		}
+		if err := os.Rename(staged, filepath.Join(dir, name)); err != nil {
+			return err
+		}
+		installed = append(installed, name)
+		return nil
+	}
+	if err := install("profile.json", profBody); err != nil {
+		rollback()
+		return err
+	}
+	for _, f := range files {
+		if err := install(f.name, []byte(f.content)); err != nil {
+			rollback()
+			return fmt.Errorf("mgmt: writing %s: %w", f.name, err)
+		}
+	}
+	fmt.Printf("wrote %s (and any companion files)\n", filepath.Join(dir, "profile.json"))
 	return nil
 }

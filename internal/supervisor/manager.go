@@ -70,6 +70,14 @@ type running struct {
 	since    time.Time
 	serveErr error
 	done     chan struct{}
+
+	// buildMu serializes stop/start on this handle. A rebuild is stop-then-start
+	// and the whole sequence takes the lock, so two concurrent rebuilds (an API
+	// restart racing a SIGHUP reconcile) cannot interleave a Close with a fresh
+	// ListenAndServe on the same handle. Rebuild releases Manager.mu around the
+	// rebuild so the "building" state is observable and a slow build does not
+	// freeze every other listener's status read; buildMu is what makes that safe.
+	buildMu sync.Mutex
 }
 
 // setState publishes a terminal build outcome (disabled, or error) on r.
@@ -178,10 +186,12 @@ func hostnetStatePath(dir, name string) string {
 // TeardownState treats it as a no-op, so the file lifecycle is uniform. Failure
 // to persist is logged, not fatal -- the listener is up and serving either way.
 //
-// Written through a temp file and renamed, like every other config this daemon
-// owns. os.WriteFile truncates in place, so a crash between truncate and write
-// leaves valid-length garbage that loadHostnetState cannot parse, which drops
-// teardown onto the tag-scan recovery path for no reason.
+// Written through a temp file, synced, and renamed, like every other config
+// this daemon owns. os.WriteFile truncates in place, so a crash between
+// truncate and write leaves valid-length garbage that loadHostnetState cannot
+// parse, which drops teardown onto the tag-scan recovery path for no reason;
+// and skipping the sync entirely leaves the same hazard one rename later, on
+// filesystems whose rename is not ordered behind the data.
 func (m *Manager) persistHostnetState(name string, st hostnet.State) {
 	body, err := json.Marshal(st)
 	if err != nil {
@@ -194,8 +204,28 @@ func (m *Manager) persistHostnetState(name string, st hostnet.State) {
 		return
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, body, 0o600); err != nil {
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
 		m.log.Printf("supervisor: %s: writing host state: %v", name, err)
+		return
+	}
+	// The temp file is never kept past its rename; if anything below fails, the
+	// only harm is a stale temp that a later persist truncates again.
+	if _, err := f.Write(body); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		m.log.Printf("supervisor: %s: writing host state: %v", name, err)
+		return
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		m.log.Printf("supervisor: %s: syncing host state: %v", name, err)
+		return
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		m.log.Printf("supervisor: %s: closing host state: %v", name, err)
 		return
 	}
 	if err := os.Rename(tmp, path); err != nil {
@@ -373,22 +403,41 @@ func (m *Manager) All() []Status {
 // Rebuild forces the named listener back to build then ListenAndServe, the
 // operation triggered by a config edit. Safe to call against a stopped or
 // errored listener -- it tears down what is there, if anything, and rebuilds.
+//
+// Manager.mu is released for the rebuild itself: holding it across a slow
+// construction would freeze every other listener's status read and, worse,
+// make the "building" state unobservable through the API (Status needs the
+// lock to look the handle up). buildMu on the handle serializes the rebuild
+// against a concurrent SIGHUP reconcile, and the handle is put back if a
+// concurrent Apply stopped and removed it while we were building.
 func (m *Manager) Rebuild(name string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	r, ok := m.listeners[name]
 	if !ok {
+		m.mu.Unlock()
 		return fmt.Errorf("supervisor: no listener named %q", name)
 	}
 	cfgs, err := LoadDir(m.dir)
 	if err != nil {
+		m.mu.Unlock()
 		return err
 	}
 	cfg, ok := cfgs[name]
 	if !ok {
+		m.mu.Unlock()
 		return fmt.Errorf("supervisor: %q has no on-disk config; DeleteListenerFile removed it", name)
 	}
-	return m.rebuildLocked(r, cfg)
+	m.mu.Unlock()
+	err = m.rebuildLocked(r, cfg)
+	// A SIGHUP reconcile that ran while we were rebuilding may have stopped
+	// this listener and dropped it from the map; a listener that just came up
+	// must not be left running untracked.
+	m.mu.Lock()
+	if _, still := m.listeners[name]; !still {
+		m.listeners[name] = r
+	}
+	m.mu.Unlock()
+	return err
 }
 
 // Stop tears down a listener and drops it from the live set. Its config file
@@ -425,20 +474,35 @@ func (m *Manager) Close() error {
 	return firstErr
 }
 
-// Server returns the live *client.Server for a running listener, so the
-// management API can type-assert it against optional interfaces such as
-// client.PeerDescriber. Returns nil if the listener is not running or does
-// not exist.
-func (m *Manager) Server(name string) client.Server {
+// Peers returns the live peer list for a running listener whose protocol
+// implements client.PeerDescriber. exists is false when the listener is not
+// tracked or is not running (its server handle is nil); a true exists with a
+// nil slice means the protocol does not describe peers, which the caller must
+// render as "no peer feature" rather than "no peers".
+//
+// The PeerDescriber call runs while holding r.mu. That ordering is the point:
+// stopLocked clears r.srv and spawns srv.Close while holding r.mu, so a
+// concurrent rebuild or stop blocks on r.mu before it can tear the server down
+// underneath this call. Reading the live server through Server() and calling
+// Peers() afterward released r.mu first, which left the raw handle open to a
+// use-after-close exactly when a panel poll raced a rekey or a rebuild.
+func (m *Manager) Peers(name string) ([]client.PeerInfo, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	r, ok := m.listeners[name]
 	if !ok {
-		return nil
+		return nil, false
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.srv
+	if r.srv == nil {
+		return nil, false
+	}
+	pd, ok := r.srv.(client.PeerDescriber)
+	if !ok {
+		return nil, true
+	}
+	return pd.Peers(), true
 }
 
 // build allocates a fresh handle and starts it. The handle is returned whether
@@ -469,6 +533,15 @@ func (m *Manager) start(r *running, cfg ListenerConfig) error {
 		r.setState(cfg, "disabled", nil)
 		return nil
 	}
+	// Published before construction so a slow build is visible rather than a
+	// stale "running" (or a pre-rebuild "building") that makes the panel look
+	// frozen. Construction can block on a TUN open and a syscall or two of
+	// iptables, which is exactly the moment an operator staring at the panel
+	// wants to know something is happening.
+	r.mu.Lock()
+	r.state = "building"
+	r.since = time.Now()
+	r.mu.Unlock()
 	srv, err := m.ctor(cfg.Protocol, cfg.Options)
 	if err != nil {
 		err = fmt.Errorf("constructing %s server: %w", cfg.Protocol, err)
@@ -522,10 +595,23 @@ func (m *Manager) start(r *running, cfg ListenerConfig) error {
 // It re-uses the running handle so external references to the listener (a status
 // read that captured the pointer) keep referring to the same *running. On
 // failure start leaves r in "error" state with the reason, so the next Apply
-// retries it and the management API reports why. Manager.mu is held by the
-// caller.
+// retries it and the management API reports why.
+//
+// Called with Manager.mu held (Apply) or not (Rebuild); buildMu serializes the
+// two so a SIGHUP reconcile and an API restart cannot rebuild the same handle
+// concurrently.
 func (m *Manager) rebuildLocked(r *running, cfg ListenerConfig) error {
-	m.stopLocked(r)
+	r.buildMu.Lock()
+	defer r.buildMu.Unlock()
+	// Published before the stop so the whole stop-then-start sequence reads as
+	// one "building" phase to the panel. Without this the listener flashes
+	// "stopped" between the two halves, and a rebuild that takes a moment looks
+	// like the listener was taken down rather than being reconfigured.
+	r.mu.Lock()
+	r.state = "building"
+	r.since = time.Now()
+	r.mu.Unlock()
+	m.stopLockedInner(r)
 	return m.start(r, cfg)
 }
 
@@ -536,15 +622,16 @@ const stopGrace = 5 * time.Second
 
 // stopLocked closes the listener's server and waits for the goroutine to exit,
 // then tears down any host-networking rules it owned. Called under Manager.mu;
-// acquires r.mu.
+// acquires buildMu and r.mu. rebuildLocked calls stopLockedInner directly while
+// holding buildMu, so the whole stop-then-start stays one critical section.
 //
 // Both waits are bounded, and Close is called on a goroutine rather than inline,
-// because Close can block indefinitely. dataplane.TUN.Read is a raw blocking
-// read(2) on an fd the Go runtime does not poll, and TUN.Close is a raw close(2)
-// -- which on Linux does not wake a thread already blocked reading that fd. So a
-// protocol whose Close waits for its packet pump to finish (internal/toy does,
-// and the shape is common) does not return until a packet happens to arrive on
-// the interface, which on an idle tunnel may be never.
+// because Close can block. The once-central cause is fixed: dataplane's TUN fd
+// is held non-blocking and polled against a wake eventfd, so a Close waiting on
+// its packet pump unblocks instead of hanging on an idle tunnel. But Close can
+// still stall on any other blocking path a protocol owns (a wedged control
+// connection, a peer that never answers), and this package's job is that one
+// listener can never freeze the fleet.
 //
 // That is invisible to `veepin serve <proto>`: it calls Close and exits, and the
 // kernel cleans up. It is not invisible here. stopLocked runs under Manager.mu,
@@ -559,6 +646,13 @@ const stopGrace = 5 * time.Second
 // TUN read interruptible, which is a change to the allocation-guarded data path
 // and belongs on its own.
 func (m *Manager) stopLocked(r *running) {
+	r.buildMu.Lock()
+	defer r.buildMu.Unlock()
+	m.stopLockedInner(r)
+}
+
+// stopLockedInner is the teardown itself. Callers must hold r.buildMu.
+func (m *Manager) stopLockedInner(r *running) {
 	r.mu.Lock()
 	srv, done, cfg := r.srv, r.done, r.cfg
 	r.srv = nil
@@ -566,7 +660,13 @@ func (m *Manager) stopLocked(r *running) {
 	// after this point finds r.done no longer its own and leaves the state
 	// below alone.
 	r.done = nil
-	r.state = "stopped"
+	if r.state != "building" {
+		// A rebuild pre-sets "building" and then calls this; keeping it means
+		// the whole stop-then-start sequence reads as one "building" phase
+		// instead of flashing "stopped" during the (possibly slow) Close. Every
+		// other caller is a real stop, where "stopped" is the truth.
+		r.state = "stopped"
+	}
 	r.since = time.Now()
 	r.mu.Unlock()
 

@@ -163,6 +163,38 @@ func TestProfileRoutesCarryTheProfileEditHint(t *testing.T) {
 	}
 }
 
+// TestFormHidesRestartAndDeleteOnNewPages: restart and delete act on an
+// existing entity, so on the "new" pages both buttons would fire at a name that
+// has not been saved yet and 404. configureBody must hide them there; the
+// listener/profiles split alone is not enough (the listener "new" page used to
+// show both buttons).
+func TestFormHidesRestartAndDeleteOnNewPages(t *testing.T) {
+	body, err := templatesFS.ReadFile("templates/form.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(body)
+	if !strings.Contains(src, `document.getElementById("apply").style.display = (isProfile() || isNew) ? "none" : "";`) {
+		t.Errorf("form.html does not hide the restart button on new pages")
+	}
+	if !strings.Contains(src, `document.getElementById("delete").style.display = isNew ? "none" : "";`) {
+		t.Errorf("form.html does not hide the delete button on new pages")
+	}
+}
+
+// TestDashboardRestartConfirms: a restart drops every connected client (the
+// listener cold-rebuilds), so the dashboard must confirm before firing it, the
+// way delete already does.
+func TestDashboardRestartConfirms(t *testing.T) {
+	body, err := templatesFS.ReadFile("templates/dashboard.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), `confirm("restart listener `) {
+		t.Errorf("dashboard.html restart does not confirm")
+	}
+}
+
 // TestPanelJSIsServedAsJavaScriptAndNotSniffable pins the shared-asset route both templates load.
 func TestPanelJSIsServedAsJavaScriptAndNotSniffable(t *testing.T) {
 	h, _ := NewHandler("test-token")
@@ -204,10 +236,31 @@ func TestDashboardRepollsEveryPanelIncludingHealth(t *testing.T) {
 		t.Fatal(err)
 	}
 	src := string(body)
-	for _, fn := range []string{"refresh", "refreshProfiles", "refreshAudit", "refreshHealth"} {
+	for _, fn := range []string{"refresh", "refreshProfiles", "refreshAudit", "refreshHealth", "refreshLog"} {
 		if !strings.Contains(src, "setInterval("+fn+",") {
 			t.Errorf("%s is never re-polled: the panel it fills goes stale after page load", fn)
 		}
+	}
+}
+
+// TestDashboardRendersALogBlock: the dashboard must offer the supervisor's log
+// tail and refresh it on the poll cycle, so "why is this listener in error
+// state" is answerable from the browser rather than from the supervisor's
+// stdout. The log lines are arbitrary text, so the rendering must escape them.
+func TestDashboardRendersALogBlock(t *testing.T) {
+	body, err := templatesFS.ReadFile("templates/dashboard.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(body)
+	if !strings.Contains(src, `id="log"`) {
+		t.Errorf("dashboard.html has no log block")
+	}
+	if !strings.Contains(src, "/api/logs?n=200") {
+		t.Errorf("dashboard.html does not fetch the log tail")
+	}
+	if !strings.Contains(src, "esc(l.line)") {
+		t.Errorf("log rendering does not escape the line (arbitrary log text must not inject markup)")
 	}
 }
 
@@ -268,6 +321,49 @@ func TestDashboardOffersClientConfigGeneration(t *testing.T) {
 	}
 	if !strings.Contains(src, "/client-config") {
 		t.Errorf("dashboard does not POST to the client-config endpoint")
+	}
+}
+
+// TestDashboardClientConfigDialogCarriesOverrides: the client-config dialog
+// must collect option overrides, not just the endpoint. Protocols whose client
+// identity is not derivable from the listener (nebula's per-host cert/key,
+// ikev2's identity) are ungeneratable from the browser otherwise. The prompt
+// API cannot carry a map, which is why the dialog replaced it.
+func TestDashboardClientConfigDialogCarriesOverrides(t *testing.T) {
+	body, err := templatesFS.ReadFile("templates/dashboard.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(body)
+	if !strings.Contains(src, "cc-overrides") {
+		t.Errorf("dashboard has no overrides textarea in the client-config dialog")
+	}
+	if !strings.Contains(src, "parseOverrides(") {
+		t.Errorf("dashboard does not parse override lines")
+	}
+	if strings.Contains(src, `window.prompt("Server address`) {
+		t.Errorf("client-config still uses window.prompt, which cannot carry overrides")
+	}
+}
+
+// TestDashboardOffersPeerRemoval: a WireGuard-family listener's peer rows must
+// offer removal — the escape hatch for a stranded peer nobody holds the key
+// for. The button only renders for the WireGuard family; other protocols get
+// no dead button.
+func TestDashboardOffersPeerRemoval(t *testing.T) {
+	body, err := templatesFS.ReadFile("templates/dashboard.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(body)
+	if !strings.Contains(src, `data-peer-del`) {
+		t.Errorf("dashboard has no peer-removal action")
+	}
+	if !strings.Contains(src, `"/peers?key=" + encodeURIComponent(key)`) {
+		t.Errorf("peer removal does not send the public key as a query value")
+	}
+	if !strings.Contains(src, `wg = protocol === "wireguard" || protocol === "amneziawg"`) {
+		t.Errorf("peer removal is not gated on the WireGuard family")
 	}
 }
 

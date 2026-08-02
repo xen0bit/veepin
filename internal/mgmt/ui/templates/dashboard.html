@@ -30,12 +30,33 @@
     .toolbar button { font-weight: 600; }
     .detail-cell { padding: 10px; background: #fafafa; }
     .detail-cell .section-title { font-weight: 600; margin: 6px 0 2px; }
+    #cc-dialog { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.35); z-index: 10; }
+    #cc-dialog .box { background: #fff; margin: 12vh auto; max-width: 520px; padding: 16px; border: 1px solid #ccc; }
+    #cc-dialog label { display: block; margin: 8px 0; }
+    #cc-dialog input[type=text], #cc-dialog textarea { width: 100%; box-sizing: border-box; margin-top: 2px; }
+    #cc-dialog .muted { margin-top: 4px; }
   </style>
 </head>
 <body>
   <h1>veepin supervisor</h1>
   <span id="health" class="muted">status: loading&hellip;</span>
   <div id="banner" class="banner"></div>
+  <div id="cc-dialog">
+    <div class="box">
+      <h3>Generate client config</h3>
+      <p class="muted">Derives a dialable profile from the listener. Everything except
+        the endpoint carries over; file-path credentials are bundled as companions.</p>
+      <label>Server address clients dial (host[:port]):
+        <input id="cc-endpoint" type="text" placeholder="vpn.example.com:443" autocomplete="off">
+      </label>
+      <label>Option overrides — <code>key=value</code>, one per line (optional):
+        <textarea id="cc-overrides" rows="4" placeholder="cert=client.crt&#10;key=client.key"></textarea>
+      </label>
+      <p class="muted">Overrides are required by protocols whose client identity is not derivable
+        (nebula needs a per-host cert/key; ikev2 an identity).</p>
+      <p><button id="cc-ok">generate</button> <button id="cc-cancel">cancel</button></p>
+    </div>
+  </div>
   <p class="toolbar">
     <a href="/listeners/new"><button class="new-btn">new listener</button></a>
     <a href="/profiles/new"><button class="new-btn">new profile</button></a>
@@ -71,6 +92,9 @@
     <thead><tr><th>time</th><th>action</th><th>name</th><th>outcome</th></tr></thead>
     <tbody><tr><td colspan="4" class="muted">loading&hellip;</td></tr></tbody>
   </table>
+
+  <h2>Log</h2>
+  <pre id="log" class="muted">loading&hellip;</pre>
 <script>
 window.VEEPIN_TOKEN = "{{.Token}}";
 </script>
@@ -102,12 +126,19 @@ function renderRow(l) {
     '</tr>';
 }
 
-function peersHTML(peers) {
+function peersHTML(peers, protocol, name) {
   if (!peers || peers.length === 0) {
     return '<p class="muted">no peer data (this protocol does not report peers)</p>';
   }
-  return '<table class="inner"><thead><tr><th>identity</th><th>address</th><th>state</th><th>last handshake</th></tr></thead><tbody>' +
-    peers.map(p => '<tr><td>' + esc(p.id) + '</td><td>' + esc(p.address) + '</td><td>' + esc(p.state) + '</td><td>' + esc(p.last_handshake) + '</td></tr>').join("") +
+  // WireGuard-family peers carry a removal action: a lost client-config
+  // response strands a peer nobody holds the key for, and the row is how it is
+  // taken back out.
+  const wg = protocol === "wireguard" || protocol === "amneziawg";
+  return '<table class="inner"><thead><tr><th>identity</th><th>address</th><th>state</th><th>last handshake</th>' +
+    (wg ? '<th></th>' : '') + '</tr></thead><tbody>' +
+    peers.map(p => '<tr><td>' + esc(p.id) + '</td><td>' + esc(p.address) + '</td><td>' + esc(p.state) + '</td><td>' + esc(p.last_handshake) + '</td>' +
+      (wg ? '<td><button data-peer-del="' + esc(name) + '" data-peer-key="' + esc(p.id) + '">remove</button></td>' : '') +
+      '</tr>').join("") +
     '</tbody></table>';
 }
 
@@ -138,7 +169,7 @@ function loadDetail(name) {
     }
     html += '<div class="section-title">config</div>' +
       '<pre>' + esc(JSON.stringify(cfg, null, 2)) + '</pre>' +
-      '<div class="section-title">peers</div>' + peersHTML(peers);
+      '<div class="section-title">peers</div>' + peersHTML(peers, cfg.protocol, name);
     cell.innerHTML = html;
   }).catch(err => {
     cell.innerHTML = '<p class="st-error">detail load failed: ' + esc(err) + '</p>';
@@ -262,6 +293,33 @@ function refreshAudit() {
   });
 }
 
+// refreshLog renders the supervisor's log tail. Lines are arbitrary text from
+// the logger (protocol error messages quote option values), so every line goes
+// through esc() — this page holds the bearer token and must not let a log line
+// inject markup. A 404 means the supervisor was built without a log ring (the
+// tests do); the panel says so instead of blanking.
+function refreshLog() {
+  api("/api/logs?n=200").then(({status, body}) => {
+    const el = document.getElementById("log");
+    if (status === 404) {
+      el.textContent = "no log (the supervisor is running without a log ring)";
+      return;
+    }
+    if (status >= 300) {
+      el.textContent = "log unavailable: " + (typeof body === "string" ? body : JSON.stringify(body));
+      return;
+    }
+    const lines = body.lines || [];
+    if (lines.length === 0) {
+      el.textContent = "(no log lines yet)";
+      return;
+    }
+    el.innerHTML = lines.map(l => esc(l.line)).join("\n");
+  }).catch(err => {
+    document.getElementById("log").textContent = "log unavailable: " + err;
+  });
+}
+
 document.addEventListener("click", e => {
   const name = e.target.dataset.expand;
   if (name !== undefined) {
@@ -270,6 +328,9 @@ document.addEventListener("click", e => {
   }
   const restart = e.target.dataset.restart;
   if (restart !== undefined) {
+    // A restart drops every connected client (the listener cold-rebuilds), so
+    // it deserves the same one-line confirm the delete has.
+    if (!confirm("restart listener " + restart + "? (clients will drop and re-handshake)")) return;
     api("/api/listeners/" + encodeURIComponent(restart) + "/restart", {method: "POST"})
       .then(({status, body}) => {
         if (status >= 300) showBanner(document.getElementById("banner"), "restart " + restart + " failed: " + (typeof body === "string" ? body : JSON.stringify(body)));
@@ -289,22 +350,15 @@ document.addEventListener("click", e => {
   }
   const ccName = e.target.dataset.clientcfg;
   if (ccName !== undefined) {
-    // The endpoint is the one thing generation cannot know: the listener config
-    // does not carry its own public hostname.
-    const endpoint = window.prompt("Server address clients dial (host[:port]):", "");
-    if (endpoint === null) return;
-    api("/api/listeners/" + encodeURIComponent(ccName) + "/client-config",
-        {method: "POST", body: {endpoint}})
-      .then(({status, body}) => {
-        if (status >= 300) {
-          showBanner(document.getElementById("banner"), "client config failed: " + (typeof body === "string" ? body : JSON.stringify(body)));
-          return;
-        }
-        ccResults[ccName] = clientConfigHTML(body, status);
-        expanded[ccName] = true;
-        refresh();
-      })
-      .catch(err => showBanner(document.getElementById("banner"), "client config failed: " + err));
+    // The endpoint is the one thing generation cannot know (the listener config
+    // does not carry its own public hostname), and overrides are how protocols
+    // whose client identity is not derivable (nebula, ikev2) get what they
+    // need. A bare window.prompt could not carry either, so the dialog does.
+    ccTarget = ccName;
+    document.getElementById("cc-endpoint").value = "";
+    document.getElementById("cc-overrides").value = "";
+    document.getElementById("cc-dialog").style.display = "block";
+    return;
   }
   const delProfile = e.target.dataset.delprofile;
   if (delProfile !== undefined) {
@@ -316,9 +370,69 @@ document.addEventListener("click", e => {
       })
       .catch(err => showBanner(document.getElementById("banner"), "delete profile " + delProfile + " failed: " + err));
   }
+  const peerDel = e.target.dataset.peerDel;
+  if (peerDel !== undefined) {
+    const key = e.target.dataset.peerKey || "";
+    if (!confirm("remove peer " + key.slice(0, 16) + "… from " + peerDel + "? (it cold-rebuilds)") ) return;
+    api("/api/listeners/" + encodeURIComponent(peerDel) + "/peers?key=" + encodeURIComponent(key),
+        {method: "DELETE"})
+      .then(({status, body}) => {
+        if (status >= 300) showBanner(document.getElementById("banner"), "remove peer failed: " + (typeof body === "string" ? body : JSON.stringify(body)));
+        else { expanded[peerDel] = true; refresh(); }
+      })
+      .catch(err => showBanner(document.getElementById("banner"), "remove peer failed: " + err));
+  }
 });
 
 document.getElementById("filter").addEventListener("change", refresh);
+
+// ccTarget is the listener the open client-config dialog is generating for.
+let ccTarget = null;
+
+// parseOverrides turns the dialog's key=value-per-line textarea into the
+// overrides object the API expects. A malformed line is an error, not a silent
+// drop -- a mistyped key would otherwise be ignored by the server's validation
+// and the operator would never see why.
+function parseOverrides(text) {
+  const out = {};
+  for (const line of text.split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    const eq = t.indexOf("=");
+    if (eq <= 0) throw new Error("override line must be key=value, got: " + t);
+    out[t.slice(0, eq).trim()] = t.slice(eq + 1).trim();
+  }
+  return out;
+}
+
+document.getElementById("cc-cancel").addEventListener("click", () => {
+  document.getElementById("cc-dialog").style.display = "none";
+});
+
+document.getElementById("cc-ok").addEventListener("click", () => {
+  const endpoint = document.getElementById("cc-endpoint").value.trim();
+  let overrides;
+  try {
+    overrides = parseOverrides(document.getElementById("cc-overrides").value);
+  } catch (err) {
+    showBanner(document.getElementById("banner"), "client config failed: " + err);
+    return;
+  }
+  document.getElementById("cc-dialog").style.display = "none";
+  const body = {endpoint};
+  if (Object.keys(overrides).length) body.overrides = overrides;
+  api("/api/listeners/" + encodeURIComponent(ccTarget) + "/client-config", {method: "POST", body})
+    .then(({status, body}) => {
+      if (status >= 300) {
+        showBanner(document.getElementById("banner"), "client config failed: " + (typeof body === "string" ? body : JSON.stringify(body)));
+        return;
+      }
+      ccResults[ccTarget] = clientConfigHTML(body, status);
+      expanded[ccTarget] = true;
+      refresh();
+    })
+    .catch(err => showBanner(document.getElementById("banner"), "client config failed: " + err));
+});
 
 refresh();
 refreshProfiles();
@@ -331,6 +445,8 @@ refreshAudit();
 setInterval(refresh, 5000);
 setInterval(refreshProfiles, 5000);
 setInterval(refreshAudit, 5000);
+refreshLog();
+setInterval(refreshLog, 5000);
 </script>
 </body>
 </html>

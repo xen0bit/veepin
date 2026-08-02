@@ -58,6 +58,7 @@ import (
 // counters and the recorded calls back.
 type fakeMgr struct {
 	applyCalls int
+	applyErr   error
 	statuses   map[string]supervisor.Status
 	rebuildOf  string
 	stopOf     string
@@ -66,7 +67,7 @@ type fakeMgr struct {
 	peerServer client.Server // optional, returned by Server()
 }
 
-func (f *fakeMgr) Apply() error { f.applyCalls++; return nil }
+func (f *fakeMgr) Apply() error { f.applyCalls++; return f.applyErr }
 func (f *fakeMgr) All() []supervisor.Status {
 	out := make([]supervisor.Status, 0, len(f.statuses))
 	for _, s := range f.statuses {
@@ -89,8 +90,17 @@ func (f *fakeMgr) Stop(name string) error {
 	delete(f.statuses, name)
 	return f.stopErr
 }
-func (f *fakeMgr) Close() error                     { return nil }
-func (f *fakeMgr) Server(name string) client.Server { return f.peerServer }
+func (f *fakeMgr) Close() error { return nil }
+func (f *fakeMgr) Peers(name string) ([]client.PeerInfo, bool) {
+	if f.peerServer == nil {
+		return nil, false
+	}
+	pd, ok := f.peerServer.(client.PeerDescriber)
+	if !ok {
+		return nil, true
+	}
+	return pd.Peers(), true
+}
 
 // newTestServer wires a real mgmt.Server with a fake manager and a temp config
 // dir, returning the server and its token-bearing client. One helper covers
@@ -319,6 +329,49 @@ func TestCreateRespectsOperatorSuppliedKeys(t *testing.T) {
 	}
 	if got := readListenerFile(t, s.dir, "wg-2"); got.Options["private-key"] != "operator-key" {
 		t.Errorf("operator's private key was overwritten: %q", got.Options["private-key"])
+	}
+}
+
+// TestCreateApplyFailureLeavesNoOrphanKeyDir: a create whose key generation
+// succeeded but whose Apply failed must take the generated key directory back
+// out. The file was never written into a live set, so DELETE can never reach
+// the orphan -- it is unreachable garbage that only this cleanup removes.
+func TestCreateApplyFailureLeavesNoOrphanKeyDir(t *testing.T) {
+	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s.mgr.(*fakeMgr).applyErr = errors.New("wireguard: listen udp 51820: address in use")
+	cfg := supervisor.ListenerConfig{Name: "wg-fail", Protocol: "wireguard",
+		Options: map[string]string{"address": "10.10.0.1/24"}, Enabled: true}
+	resp, _ := s.do("POST", "/api/listeners", cfg)
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (the Apply failure must surface)", resp.StatusCode)
+	}
+	// keygen writes the WireGuard keypair into the config, not into files, so
+	// exercise the file-writing path too: a TLS listener's ca.crt/tls.key land
+	// in <dir>/<name>/ and are exactly what would be orphaned.
+	if _, err := os.Stat(filepath.Join(s.dir, "wg-fail")); err == nil {
+		t.Errorf("key dir was left behind after a failed create: <dir>/wg-fail exists")
+	}
+}
+
+// TestDeleteRemovesKeyDirEvenWhenTheConfigFileIsGone: a create that failed
+// between key generation and the config write leaves a key directory with no
+// config file to DELETE. The cleanup must run even on the 404 path, or the
+// orphan survives every delete forever.
+func TestDeleteRemovesKeyDirEvenWhenTheConfigFileIsGone(t *testing.T) {
+	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	keyDir := filepath.Join(s.dir, "site-a")
+	if err := os.MkdirAll(keyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(keyDir, "ca.crt"), []byte("stale-ca"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resp, _ := s.do("DELETE", "/api/listeners/site-a", nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (no listener file)", resp.StatusCode)
+	}
+	if _, err := os.Stat(keyDir); !os.IsNotExist(err) {
+		t.Errorf("key dir survived a delete of a listener with no config file: %v", err)
 	}
 }
 
@@ -748,6 +801,60 @@ func TestDeletingAStoppedListenerIsNotAnAuditFailure(t *testing.T) {
 	}
 	if out.Events[0].Outcome != "ok" {
 		t.Errorf("a successful delete of a stopped listener recorded %q", out.Events[0].Outcome)
+	}
+}
+
+// TestLogRingCapturesLines: the ring is the supervisor's log tail served at
+// /api/logs. A line written through the logger the supervisor and the API share
+// must land in the ring, one entry per line, newest first.
+func TestLogRingCapturesLines(t *testing.T) {
+	lr := NewLogRing()
+	lgr := log.New(lr, "", 0)
+	lgr.Printf("first")
+	lgr.Printf("second")
+	got := lr.Recent(0)
+	if len(got) != 2 {
+		t.Fatalf("ring holds %d lines, want 2", len(got))
+	}
+	if got[0].Line != "second" || got[1].Line != "first" {
+		t.Errorf("Recent is not newest-first: %+v", got)
+	}
+	// Bounded: the ring must not grow without bound.
+	for i := 0; i < logCapacity+50; i++ {
+		_, _ = lr.Write([]byte("noise\n"))
+	}
+	if len(lr.Recent(0)) != logCapacity {
+		t.Errorf("ring capacity = %d, want %d", len(lr.Recent(0)), logCapacity)
+	}
+}
+
+// TestLogsEndpointRequiresAndServesTheRing: /api/logs serves the attached ring
+// and 404s without one, so a caller that never built a ring does not serve a
+// fabricated empty log.
+func TestLogsEndpointRequiresAndServesTheRing(t *testing.T) {
+	dir := t.TempDir()
+	mgr := &fakeMgr{statuses: map[string]supervisor.Status{}}
+	srv, err := NewServer(dir, mgr, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, _ := srv.do("GET", "/api/logs", nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("logs without a ring = %d, want 404", resp.StatusCode)
+	}
+
+	lr := NewLogRing()
+	srv2, err := NewServer(dir, &fakeMgr{}, log.New(lr, "", 0), WithLogRing(lr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = lr.Write([]byte("supervisor ready: 1 of 1 listener(s) running\n"))
+	resp2, body := srv2.do("GET", "/api/logs?n=5", nil)
+	if resp2.StatusCode != 200 {
+		t.Fatalf("logs with a ring = %d, want 200", resp2.StatusCode)
+	}
+	if !strings.Contains(string(body), "supervisor ready") {
+		t.Errorf("logs body does not contain the captured line: %s", body)
 	}
 }
 
@@ -1392,6 +1499,55 @@ func TestBootTokenGeneratesOnFirstRun(t *testing.T) {
 	}
 }
 
+// TestBootTokenMintsNoStaleTempFiles pins the atomic write: the token is
+// written to a temp file and renamed, so a crash between write and rename can
+// never leave an empty token file (which fails every later boot). A leftover
+// token.tmp* file next to the real one is exactly the crash residue the
+// temp+rename exists to avoid.
+func TestBootTokenMintsNoStaleTempFiles(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "mgmt"), 0o700)
+	tokenPath := filepath.Join(dir, "mgmt", tokenName)
+	if _, _, err := bootToken(tokenPath); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, "mgmt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() != tokenName {
+			t.Errorf("unexpected file in mgmt dir: %s", e.Name())
+		}
+	}
+	body, err := os.ReadFile(tokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(strings.TrimSpace(string(body))) != 64 {
+		t.Errorf("token file content = %q, want a 64-hex-char token", body)
+	}
+}
+
+// TestBootTokenEmptyFileNamesTheRemedy: an empty token file is a brick (it
+// fails NewServer, which aborts the supervisor), so the error must say what
+// fixes it rather than just that it is empty.
+func TestBootTokenEmptyFileNamesTheRemedy(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "mgmt"), 0o700)
+	tokenPath := filepath.Join(dir, "mgmt", tokenName)
+	if err := os.WriteFile(tokenPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := bootToken(tokenPath)
+	if err == nil {
+		t.Fatal("bootToken accepted an empty token file")
+	}
+	if !strings.Contains(err.Error(), "delete it") {
+		t.Errorf("empty-token error does not name the remedy: %v", err)
+	}
+}
+
 // TestBearerHeaderParsing pins the "Bearer " prefix parsing; a basic-auth-style
 // header or wrong scheme returns no token rather than a half-parse.
 // TestRequireHostRejectsRebinding is the DNS-rebinding guard. The panel cannot
@@ -1523,6 +1679,126 @@ func (f *fakePeerDescriber) Network() *net.IPNet {
 	return n
 }
 func (f *fakePeerDescriber) Peers() []client.PeerInfo { return f.peers }
+
+// TestPeerDeleteRemovesAConfiguredPeer: the DELETE endpoint takes a configured
+// peer out of a WireGuard-family listener and cold-rebuilds it. It exists
+// because a lost client-config response leaves a peer nobody holds the key for,
+// and stranded peers had no removal path.
+func TestPeerDeleteRemovesAConfiguredPeer(t *testing.T) {
+	dir := t.TempDir()
+	cfg := supervisor.ListenerConfig{Name: "wg", Protocol: "wireguard", Enabled: true,
+		Options: map[string]string{
+			"private-key": "k", "address": "10.10.0.1/24",
+			"peers": `[{"public-key":"AAA","allowed-ips":["10.10.0.2/32"]},{"public-key":"BBB","allowed-ips":["10.10.0.3/32"]}]`,
+		}}
+	body, _ := json.Marshal(cfg)
+	_ = os.WriteFile(filepath.Join(dir, "wg.json"), body, 0o600)
+	mgr := &fakeMgr{statuses: map[string]supervisor.Status{"wg": {Name: "wg", State: "running"}}}
+	srv, err := NewServer(dir, mgr, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, respBody := srv.do("DELETE", "/api/listeners/wg/peers?key=AAA", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d body=%s", resp.StatusCode, respBody)
+	}
+	if mgr.rebuildOf != "wg" {
+		t.Errorf("Rebuild was not called after a peer removal")
+	}
+	got := readListenerFile(t, dir, "wg")
+	if strings.Contains(got.Options["peers"], "AAA") {
+		t.Errorf("removed peer still in the stored peers: %s", got.Options["peers"])
+	}
+	if !strings.Contains(got.Options["peers"], "BBB") {
+		t.Errorf("the other peer was removed too: %s", got.Options["peers"])
+	}
+}
+
+// TestPeerDeleteClearsTheSinglePeerOptions: a peer stored via the single-peer
+// options is removed by clearing those options, not by leaving an orphaned
+// allowed-ips behind.
+func TestPeerDeleteClearsTheSinglePeerOptions(t *testing.T) {
+	dir := t.TempDir()
+	cfg := supervisor.ListenerConfig{Name: "wg", Protocol: "wireguard", Enabled: true,
+		Options: map[string]string{
+			"private-key": "k", "address": "10.10.0.1/24",
+			"peer-public-key": "AAA", "peer-allowed-ips": "10.10.0.2/32",
+		}}
+	body, _ := json.Marshal(cfg)
+	_ = os.WriteFile(filepath.Join(dir, "wg.json"), body, 0o600)
+	mgr := &fakeMgr{statuses: map[string]supervisor.Status{"wg": {Name: "wg", State: "running"}}}
+	srv, err := NewServer(dir, mgr, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, _ := srv.do("DELETE", "/api/listeners/wg/peers?key=AAA", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	got := readListenerFile(t, dir, "wg")
+	if got.Options["peer-public-key"] != "" {
+		t.Errorf("peer-public-key survived the removal: %q", got.Options["peer-public-key"])
+	}
+	if got.Options["peer-allowed-ips"] != "" {
+		t.Errorf("peer-allowed-ips survived the removal: %q", got.Options["peer-allowed-ips"])
+	}
+}
+
+// TestPeerDeleteUnknownKeyAndWrongProtocol: deleting a peer that is not there
+// 404s, and asking a non-WireGuard listener for a peer removal is refused
+// rather than silently doing nothing.
+func TestPeerDeleteUnknownKeyAndWrongProtocol(t *testing.T) {
+	dir := t.TempDir()
+	cfg := supervisor.ListenerConfig{Name: "wg", Protocol: "wireguard", Enabled: true,
+		Options: map[string]string{"private-key": "k", "address": "10.10.0.1/24",
+			"peers": `[{"public-key":"AAA","allowed-ips":["10.10.0.2/32"]}]`}}
+	body, _ := json.Marshal(cfg)
+	_ = os.WriteFile(filepath.Join(dir, "wg.json"), body, 0o600)
+	other := supervisor.ListenerConfig{Name: "toy", Protocol: "toy", Enabled: true,
+		Options: map[string]string{"user": "a", "secret": "s"}}
+	body2, _ := json.Marshal(other)
+	_ = os.WriteFile(filepath.Join(dir, "toy.json"), body2, 0o600)
+	mgr := &fakeMgr{statuses: map[string]supervisor.Status{}}
+	srv, err := NewServer(dir, mgr, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp, _ := srv.do("DELETE", "/api/listeners/wg/peers?key=ZZZ", nil); resp.StatusCode != http.StatusNotFound {
+		t.Errorf("unknown peer key = %d, want 404", resp.StatusCode)
+	}
+	if resp, _ := srv.do("DELETE", "/api/listeners/toy/peers?key=AAA", nil); resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("peer removal on a non-WG listener = %d, want 400", resp.StatusCode)
+	}
+	if resp, _ := srv.do("DELETE", "/api/listeners/wg/peers", nil); resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("peer removal without a key = %d, want 400", resp.StatusCode)
+	}
+}
+
+// TestPeerDeleteRollsBackOnRebuildFailure: a peer removal whose rebuild fails
+// must put the peer back, mirroring client-config generation's rollback. The
+// listener's config is on disk either way; the peer must not be silently lost.
+func TestPeerDeleteRollsBackOnRebuildFailure(t *testing.T) {
+	dir := t.TempDir()
+	cfg := supervisor.ListenerConfig{Name: "wg", Protocol: "wireguard", Enabled: true,
+		Options: map[string]string{"private-key": "k", "address": "10.10.0.1/24",
+			"peers": `[{"public-key":"AAA","allowed-ips":["10.10.0.2/32"]},{"public-key":"BBB","allowed-ips":["10.10.0.3/32"]}]`}}
+	body, _ := json.Marshal(cfg)
+	_ = os.WriteFile(filepath.Join(dir, "wg.json"), body, 0o600)
+	mgr := &fakeMgr{statuses: map[string]supervisor.Status{"wg": {Name: "wg", State: "running"}}}
+	mgr.rebuildErr = errors.New("wireguard: listen udp 51820: address in use")
+	srv, err := NewServer(dir, mgr, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, _ := srv.do("DELETE", "/api/listeners/wg/peers?key=AAA", nil)
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", resp.StatusCode)
+	}
+	got := readListenerFile(t, dir, "wg")
+	if !strings.Contains(got.Options["peers"], "AAA") {
+		t.Errorf("peer was not rolled back after a failed rebuild: %s", got.Options["peers"])
+	}
+}
 
 // Suppress "unused" errors for net.IP we want to keep imported for parity with
 // a future IPv6 listener status field.

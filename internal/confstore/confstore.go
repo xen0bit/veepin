@@ -172,10 +172,22 @@ func (s *Store[T]) Write(c T) error {
 		return fmt.Errorf("%s: creating config dir %q: %w", s.prefix, s.dir, err)
 	}
 	final := filepath.Join(s.dir, name+".json")
-	tmp := final + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	// Unique temp name via os.CreateTemp, not a fixed final+".tmp". Two
+	// concurrent Write calls for the SAME entity would otherwise share one temp
+	// path: each truncates and writes the other's in-flight content, and the
+	// two renames race -- the second rename can install a torn file, or the
+	// first can succeed and be silently overwritten by the other's copy. A
+	// random suffix makes each writer's temp distinct, so at worst the two
+	// renames serialize and the last one wins whole.
+	f, err := os.CreateTemp(s.dir, name+".tmp.*")
 	if err != nil {
-		return fmt.Errorf("%s: opening temp file: %w", s.prefix, err)
+		return fmt.Errorf("%s: creating temp file: %w", s.prefix, err)
+	}
+	tmp := f.Name()
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("%s: chmod temp file: %w", s.prefix, err)
 	}
 	if _, err := f.Write(body); err != nil {
 		_ = f.Close()

@@ -56,7 +56,11 @@ func runConnect(args []string) error {
 	// ~/.config/veepin/profiles/. The registry is checked first so a profile
 	// that happens to share a name with a protocol resolves to the protocol.
 	if !knownProtocol(name) {
-		profDir, err := profile.DefaultDir()
+		// VEEPIN_PROFILE_DIR is honored here too, not just by the profile
+		// subcommands: `VEEPIN_PROFILE_DIR=./out veepin profile add x ...` and
+		// `VEEPIN_PROFILE_DIR=./out veepin connect x` must agree on where a
+		// profile lives, or a generated bundle can be saved and then undialable.
+		profDir, err := profileDir()
 		if err != nil {
 			return fmt.Errorf("connect: profile directory: %w", err)
 		}

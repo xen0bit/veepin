@@ -17,8 +17,10 @@ PATCH  /api/listeners/{name}           partial update, then cold-rebuild
 DELETE /api/listeners/{name}           stop + remove the file and its iptables rules
 POST   /api/listeners/{name}/restart   rebuild from the on-disk config
 GET    /api/listeners/{name}/peers     peers, if the protocol implements PeerDescriber
+DELETE /api/listeners/{name}/peers     remove a configured peer (WireGuard family), then cold-rebuild; key in ?key=
 POST   /api/listeners/{name}/client-config  generate a client profile (provisions a peer + rebuilds for WireGuard-family protocols)
 GET    /api/audit                      recent mutations, newest first (in-memory, bounded)
+GET    /api/logs                       the supervisor's log tail, newest first (in-memory, bounded; 404 without a ring)
 GET    /api/profiles                   list client profiles (when a profile dir is configured)
 POST   /api/profiles                   create a profile
 GET    /api/profiles/{name}            get a profile, secrets redacted
@@ -44,6 +46,25 @@ line into a bounded (200-entry) in-memory ring: action, entity, and outcome.
 `GET /api/audit` returns it newest-first, and the panel renders it as "recent
 activity". It answers "what has changed since the supervisor started", not
 "what happened last month" — persistence is the supervisor's own log file's job.
+
+## The log ring
+
+The supervisor's logger writes into a bounded (1000-line) in-memory ring as
+well, served at `GET /api/logs` newest-first. It is the "why is this listener
+in error state" view: the status field carries the last failure, the log shows
+the sequence (build errors, hostnet messages, per-request API lines) that
+produced it. The caller attaches it with `WithLogRing`; without one the
+endpoint answers 404 rather than serving a fabricated empty log.
+
+## Peer removal
+
+`DELETE /api/listeners/{name}/peers?key=<public-key>` removes one configured
+peer from a WireGuard-family listener and cold-rebuilds it, rolling the peer
+back in if the rebuild fails. It exists for stranded peers: a client-config
+response lost after a successful provision leaves a peer on the listener that
+nobody holds the private key for, and hand-editing the config was the only way
+to take it back out. The key is a query value, not a path segment, because it
+is base64 and a path segment would be split by any `/` or `+` in it.
 
 ## Client config generation
 
