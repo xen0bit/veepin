@@ -5,7 +5,8 @@ The supervisor's management plane: a REST API over the listener directory, and
 
 Stdlib only, like everything else here. The dependency contract forbids a router,
 so `net/http.ServeMux` pattern matching is the routing; it forbids a logging
-library, so one `*log.Logger` writes a line per request.
+library, so one `*log.Logger` writes a line per request that changed something
+or failed.
 
 ```
 GET    /api/health                     liveness + uptime
@@ -52,9 +53,18 @@ activity". It answers "what has changed since the supervisor started", not
 The supervisor's logger writes into a bounded (1000-line) in-memory ring as
 well, served at `GET /api/logs` newest-first. It is the "why is this listener
 in error state" view: the status field carries the last failure, the log shows
-the sequence (build errors, hostnet messages, per-request API lines) that
-produced it. The caller attaches it with `WithLogRing`; without one the
+the sequence (build errors, hostnet messages, refused and mutating API calls)
+that produced it. The caller attaches it with `WithLogRing`; without one the
 endpoint answers 404 rather than serving a fabricated empty log.
+
+A GET that succeeded is deliberately not logged, and that exclusion is what
+makes the ring usable. The panel polls five endpoints every five seconds, so
+logging them wrote a line per second into the very ring being displayed — the
+1000 lines held nothing but `GET /api/logs -> 200` after about seventeen
+minutes, and the build error an operator opened the panel to read was evicted by
+the act of reading it. Failures (the 401s especially) and every mutation are
+kept, so nothing that changed state, or tried to and was refused, goes
+unlogged.
 
 ## Peer removal
 
@@ -143,7 +153,7 @@ fine; anywhere else the token crosses the wire in the clear and a reverse proxy
 with TLS is not optional.
 
 **No rate limiting, no accounts.** One token, full authority, and the request
-log is a line per request. The audit log does record *what* changed and *whether
+log is a line per mutation or failure. The audit log does record *what* changed and *whether
 it worked*, but not *who* — every authenticated mutation shares the one token,
 so a fleet where several people hold it still cannot attribute an edit. That is
 a deliberate boundary: accounts and per-user authorization are a separate

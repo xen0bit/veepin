@@ -429,14 +429,29 @@ func (m *Manager) Rebuild(name string) error {
 	}
 	m.mu.Unlock()
 	err = m.rebuildLocked(r, cfg)
-	// A SIGHUP reconcile that ran while we were rebuilding may have stopped
-	// this listener and dropped it from the map; a listener that just came up
-	// must not be left running untracked.
+	// A Stop, a Close, or a SIGHUP reconcile may have dropped this listener from
+	// the map while we were rebuilding. That removal is the later decision and
+	// it wins: tear down whatever the rebuild left behind rather than putting
+	// the handle back.
+	//
+	// Re-adding it was wrong in the interleaving that actually happens. Stop,
+	// Close and Apply all block on buildMu until the rebuild finishes, so the
+	// removal lands *after* the new server is up and closes it -- and the re-add
+	// then resurrected an already-dead entry, leaving a listener whose config
+	// file was deleted still tracked and Close returning with a non-empty map.
+	//
+	// Tearing down is also the right answer in the other order, where the
+	// removal landed before start() and the server we just built is genuinely
+	// running untracked: this is the only thing that stops it. stopLocked is a
+	// no-op on a handle the remover already closed, so both cases are covered by
+	// the same call. It runs without Manager.mu, like the rebuild above, so a
+	// slow Close cannot freeze the fleet.
 	m.mu.Lock()
-	if _, still := m.listeners[name]; !still {
-		m.listeners[name] = r
-	}
+	_, still := m.listeners[name]
 	m.mu.Unlock()
+	if !still {
+		m.stopLocked(r)
+	}
 	return err
 }
 

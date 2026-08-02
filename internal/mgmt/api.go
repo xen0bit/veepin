@@ -379,13 +379,30 @@ func (s *Server) requireToken(next http.Handler) http.Handler {
 	})
 }
 
-// logRequest emits one line per request: method, path, status, elapsed. It is
-// the minimum operator's view, and the only structured-ish output the
-// management plane produces.
+// logRequest emits one line per request: method, path, status. It is the
+// minimum operator's view, and the only structured-ish output the management
+// plane produces.
+//
+// A GET that succeeded is not logged, and that exclusion is load-bearing rather
+// than cosmetic. The panel polls five endpoints every five seconds, so logging
+// them wrote a line per second into the same logger that feeds the log ring --
+// which meant the 1000-line ring held nothing but "GET /api/logs -> 200" after
+// about seventeen minutes, and the build error an operator opened the panel to
+// read was evicted by the act of reading it. The ring exists to answer "why is
+// this listener in error state"; a feature that overwrites its own answer is
+// worse than not having it.
+//
+// What is kept is everything that carries information: any failure (a 401 is
+// the one security-relevant line here, and 4xx/5xx are what an operator greps
+// for) and every mutation, whatever its outcome. Nothing that changed state, or
+// tried to and was refused, goes unlogged.
 func (s *Server) logRequest(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
+		if r.Method == http.MethodGet && rec.status < 300 {
+			return
+		}
 		s.log.Printf("mgmt: %s %s -> %d", r.Method, r.URL.Path, rec.status)
 	})
 }
@@ -890,7 +907,15 @@ func (s *Server) handlePeerDelete(w http.ResponseWriter, r *http.Request) {
 	// Persist the reduced peer set, then rebuild; on a failed rebuild the peer
 	// goes back in, exactly as client-config generation rolls a failed
 	// provision back out.
-	prevPeers := cfg.Options[wireguard.OptServerPeers]
+	//
+	// The whole options map is snapshotted rather than the peers key alone. A
+	// single-peer removal clears peer-public-key and peer-allowed-ips too, and
+	// restoring only the peers JSON put none of that back: a failed rebuild
+	// dropped the peer permanently. That is the one unrecoverable case here --
+	// unlike a generated client config, the server never held the client's
+	// private key, so a lost peer public key cannot be re-issued. Snapshotting
+	// the map keeps the rollback correct for whatever key a later protocol adds.
+	prevOptions := maps.Clone(cfg.Options)
 	if len(kept) == 0 {
 		delete(cfg.Options, wireguard.OptServerPeers)
 	} else {
@@ -912,11 +937,7 @@ func (s *Server) handlePeerDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.mgr.Rebuild(name); err != nil {
-		if prevPeers == "" {
-			delete(cfg.Options, wireguard.OptServerPeers)
-		} else {
-			cfg.Options[wireguard.OptServerPeers] = prevPeers
-		}
+		cfg.Options = prevOptions
 		if rerr := supervisor.WriteListenerFile(s.dir, cfg); rerr != nil {
 			s.log.Printf("mgmt: %s: rolling back a failed peer removal: %v", name, rerr)
 		}
