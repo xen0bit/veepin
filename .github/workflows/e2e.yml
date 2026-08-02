@@ -1,0 +1,92 @@
+name: e2e
+
+# Playwright browser tests of the management panel. Kept in its own workflow —
+# like interop.yml and nm.yml — so the toolchain-light core jobs in ci.yml never
+# install Node or a browser. Path-filtered to the management plane and the e2e
+# suite itself: a change confined to a protocol's data path cannot break the
+# panel, and this job should not run on it.
+on:
+  # Manual trigger, so the panel can be exercised against current main even when
+  # a change lands outside the path filter (e.g. a client-side fix that touches
+  # only the templates).
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "internal/mgmt/**"
+      - "internal/supervisor/**"
+      - "client/**"
+      - "cmd/veepin/**"
+      - "tests/e2e/**"
+      - ".github/workflows/e2e.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "internal/mgmt/**"
+      - "internal/supervisor/**"
+      - "client/**"
+      - "cmd/veepin/**"
+      - "tests/e2e/**"
+      - ".github/workflows/e2e.yml"
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  web-panel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Build the panel harness
+        # Built once, then pointed at by PANEL_HARNESS so the Playwright
+        # webServer step does not recompile on every test run.
+        run: go build -o /tmp/veepin-panel-harness ./tests/e2e/harness
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: tests/e2e/package-lock.json
+
+      - name: Install dependencies
+        working-directory: tests/e2e
+        run: npm ci
+
+      - name: Install the browser
+        working-directory: tests/e2e
+        # --with-deps pulls in the system libraries Chromium needs; the runner's
+        # passwordless sudo covers the apt install.
+        run: npx playwright install --with-deps chromium
+
+      - name: Typecheck the specs
+        working-directory: tests/e2e
+        run: npx tsc --noEmit
+
+      - name: Run the panel tests
+        working-directory: tests/e2e
+        env:
+          PANEL_HARNESS: /tmp/veepin-panel-harness
+        run: npx playwright test
+
+      - name: Upload traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: tests/e2e/test-results/
+          if-no-files-found: ignore
+          retention-days: 7

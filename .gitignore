@@ -16,6 +16,9 @@ nm/bin/
 # binary rule did.
 /veepin
 
+# The e2e panel harness, if built without -o (`go build ./tests/e2e/harness`).
+/harness
+
 # Editor / OS cruft
 *.swp
 .DS_Store
@@ -23,3 +26,9 @@ nm/bin/
 # Python bytecode from the TOY interop peer
 __pycache__/
 *.pyc
+
+# Playwright browser tests (see tests/e2e)
+tests/e2e/node_modules/
+tests/e2e/test-results/
+tests/e2e/playwright-report/
+
