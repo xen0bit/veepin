@@ -62,23 +62,15 @@ half of a build is testable without privileges — the same shape as the pluggab
 ## Caveats
 
 **A listener whose `Close` blocks is abandoned, not waited for.**
-`dataplane.TUN.Read` is a raw blocking `read(2)` on an fd the Go runtime does not
-poll, and `TUN.Close` is a raw `close(2)`, which on Linux does not wake a thread
-already blocked reading that fd. A protocol whose `Close` waits for its packet
-pump therefore does not return until a packet happens to arrive on the
-interface, which on an idle tunnel may be never.
-
-`veepin serve <proto>` never notices: it calls `Close` and exits, and the kernel
-cleans up. The supervisor cannot do that, because it keeps running. So `Close`
-is called on a goroutine and waited for with a bound (`stopGrace`, 5s) — an
-unbounded wait under `Manager.mu` would freeze every other listener's status and
-rebuild behind it. Past the bound the listener is logged and abandoned, which
-**leaks its pump goroutine and TUN fd until the process exits**. Restarting the
-same listener repeatedly on an idle tunnel accumulates both.
-
-The real fix is for `dataplane` to make a blocked TUN read interruptible — a
-runtime-polled fd, or a self-pipe wakeup. That is a change to the
-allocation-guarded data path and belongs on its own, not smuggled in here.
+`Close` is called on a goroutine and waited for with a bound (`stopGrace`, 5s) —
+an unbounded wait would freeze every other listener's status and rebuild behind
+it. The original cause is fixed: `dataplane`'s TUN fd is held non-blocking and
+polled against a wake eventfd, so a `Close` waiting on its packet pump unblocks
+instead of hanging on an idle tunnel. But `Close` can still stall on any other
+blocking path a protocol owns (a wedged control connection, a peer that never
+answers), and past the bound the listener is logged and abandoned, which
+**leaks its pump goroutine and TUN fd until the process exits**. Repeatedly
+restarting a genuinely wedged listener accumulates both.
 
 **A rebuild is a gap in service.** Close, construct, bind again. Clients of that
 listener are disconnected and must re-handshake. There is no draining and no
@@ -87,7 +79,19 @@ overlap; a protocol with a long handshake makes the gap longer.
 **`Apply` holds `Manager.mu` for the whole pass.** Building a listener opens a
 TUN and may shell out to iptables, so a large fleet's reconciliation blocks
 status reads for the duration. Fine for the tens of listeners this is built for;
-it is not a design for hundreds.
+it is not a design for hundreds. (The per-listener `Rebuild` path is the
+exception: it releases the lock around the rebuild so a slow construction shows
+a `"building"` status instead of freezing the other listeners' reads — `buildMu`
+on the handle is what keeps a SIGHUP reconcile from rebuilding it concurrently.)
+
+Releasing that lock means a `Stop`, a `Close` or a reconcile can drop the
+listener from the live set while the rebuild is still running. The removal is
+the later decision and it wins: `Rebuild` tears down whatever it built rather
+than putting the handle back. Re-adding it was the obvious move and the wrong
+one — every remover blocks on `buildMu` until the rebuild finishes, so the
+removal normally lands *after* the new server is up and closes it, and the
+re-add then resurrected a dead entry, leaving a deleted listener still tracked
+and `Close` returning with a non-empty map.
 
 **Nothing here is multi-tenant.** Every listener runs with the supervisor's
 privileges, reads whatever files its options name, and can be edited by anyone

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -804,7 +805,12 @@ func runSupervisorMode(args []string) error {
 		return err
 	}
 
-	logger := log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
+	// The shared log ring captures every line the supervisor and the API write,
+	// for GET /api/logs. Both logger consumers below get the SAME *log.Logger,
+	// so a single ring at the source captures listener events, hostnet
+	// messages, and the per-request API log alike.
+	logRing := mgmt.NewLogRing()
+	logger := log.New(io.MultiWriter(os.Stdout, logRing), "", log.LstdFlags|log.Lmicroseconds)
 	mgr := supervisor.NewManager(configDir, logger, nil)
 	if err := mgr.Apply(); err != nil {
 		// A listener that will not start is left tracked in "error" state with
@@ -834,6 +840,7 @@ func runSupervisorMode(args []string) error {
 			*profilesDir = filepath.Join(configDir, "profiles")
 		}
 		mgmtOpts = append(mgmtOpts, mgmt.WithProfileDir(*profilesDir))
+		mgmtOpts = append(mgmtOpts, mgmt.WithLogRing(logRing))
 		mgmtServer, err := mgmt.NewServer(configDir, mgr, logger, mgmtOpts...)
 		if err != nil {
 			_ = mgr.Close()

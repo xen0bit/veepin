@@ -30,7 +30,7 @@ parallel interface:
 | `add` (config on stdin)      | `POST /api/listeners`                      | create a listener from a JSON file                 |
 | `edit <name>` (config on stdin) | `PATCH /api/listeners/<name>`          | update fields, cold-rebuild                         |
 | `restart <name>`             | `POST /api/listeners/<name>/restart`       | rebuild from the existing on-disk config           |
-| `rm <name>`                  | `DELETE /api/listeners/<name>`             | stop listener + remove its file                    |
+| `rm <name>`                  | `DELETE /api/listeners/<name>`             | stop listener + remove its file (prompts at a terminal; `-y` skips) |
 | `audit`                      | `GET /api/audit`                           | recent management-plane activity, newest first     |
 | `client-config <name>`       | `POST /api/listeners/<name>/client-config` | generate a client profile for a listener           |
 
@@ -122,7 +122,10 @@ source of truth for what is taken. A listener whose address pool is exhausted
 fails loudly rather than reusing an address.
 
 The panel's *client config* button on a listener row is the same call, with the
-endpoint prompted in the browser and the profile offered as a downloadable file.
+endpoint prompted in the browser, an option-overrides editor (needed by
+protocols whose client identity is not derivable — nebula's per-host
+certificate/key, ikev2's identity), and the profile offered as a downloadable
+file.
 
 Caveats: a generated config snapshots the listener's secrets, so rotating the
 PSK invalidates every config generated before it; re-generate to refresh.
@@ -148,7 +151,11 @@ $ veepin profile rm home
 ```
 
 The flag form takes exactly what `veepin connect <protocol>` takes; the older
-`veepin profile add < a-profile.json` (stdin) still works. The supervisor's
-panel manages a *server-side* profile set (`serve -config ... -profiles <dir>`,
-default `<config>/profiles`) for provisioning; per-user profiles under
-`~/.config/veepin/profiles/` stay on the machine that dials.
+`veepin profile add < a-profile.json` (stdin) still works. Both forms validate
+the options against the protocol's parse before saving, so a profile that would
+fail at `veepin connect` time is refused at `add` time with the parse's own
+message — and `veepin connect <name>` resolves profiles from the same directory
+`profile add` writes to, including a custom `VEEPIN_PROFILE_DIR`. The
+supervisor's panel manages a *server-side* profile set (`serve -config ...
+-profiles <dir>`, default `<config>/profiles`) for provisioning; per-user
+profiles under `~/.config/veepin/profiles/` stay on the machine that dials.

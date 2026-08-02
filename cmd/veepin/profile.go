@@ -10,7 +10,7 @@ package main
 //	ls                       list saved profiles
 //	add <name> <protocol>    create a profile from connect flags (or stdin JSON)
 //	show <name>              print a profile (secrets redacted)
-//	rm <name>                delete a profile
+//	rm <name>                delete a profile [-y]
 //
 // VEEPIN_PROFILE_DIR overrides the directory, which is what the tests use and
 // what lets a profile set live somewhere other than the user's config home.
@@ -105,6 +105,17 @@ func profileAdd(args []string) error {
 	if err != nil {
 		return fmt.Errorf("profile add: %w", err)
 	}
+	// The stdin form gets the registry check the flag form already does, and
+	// the same save-time validation, so a profile that cannot be dialed is
+	// refused here rather than surfacing at `veepin connect` time with a
+	// mystery parse error.
+	if !slices.Contains(client.Protocols(), cfg.Protocol) {
+		return fmt.Errorf("profile add: unknown protocol %q (available: %s)",
+			cfg.Protocol, strings.Join(client.Protocols(), ", "))
+	}
+	if err := client.ValidateOptions(cfg.Protocol, cfg.Options); err != nil {
+		return fmt.Errorf("profile add: %w", err)
+	}
 	dir, err := profileDir()
 	if err != nil {
 		return err
@@ -139,6 +150,15 @@ func profileAddFlags(name, protocol string, args []string) error {
 		return fmt.Errorf("profile add: unexpected argument %q", fs.Arg(0))
 	}
 	cfg := profile.Config{Name: name, Protocol: protocol, Options: options()}
+	// The profile's options were typed as connect flags, but flags are a lossy
+	// form: defaults get baked in, required options can be left out, and a typo
+	// in a value the parse does not check is only caught here. ValidateOptions
+	// runs the protocol's ParseFunc and discards the Dialer -- no I/O -- so a
+	// profile that would fail at connect time is refused at save time, with the
+	// parse's own "X is required" message.
+	if err := client.ValidateOptions(protocol, cfg.Options); err != nil {
+		return fmt.Errorf("profile add: %w", err)
+	}
 	dir, err := profileDir()
 	if err != nil {
 		return err
@@ -190,20 +210,36 @@ func profileShow(args []string) error {
 }
 
 func profileRm(args []string) error {
+	// -y is read positionally (see mgmtRm for why it cannot be a flag in the
+	// set): a profile rm in a script is usually `profile rm name -y`, and Go's
+	// flag package stops parsing at the first positional.
+	yes := false
+	filtered := make([]string, 0, len(args))
+	for _, a := range args {
+		if a == "-y" || a == "--y" {
+			yes = true
+			continue
+		}
+		filtered = append(filtered, a)
+	}
 	fs := flag.NewFlagSet("profile rm", flag.ContinueOnError)
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(filtered); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: veepin profile rm <name>")
+		return fmt.Errorf("usage: veepin profile rm <name> [-y]")
+	}
+	name := fs.Arg(0)
+	if !confirmDelete("delete profile "+name, yes) {
+		return fmt.Errorf("profile rm %s: cancelled", name)
 	}
 	dir, err := profileDir()
 	if err != nil {
 		return err
 	}
-	if err := profile.Delete(dir, fs.Arg(0)); err != nil {
+	if err := profile.Delete(dir, name); err != nil {
 		return err
 	}
-	fmt.Printf("deleted %q\n", fs.Arg(0))
+	fmt.Printf("deleted %q\n", name)
 	return nil
 }

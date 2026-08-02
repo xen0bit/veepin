@@ -15,7 +15,7 @@ import (
 
 func TestProfileAddAndList(t *testing.T) {
 	dir := tempProfileDir(t)
-	writeStdin(t, `{"name":"home","protocol":"wireguard","options":{"endpoint":"1.2.3.4:51820"}}`)
+	writeStdin(t, `{"name":"home","protocol":"wireguard","options":{"private-key":"MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=","public-key":"MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=","endpoint":"1.2.3.4:51820","address":"10.0.0.2/32","allowed-ips":"0.0.0.0/0"}}`)
 	if err := runProfile([]string{"add"}); err != nil {
 		t.Fatalf("add: %v", err)
 	}
@@ -36,11 +36,37 @@ func TestProfileAddValidatesName(t *testing.T) {
 	}
 }
 
+// TestProfileAddRejectsUndialableConfigs: a profile the protocol's parse would
+// refuse is rejected at save time, by both forms. The alternative is a profile
+// that saves cleanly and fails at `veepin connect` with a mystery error -- the
+// exact gap client.ValidateOptions exists to close.
+func TestProfileAddRejectsUndialableConfigs(t *testing.T) {
+	// Flag form: an ikev2 profile with no identity option the parse requires.
+	_ = tempProfileDir(t)
+	writeStdin(t, `{"name":"bad-stdin","protocol":"wireguard","options":{"endpoint":"1.2.3.4:51820"}}`)
+	if err := runProfile([]string{"add"}); err == nil {
+		t.Error("stdin form saved a wireguard profile with no keys")
+	} else if !strings.Contains(err.Error(), "required") {
+		t.Errorf("error does not name the missing option: %v", err)
+	}
+
+	// Stdin form: an unknown protocol must be refused, not silently saved.
+	_ = tempProfileDir(t)
+	writeStdin(t, `{"name":"bogus","protocol":"not-a-protocol","options":{}}`)
+	if err := runProfile([]string{"add"}); err == nil {
+		t.Error("stdin form saved a profile with an unknown protocol")
+	} else if !strings.Contains(err.Error(), "unknown protocol") {
+		t.Errorf("error does not name the unknown protocol: %v", err)
+	}
+}
+
 func TestProfileRm(t *testing.T) {
 	dir := tempProfileDir(t)
-	writeStdin(t, `{"name":"home","protocol":"wireguard"}`)
+	writeStdin(t, `{"name":"home","protocol":"wireguard","options":{"private-key":"MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=","public-key":"MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=","endpoint":"1.2.3.4:51820","address":"10.0.0.2/32","allowed-ips":"0.0.0.0/0"}}`)
 	_ = runProfile([]string{"add"})
-	if err := runProfile([]string{"rm", "home"}); err != nil {
+	// -y: rm is destructive and prompts at a terminal, and a test must not
+	// depend on the runner's stdin being a pipe rather than a tty.
+	if err := runProfile([]string{"rm", "home", "-y"}); err != nil {
 		t.Fatalf("rm: %v", err)
 	}
 	if _, err := os.Stat(dir); err != nil {
@@ -187,6 +213,40 @@ func tempProfileDir(t *testing.T) string {
 	dir := t.TempDir()
 	t.Setenv("VEEPIN_PROFILE_DIR", dir)
 	return dir
+}
+
+// TestConnectResolvesProfilesFromVEEPIN_PROFILE_DIR: `veepin connect <name>`
+// must look in the same directory the profile subcommands write to. A profile
+// saved into a custom VEEPIN_PROFILE_DIR that connect refuses to see is a
+// profile that can be created but never dialed; the CLI resolved profiles from
+// the XDG default regardless of the env var until the resolution was unified.
+func TestConnectResolvesProfilesFromVEEPIN_PROFILE_DIR(t *testing.T) {
+	dir := tempProfileDir(t)
+	// A toy profile with no options: toy's ParseFunc rejects the empty set with
+	// a fast, no-I/O "server is required", which is exactly the signal we want —
+	// reaching that error proves the profile was found and dialed from the
+	// custom dir, rather than the resolution having given up with "neither a
+	// protocol nor a saved profile".
+	cfg := profile.Config{Name: "mytoy", Protocol: "toy"}
+	if err := profile.Write(dir, cfg); err != nil {
+		t.Fatal(err)
+	}
+	err := runConnect([]string{"mytoy"})
+	if err == nil {
+		t.Fatal("connect succeeded for a toy profile with no server (it should fail the parse)")
+	}
+	if !strings.Contains(err.Error(), "toy: server is required") {
+		t.Errorf("connect did not dial the custom-dir profile; got %v", err)
+	}
+
+	// And the inverse: with the dir set but the profile absent, the CLI must
+	// report the name as unresolvable rather than silently dialing a profile
+	// from the default directory (the old behavior, which made the env var a
+	// lie).
+	err = runConnect([]string{"missing-profile"})
+	if err == nil || !strings.Contains(err.Error(), "neither a protocol nor a saved profile") {
+		t.Errorf("connect did not report the missing custom-dir profile: %v", err)
+	}
 }
 
 // writeStdin replaces os.Stdin with a pipe carrying content. Callers should

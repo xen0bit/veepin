@@ -8,6 +8,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http/httptest"
@@ -24,9 +25,10 @@ import (
 // cliFakeMgr mirrors internal/mgmt's fakeMgr but in package main (the CLI test
 // is in package main, so the type is local). It satisfies mgmt.ManagerBackend.
 type cliFakeMgr struct {
-	statuses  map[string]supervisor.Status
-	rebuildOf string
-	stopOf    string
+	statuses   map[string]supervisor.Status
+	rebuildOf  string
+	stopOf     string
+	rebuildErr error
 }
 
 func (f *cliFakeMgr) Apply() error { return nil }
@@ -43,14 +45,16 @@ func (f *cliFakeMgr) Status(name string) supervisor.Status {
 	}
 	return supervisor.Status{Name: name, State: "unknown"}
 }
-func (f *cliFakeMgr) Rebuild(name string) error { f.rebuildOf = name; return nil }
+func (f *cliFakeMgr) Rebuild(name string) error { f.rebuildOf = name; return f.rebuildErr }
 func (f *cliFakeMgr) Stop(name string) error {
 	f.stopOf = name
 	delete(f.statuses, name)
 	return nil
 }
-func (f *cliFakeMgr) Close() error                     { return nil }
-func (f *cliFakeMgr) Server(name string) client.Server { return nil }
+func (f *cliFakeMgr) Close() error { return nil }
+func (f *cliFakeMgr) Peers(name string) ([]client.PeerInfo, bool) {
+	return nil, false
+}
 
 // startMgmtTestServer launches a real mgmt.Server (with a fake manager) bound
 // to a httptest.Server and returns the URL + token. The CLI's env vars point at
@@ -114,8 +118,120 @@ func TestMgmtRm(t *testing.T) {
 	})
 	t.Setenv("VEEPIN_MGMT_URL", url)
 	t.Setenv("VEEPIN_MGMT_TOKEN", token)
-	if err := runMgmt([]string{"rm", "site-a"}); err != nil {
+	if err := runMgmt([]string{"rm", "site-a", "-y"}); err != nil {
 		t.Fatalf("rm: %v", err)
+	}
+}
+
+// TestMgmtRmNeedsConfirmation: rm is destructive, so a terminal run must be
+// asked before it deletes. Scripts (non-terminal stdin) proceed as before; the
+// guard is the interactive case, which a test cannot fake without a pty, so the
+// -y path and the non-terminal path are what are pinned here.
+func TestMgmtRmConfirmDelete(t *testing.T) {
+	// Piped stdin (a script) proceeds without -y, and -y forces it anywhere.
+	oldStdin := os.Stdin
+	r, w, _ := os.Pipe()
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = oldStdin; _ = r.Close() })
+	go func() { _, _ = w.Write([]byte("\n")); _ = w.Close() }()
+	if !confirmDelete("delete listener site-a", false) {
+		t.Errorf("confirmDelete refused a non-terminal (script) run")
+	}
+	if !confirmDelete("delete listener site-a", true) {
+		t.Errorf("confirmDelete refused with force (-y)")
+	}
+}
+
+// TestMgmtEditSurfacesABuildError: PATCH answers 202 with build_error when the
+// config was saved but the rebuild failed. The config IS on disk, so the CLI
+// must not treat the response as a success -- the operator needs to know the
+// listener is down and how to bring it back. The response still prints (so a
+// -json script sees the envelope), but the command exits with an error naming
+// the retry path.
+func TestMgmtEditSurfacesABuildError(t *testing.T) {
+	url, token := startMgmtTestServer(t, map[string]supervisor.Status{
+		"site-a": {Name: "site-a", State: "running"},
+	})
+	t.Setenv("VEEPIN_MGMT_URL", url)
+	t.Setenv("VEEPIN_MGMT_TOKEN", token)
+
+	r, w, _ := os.Pipe()
+	t.Cleanup(func() { _ = r.Close() })
+	oldStdin := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = oldStdin })
+	// The fake manager is reachable through the real mgmt.Server the CLI talks
+	// to, but the CLI has its own process-env view of the world. The rebuild
+	// failure is injected server-side by making the fake return one; the API
+	// then answers 202 with build_error, which is what the CLI must surface.
+	// startMgmtTestServer builds its own fake, so use a fresh server here to
+	// reach it.
+	dir := t.TempDir()
+	cfg := supervisor.ListenerConfig{Name: "site-a", Protocol: "wireguard",
+		Enabled: true, Options: map[string]string{"private-key": "k", "address": "10.10.0.1/24"}}
+	body, _ := json.Marshal(cfg)
+	_ = os.WriteFile(filepath.Join(dir, "site-a.json"), body, 0o600)
+	mgr := &cliFakeMgr{statuses: map[string]supervisor.Status{"site-a": {Name: "site-a", State: "running"}}}
+	mgr.rebuildErr = errors.New("wireguard: listen udp 51820: address in use")
+	srv, err := mgmt.NewServer(dir, mgr, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatalf("mgmt.NewServer: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(func() { _ = srv.Close(); ts.Close() })
+	t.Setenv("VEEPIN_MGMT_URL", ts.URL)
+	t.Setenv("VEEPIN_MGMT_TOKEN", string(srv.Token()))
+
+	go func() { _, _ = w.Write([]byte(`{"options":{"address":"10.20.0.1/24"}}`)); _ = w.Close() }()
+	err = runMgmt([]string{"edit", "site-a"})
+	if err == nil {
+		t.Fatalf("edit succeeded despite a rebuild failure")
+	}
+	if !strings.Contains(err.Error(), "rebuild failed") || !strings.Contains(err.Error(), "restart site-a") {
+		t.Errorf("error does not name the failure and the retry path: %v", err)
+	}
+}
+
+// TestMgmtClientHasATimeout: the CLI must not hang forever against a wedged
+// supervisor. The mutation endpoints can block on a rebuild that waits out the
+// supervisor's close grace, so the HTTP client carries a finite timeout.
+func TestMgmtClientHasATimeout(t *testing.T) {
+	t.Setenv("VEEPIN_MGMT_TOKEN", "tok")
+	c, err := newMgmtClient()
+	if err != nil {
+		t.Fatalf("newMgmtClient: %v", err)
+	}
+	if c.http == nil || c.http.Timeout == 0 {
+		t.Errorf("mgmt client has no HTTP timeout")
+	}
+}
+
+// TestClientConfigBundleIsAllOrNothing: writeClientConfigBundle must not leave
+// a half-bundle behind when a companion file fails to install. profile.json
+// lands first, so a companion failure is exactly the case that used to strand
+// a profile pointing at a CA that was never written.
+func TestClientConfigBundleIsAllOrNothing(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "bundle")
+	// Occupy the companion's target name with a directory so the rename into
+	// place fails after profile.json has already been installed.
+	if err := os.MkdirAll(filepath.Join(out, "ca.crt"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	resp := map[string]any{
+		"protocol": "openvpn",
+		"profile": map[string]any{
+			"name": "site-a", "protocol": "openvpn",
+			"options": map[string]any{"remote": "vpn.example.com", "ca": "ca.crt"},
+		},
+		"files": []any{
+			map[string]any{"name": "ca.crt", "content": "-----BEGIN CERTIFICATE-----\n"},
+		},
+	}
+	if err := writeClientConfigBundle(out, resp); err == nil {
+		t.Fatal("bundle succeeded despite an uninstallable companion")
+	}
+	if _, err := os.Stat(filepath.Join(out, "profile.json")); !os.IsNotExist(err) {
+		t.Errorf("profile.json survived a failed bundle")
 	}
 }
 

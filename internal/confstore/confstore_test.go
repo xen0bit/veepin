@@ -5,8 +5,11 @@ package confstore
 // regression here is a regression in both.
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 )
 
@@ -105,8 +108,50 @@ func TestWriteIsAtomicAndOwnerOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, e := range entries {
-		if filepath.Ext(e.Name()) == ".tmp" {
+		if strings.Contains(e.Name(), ".tmp.") {
 			t.Errorf("write left a temp file behind: %s", e.Name())
+		}
+	}
+}
+
+// TestConcurrentWritesDoNotCorrupt: two goroutines writing the SAME entity
+// must not corrupt the file. The old fixed temp name made them share one
+// "name.json.tmp": each truncated the other's in-flight write, and the two
+// renames raced -- installing a torn file, or letting the loser silently
+// overwrite the winner. With a unique temp per writer the renames serialize
+// and the last writer wins whole. This runs under -race in CI.
+func TestConcurrentWritesDoNotCorrupt(t *testing.T) {
+	s := newStore(t)
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			v := fmt.Sprintf("writer-%d", i)
+			if err := s.Write(thing{Name: "same", Value: v, Enabled: true}); err != nil {
+				t.Errorf("write %d: %v", i, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	got, err := s.ParseFile(s.Path("same"))
+	if err != nil {
+		t.Fatalf("final file does not parse after concurrent writes: %v", err)
+	}
+	// The final value must be one whole writer's, never a blend.
+	found := false
+	for i := range 8 {
+		if got.Value == fmt.Sprintf("writer-%d", i) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("final value %q is not any single writer's output", got.Value)
+	}
+	entries, _ := os.ReadDir(s.Dir())
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp.") {
+			t.Errorf("concurrent writes left a temp file behind: %s", e.Name())
 		}
 	}
 }

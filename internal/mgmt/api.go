@@ -35,6 +35,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -43,6 +44,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/internal/keygen"
 	"github.com/xen0bit/veepin/internal/supervisor"
+	"github.com/xen0bit/veepin/wireguard"
 )
 
 // redacted is the package-local spelling of client.Redacted: the value the API
@@ -64,7 +66,7 @@ type ManagerBackend interface {
 	Rebuild(name string) error
 	Stop(name string) error
 	Close() error
-	Server(name string) client.Server
+	Peers(name string) ([]client.PeerInfo, bool)
 }
 
 // Option adjusts a Server before its routes are wired. NewServer takes none,
@@ -78,6 +80,13 @@ type Option func(*Server)
 // directory uses. Without it the profile endpoints answer 404.
 func WithProfileDir(dir string) Option {
 	return func(s *Server) { s.profiles = dir }
+}
+
+// WithLogRing attaches the supervisor's shared log ring to the API server so
+// GET /api/logs can serve it. Without it the endpoint answers 404, which is the
+// right default: a caller that never built a ring has no log to serve.
+func WithLogRing(lr *LogRing) Option {
+	return func(s *Server) { s.logs = lr }
 }
 
 // Server is the management HTTP server.
@@ -109,6 +118,10 @@ type Server struct {
 	// profiles is the on-disk profile directory, or "" when the supervisor did
 	// not configure one (the /api/profiles endpoints then answer 404).
 	profiles string
+
+	// logs is the supervisor's shared log ring (see logring.go), or nil when
+	// no ring was attached. GET /api/logs answers 404 without one.
+	logs *LogRing
 
 	// startedAt is the supervisor uptime start the health endpoint reports.
 	startedAt atomic.Int64
@@ -167,8 +180,10 @@ func NewServer(dir string, mgr ManagerBackend, logger *log.Logger, opts ...Optio
 	s.mux.HandleFunc("DELETE /api/listeners/{name}", s.handleDeleteListener)
 	s.mux.HandleFunc("POST /api/listeners/{name}/restart", s.handleRestartListener)
 	s.mux.HandleFunc("GET /api/listeners/{name}/peers", s.handlePeerList)
+	s.mux.HandleFunc("DELETE /api/listeners/{name}/peers", s.handlePeerDelete)
 	s.mux.HandleFunc("POST /api/listeners/{name}/client-config", s.handleClientConfig)
 	s.mux.HandleFunc("GET /api/audit", s.handleAudit)
+	s.mux.HandleFunc("GET /api/logs", s.handleLogs)
 	if s.profiles != "" {
 		s.mux.HandleFunc("GET /api/profiles", s.handleListProfiles)
 		s.mux.HandleFunc("POST /api/profiles", s.handleCreateProfile)
@@ -211,7 +226,12 @@ func bootToken(path string) ([]byte, bool, error) {
 	if body, err := os.ReadFile(path); err == nil {
 		trimmed := strings.TrimSpace(string(body))
 		if trimmed == "" {
-			return nil, false, fmt.Errorf("token file %s is empty", path)
+			// Atomic writes make this unreachable from a crash, but a file
+			// zeroed by hand or by an older build can still get here. It is
+			// unrecoverable as-is (an empty token is no token), so say what
+			// will fix it rather than leaving the operator to guess why the
+			// supervisor refuses to start.
+			return nil, false, fmt.Errorf("token file %s is empty; delete it and the supervisor will mint a new one", path)
 		}
 		return []byte(trimmed), false, nil
 	} else if !errors.Is(err, fs.ErrNotExist) {
@@ -225,10 +245,51 @@ func bootToken(path string) ([]byte, bool, error) {
 		return nil, false, err
 	}
 	token := []byte(hex.EncodeToString(raw))
-	if err := os.WriteFile(path, append(token, '\n'), 0o600); err != nil {
+	// Written through a temp file and renamed, like every other config this
+	// daemon owns. os.WriteFile truncates in place, so a crash between truncate
+	// and write leaves an empty token file, and an empty token file is fatal on
+	// every later boot -- it fails NewServer, which aborts the whole supervisor.
+	if err := writeTokenAtomic(path, token); err != nil {
 		return nil, false, err
 	}
 	return token, true, nil
+}
+
+// writeTokenAtomic writes the token to a temp file, syncs it, and renames it
+// into place, so the token file is never observed half-written.
+func writeTokenAtomic(path string, token []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, tokenName+".tmp.*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	// The temp file only needs to go away if we are not the ones renaming it;
+	// a successful rename leaves the name vacant. Close-then-remove handles
+	// every error path (a still-open file cannot be renamed on Windows, and
+	// removing an open file would leak the fd on some platforms).
+	keep := false
+	defer func() {
+		if !keep {
+			_ = tmp.Close()
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if err := tmp.Chmod(0o600); err != nil {
+		return err
+	}
+	body := append(append([]byte{}, token...), '\n')
+	if _, err := tmp.Write(body); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	keep = true
+	return os.Rename(tmpName, path)
 }
 
 // --- Middleware ---
@@ -318,13 +379,30 @@ func (s *Server) requireToken(next http.Handler) http.Handler {
 	})
 }
 
-// logRequest emits one line per request: method, path, status, elapsed. It is
-// the minimum operator's view, and the only structured-ish output the
-// management plane produces.
+// logRequest emits one line per request: method, path, status. It is the
+// minimum operator's view, and the only structured-ish output the management
+// plane produces.
+//
+// A GET that succeeded is not logged, and that exclusion is load-bearing rather
+// than cosmetic. The panel polls five endpoints every five seconds, so logging
+// them wrote a line per second into the same logger that feeds the log ring --
+// which meant the 1000-line ring held nothing but "GET /api/logs -> 200" after
+// about seventeen minutes, and the build error an operator opened the panel to
+// read was evicted by the act of reading it. The ring exists to answer "why is
+// this listener in error state"; a feature that overwrites its own answer is
+// worse than not having it.
+//
+// What is kept is everything that carries information: any failure (a 401 is
+// the one security-relevant line here, and 4xx/5xx are what an operator greps
+// for) and every mutation, whatever its outcome. Nothing that changed state, or
+// tried to and was refused, goes unlogged.
 func (s *Server) logRequest(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
+		if r.Method == http.MethodGet && rec.status < 300 {
+			return
+		}
 		s.log.Printf("mgmt: %s %s -> %d", r.Method, r.URL.Path, rec.status)
 	})
 }
@@ -390,6 +468,30 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"events": s.audit.recent(auditCapacity)})
+}
+
+// handleLogs returns the supervisor's recent log lines, newest first. It is
+// what lets the panel answer "why is this listener in error state" — the status
+// field carries the last failure, but the log shows the sequence (build errors,
+// hostnet messages, request lines) that produced it.
+func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.logs == nil {
+		http.Error(w, "no log ring configured", http.StatusNotFound)
+		return
+	}
+	// An explicit ?n bounds the response; the panel asks for the tail. The
+	// default is everything the ring holds, which is bounded by construction.
+	n := 0
+	if q := r.URL.Query().Get("n"); q != "" {
+		if parsed, err := strconv.Atoi(q); err == nil && parsed > 0 {
+			n = parsed
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"lines": s.logs.Recent(n)})
 }
 
 // ProtocolsResp is the body of GET /api/protocols.
@@ -532,11 +634,23 @@ func (s *Server) handleCreateListener(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := supervisor.WriteListenerFile(s.dir, cfg); err != nil {
+		// The generated key material has no owner yet -- the config file that
+		// would make the listener real was never written -- so take it out now.
+		// Without this, a create that fails here leaves <dir>/<name>/ forever:
+		// DELETE cleans it only on the success path, and no other code knows the
+		// directory exists.
+		_ = os.RemoveAll(filepath.Join(s.dir, cfg.Name))
 		res = err
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if err := s.mgr.Apply(); err != nil {
+		// Same cleanup, one step later: the file landed but the listener never
+		// came up, and an orphan key directory with no running listener is
+		// unreachable by DELETE. The Apply failure itself is reported, so the
+		// operator sees why; the material they must keep (a generated public
+		// key) is recoverable from the written config file.
+		_ = os.RemoveAll(filepath.Join(s.dir, cfg.Name))
 		res = err
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -640,8 +754,19 @@ func (s *Server) handleDeleteListener(w http.ResponseWriter, r *http.Request) {
 	// recorded: routing it into res made every delete of a stopped or disabled
 	// listener show up in the audit log as a red failure next to its own 200.
 	_ = s.mgr.Stop(name)
+	// Clean up any generated key material stored alongside the listener. This
+	// runs before the file-missing early-return below: a create that failed
+	// between key generation and the config write leaves the key directory
+	// behind with no config file to DELETE, and the orphan can only be reached
+	// by a delete that does not insist on the file existing first.
+	keyErr := os.RemoveAll(filepath.Join(s.dir, name))
 	if err := supervisor.DeleteListenerFile(s.dir, name); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
+			if keyErr != nil {
+				res = fmt.Errorf("mgmt: removing key material: %w", keyErr)
+				http.Error(w, res.Error(), http.StatusInternalServerError)
+				return
+			}
 			res = err
 			http.Error(w, "no such listener", http.StatusNotFound)
 			return
@@ -650,8 +775,11 @@ func (s *Server) handleDeleteListener(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// Clean up any generated key material stored alongside the listener.
-	_ = os.RemoveAll(filepath.Join(s.dir, name))
+	if keyErr != nil {
+		res = fmt.Errorf("mgmt: removing key material: %w", keyErr)
+		http.Error(w, res.Error(), http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"deleted": name})
 }
 
@@ -689,19 +817,135 @@ func (s *Server) handlePeerList(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		return
 	}
-	srv := s.mgr.Server(name)
-	if srv == nil {
+	// Peer listing goes through the manager, which resolves the live server
+	// under its locks and holds them across the PeerDescriber call. Reading the
+	// raw server handle here and calling Peers() on it would race a concurrent
+	// rebuild or stop that Close()s the server mid-call -- a panel poll racing
+	// a rekey is exactly when peer lists are wanted, and a use-after-close on
+	// the management plane is not a diagnostic anyone asked for.
+	peers, exists := s.mgr.Peers(name)
+	if !exists {
 		http.Error(w, "no such listener", http.StatusNotFound)
 		return
 	}
-	var peers []client.PeerInfo
-	if pd, ok := srv.(client.PeerDescriber); ok {
-		peers = pd.Peers()
-	}
 	if peers == nil {
+		// Protocols without a PeerDescriber return a true exists with a nil
+		// slice; the panel renders nothing rather than a misleading "no peers"
+		// which could be read as "no clients".
 		peers = []client.PeerInfo{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"peers": peers})
+}
+
+// handlePeerDelete removes a configured peer from a WireGuard-family listener
+// (wireguard and amneziawg, which share the same peers options). Stranded
+// peers are the point: a client-config response lost after a successful
+// provision leaves a peer on the listener that nobody holds the private key
+// for, and before this endpoint there was no way to take it back out except
+// hand-editing the config file.
+//
+// The public key travels in the query string, not the path: it is base64, so a
+// path segment would be split by any "/" or "+" in the key.
+func (s *Server) handlePeerDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	name := s.pathName(w, r)
+	if name == "" {
+		return
+	}
+	s.mutate.Lock()
+	defer s.mutate.Unlock()
+	var res error
+	defer func() { s.audit.record("listener.peer-delete", name, res) }()
+	pub := r.URL.Query().Get("key")
+	if pub == "" {
+		res = errors.New("mgmt: peer key is required")
+		http.Error(w, "peer key is required (?key=<public-key>)", http.StatusBadRequest)
+		return
+	}
+	cfg, err := supervisor.ParseListenerFile(supervisor.ListenerPath(s.dir, name))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			res = err
+			http.Error(w, "no such listener", http.StatusNotFound)
+			return
+		}
+		res = err
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if cfg.Protocol != "wireguard" && cfg.Protocol != "amneziawg" {
+		res = fmt.Errorf("mgmt: %s has no configurable peers", cfg.Protocol)
+		http.Error(w, "peer management is a WireGuard-family feature", http.StatusBadRequest)
+		return
+	}
+	peers, err := parseWGPeers(cfg.Options[wireguard.OptServerPeers])
+	if err != nil {
+		res = err
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// The single-peer options are a peer too; removing that one clears them
+	// rather than leaving an orphaned allowed-ips.
+	wasSingle := cfg.Options[wireguard.OptServerPeerPublicKey] == pub
+	kept := make([]wireguard.ServerPeer, 0, len(peers))
+	found := wasSingle
+	for _, p := range peers {
+		if p.PublicKey == pub {
+			found = true
+			continue
+		}
+		kept = append(kept, p)
+	}
+	if !found {
+		res = fmt.Errorf("mgmt: no peer with that key on %s", name)
+		http.Error(w, "no such peer", http.StatusNotFound)
+		return
+	}
+	// Persist the reduced peer set, then rebuild; on a failed rebuild the peer
+	// goes back in, exactly as client-config generation rolls a failed
+	// provision back out.
+	//
+	// The whole options map is snapshotted rather than the peers key alone. A
+	// single-peer removal clears peer-public-key and peer-allowed-ips too, and
+	// restoring only the peers JSON put none of that back: a failed rebuild
+	// dropped the peer permanently. That is the one unrecoverable case here --
+	// unlike a generated client config, the server never held the client's
+	// private key, so a lost peer public key cannot be re-issued. Snapshotting
+	// the map keeps the rollback correct for whatever key a later protocol adds.
+	prevOptions := maps.Clone(cfg.Options)
+	if len(kept) == 0 {
+		delete(cfg.Options, wireguard.OptServerPeers)
+	} else {
+		body, err := json.Marshal(kept)
+		if err != nil {
+			res = err
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		cfg.Options[wireguard.OptServerPeers] = string(body)
+	}
+	if wasSingle {
+		delete(cfg.Options, wireguard.OptServerPeerPublicKey)
+		delete(cfg.Options, wireguard.OptServerPeerAllowedIPs)
+	}
+	if err := supervisor.WriteListenerFile(s.dir, cfg); err != nil {
+		res = err
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := s.mgr.Rebuild(name); err != nil {
+		cfg.Options = prevOptions
+		if rerr := supervisor.WriteListenerFile(s.dir, cfg); rerr != nil {
+			s.log.Printf("mgmt: %s: rolling back a failed peer removal: %v", name, rerr)
+		}
+		res = err
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": pub, "listener": name})
 }
 
 // generateListenerKeys inspects the protocol's OptSpec declarations for entries

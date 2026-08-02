@@ -58,6 +58,14 @@ func (s *fakeServer) Gateway() net.IP     { return s.gateway }
 func (s *fakeServer) Network() *net.IPNet { return s.network }
 func (s *fakeServer) isClosed() bool      { return s.closed.Load() }
 
+// Peers makes fakeServer a client.PeerDescriber so the manager's Peers path is
+// exercised by tests. The peer identity is derived from the TUN name, so each
+// rebuilt generation reports a different address and a test can tell which
+// server generation a Peers call saw.
+func (s *fakeServer) Peers() []client.PeerInfo {
+	return []client.PeerInfo{{ID: s.name, Address: s.tun, State: "connected"}}
+}
+
 // fakeCtor records the calls made to the constructor and produces one
 // fakeServer per call. Set nextErr to make the next construction fail; that
 // surfaces the error from Apply exactly as a real protocol would.
@@ -990,4 +998,181 @@ func TestStatusOfUnknownListener(t *testing.T) {
 func testLogger(t *testing.T) *log.Logger {
 	_ = t
 	return log.New(io.Discard, "", 0)
+}
+
+// TestPeersReturnsTheLiveGeneration's peers under lock, and a concurrent
+// rebuild cannot close the server out from under the call. Before the fix the
+// management API read the raw server handle and called Peers() after the
+// manager released its locks, so a rebuild that Close()d that server mid-call
+// was a use-after-close. Peers must resolve the handle and hold r.mu across
+// the PeerDescriber call.
+//
+// This runs under -race in CI; the loop is the point -- a regression that
+// reads r.srv (or the server) without the lock races with the rebuilds.
+func TestPeersDoesNotRaceARebuild(t *testing.T) {
+	dir := t.TempDir()
+	writeCfg(t, dir, "site-a", "wireguard")
+	ctor := &fakeCtor{}
+	mgr := NewManager(dir, testLogger(t), ctor.construct)
+	t.Cleanup(func() { _ = mgr.Close() })
+	if err := mgr.Apply(); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	// Bounded, not unbounded: every rebuild constructs a new fakeServer and the
+	// fake's TUN index would overflow 255 if the loop ran free, which is a
+	// failure of the fixture, not of the manager.
+	const rebuilds = 40
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range rebuilds {
+				_ = mgr.Rebuild("site-a")
+			}
+		}()
+	}
+	for range 300 {
+		peers, exists := mgr.Peers("site-a")
+		if !exists {
+			// A rebuild stops the listener briefly; Peers may see the gap and
+			// report it as not-running, which is fine. What must never happen is
+			// a peer slice read from a server that was being Close()d.
+			continue
+		}
+		if len(peers) != 1 {
+			t.Fatalf("Peers returned %d entries, want 1: %+v", len(peers), peers)
+		}
+	}
+	wg.Wait()
+}
+
+// TestPeersUnknownListener: Peers of a name the manager never heard of reports
+// not-exists, so the API can answer 404 rather than an empty peer list.
+func TestPeersUnknownListener(t *testing.T) {
+	dir := t.TempDir()
+	mgr := NewManager(dir, testLogger(t), (&fakeCtor{}).construct)
+	if _, exists := mgr.Peers("never-existed"); exists {
+		t.Errorf("Peers of an unknown listener reported exists")
+	}
+}
+
+// TestBuildingStateIsVisibleDuringASlowRebuild: a rebuild that blocks in
+// construction must read as "building" for the whole of it. The state string
+// was documented long before anything ever set it, so a slow rebuild read as a
+// stale "running" (or a "stopped" flash between the stop and the start) and the
+// panel looked frozen. It is only observable because Rebuild releases
+// Manager.mu around the rebuild; with the lock held across construction every
+// Status call would block behind it and the state would never be seen.
+func TestBuildingStateIsVisibleDuringASlowRebuild(t *testing.T) {
+	dir := t.TempDir()
+	writeCfg(t, dir, "site-a", "wireguard")
+	release := make(chan struct{})
+	var constructed atomic.Int32
+	ctor := func(protocol string, opts map[string]string) (client.Server, error) {
+		// Block only the rebuild's construction, not the initial build.
+		if constructed.Add(1) > 1 {
+			<-release
+		}
+		return &fakeServer{name: opts["__name"], tun: "tun0", serveCh: make(chan struct{})}, nil
+	}
+	mgr := NewManager(dir, testLogger(t), ctor)
+	t.Cleanup(func() { _ = mgr.Close() })
+	if err := mgr.Apply(); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if s := mgr.Status("site-a"); s.State != "running" {
+		t.Fatalf("initial state = %q, want running", s.State)
+	}
+	done := make(chan error, 1)
+	go func() { done <- mgr.Rebuild("site-a") }()
+
+	// Poll until the rebuild's construction is underway (state "building"),
+	// then assert it before releasing the ctor.
+	deadline := time.Now().Add(2 * time.Second)
+	for mgr.Status("site-a").State != "building" {
+		if time.Now().After(deadline) {
+			t.Fatalf("listener never entered 'building' during a blocked rebuild")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if s := mgr.Status("site-a"); s.State != "building" {
+		t.Fatalf("status during a blocked rebuild = %q, want building", s.State)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	if s := mgr.Status("site-a"); s.State != "running" {
+		t.Errorf("status after the rebuild = %q, want running", s.State)
+	}
+}
+
+// TestRebuildDoesNotResurrectAStoppedListener: Rebuild releases Manager.mu
+// around the construction so a slow build stays observable, and put the handle
+// back if it had gone from the map. That re-add cannot tell its two
+// interleavings apart.
+//
+// If the removal landed *before* the rebuild started the server, the handle is
+// genuinely running untracked and putting it back is right. If it landed
+// *after* -- Stop and Apply both block on buildMu until the rebuild finishes,
+// so this is the ordinary case -- the remover already tore the new server down,
+// and the re-add resurrects a dead entry the reconcile deliberately dropped. A
+// listener whose config file was deleted then stays tracked, and Close leaves a
+// non-empty map behind.
+//
+// Either way the removal is the later decision and must win.
+func TestRebuildDoesNotResurrectAStoppedListener(t *testing.T) {
+	dir := t.TempDir()
+	writeCfg(t, dir, "site-a", "wireguard")
+	ctor := &fakeCtor{}
+	// gate holds the second construction (the rebuild's) inside the ctor so the
+	// test can run a Stop while the rebuild is provably in flight.
+	gate := make(chan struct{})
+	entered := make(chan struct{})
+	var once sync.Once
+	building := func(protocol string, opts map[string]string) (client.Server, error) {
+		if ctor.tunIdx.Load() > 0 {
+			once.Do(func() { close(entered) })
+			<-gate
+		}
+		return ctor.construct(protocol, opts)
+	}
+	mgr := NewManager(dir, testLogger(t), building)
+	mgr.SetCommander(func(string, ...string) ([]byte, error) { return nil, nil })
+	if err := mgr.Apply(); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = mgr.Rebuild("site-a")
+	}()
+	<-entered // the rebuild is inside the constructor, holding buildMu
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- mgr.Stop("site-a") }()
+	// Give Stop time to take Manager.mu and block on buildMu, so the removal
+	// lands after the rebuild rather than before it.
+	time.Sleep(50 * time.Millisecond)
+	close(gate)
+
+	if err := <-stopped; err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	<-done
+
+	if st := mgr.Status("site-a"); st.State != "unknown" {
+		t.Errorf("a stopped listener was resurrected into the live set: state = %q, want unknown", st.State)
+	}
+	if got := len(mgr.All()); got != 0 {
+		t.Errorf("All reports %d listeners after a Stop, want 0", got)
+	}
+	// Whatever the rebuild started must not be left running.
+	last := ctor.byName(t, "site-a")
+	if !last.isClosed() {
+		t.Errorf("the server the rebuild started was left running after the listener was stopped")
+	}
 }

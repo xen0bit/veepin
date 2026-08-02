@@ -164,15 +164,21 @@ function loadProtocols() {
 }
 
 // configureBody shows or hides the listener-only rows (enabled / setup-nat /
-// wan) and the restart button, and retitles the page.
+// wan), the restart button, and the delete button, and retitles the page.
 function configureBody() {
   const isNewProfile = INITIAL === "new-profile";
+  const isNew = isNewProfile || INITIAL === "new";
   document.getElementById("row-enabled").style.display = isProfile() ? "none" : "";
   document.getElementById("row-setup-nat").style.display = isProfile() ? "none" : "";
   document.getElementById("row-wan").style.display = isProfile() ? "none" : "";
-  document.getElementById("apply").style.display = isProfile() ? "none" : "";
+  // Restart and delete act on an existing entity. On a "new" page both would
+  // fire at a name that has not been saved yet and 404 with a confusing
+  // banner; hide them rather than let an operator click a button whose only
+  // outcome is an error.
+  document.getElementById("apply").style.display = (isProfile() || isNew) ? "none" : "";
+  document.getElementById("delete").style.display = isNew ? "none" : "";
   document.getElementById("title").textContent =
-    (isProfile() ? "profile" : "listener") + (isNewProfile || INITIAL === "new" ? "" : " — " + EDIT_NAME);
+    (isProfile() ? "profile" : "listener") + (isNew ? "" : " — " + EDIT_NAME);
 }
 
 function loadEntity() {
