@@ -1024,16 +1024,16 @@ func TestPeersDoesNotRaceARebuild(t *testing.T) {
 	// fake's TUN index would overflow 255 if the loop ran free, which is a
 	// failure of the fixture, not of the manager.
 	const rebuilds = 40
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for j := 0; j < rebuilds; j++ {
+			for range rebuilds {
 				_ = mgr.Rebuild("site-a")
 			}
 		}()
 	}
-	for i := 0; i < 300; i++ {
+	for range 300 {
 		peers, exists := mgr.Peers("site-a")
 		if !exists {
 			// A rebuild stops the listener briefly; Peers may see the gap and
@@ -1106,5 +1106,73 @@ func TestBuildingStateIsVisibleDuringASlowRebuild(t *testing.T) {
 	}
 	if s := mgr.Status("site-a"); s.State != "running" {
 		t.Errorf("status after the rebuild = %q, want running", s.State)
+	}
+}
+
+// TestRebuildDoesNotResurrectAStoppedListener: Rebuild releases Manager.mu
+// around the construction so a slow build stays observable, and put the handle
+// back if it had gone from the map. That re-add cannot tell its two
+// interleavings apart.
+//
+// If the removal landed *before* the rebuild started the server, the handle is
+// genuinely running untracked and putting it back is right. If it landed
+// *after* -- Stop and Apply both block on buildMu until the rebuild finishes,
+// so this is the ordinary case -- the remover already tore the new server down,
+// and the re-add resurrects a dead entry the reconcile deliberately dropped. A
+// listener whose config file was deleted then stays tracked, and Close leaves a
+// non-empty map behind.
+//
+// Either way the removal is the later decision and must win.
+func TestRebuildDoesNotResurrectAStoppedListener(t *testing.T) {
+	dir := t.TempDir()
+	writeCfg(t, dir, "site-a", "wireguard")
+	ctor := &fakeCtor{}
+	// gate holds the second construction (the rebuild's) inside the ctor so the
+	// test can run a Stop while the rebuild is provably in flight.
+	gate := make(chan struct{})
+	entered := make(chan struct{})
+	var once sync.Once
+	building := func(protocol string, opts map[string]string) (client.Server, error) {
+		if ctor.tunIdx.Load() > 0 {
+			once.Do(func() { close(entered) })
+			<-gate
+		}
+		return ctor.construct(protocol, opts)
+	}
+	mgr := NewManager(dir, testLogger(t), building)
+	mgr.SetCommander(func(string, ...string) ([]byte, error) { return nil, nil })
+	if err := mgr.Apply(); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = mgr.Rebuild("site-a")
+	}()
+	<-entered // the rebuild is inside the constructor, holding buildMu
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- mgr.Stop("site-a") }()
+	// Give Stop time to take Manager.mu and block on buildMu, so the removal
+	// lands after the rebuild rather than before it.
+	time.Sleep(50 * time.Millisecond)
+	close(gate)
+
+	if err := <-stopped; err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	<-done
+
+	if st := mgr.Status("site-a"); st.State != "unknown" {
+		t.Errorf("a stopped listener was resurrected into the live set: state = %q, want unknown", st.State)
+	}
+	if got := len(mgr.All()); got != 0 {
+		t.Errorf("All reports %d listeners after a Stop, want 0", got)
+	}
+	// Whatever the rebuild started must not be left running.
+	last := ctor.byName(t, "site-a")
+	if !last.isClosed() {
+		t.Errorf("the server the rebuild started was left running after the listener was stopped")
 	}
 }

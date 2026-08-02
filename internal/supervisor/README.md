@@ -84,6 +84,15 @@ exception: it releases the lock around the rebuild so a slow construction shows
 a `"building"` status instead of freezing the other listeners' reads — `buildMu`
 on the handle is what keeps a SIGHUP reconcile from rebuilding it concurrently.)
 
+Releasing that lock means a `Stop`, a `Close` or a reconcile can drop the
+listener from the live set while the rebuild is still running. The removal is
+the later decision and it wins: `Rebuild` tears down whatever it built rather
+than putting the handle back. Re-adding it was the obvious move and the wrong
+one — every remover blocks on `buildMu` until the rebuild finishes, so the
+removal normally lands *after* the new server is up and closes it, and the
+re-add then resurrected a dead entry, leaving a deleted listener still tracked
+and `Close` returning with a non-empty map.
+
 **Nothing here is multi-tenant.** Every listener runs with the supervisor's
 privileges, reads whatever files its options name, and can be edited by anyone
 holding the management token. The boundary is the host, not the listener — see

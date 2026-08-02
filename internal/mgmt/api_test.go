@@ -820,7 +820,7 @@ func TestLogRingCapturesLines(t *testing.T) {
 		t.Errorf("Recent is not newest-first: %+v", got)
 	}
 	// Bounded: the ring must not grow without bound.
-	for i := 0; i < logCapacity+50; i++ {
+	for range logCapacity + 50 {
 		_, _ = lr.Write([]byte("noise\n"))
 	}
 	if len(lr.Recent(0)) != logCapacity {
@@ -1797,6 +1797,115 @@ func TestPeerDeleteRollsBackOnRebuildFailure(t *testing.T) {
 	got := readListenerFile(t, dir, "wg")
 	if !strings.Contains(got.Options["peers"], "AAA") {
 		t.Errorf("peer was not rolled back after a failed rebuild: %s", got.Options["peers"])
+	}
+}
+
+// TestPeerDeleteRollsBackTheSinglePeerOptions: the rollback above restored the
+// peers JSON, but a peer stored in the single-peer options is removed by
+// clearing peer-public-key and peer-allowed-ips -- and those were never put
+// back. A failed rebuild then left the listener with no peer at all and the
+// operator holding a 500, which is the one case where the key is unrecoverable:
+// unlike a generated client config, the server never had a copy to re-issue.
+func TestPeerDeleteRollsBackTheSinglePeerOptions(t *testing.T) {
+	dir := t.TempDir()
+	cfg := supervisor.ListenerConfig{Name: "wg", Protocol: "wireguard", Enabled: true,
+		Options: map[string]string{"private-key": "k", "address": "10.10.0.1/24",
+			"peer-public-key": "AAA", "peer-allowed-ips": "10.10.0.2/32"}}
+	body, _ := json.Marshal(cfg)
+	_ = os.WriteFile(filepath.Join(dir, "wg.json"), body, 0o600)
+	mgr := &fakeMgr{statuses: map[string]supervisor.Status{"wg": {Name: "wg", State: "running"}}}
+	mgr.rebuildErr = errors.New("wireguard: listen udp 51820: address in use")
+	srv, err := NewServer(dir, mgr, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, _ := srv.do("DELETE", "/api/listeners/wg/peers?key=AAA", nil)
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", resp.StatusCode)
+	}
+	got := readListenerFile(t, dir, "wg")
+	if got.Options["peer-public-key"] != "AAA" {
+		t.Errorf("peer-public-key was not rolled back: %q", got.Options["peer-public-key"])
+	}
+	if got.Options["peer-allowed-ips"] != "10.10.0.2/32" {
+		t.Errorf("peer-allowed-ips was not rolled back: %q", got.Options["peer-allowed-ips"])
+	}
+}
+
+// TestPollingDoesNotEvictTheLogRing: the panel polls five endpoints every five
+// seconds, and every request wrote a line through the same logger that feeds
+// the ring. That is a line per second of pure self-noise, so the 1000-line ring
+// held nothing but "GET /api/logs -> 200" within about seventeen minutes -- the
+// build error the operator opened the panel to read was evicted by the act of
+// reading it. A successful GET is a poll, not an event; failures and every
+// mutation still get their line.
+func TestPollingDoesNotEvictTheLogRing(t *testing.T) {
+	dir := t.TempDir()
+	ring := NewLogRing()
+	mgr := &fakeMgr{statuses: map[string]supervisor.Status{}}
+	srv, err := NewServer(dir, mgr, log.New(ring, "", 0), WithLogRing(ring))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The line the operator actually wants to still be there afterwards.
+	srv.log.Printf("supervisor: site-a: build failed: address in use")
+	for range logCapacity {
+		if resp, _ := srv.do("GET", "/api/listeners", nil); resp.StatusCode != 200 {
+			t.Fatalf("poll failed: %d", resp.StatusCode)
+		}
+	}
+	lines := ring.Recent(0)
+	for _, l := range lines {
+		if strings.Contains(l.Line, "GET /api/listeners") {
+			t.Fatalf("a successful poll was written to the log ring: %q", l.Line)
+		}
+	}
+	found := false
+	for _, l := range lines {
+		if strings.Contains(l.Line, "build failed") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("polling evicted the build error the ring exists to show")
+	}
+}
+
+// TestFailedRequestsAreStillLogged: the poll-suppression above must not silence
+// the lines that matter. An unauthorized request and a mutation both still
+// reach the log.
+func TestFailedRequestsAreStillLogged(t *testing.T) {
+	dir := t.TempDir()
+	ring := NewLogRing()
+	mgr := &fakeMgr{statuses: map[string]supervisor.Status{}}
+	srv, err := NewServer(dir, mgr, log.New(ring, "", 0), WithLogRing(ring))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A 401: no bearer token at all.
+	req := httptest.NewRequest("GET", "/api/listeners", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	// A mutation, which is an event whatever its outcome.
+	srv.do("DELETE", "/api/listeners/nope", nil)
+
+	var sawUnauthorized, sawDelete bool
+	for _, l := range ring.Recent(0) {
+		if strings.Contains(l.Line, "-> 401") {
+			sawUnauthorized = true
+		}
+		if strings.Contains(l.Line, "DELETE /api/listeners/nope") {
+			sawDelete = true
+		}
+	}
+	if !sawUnauthorized {
+		t.Errorf("a rejected request was not logged")
+	}
+	if !sawDelete {
+		t.Errorf("a mutation was not logged")
 	}
 }
 

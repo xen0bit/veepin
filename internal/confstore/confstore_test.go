@@ -123,7 +123,7 @@ func TestWriteIsAtomicAndOwnerOnly(t *testing.T) {
 func TestConcurrentWritesDoNotCorrupt(t *testing.T) {
 	s := newStore(t)
 	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -140,7 +140,7 @@ func TestConcurrentWritesDoNotCorrupt(t *testing.T) {
 	}
 	// The final value must be one whole writer's, never a blend.
 	found := false
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		if got.Value == fmt.Sprintf("writer-%d", i) {
 			found = true
 		}
