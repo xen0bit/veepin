@@ -10,11 +10,23 @@ on:
   # a change lands outside the path filter (e.g. a client-side fix that touches
   # only the templates).
   workflow_dispatch:
+  # Both filters below must stay identical, the same way interop.yml carries two
+  # copies of its list: GitHub's workflow parser does not support YAML anchors,
+  # so the duplication is the only way to say it.
   push:
     branches: [main]
     paths:
       - "internal/mgmt/**"
       - "internal/supervisor/**"
+      # The three packages the plane is built out of. They are not obvious from
+      # the panel's own directory and every one of them can break it: confstore
+      # is the read/write path under both the listener and profile endpoints,
+      # keygen is what a create dispatches to for key material, and profile is
+      # the type the /api/profiles surface stores. A change confined to one of
+      # them used to run no browser test at all.
+      - "internal/confstore/**"
+      - "internal/keygen/**"
+      - "internal/profile/**"
       - "client/**"
       - "cmd/veepin/**"
       - "tests/e2e/**"
@@ -24,6 +36,9 @@ on:
     paths:
       - "internal/mgmt/**"
       - "internal/supervisor/**"
+      - "internal/confstore/**"
+      - "internal/keygen/**"
+      - "internal/profile/**"
       - "client/**"
       - "cmd/veepin/**"
       - "tests/e2e/**"
