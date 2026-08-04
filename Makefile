@@ -140,6 +140,12 @@ test-short:
 interop:
 	$(GO) test -tags interop -count=1 -timeout 20m ./tests/interop/...
 
+## e2e: Playwright browser tests of the management panel (needs Node >= 20.6 + Chromium; not in `test`)
+.PHONY: e2e
+e2e:
+	$(GO) build -o /tmp/veepin-panel-harness ./tests/e2e/harness
+	cd tests/e2e && npm ci && PANEL_HARNESS=/tmp/veepin-panel-harness npx playwright test
+
 ## test-v: run all tests verbosely with the race detector
 .PHONY: test-v
 test-v:

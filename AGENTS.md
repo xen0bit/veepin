@@ -167,6 +167,19 @@ Two corollaries:
   fixed `—†` label rather than a false ✗ (see the Fortinet precedent in
   `internal/livingreadme/interop.go`).
 
+## The management panel's browser tests
+
+`tests/e2e/` is a separate Playwright suite that drives the panel in a real
+Chromium against the production management plane — a real `mgmt.Server`, the
+embedded `ui.Handler`, and `mgmt.RequireHost` — with a fake `ManagerBackend`
+standing in for the supervisor, so no TUN, Docker, or root is needed. The harness
+is `tests/e2e/harness` (a Go `main`; `go build ./...` compiles it) and the world
+it serves comes from `tests/e2e/fixtures/seed.json`. Run locally with `make e2e`
+(needs Node ≥ 20.6 and `npx playwright install chromium` once); CI runs it in the
+path-filtered `e2e` workflow. The Go tests pin the API's HTTP behavior; these pin
+that the DOM renders it — redaction sentinels visible, destructive actions gated
+on `confirm()`, the client-config dialog provisioning a real peer.
+
 ## Protocol work: things learned the hard way
 
 - **Read the reference implementation's source, not a summary of it.** For

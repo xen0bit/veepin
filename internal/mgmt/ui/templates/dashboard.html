@@ -217,7 +217,11 @@ function refresh() {
       visible.filter(l => expanded[l.name]).map(l =>
         '<tr class="detail-row"><td colspan="9" class="detail-cell" data-detail="' +
         encodeURIComponent(l.name) + '">loading&hellip;</td></tr>').join("");
-    visible.filter(l => expanded[l.name]).forEach(loadDetail);
+    // loadDetail takes the NAME, not the listener object: Array.prototype.forEach
+    // passes the element through, and encodeURIComponent(element) becomes the
+    // literal "[object Object]", which matches no data-detail cell and leaves
+    // the expanded row stuck on "loading…" forever.
+    visible.filter(l => expanded[l.name]).forEach(l => loadDetail(l.name));
   }).catch(err => {
     const tbody = document.querySelector("#listeners tbody");
     tbody.innerHTML = '<tr><td colspan="9" class="muted">load failed: ' + esc(err) + '</td></tr>';

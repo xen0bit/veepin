@@ -1,0 +1,63 @@
+{
+  "listeners": [
+    {
+      "name": "site-a",
+      "protocol": "wireguard",
+      "state": "running",
+      "tun": "tun0",
+      "gateway": "10.10.0.1",
+      "network": "10.10.0.0/24",
+      "enabled": true,
+      "options": {
+        "private-key": "811WYV9bqgEduWyGDs+V+xJyo7Gx6Zo4Qn+HoB8Y6rk=",
+        "address": "10.10.0.1/24",
+        "peers": "[{\"public-key\":\"e2e-peer-AAAABBBBCCCCDDDDEEEEFFFF000011112222333344445555\",\"allowed-ips\":[\"10.10.0.2/32\"]}]"
+      }
+    },
+    {
+      "name": "broken",
+      "protocol": "toy",
+      "state": "error",
+      "error": "constructing toy server: user is required",
+      "enabled": true,
+      "options": {
+        "user": "ops"
+      },
+      "rebuildErr": "toy: bind 127.0.0.1:5555: address in use"
+    },
+    {
+      "name": "down",
+      "protocol": "openvpn",
+      "state": "stopped",
+      "enabled": true,
+      "options": {
+        "remote": "vpn.example.com"
+      }
+    },
+    {
+      "name": "disabled",
+      "protocol": "sstp",
+      "state": "disabled",
+      "enabled": false,
+      "options": {
+        "server": "sstp.example.com"
+      }
+    }
+  ],
+  "profiles": [
+    {
+      "name": "home",
+      "protocol": "toy",
+      "options": {
+        "server": "home.example.com",
+        "user": "alice",
+        "secret": "e2e-profile-secret"
+      }
+    }
+  ],
+  "logs": [
+    "supervisor ready: 2 of 4 listener(s) running",
+    "supervisor: broken/toy: constructing toy server: user is required",
+    "mgmt: GET /api/listeners -> 200"
+  ]
+}
