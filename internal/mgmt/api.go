@@ -35,6 +35,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,6 +43,7 @@ import (
 	"time"
 
 	"github.com/xen0bit/veepin/client"
+	"github.com/xen0bit/veepin/internal/confstore"
 	"github.com/xen0bit/veepin/internal/keygen"
 	"github.com/xen0bit/veepin/internal/supervisor"
 	"github.com/xen0bit/veepin/wireguard"
@@ -441,6 +443,16 @@ func bearer(h string) []byte {
 // could ever have written; the caller returns on an empty result.
 func (s *Server) pathName(w http.ResponseWriter, r *http.Request) string {
 	name := r.PathValue("name")
+	// A reserved name is a different answer from a missing one, and the
+	// difference matters: "mgmt" and "profiles" are the config root's own
+	// subdirectories, and the DELETE handler's orphan cleanup is an
+	// os.RemoveAll of <dir>/<name>. Answering 404 for them would be true of the
+	// listener and a lie about what just did not happen, so say it plainly.
+	if confstore.ReservedName(name) {
+		http.Error(w, "\""+name+"\" is reserved for the config root's own directory",
+			http.StatusBadRequest)
+		return ""
+	}
 	if !supervisor.ValidName(name) {
 		http.Error(w, "no such listener", http.StatusNotFound)
 		return ""
@@ -607,6 +619,18 @@ func (s *Server) handleCreateListener(w http.ResponseWriter, r *http.Request) {
 	if !supervisor.KnownProtocol(cfg.Protocol) {
 		res = fmt.Errorf("mgmt: unknown protocol %q", cfg.Protocol)
 		http.Error(w, "unknown protocol", http.StatusBadRequest)
+		return
+	}
+	// The sentinel means "keep what is stored", and on a create there is nothing
+	// stored to keep. mergeOptions honours it, but only PATCH goes through
+	// mergeOptions -- a create decodes straight into the config, so a
+	// GET-edit-POST-under-a-new-name round trip stored the literal string
+	// "<redacted>" as the private key. Worse, being non-empty it then suppressed
+	// key generation below, and the whole thing answered 201.
+	if k := firstRedactedLiteral(cfg.Options); k != "" {
+		res = fmt.Errorf("mgmt: %q is the redaction sentinel, not a value", k)
+		http.Error(w, "option "+k+" is the literal \"<redacted>\": supply the real value, "+
+			"or leave it empty to have one generated", http.StatusBadRequest)
 		return
 	}
 	// POST creates. Without this check it also silently overwrote, so a repeated
@@ -956,6 +980,19 @@ func (s *Server) handlePeerDelete(w http.ResponseWriter, r *http.Request) {
 // Multi-file generators (e.g. "tls" returns both "cert" and "key") set every key
 // they produce, so the handler does not need to deduce which keys were affected.
 //
+// Whether a generator runs is decided per GENERATOR, not per spec, in a first
+// pass over the declarations. Deciding it per spec meant partial operator input
+// went undetected: the loop skipped a spec whose value was already supplied
+// before recording that its generator had been considered, so
+//
+//	POST {"protocol":"openvpn","options":{"key":"/etc/my/server.key"}}
+//
+// left "ca" empty, ran x509-chain anyway, O_TRUNC-wrote all three PEMs, and
+// then merged only into the empty keys -- storing a generated certificate
+// alongside the operator's unrelated private key. The listener answered 201 and
+// failed every handshake. A generator is all-or-nothing, so a partial supply is
+// refused rather than half-honoured.
+//
 // The returned map is the generated material the protocol does NOT declare as an
 // option (a WireGuard public key, which the parse never reads but the operator
 // must distribute): the handler merges it into cfg.Options so it persists with
@@ -969,6 +1006,19 @@ func generateListenerKeys(configDir string, cfg *supervisor.ListenerConfig) (map
 	for _, spec := range decl {
 		declared[spec.Key] = true
 	}
+	// First pass: for each generator, which of its keys the operator supplied.
+	supplied := map[string][]string{}
+	missing := map[string][]string{}
+	for _, spec := range decl {
+		if spec.Generate == "" {
+			continue
+		}
+		if cfg.Options[spec.Key] != "" {
+			supplied[spec.Generate] = append(supplied[spec.Generate], spec.Key)
+		} else {
+			missing[spec.Generate] = append(missing[spec.Generate], spec.Key)
+		}
+	}
 	generated := map[string]string{}
 	seen := map[string]bool{}
 	for _, spec := range decl {
@@ -978,13 +1028,24 @@ func generateListenerKeys(configDir string, cfg *supervisor.ListenerConfig) (map
 		if cfg.Options == nil {
 			cfg.Options = map[string]string{}
 		}
-		if cfg.Options[spec.Key] != "" {
-			continue
-		}
 		if seen[spec.Generate] {
 			continue
 		}
 		seen[spec.Generate] = true
+		// Nothing missing: the operator brought their own, in full.
+		if len(missing[spec.Generate]) == 0 {
+			continue
+		}
+		// Something missing and something supplied: refuse rather than write
+		// over half of a set that has to agree with itself.
+		if got := supplied[spec.Generate]; len(got) > 0 {
+			slices.Sort(got)
+			want := slices.Clone(missing[spec.Generate])
+			slices.Sort(want)
+			return nil, fmt.Errorf(
+				"mgmt: %q generates %s together: supply all of them or none (missing %s)",
+				spec.Generate, strings.Join(got, ", "), strings.Join(want, ", "))
+		}
 
 		kv, err := keygen.Generate(cfg.Name, configDir, spec.Generate, spec.Key)
 		if err != nil {
@@ -1051,6 +1112,42 @@ func (p listenerPatch) applyTo(existing supervisor.ListenerConfig) supervisor.Li
 	if p.Enabled != nil {
 		out.Enabled = *p.Enabled
 	}
+	// A protocol change re-bases which keys are secret, because redaction is
+	// resolved against the CURRENT protocol's specs. Carrying the old
+	// protocol's options across meant a single PATCH could declassify them:
+	//
+	//	POST  {"protocol":"ikev2","options":{"psk":"REAL"}}
+	//	PATCH {"protocol":"toy"}          -- toy declares no psk spec
+	//	GET   -> {"options":{"psk":"REAL"}}   in the clear
+	//
+	// Dropping what the new protocol does not declare is both the safe answer
+	// and the correct one: a key the new parse never reads is dead config
+	// either way, and keeping it only preserved it somewhere it could leak.
+	if p.Protocol != nil && *p.Protocol != existing.Protocol {
+		out.Options = keepDeclaredOptions(out.Protocol, out.Options)
+	}
+	return out
+}
+
+// keepDeclaredOptions drops every key the protocol does not declare a server
+// OptSpec for. A protocol with no declaration is left alone: the API cannot
+// tell which of its keys are meaningful, and every registered protocol declares
+// one, so this is a fallback rather than a live path.
+func keepDeclaredOptions(protocol string, opts map[string]string) map[string]string {
+	specs, ok := client.ServerOptsFor(protocol)
+	if !ok || opts == nil {
+		return opts
+	}
+	declared := make(map[string]bool, len(specs))
+	for _, sp := range specs {
+		declared[sp.Key] = true
+	}
+	out := make(map[string]string, len(opts))
+	for k, v := range opts {
+		if declared[k] {
+			out[k] = v
+		}
+	}
 	return out
 }
 
@@ -1079,6 +1176,23 @@ func mergeOptions(existing, patch map[string]string) map[string]string {
 		}
 	}
 	return out
+}
+
+// firstRedactedLiteral returns the first key whose value is the redaction
+// sentinel, or "" if none is. Sorted, so the message a form full of them
+// produces is the same one every time.
+func firstRedactedLiteral(opts map[string]string) string {
+	keys := make([]string, 0, len(opts))
+	for k, v := range opts {
+		if v == redacted {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) == 0 {
+		return ""
+	}
+	slices.Sort(keys)
+	return keys[0]
 }
 
 // redactOptions returns a copy of opts with the values of the secret keys a

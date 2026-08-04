@@ -715,7 +715,8 @@ func TestProfilePatchMergesOptions(t *testing.T) {
 func TestProfileDeleteRemovesTheFileAndIsNotIdempotent(t *testing.T) {
 	dir := t.TempDir()
 	s, _, _ := newTestServerWithProfiles(t, map[string]supervisor.Status{}, dir)
-	s.do("POST", "/api/profiles", map[string]any{"name": "home", "protocol": "toy"})
+	s.do("POST", "/api/profiles", map[string]any{"name": "home", "protocol": "toy",
+		"options": map[string]string{"server": "vpn.example.com", "user": "a", "secret": "s"}})
 	resp, _ := s.do("DELETE", "/api/profiles/home", nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("delete status = %d", resp.StatusCode)
@@ -985,8 +986,17 @@ func TestClientConfigBundlesFileCompanions(t *testing.T) {
 	if err := os.WriteFile(caPath, []byte("-----BEGIN CERTIFICATE-----\nMOCK\n-----END CERTIFICATE-----\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// All three of x509-chain's outputs, not just the CA: the generator is
+	// all-or-nothing, so a partial supply is refused rather than half-honoured.
+	certPath := filepath.Join(s.dir, "server.crt")
+	keyPath := filepath.Join(s.dir, "server.key")
+	for _, p := range []string{certPath, keyPath} {
+		if err := os.WriteFile(p, []byte("-----BEGIN CERTIFICATE-----\nMOCK\n-----END CERTIFICATE-----\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s.do("POST", "/api/listeners", map[string]any{"name": "site-a", "protocol": "openvpn",
-		"options": map[string]string{"ca": caPath}, "enabled": true})
+		"options": map[string]string{"ca": caPath, "cert": certPath, "key": keyPath}, "enabled": true})
 	resp, body := s.do("POST", "/api/listeners/site-a/client-config",
 		map[string]any{"endpoint": "vpn.example.com"})
 	if resp.StatusCode != 200 {
@@ -1222,8 +1232,14 @@ func TestClientConfigNeverReadsAnOperatorSuppliedPath(t *testing.T) {
 func TestClientConfigWarnsAboutAFileItCannotBundle(t *testing.T) {
 	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
 	missing := filepath.Join(s.dir, "gone.crt")
+	// cert and key are supplied too, so x509-chain does not run: this test is
+	// about a file the bundler cannot read, not about a partial key set.
+	present := filepath.Join(s.dir, "there.pem")
+	if err := os.WriteFile(present, []byte("-----BEGIN CERTIFICATE-----\nMOCK\n-----END CERTIFICATE-----\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	s.do("POST", "/api/listeners", map[string]any{"name": "site-a", "protocol": "openvpn",
-		"options": map[string]string{"ca": missing}, "enabled": true})
+		"options": map[string]string{"ca": missing, "cert": present, "key": present}, "enabled": true})
 	_, body := s.do("POST", "/api/listeners/site-a/client-config",
 		map[string]any{"endpoint": "vpn.example.com"})
 	var out clientConfigResponse

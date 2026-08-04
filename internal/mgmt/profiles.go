@@ -105,6 +105,18 @@ func (s *Server) handleCreateProfile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown protocol", http.StatusBadRequest)
 		return
 	}
+	// Run the protocol's own parse over the options, exactly as `veepin profile
+	// add` does. Config.Validate above checks only the envelope -- a name and a
+	// known protocol -- so without this the panel happily saved
+	// {"protocol":"wireguard","options":{}} with a 201, and the operator found
+	// out at `veepin connect` that private-key was required. That is the gap
+	// client.ValidateOptions exists to close, and the panel is the consumer the
+	// OptSpec tables were written for.
+	if err := client.ValidateOptions(cfg.Protocol, cfg.Options); err != nil {
+		res = err
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	// POST creates; a repeated create is a conflict, mirroring the listener
 	// endpoint's stance.
 	if _, err := os.Stat(profile.Path(s.profiles, cfg.Name)); err == nil {
@@ -145,6 +157,31 @@ func (p profilePatch) applyTo(existing profile.Config) profile.Config {
 	}
 	if p.Options != nil {
 		out.Options = mergeOptions(existing.Options, *p.Options)
+	}
+	// Same reasoning as listenerPatch.applyTo: redaction resolves against the
+	// current protocol, so carrying the old protocol's keys across a protocol
+	// change would move a stored secret out of the redaction set.
+	if p.Protocol != nil && *p.Protocol != existing.Protocol {
+		out.Options = keepDeclaredClientOptions(out.Protocol, out.Options)
+	}
+	return out
+}
+
+// keepDeclaredClientOptions is keepDeclaredOptions against the client registry.
+func keepDeclaredClientOptions(protocol string, opts map[string]string) map[string]string {
+	specs, ok := client.ClientOptsFor(protocol)
+	if !ok || opts == nil {
+		return opts
+	}
+	declared := make(map[string]bool, len(specs))
+	for _, sp := range specs {
+		declared[sp.Key] = true
+	}
+	out := make(map[string]string, len(opts))
+	for k, v := range opts {
+		if declared[k] {
+			out[k] = v
+		}
 	}
 	return out
 }
@@ -194,6 +231,11 @@ func (s *Server) handlePatchProfile(w http.ResponseWriter, r *http.Request) {
 	if !knownClientProtocol(merged.Protocol) {
 		res = fmt.Errorf("mgmt: unknown protocol %q", merged.Protocol)
 		http.Error(w, "unknown protocol", http.StatusBadRequest)
+		return
+	}
+	if err := client.ValidateOptions(merged.Protocol, merged.Options); err != nil {
+		res = err
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	if err := s.profileStore().Write(merged); err != nil {

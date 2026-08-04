@@ -49,13 +49,41 @@ import (
 // of 1-32 octets, starting with a letter or digit.
 var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 
+// reserved are the names an entity may not take because the config root already
+// uses them for its own subdirectories: <dir>/mgmt holds the bearer token,
+// <dir>/profiles holds the saved client profiles.
+//
+// The grammar admits both, and an entity's name is not only its filename but
+// also the directory its generated key material goes in -- so a listener called
+// "profiles" would generate PEMs into the profile directory, and deleting it
+// would take every profile on the box with it. Refusing the two names here is
+// what stops that, in the one place that already owns "what may become a path
+// element". The cost is that neither word can name a listener or a profile,
+// which is a trade an operator can work around and a data loss is not.
+var reserved = map[string]bool{"mgmt": true, "profiles": true}
+
 // ValidName reports whether name may be used as an entity name, and therefore
 // as a path element. Callers validate with it rather than re-deriving the rule,
 // so there is one answer to "what may become a filename here".
-func ValidName(name string) bool { return nameRe.MatchString(name) }
+func ValidName(name string) bool { return nameRe.MatchString(name) && !reserved[name] }
+
+// ReservedName reports whether name is refused because the config root claims
+// it, rather than because it fails the grammar. Callers use it to say which of
+// the two rules a name broke.
+func ReservedName(name string) bool { return reserved[name] }
 
 // NameGrammar is the human-readable form of the rule, for error messages.
 func NameGrammar() string { return nameRe.String() }
+
+// NameRefusal says which of the two rules a name broke, so the operator who
+// picked "profiles" is not told to consult a regular expression that admits it.
+// Callers phrasing their own "bad name" error use this for the reason clause.
+func NameRefusal(name string) string {
+	if reserved[name] {
+		return "the config root uses that name for its own directory"
+	}
+	return "bad name, want " + NameGrammar()
+}
 
 // Named is what a stored type must be able to say about itself: what it is
 // called, and whether it makes sense.
@@ -116,6 +144,15 @@ func (s *Store[T]) ParseBytes(body []byte) (T, error) {
 		var zero T
 		return zero, fmt.Errorf("%s: parsing config: %w", s.prefix, err)
 	}
+	// Decode reads exactly one value and stops, so two concatenated documents
+	// parse as the first one alone. An interrupted editor or a script that
+	// appended instead of replacing produces exactly that, and the half the
+	// operator can see is the half being ignored -- the same silent-drop failure
+	// DisallowUnknownFields above exists to prevent.
+	if dec.More() {
+		var zero T
+		return zero, fmt.Errorf("%s: trailing data after the config document", s.prefix)
+	}
 	if err := c.Validate(); err != nil {
 		var zero T
 		return zero, err
@@ -141,9 +178,23 @@ func (s *Store[T]) LoadDir() (map[string]T, error) {
 		}
 		c, err := s.ParseFile(filepath.Join(s.dir, e.Name()))
 		if err != nil {
-			return nil, fmt.Errorf("%s: %s: %w", s.prefix, e.Name(), err)
+			// ParseFile already names the file and prefixes the package; wrapping
+			// again produced "supervisor: site-a.json: supervisor: reading
+			// site-a.json: ...".
+			return nil, err
 		}
 		name := c.ConfigName()
+		// The filename is how the operator finds the entity and how Write will
+		// name it; the name field is how everything else refers to it. When they
+		// disagree, a hand-edited site-a.json saying "name":"site-b" loads as
+		// site-b, the next Write creates site-b.json, and the load AFTER that
+		// fails "duplicate name" -- taking the whole fleet down, since LoadDir
+		// fails whole. Refuse at the first read, where the file is still the only
+		// one and the message can say which.
+		if stem := strings.TrimSuffix(e.Name(), ".json"); stem != name {
+			return nil, fmt.Errorf("%s: %s: config names itself %q; rename the file or the field so they agree",
+				s.prefix, e.Name(), name)
+		}
 		if _, dup := out[name]; dup {
 			return nil, fmt.Errorf("%s: duplicate name %q (from %s)", s.prefix, name, e.Name())
 		}
@@ -164,6 +215,14 @@ func (s *Store[T]) Write(c T) error {
 		return err
 	}
 	name := c.ConfigName()
+	// Validate above is the caller's rule; this is the store's. Nothing in the
+	// Named interface obliges a Validate to check the name, and Write is the
+	// function that turns it into a path -- so a type whose Validate forgot
+	// would have this one create <dir>/../../etc/cron.d/x.json at 0600. Delete
+	// makes the same check for the same reason.
+	if !ValidName(name) {
+		return fmt.Errorf("%s: refusing to write %q: %s", s.prefix, name, NameRefusal(name))
+	}
 	body, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return fmt.Errorf("%s: marshalling %q: %w", s.prefix, name, err)
@@ -183,12 +242,9 @@ func (s *Store[T]) Write(c T) error {
 	if err != nil {
 		return fmt.Errorf("%s: creating temp file: %w", s.prefix, err)
 	}
+	// No Chmod: os.CreateTemp already creates at 0600, which is the mode this
+	// file must end up with.
 	tmp := f.Name()
-	if err := f.Chmod(0o600); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("%s: chmod temp file: %w", s.prefix, err)
-	}
 	if _, err := f.Write(body); err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmp)
@@ -218,9 +274,12 @@ func (s *Store[T]) Write(c T) error {
 // should never have got this far.
 func (s *Store[T]) Delete(name string) error {
 	if !ValidName(name) {
-		return fmt.Errorf("%s: refusing to delete %q: bad name", s.prefix, name)
+		return fmt.Errorf("%s: refusing to delete %q: %s", s.prefix, name, NameRefusal(name))
 	}
-	return os.Remove(filepath.Join(s.dir, name+".json"))
+	if err := os.Remove(filepath.Join(s.dir, name+".json")); err != nil {
+		return fmt.Errorf("%s: deleting %q: %w", s.prefix, name, err)
+	}
+	return nil
 }
 
 // Path is the file an entity of the given name lives at. Callers that need to

@@ -96,7 +96,7 @@ func (c ListenerConfig) ConfigName() string { return c.Name }
 // data check that runs in the fuzz target without touching registration.
 func (c ListenerConfig) Validate() error {
 	if !confstore.ValidName(c.Name) {
-		return fmt.Errorf("supervisor: name %q must match %s", c.Name, confstore.NameGrammar())
+		return fmt.Errorf("supervisor: name %q: %s", c.Name, confstore.NameRefusal(c.Name))
 	}
 	if c.Protocol == "" {
 		return errors.New("supervisor: protocol is required")
