@@ -68,11 +68,17 @@ type fakeMgr struct {
 }
 
 func (f *fakeMgr) Apply() error { f.applyCalls++; return f.applyErr }
+
+// All mirrors the real Manager.All, which sorts by name. The fake used to range
+// the map and return whatever order that gave, so it modelled the opposite of
+// the production behaviour and no test could hold the API to the ordering it
+// documents.
 func (f *fakeMgr) All() []supervisor.Status {
 	out := make([]supervisor.Status, 0, len(f.statuses))
 	for _, s := range f.statuses {
 		out = append(out, s)
 	}
+	slices.SortFunc(out, func(a, b supervisor.Status) int { return strings.Compare(a.Name, b.Name) })
 	return out
 }
 func (f *fakeMgr) Status(name string) supervisor.Status {
@@ -222,19 +228,41 @@ func TestProtocolsEndpointListsEveryRegisteredProtocol(t *testing.T) {
 	}
 }
 
+// TestListListenersReturnsStatuses: the listing carries every listener, in name
+// order. The order is what the panel renders rows in, so an unsorted answer
+// makes rows jump between polls.
+//
+// It used to say "sorted by name" in a comment and check it with two
+// strings.Contains, which hold for any order at all.
 func TestListListenersReturnsStatuses(t *testing.T) {
 	statuses := map[string]supervisor.Status{
-		"site-a": {Name: "site-a", Protocol: "wireguard", State: "running"},
 		"site-b": {Name: "site-b", Protocol: "ikev2", State: "running"},
+		"site-a": {Name: "site-a", Protocol: "wireguard", State: "running"},
+		"site-c": {Name: "site-c", Protocol: "toy", State: "stopped"},
 	}
 	s, _, _ := newTestServer(t, statuses)
 	resp, body := s.do("GET", "/api/listeners", nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d body=%s", resp.StatusCode, body)
 	}
-	// Both statuses should appear, sorted by name.
-	if !strings.Contains(string(body), "site-a") || !strings.Contains(string(body), "site-b") {
-		t.Errorf("body misses a listener: %s", body)
+	var out struct {
+		Listeners []supervisor.Status `json:"listeners"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("response not JSON: %v: %s", err, body)
+	}
+	var got []string
+	for _, l := range out.Listeners {
+		got = append(got, l.Name)
+	}
+	if want := []string{"site-a", "site-b", "site-c"}; !slices.Equal(got, want) {
+		t.Errorf("listing = %v, want %v (every listener, in name order)", got, want)
+	}
+	// And the protocol and state travel with the name, not just the name.
+	for _, l := range out.Listeners {
+		if want := statuses[l.Name]; l.Protocol != want.Protocol || l.State != want.State {
+			t.Errorf("%s = protocol %q state %q, want %q/%q", l.Name, l.Protocol, l.State, want.Protocol, want.State)
+		}
 	}
 }
 
@@ -980,6 +1008,16 @@ func TestClientConfigRequiresEndpoint(t *testing.T) {
 
 // TestClientConfigBundlesFileCompanions: a file-path client option is bundled
 // into the response and the profile rewritten to the file's base name.
+// ovpnClientIdentity is the client certificate and key an openvpn client-config
+// must be given. veepin does not run a CA that issues client certificates -- the
+// same reason nebula's per-host certificate cannot be derived either -- and the
+// openvpn client parse requires both unconditionally, so the endpoint reports
+// them as overrides the caller has to supply rather than inventing a pair.
+var ovpnClientIdentity = map[string]string{
+	"cert": "/etc/veepin/client.crt",
+	"key":  "/etc/veepin/client.key",
+}
+
 func TestClientConfigBundlesFileCompanions(t *testing.T) {
 	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
 	caPath := filepath.Join(s.dir, "ca.crt")
@@ -998,7 +1036,7 @@ func TestClientConfigBundlesFileCompanions(t *testing.T) {
 	s.do("POST", "/api/listeners", map[string]any{"name": "site-a", "protocol": "openvpn",
 		"options": map[string]string{"ca": caPath, "cert": certPath, "key": keyPath}, "enabled": true})
 	resp, body := s.do("POST", "/api/listeners/site-a/client-config",
-		map[string]any{"endpoint": "vpn.example.com"})
+		map[string]any{"overrides": ovpnClientIdentity, "endpoint": "vpn.example.com"})
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d: %s", resp.StatusCode, body)
 	}
@@ -1047,7 +1085,7 @@ func TestClientConfigPutsThePortInThePortOption(t *testing.T) {
 			s.do("POST", "/api/listeners", map[string]any{"name": "ovpn", "protocol": "openvpn",
 				"options": opts, "enabled": true})
 			resp, body := s.do("POST", "/api/listeners/ovpn/client-config",
-				map[string]any{"endpoint": c.endpoint})
+				map[string]any{"overrides": ovpnClientIdentity, "endpoint": c.endpoint})
 			if resp.StatusCode != 200 {
 				t.Fatalf("status = %d: %s", resp.StatusCode, body)
 			}
@@ -1207,7 +1245,11 @@ func TestClientConfigNeverReadsAnOperatorSuppliedPath(t *testing.T) {
 	s.do("POST", "/api/listeners", map[string]any{"name": "site-a", "protocol": "openvpn",
 		"options": map[string]string{}, "enabled": true})
 	resp, body := s.do("POST", "/api/listeners/site-a/client-config",
-		map[string]any{"endpoint": "vpn.example.com", "overrides": map[string]string{"ca": secret}})
+		map[string]any{"endpoint": "vpn.example.com", "overrides": map[string]string{
+			"ca":   secret,
+			"cert": ovpnClientIdentity["cert"],
+			"key":  ovpnClientIdentity["key"],
+		}})
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d: %s", resp.StatusCode, body)
 	}
@@ -1241,7 +1283,7 @@ func TestClientConfigWarnsAboutAFileItCannotBundle(t *testing.T) {
 	s.do("POST", "/api/listeners", map[string]any{"name": "site-a", "protocol": "openvpn",
 		"options": map[string]string{"ca": missing, "cert": present, "key": present}, "enabled": true})
 	_, body := s.do("POST", "/api/listeners/site-a/client-config",
-		map[string]any{"endpoint": "vpn.example.com"})
+		map[string]any{"overrides": ovpnClientIdentity, "endpoint": "vpn.example.com"})
 	var out clientConfigResponse
 	if err := json.Unmarshal(body, &out); err != nil {
 		t.Fatalf("response not JSON: %v", err)

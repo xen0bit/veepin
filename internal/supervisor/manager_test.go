@@ -967,19 +967,39 @@ func TestCloseTearsDownEveryListener(t *testing.T) {
 	}
 }
 
-// TestManagerDefaultCtorIsNewServer pins the default constructor: with a nil
-// ctor argument the Manager uses the real production registry. The test only
-// verifies codegen/dispatch shape; it does not call Apply (which would require
-// privileges), it just confirms the logger field isn't panicking.
+// TestManagerDefaultCtorIsNewServer pins the default constructor: a nil ctor
+// means the real registry, so a supervisor built the production way can
+// actually construct servers.
+//
+// The previous version asserted `m != nil && m.listeners != nil` under a
+// comment conceding it "only verifies codegen/dispatch shape" -- it passed with
+// ctor left nil, which is the one thing it was named for. Calling the ctor is
+// the assertion: it reaches client.NewServer, which answers for a registered
+// protocol and refuses an unregistered one. No privileges are needed, because a
+// bad protocol name fails before anything is opened.
 func TestManagerDefaultCtorIsNewServer(t *testing.T) {
-	dir := t.TempDir()
-	// Constructing the manager with a nil ctor must not panic.
-	m := NewManager(dir, nil, nil)
+	m := NewManager(t.TempDir(), nil, nil)
 	if m == nil {
 		t.Fatal("nil manager")
 	}
 	if m.listeners == nil {
-		t.Errorf("listeners map not initialized")
+		t.Fatal("listeners map not initialized")
+	}
+	if m.ctor == nil {
+		t.Fatal("a nil ctor argument left the manager with no constructor at all")
+	}
+	// An unregistered protocol must be refused by the real registry. A stub
+	// ctor that ignored its argument would happily return something here.
+	if _, err := m.ctor("not-a-registered-protocol", map[string]string{}); err == nil {
+		t.Error("the default ctor accepted a protocol the registry has never heard of")
+	}
+	// And a registered one is dispatched to that protocol's parse, which
+	// rejects an empty option map by name rather than by "unknown protocol".
+	_, err := m.ctor("wireguard", map[string]string{})
+	if err == nil {
+		t.Error("the default ctor built a wireguard server from no options at all")
+	} else if strings.Contains(err.Error(), "unknown protocol") {
+		t.Errorf("the default ctor does not reach the registry: %v", err)
 	}
 }
 

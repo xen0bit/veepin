@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"nAme\":\"000000\",\"protoCol\":\"0\",\"options\":{}}")

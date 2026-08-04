@@ -6,6 +6,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -41,7 +42,8 @@ func TestProfileAddValidatesName(t *testing.T) {
 // that saves cleanly and fails at `veepin connect` with a mystery error -- the
 // exact gap client.ValidateOptions exists to close.
 func TestProfileAddRejectsUndialableConfigs(t *testing.T) {
-	// Flag form: an ikev2 profile with no identity option the parse requires.
+	// Stdin form: a wireguard profile with an endpoint and none of the keys the
+	// parse requires.
 	_ = tempProfileDir(t)
 	writeStdin(t, `{"name":"bad-stdin","protocol":"wireguard","options":{"endpoint":"1.2.3.4:51820"}}`)
 	if err := runProfile([]string{"add"}); err == nil {
@@ -50,7 +52,7 @@ func TestProfileAddRejectsUndialableConfigs(t *testing.T) {
 		t.Errorf("error does not name the missing option: %v", err)
 	}
 
-	// Stdin form: an unknown protocol must be refused, not silently saved.
+	// And an unknown protocol must be refused, not silently saved.
 	_ = tempProfileDir(t)
 	writeStdin(t, `{"name":"bogus","protocol":"not-a-protocol","options":{}}`)
 	if err := runProfile([]string{"add"}); err == nil {
@@ -69,8 +71,19 @@ func TestProfileRm(t *testing.T) {
 	if err := runProfile([]string{"rm", "home", "-y"}); err != nil {
 		t.Fatalf("rm: %v", err)
 	}
+	// The profile file is gone. This used to stat the DIRECTORY, which `rm`
+	// never touches, so a no-op profile.Delete passed.
+	if _, err := os.Stat(filepath.Join(dir, "home.json")); !os.IsNotExist(err) {
+		t.Errorf("home.json survives rm: %v", err)
+	}
+	// And the directory it lived in is still there, ready for the next one.
 	if _, err := os.Stat(dir); err != nil {
-		t.Errorf("dir removed? %v", err)
+		t.Errorf("rm removed the profile directory: %v", err)
+	}
+	// A second rm has nothing to remove and says so, rather than reporting
+	// success for a profile that does not exist.
+	if err := runProfile([]string{"rm", "home", "-y"}); err == nil {
+		t.Error("rm of a missing profile reported success")
 	}
 }
 

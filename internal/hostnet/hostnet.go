@@ -305,7 +305,14 @@ func teardownByTagWith(name string, run Commander) error {
 			if len(fields) < 2 || fields[0] != "-A" || !ruleHasTag(fields, tag) {
 				continue
 			}
-			args := append([]string{"-t", c.table}, fields...)
+			// Unquoted, because `iptables -S` prints the comment quoted --
+			// `--comment "veepin:site-a"` -- and there is no shell between here
+			// and execve to take the quotes off. Passing them through made every
+			// -D name a comment no installed rule has, so each one failed, the
+			// loop returned on the first, and the rules stayed on the host
+			// forever. ruleHasTag below already knew to unquote to MATCH; only
+			// the rebuild did not.
+			args := append([]string{"-t", c.table}, unquoteFields(fields)...)
 			args[2] = "-D"
 			if o, derr := run("iptables", args...); derr != nil {
 				return fmt.Errorf("hostnet: tagged teardown: iptables %s: %v: %s",
@@ -314,6 +321,18 @@ func teardownByTagWith(name string, run Commander) error {
 		}
 	}
 	return nil
+}
+
+// unquoteFields strips the double quotes `iptables -S` puts around values that
+// contain spaces (in practice, the comment). exec.Command passes each argument
+// through untouched, so a quote that survives here is a literal quote in the
+// value iptables compares against.
+func unquoteFields(fields []string) []string {
+	out := make([]string, len(fields))
+	for i, f := range fields {
+		out[i] = strings.Trim(f, `"`)
+	}
+	return out
 }
 
 // ruleHasTag reports whether an `iptables -S` rule carries exactly this tag as
@@ -350,7 +369,7 @@ func ensureRule(run Commander, rule []string) error {
 // defensive) do not survive teardown.
 func removeRule(run Commander, rule []string) error {
 	deleteArgs := iptablesDeleteArgs(rule)
-	for i := 0; i < 64; i++ {
+	for range 64 {
 		checkArgs := iptablesCheckArgs(rule)
 		if _, err := run("iptables", checkArgs...); err != nil {
 			return nil // no matching rule left

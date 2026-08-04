@@ -11,6 +11,8 @@ package supervisor
 // management API) feeding the supervisor bytes that take it down.
 
 import (
+	"bytes"
+	"encoding/json"
 	"testing"
 )
 
@@ -24,15 +26,51 @@ func FuzzParseListenerFile(f *testing.F) {
 	f.Add([]byte(``))
 
 	f.Fuzz(func(t *testing.T, body []byte) {
-		// parseListenerBytes must not panic on any input; it returns an error
-		// instead. Anything it parses must round-trip through Validate, so a
-		// successful parse of malformed data is also a finding here.
-		if _, err := parseListenerBytes(body); err != nil {
+		// Never panic is the first contract, and it is the whole of what this
+		// used to check: the body was one `if err != nil { return }` followed by
+		// two comments, the first claiming a round-trip check that did not exist
+		// and the second saying it was somebody else's job.
+		cfg, err := parseListenerBytes(body)
+		if err != nil {
 			return
 		}
-		// Re-parse a serialization of the result; the parser is expected to be
-		// idempotent over a config it accepted.
-		// (Round-trip check is the responsibility of the unit tests; the fuzzer's
-		// only contract here is "never panic".)
+		// A parse that succeeded has made two promises worth holding it to.
+		//
+		// First, that what it returned is valid -- the store calls Validate on
+		// every read for exactly this reason, so a config that parses and does
+		// not validate is a config that reached the fleet through a door nobody
+		// is watching.
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("parsed a config that does not validate: %v\ninput: %q", err, body)
+		}
+		// Second, that the name is one we could have written, since it is about
+		// to become a filename and an iptables comment.
+		if !ValidName(cfg.Name) {
+			t.Fatalf("parsed a config whose name cannot be a filename: %q\ninput: %q", cfg.Name, body)
+		}
+		// And the parse is idempotent over what it accepted: re-encoding and
+		// re-parsing must give the same config back. A field that survives one
+		// direction and not the other is how a setting silently reverts.
+		encoded, err := json.Marshal(cfg)
+		if err != nil {
+			t.Fatalf("marshalling a parsed config: %v", err)
+		}
+		again, err := parseListenerBytes(encoded)
+		if err != nil {
+			t.Fatalf("a config we just wrote does not parse: %v\nencoded: %s", err, encoded)
+		}
+		// Compared as encoded documents, not with reflect.DeepEqual on the
+		// structs. An absent "options" and an "options":{} are the same
+		// listener and differ as Go values (nil map versus empty map), so
+		// DeepEqual reports a difference that does not exist -- the fuzzer
+		// found that within a second, and it is not the property worth pinning.
+		// What is: writing a config and reading it back gives that config.
+		reencoded, err := json.Marshal(again)
+		if err != nil {
+			t.Fatalf("marshalling a re-parsed config: %v", err)
+		}
+		if !bytes.Equal(encoded, reencoded) {
+			t.Fatalf("round trip changed the config:\n first: %s\nsecond: %s", encoded, reencoded)
+		}
 	})
 }

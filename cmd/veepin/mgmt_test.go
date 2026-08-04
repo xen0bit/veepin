@@ -60,6 +60,16 @@ func (f *cliFakeMgr) Peers(name string) ([]client.PeerInfo, bool) {
 // to a httptest.Server and returns the URL + token. The CLI's env vars point at
 // it.
 func startMgmtTestServer(t *testing.T, statuses map[string]supervisor.Status) (url, token string) {
+	u, tok, _, _ := startMgmtTestServerWithDir(t, statuses)
+	return u, tok
+}
+
+// startMgmtTestServerWithDir is the same, and also hands back the config
+// directory and the fake manager. The dir was previously created and dropped on
+// the floor, so a test that wanted to assert `mgmt add` had written a file was
+// told in a comment that it could not reach it -- it could, the helper just did
+// not return it.
+func startMgmtTestServerWithDir(t *testing.T, statuses map[string]supervisor.Status) (string, string, string, *cliFakeMgr) {
 	t.Helper()
 	dir := t.TempDir()
 	for name := range statuses {
@@ -75,7 +85,7 @@ func startMgmtTestServer(t *testing.T, statuses map[string]supervisor.Status) (u
 	}
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(func() { _ = srv.Close(); ts.Close() })
-	return ts.URL, string(srv.Token())
+	return ts.URL, string(srv.Token()), dir, mgr
 }
 
 func TestMgmtLsAndStatus(t *testing.T) {
@@ -101,25 +111,49 @@ func TestMgmtProtocols(t *testing.T) {
 	}
 }
 
+// TestMgmtRestart: `veepin mgmt restart <name>` reaches the manager's Rebuild
+// for that listener, and no other.
+//
+// It used to assert only that runMgmt returned nil. The fake has recorded
+// rebuildOf since it was written and no test ever read it -- state kept
+// specifically for an assertion nobody made -- so a restart that POSTed to the
+// wrong listener, or to nothing at all, passed.
 func TestMgmtRestart(t *testing.T) {
-	url, token := startMgmtTestServer(t, map[string]supervisor.Status{
+	url, token, _, mgr := startMgmtTestServerWithDir(t, map[string]supervisor.Status{
 		"site-a": {Name: "site-a", State: "running"},
+		"site-b": {Name: "site-b", State: "running"},
 	})
 	t.Setenv("VEEPIN_MGMT_URL", url)
 	t.Setenv("VEEPIN_MGMT_TOKEN", token)
 	if err := runMgmt([]string{"restart", "site-a"}); err != nil {
 		t.Fatalf("restart: %v", err)
 	}
+	if mgr.rebuildOf != "site-a" {
+		t.Errorf("rebuilt %q, want site-a", mgr.rebuildOf)
+	}
 }
 
+// TestMgmtRm: `veepin mgmt rm <name> -y` stops the listener and removes its
+// config file. Same story as restart -- stopOf was recorded and never read, and
+// the file on disk was never checked, so an rm that deleted nothing passed.
 func TestMgmtRm(t *testing.T) {
-	url, token := startMgmtTestServer(t, map[string]supervisor.Status{
+	url, token, dir, mgr := startMgmtTestServerWithDir(t, map[string]supervisor.Status{
 		"site-a": {Name: "site-a", State: "running"},
+		"site-b": {Name: "site-b", State: "running"},
 	})
 	t.Setenv("VEEPIN_MGMT_URL", url)
 	t.Setenv("VEEPIN_MGMT_TOKEN", token)
 	if err := runMgmt([]string{"rm", "site-a", "-y"}); err != nil {
 		t.Fatalf("rm: %v", err)
+	}
+	if mgr.stopOf != "site-a" {
+		t.Errorf("stopped %q, want site-a", mgr.stopOf)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "site-a.json")); !os.IsNotExist(err) {
+		t.Errorf("site-a.json survives rm: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "site-b.json")); err != nil {
+		t.Errorf("rm took another listener with it: %v", err)
 	}
 }
 
@@ -352,7 +386,7 @@ func TestMgmtNoSubcommandPrintsUsage(t *testing.T) {
 // the API's response names the listener, so a zero-error `add` plus a status
 // round trip is the assertion that the file landed on disk.
 func TestMgmtAddCreatesListener(t *testing.T) {
-	url, token := startMgmtTestServer(t, nil)
+	url, token, dir, _ := startMgmtTestServerWithDir(t, nil)
 	t.Setenv("VEEPIN_MGMT_URL", url)
 	t.Setenv("VEEPIN_MGMT_TOKEN", token)
 
@@ -369,7 +403,17 @@ func TestMgmtAddCreatesListener(t *testing.T) {
 	if err := runMgmt([]string{"add"}); err != nil {
 		t.Fatalf("add: %v", err)
 	}
-	// The temp-dir path the API writes into is internal to the mgmt server, so
-	// we cannot reach its file from here; the absence of an error from `add`
-	// is the assertion the file landed on disk plus a status probe would.
+	// The config directory IS reachable -- the helper creates it and now
+	// returns it. The previous version asserted nothing at all and explained in
+	// a comment that it could not, which was not true.
+	stored, err := supervisor.ParseListenerFile(filepath.Join(dir, "added.json"))
+	if err != nil {
+		t.Fatalf("add wrote no config file: %v", err)
+	}
+	if stored.Protocol != "wireguard" || stored.Options["address"] != "10.10.0.1/24" {
+		t.Errorf("stored config is not the one submitted: %+v", stored)
+	}
+	if !stored.Enabled {
+		t.Error("the listener was stored disabled")
+	}
 }

@@ -7,6 +7,7 @@ package ui
 import (
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -92,14 +93,130 @@ func TestDashboardEscapesEveryFieldItRenders(t *testing.T) {
 			t.Errorf("dashboard.html no longer renders %s; this test was guarding a field that is gone", field)
 			continue
 		}
-		// Every mention of a field must be inside an esc(...) call or an
-		// encodeURIComponent(...) one; a bare "+ l.error +" is the bug.
-		for _, bare := range []string{"+ " + field + " +", "+ " + field + ")", "(" + field + "||"} {
-			if strings.Contains(src, bare) {
-				t.Errorf("dashboard.html concatenates %s unescaped (found %q)", field, bare)
+		// Every mention of a field must be lexically inside an esc(...) or
+		// encodeURIComponent(...) call.
+		//
+		// This used to reject three literal spellings -- "+ l.error +",
+		// "+ l.error)" and "(l.error||" -- which is a blacklist, and a
+		// blacklist of three entries against an infinite set. Writing
+		// '</td><td>'+l.error+'</td>' with no spaces passed. So did a template
+		// literal, and so did reading the field into a local first. The test's
+		// own comment says it guards a token-exfiltration path.
+		for _, at := range indexesOf(src, field) {
+			// Only interpolation into a string matters. Using the value as an
+			// object key (expanded[l.name]) or passing it to a function
+			// (loadDetail(l.name)) puts nothing into markup.
+			if !interpolatedIntoAString(src, at, len(field)) {
+				continue
+			}
+			if !wrappedInCall(src, at, "esc", "encodeURIComponent") {
+				t.Errorf("dashboard.html interpolates %s without escaping it, at:\n\t%s",
+					field, lineAround(src, at))
 			}
 		}
 	}
+}
+
+// indexesOf returns every offset at which needle occurs as a whole identifier
+// reference -- not as a prefix of a longer one, so "l.name" does not match
+// inside "l.namespace".
+func indexesOf(src, needle string) []int {
+	var out []int
+	for i := 0; ; {
+		j := strings.Index(src[i:], needle)
+		if j < 0 {
+			return out
+		}
+		at := i + j
+		end := at + len(needle)
+		if end >= len(src) || !isIdentRune(src[end]) {
+			out = append(out, at)
+		}
+		i = end
+	}
+}
+
+// interpolatedIntoAString reports whether the occurrence at `at` is being
+// concatenated with, or substituted into, a string: `'x' + f`, `f + 'x'`, or
+// `${f}`. Those are the ways a value reaches innerHTML; a subscript or a call
+// argument is not one of them.
+func interpolatedIntoAString(src string, at, width int) bool {
+	before := at - 1
+	for before >= 0 && (src[before] == ' ' || src[before] == '\t') {
+		before--
+	}
+	if before >= 0 && src[before] == '+' {
+		return true
+	}
+	if before >= 1 && src[before] == '{' && src[before-1] == '$' {
+		return true
+	}
+	after := at + width
+	for after < len(src) && (src[after] == ' ' || src[after] == '\t') {
+		after++
+	}
+	return after < len(src) && src[after] == '+'
+}
+
+func isIdentRune(b byte) bool {
+	return b == '_' || b == '$' ||
+		(b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+}
+
+// wrappedInCall reports whether the byte at `at` sits inside the argument list
+// of a call to one of the named functions.
+//
+// It walks backwards balancing parentheses: each unmatched '(' encountered is an
+// enclosing call, and the identifier immediately before it is that call's name.
+// Crude next to a JS parser, and enough to tell esc(x) from a bare
+// concatenation, which is the whole question.
+func wrappedInCall(src string, at int, names ...string) bool {
+	depth := 0
+	for i := at - 1; i >= 0; i-- {
+		switch src[i] {
+		case ')':
+			depth++
+		case '(':
+			if depth > 0 {
+				depth--
+				continue
+			}
+			// Unmatched: read the identifier that precedes it.
+			end := i
+			for end > 0 && src[end-1] == ' ' {
+				end--
+			}
+			start := end
+			for start > 0 && isIdentRune(src[start-1]) {
+				start--
+			}
+			if slices.Contains(names, src[start:end]) {
+				return true
+			}
+			// An enclosing call that is not one of ours: keep walking out, so
+			// esc(String(l.error)) still counts as escaped.
+		case '\n':
+			// A newline with no unmatched '(' open means the statement began
+			// on this line and nothing wraps the field.
+			if depth == 0 {
+				return false
+			}
+		}
+	}
+	return false
+}
+
+// lineAround returns the source line containing offset, for an error message
+// that points at the code rather than describing it.
+func lineAround(src string, at int) string {
+	start := strings.LastIndexByte(src[:at], '\n') + 1
+	end := strings.IndexByte(src[at:], '\n')
+	if end < 0 {
+		end = len(src)
+	} else {
+		end += at
+	}
+	return strings.TrimSpace(src[start:end])
 }
 
 // TestFormEscapesTheProtocolOptionsItBuilds extends the same discipline to
@@ -394,11 +511,4 @@ func TestDetailLoadIsCalledWithTheName(t *testing.T) {
 		t.Error("dashboard.html calls loadDetail with the listener object; " +
 			"encodeURIComponent(obj) matches no data-detail cell and the detail view never renders")
 	}
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

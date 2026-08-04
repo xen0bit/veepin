@@ -222,7 +222,7 @@ func TestClientConfigWarnsWhenTheCertDoesNotCoverTheEndpoint(t *testing.T) {
 	}
 	// No hostnames given, so the chain covers loopback and "site-a" only.
 	_, body = s.do("POST", "/api/listeners/site-a/client-config",
-		map[string]any{"endpoint": "vpn.example.com"})
+		map[string]any{"endpoint": "vpn.example.com", "overrides": ovpnClientIdentity})
 	var out clientConfigResponse
 	if err := json.Unmarshal(body, &out); err != nil {
 		t.Fatalf("response not JSON: %v", err)
@@ -250,7 +250,7 @@ func TestClientConfigWarnsWhenTheCertDoesNotCoverTheEndpoint(t *testing.T) {
 		t.Fatalf("create site-b = %d: %s", resp.StatusCode, body)
 	}
 	_, body = s.do("POST", "/api/listeners/site-b/client-config",
-		map[string]any{"endpoint": "vpn.example.com"})
+		map[string]any{"endpoint": "vpn.example.com", "overrides": ovpnClientIdentity})
 	out = clientConfigResponse{}
 	_ = json.Unmarshal(body, &out)
 	for _, w := range out.Warnings {
