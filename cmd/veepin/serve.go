@@ -791,6 +791,16 @@ func setupNetworking(tunName string, gateway net.IP, network *net.IPNet, wan str
 // flag set (the supervisor reads Options from the JSON files), and the signal
 // handling shuts down every listener through Manager.Close so SIGINT/SIGTERM
 // drain the whole fleet rather than one server.
+// stringList is a repeatable string flag: `-allow-host a -allow-host b`.
+type stringList []string
+
+func (l *stringList) String() string { return strings.Join(*l, ",") }
+
+func (l *stringList) Set(v string) error {
+	*l = append(*l, v)
+	return nil
+}
+
 func runSupervisorMode(args []string) error {
 	if len(args) < 2 {
 		return fmt.Errorf("usage: veepin serve -config <dir> [-listen <addr>] [-no-mgmt]")
@@ -801,6 +811,9 @@ func runSupervisorMode(args []string) error {
 	listenAddr := fs.String("listen", "127.0.0.1:8443", "management API / panel bind address")
 	noMgmt := fs.Bool("no-mgmt", false, "run the supervisor without the management API")
 	profilesDir := fs.String("profiles", "", "directory of client connection profiles for the panel (default: <config>/profiles)")
+	var allowHosts stringList
+	fs.Var(&allowHosts, "allow-host", "additional Host header value the panel answers on (repeatable); "+
+		"loopback and the -listen address are always allowed")
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
@@ -848,7 +861,7 @@ func runSupervisorMode(args []string) error {
 		}
 		mux := http.NewServeMux()
 		mux.Handle("/api/", mgmtServer.Handler())
-		uiHandler, err := ui.NewHandler(string(mgmtServer.Token()))
+		uiHandler, err := ui.NewHandler(string(mgmtServer.Token()), logger)
 		if err != nil {
 			_ = mgr.Close()
 			return fmt.Errorf("ui: %w", err)
@@ -859,10 +872,26 @@ func runSupervisorMode(args []string) error {
 		// that rebinds its own hostname to the loopback address becomes
 		// same-origin with the panel, reads the token out of the DOM, and drives
 		// every endpoint. See mgmt.RequireHost.
+		//
+		// -allow-host is the escape hatch the guard needs to be usable off
+		// loopback. The allow set is seeded from the literal -listen address, so
+		// binding 0.0.0.0 admits only the Host "0.0.0.0" -- which no browser
+		// ever sends -- and every real request 403s, panel and API alike. The
+		// same goes for a reverse proxy or an `ssh -L` tunnel, where the Host
+		// is whatever name the operator dialled. Naming those hosts explicitly
+		// keeps the guard strict without making it useless.
 		httpSrv = &http.Server{
-			Addr:     *listenAddr,
-			Handler:  mgmt.RequireHost([]string{*listenAddr}, mux),
-			ErrorLog: logger,
+			Addr:    *listenAddr,
+			Handler: mgmt.RequireHost(append([]string{*listenAddr}, allowHosts...), mux),
+			// A management plane with no read deadline is one slow client away
+			// from holding a connection open indefinitely. The handlers read
+			// their bodies before taking the fleet lock, so this is the outer
+			// bound rather than the only one.
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       30 * time.Second,
+			WriteTimeout:      60 * time.Second,
+			IdleTimeout:       120 * time.Second,
+			ErrorLog:          logger,
 		}
 		go func() {
 			logger.Printf("management API + panel at http://%s/", *listenAddr)

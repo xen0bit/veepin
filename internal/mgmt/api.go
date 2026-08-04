@@ -35,6 +35,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,15 +43,17 @@ import (
 	"time"
 
 	"github.com/xen0bit/veepin/client"
+	"github.com/xen0bit/veepin/internal/confstore"
 	"github.com/xen0bit/veepin/internal/keygen"
 	"github.com/xen0bit/veepin/internal/supervisor"
 	"github.com/xen0bit/veepin/wireguard"
 )
 
-// redacted is the package-local spelling of client.Redacted: the value the API
-// writes in place of a secret option. It cannot collide with a real protocol
-// value -- not a valid key, not a valid PSK, not valid base64 -- and sending it
-// back on a PATCH is treated as "leave unchanged".
+// redacted is the package-local spelling of client.Redacted, used often enough
+// here to earn the short name. Sending it back on a PATCH means "leave
+// unchanged"; sending it on a POST is refused, because there is nothing to
+// leave. client.Redacted's own doc says why the value cannot collide with a
+// real one.
 const redacted = client.Redacted
 
 // tokenName is the mgmt-bearer-token file name within the config dir.
@@ -66,7 +69,7 @@ type ManagerBackend interface {
 	Rebuild(name string) error
 	Stop(name string) error
 	Close() error
-	Peers(name string) ([]client.PeerInfo, bool)
+	Peers(name string) ([]client.PeerInfo, supervisor.PeerAvailability)
 }
 
 // Option adjusts a Server before its routes are wired. NewServer takes none,
@@ -166,7 +169,7 @@ func NewServer(dir string, mgr ManagerBackend, logger *log.Logger, opts ...Optio
 	// its own mux (it also serves the panel at the root) and never went through
 	// a Start method, so an uptime the serve path was supposed to set stayed
 	// zero and /api/health reported the whole Unix epoch as uptime.
-	s.startedAt.Store(nowUnix())
+	s.startedAt.Store(time.Now().Unix())
 	if fresh {
 		logger.Printf("mgmt: no bearer token found; generated one at %s (mode 0600)", tokenPath)
 	}
@@ -211,10 +214,14 @@ func (s *Server) Handler() http.Handler {
 // the UI handler) can inject it into the embedded dashboard template.
 func (s *Server) Token() []byte { return s.token }
 
-// Close delegates to the manager; it is exposed so a caller wiring the API
-// server into a wider HTTP mux can tear it down cleanly the same way the
-// management CLI does.
-func (s *Server) Close() error { return s.mgr.Close() }
+// CloseFleet stops every listener the Server's manager is running. It closes no
+// HTTP anything -- the Server does not own a listening socket, its caller does.
+//
+// It was called Close, which is the trap the README named: a caller reaching for
+// the conventional teardown on the HTTP-shaped object got a fleet-wide shutdown.
+// The name now says so, and the mismatch is a compile error rather than an
+// outage.
+func (s *Server) CloseFleet() error { return s.mgr.Close() }
 
 // --- Token boot ---
 
@@ -430,17 +437,24 @@ func bearer(h string) []byte {
 // --- Endpoints ---
 
 // pathName pulls the {name} segment out of the route and checks it against the
-// listener-name grammar before it is ever joined into a filesystem path. Only
-// DeleteListenerFile validated, so the GET and PATCH handlers built a filename
-// out of whatever the router happened to match. Go's ServeMux makes that hard to
-// abuse -- a {name} wildcard spans one segment and the request path is cleaned
-// before routing -- but "hard to abuse" is not the bar for a string that becomes
-// a filename, and the check is one line.
+// listener-name grammar before it is ever joined into a filesystem path. ServeMux
+// makes an escape hard, but "hard" is not the bar for a string that becomes a
+// filename, and the check is one line.
 //
 // Returns "" and writes the response when the name is not one the supervisor
 // could ever have written; the caller returns on an empty result.
 func (s *Server) pathName(w http.ResponseWriter, r *http.Request) string {
 	name := r.PathValue("name")
+	// A reserved name is a different answer from a missing one, and the
+	// difference matters: "mgmt" and "profiles" are the config root's own
+	// subdirectories, and the DELETE handler's orphan cleanup is an
+	// os.RemoveAll of <dir>/<name>. Answering 404 for them would be true of the
+	// listener and a lie about what just did not happen, so say it plainly.
+	if confstore.ReservedName(name) {
+		http.Error(w, "\""+name+"\" is reserved for the config root's own directory",
+			http.StatusBadRequest)
+		return ""
+	}
 	if !supervisor.ValidName(name) {
 		http.Error(w, "no such listener", http.StatusNotFound)
 		return ""
@@ -450,12 +464,8 @@ func (s *Server) pathName(w http.ResponseWriter, r *http.Request) string {
 
 // handleHealth answers a basic liveness probe.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	start := s.startedAt.Load()
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "uptime": nowUnix() - start})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "uptime": time.Now().Unix() - start})
 }
 
 // handleAudit returns the recent mutation log, newest first. It is the answer
@@ -463,11 +473,15 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 // recent activity, and an operator investigating a misconfiguration can see
 // which listener was edited and whether the edit took.
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	n, err := tailCount(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"events": s.audit.recent(auditCapacity)})
+	if n == 0 {
+		n = auditCapacity
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"events": s.audit.recent(n)})
 }
 
 // handleLogs returns the supervisor's recent log lines, newest first. It is
@@ -475,21 +489,14 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 // field carries the last failure, but the log shows the sequence (build errors,
 // hostnet messages, request lines) that produced it.
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	if s.logs == nil {
 		http.Error(w, "no log ring configured", http.StatusNotFound)
 		return
 	}
-	// An explicit ?n bounds the response; the panel asks for the tail. The
-	// default is everything the ring holds, which is bounded by construction.
-	n := 0
-	if q := r.URL.Query().Get("n"); q != "" {
-		if parsed, err := strconv.Atoi(q); err == nil && parsed > 0 {
-			n = parsed
-		}
+	n, err := tailCount(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"lines": s.logs.Recent(n)})
 }
@@ -505,37 +512,33 @@ type ProtocolsResp struct {
 }
 
 // ProtocolDesc is one protocol's surface the panel can render.
+//
+// There was a `known bool` here, set to true on both of the two lines that
+// construct one, while the `ok` from the OptsFor lookup that could have made it
+// false was discarded. A JSON field with one possible value tells a consumer
+// nothing, and this one read as though it might.
 type ProtocolDesc struct {
 	Name    string           `json:"name"`
 	Options []client.OptSpec `json:"options,omitempty"`
-	Known   bool             `json:"known"` // always true for client.ServerProtocols() entries
 }
 
 func (s *Server) handleProtocols(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	names := client.ServerProtocols()
 	out := ProtocolsResp{Protocols: make([]ProtocolDesc, 0, len(names))}
 	for _, name := range names {
 		opts, _ := client.ServerOptsFor(name)
-		out.Protocols = append(out.Protocols, ProtocolDesc{Name: name, Options: opts, Known: true})
+		out.Protocols = append(out.Protocols, ProtocolDesc{Name: name, Options: opts})
 	}
 	clientNames := client.Protocols()
 	out.ClientProtocols = make([]ProtocolDesc, 0, len(clientNames))
 	for _, name := range clientNames {
 		opts, _ := client.ClientOptsFor(name)
-		out.ClientProtocols = append(out.ClientProtocols, ProtocolDesc{Name: name, Options: opts, Known: true})
+		out.ClientProtocols = append(out.ClientProtocols, ProtocolDesc{Name: name, Options: opts})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleListListeners(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	statuses := s.mgr.All()
 	// Add the on-disk configs for listeners that are not yet built (disabled).
 	// The status' State="disabled" or "stopped" carries the info; full config
@@ -551,10 +554,6 @@ type listenerResponse struct {
 }
 
 func (s *Server) handleGetListener(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	name := s.pathName(w, r)
 	if name == "" {
 		return
@@ -580,25 +579,26 @@ func (s *Server) handleGetListener(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateListener(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	s.mutate.Lock()
-	defer s.mutate.Unlock()
-	var name string
-	var res error
-	defer func() { s.audit.record("listener.create", name, res) }()
+	// Read the body BEFORE taking the fleet lock. Taking it first meant an
+	// authenticated client trickling one byte per minute held the lock that
+	// serialises every create, patch, delete, restart and client-config in the
+	// directory -- and with no ReadTimeout on the server there was no outer
+	// bound on how long.
+	//
 	// Start from the same defaults a hand-written config file gets, so a create
 	// that stays silent about "enabled" produces a running listener rather than
 	// one that is stored, listed, and never started.
 	cfg := supervisor.NewListenerConfig()
 	if err := decodeJSON(r, &cfg); err != nil {
-		res = err
+		s.audit.record("listener.create", "", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	name = cfg.Name
+	s.mutate.Lock()
+	defer s.mutate.Unlock()
+	var res error
+	name := cfg.Name
+	defer func() { s.audit.record("listener.create", name, res) }()
 	if err := cfg.Validate(); err != nil {
 		res = err
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -607,6 +607,18 @@ func (s *Server) handleCreateListener(w http.ResponseWriter, r *http.Request) {
 	if !supervisor.KnownProtocol(cfg.Protocol) {
 		res = fmt.Errorf("mgmt: unknown protocol %q", cfg.Protocol)
 		http.Error(w, "unknown protocol", http.StatusBadRequest)
+		return
+	}
+	// The sentinel means "keep what is stored", and on a create there is nothing
+	// stored to keep. mergeOptions honours it, but only PATCH goes through
+	// mergeOptions -- a create decodes straight into the config, so a
+	// GET-edit-POST-under-a-new-name round trip stored the literal string
+	// "<redacted>" as the private key. Worse, being non-empty it then suppressed
+	// key generation below, and the whole thing answered 201.
+	if k := firstRedactedLiteral(cfg.Options); k != "" {
+		res = fmt.Errorf("mgmt: %q is the redaction sentinel, not a value", k)
+		http.Error(w, "option "+k+" is the literal \"<redacted>\": supply the real value, "+
+			"or leave it empty to have one generated", http.StatusBadRequest)
 		return
 	}
 	// POST creates. Without this check it also silently overwrote, so a repeated
@@ -645,14 +657,26 @@ func (s *Server) handleCreateListener(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.mgr.Apply(); err != nil {
-		// Same cleanup, one step later: the file landed but the listener never
-		// came up, and an orphan key directory with no running listener is
-		// unreachable by DELETE. The Apply failure itself is reported, so the
-		// operator sees why; the material they must keep (a generated public
-		// key) is recoverable from the written config file.
-		_ = os.RemoveAll(filepath.Join(s.dir, cfg.Name))
+		// The config file is on disk and the key material stays with it: 202,
+		// the same "saved, but it did not come up" answer PATCH gives, and the
+		// operator retries with POST .../restart once they have fixed whatever
+		// it was. A failing build is usually something outside the config --
+		// no CAP_NET_ADMIN, a port already bound -- not a reason to throw the
+		// request away.
+		//
+		// This used to RemoveAll the key directory and keep the config file,
+		// which is the worst of the three options: a stored config naming
+		// ca.crt, tls.crt and tls.key at paths that no longer exist, and no
+		// way to regenerate them, because generateListenerKeys skips a spec
+		// whose option already has a value -- and every one of them did. Its
+		// comment justified the deletion by saying the material an operator
+		// must keep is recoverable from the config, which holds for a
+		// WireGuard public key (it IS the config) and not at all for a TLS
+		// chain, where the config holds only paths.
 		res = err
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeJSON(w, http.StatusAccepted,
+			map[string]any{"status": "saved", "build_error": err.Error(),
+				"generated": generated})
 		return
 	}
 	// The generated map is surfaced once, on the create response: it carries the
@@ -666,12 +690,15 @@ func (s *Server) handleCreateListener(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePatchListener(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPatch {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	name := s.pathName(w, r)
 	if name == "" {
+		return
+	}
+	// Body first, then the lock: see handleCreateListener.
+	var in listenerPatch
+	if err := decodeJSON(r, &in); err != nil {
+		s.audit.record("listener.patch", name, err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	s.mutate.Lock()
@@ -687,12 +714,6 @@ func (s *Server) handlePatchListener(w http.ResponseWriter, r *http.Request) {
 		}
 		res = err
 		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	var in listenerPatch
-	if err := decodeJSON(r, &in); err != nil {
-		res = err
-		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	// A rename would have to move the file and retire the old listener. The
@@ -736,10 +757,6 @@ func (s *Server) handlePatchListener(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteListener(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	name := s.pathName(w, r)
 	if name == "" {
 		return
@@ -784,10 +801,6 @@ func (s *Server) handleDeleteListener(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRestartListener(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	name := s.pathName(w, r)
 	if name == "" {
 		return
@@ -809,10 +822,6 @@ func (s *Server) handleRestartListener(w http.ResponseWriter, r *http.Request) {
 // an empty array; the panel renders nothing rather than showing a misleading
 // "no peers" which could be read as "no clients".
 func (s *Server) handlePeerList(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	name := s.pathName(w, r)
 	if name == "" {
 		return
@@ -823,15 +832,29 @@ func (s *Server) handlePeerList(w http.ResponseWriter, r *http.Request) {
 	// rebuild or stop that Close()s the server mid-call -- a panel poll racing
 	// a rekey is exactly when peer lists are wanted, and a use-after-close on
 	// the management plane is not a diagnostic anyone asked for.
-	peers, exists := s.mgr.Peers(name)
-	if !exists {
+	peers, avail := s.mgr.Peers(name)
+	switch avail {
+	case supervisor.PeersNoSuchListener:
 		http.Error(w, "no such listener", http.StatusNotFound)
+		return
+	case supervisor.PeersNotRunning:
+		// 200, not 404. The listener exists; it just has no live server to ask.
+		// Answering 404 told an operator inspecting a listener in error state
+		// that the listener did not exist, while the status half of the same
+		// panel view answered 200 for it.
+		writeJSON(w, http.StatusOK, map[string]any{
+			"peers":       []client.PeerInfo{},
+			"unavailable": "the listener is not running",
+		})
+		return
+	case supervisor.PeersUnsupported:
+		writeJSON(w, http.StatusOK, map[string]any{
+			"peers":       []client.PeerInfo{},
+			"unavailable": "this protocol does not report peers",
+		})
 		return
 	}
 	if peers == nil {
-		// Protocols without a PeerDescriber return a true exists with a nil
-		// slice; the panel renders nothing rather than a misleading "no peers"
-		// which could be read as "no clients".
 		peers = []client.PeerInfo{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"peers": peers})
@@ -847,10 +870,6 @@ func (s *Server) handlePeerList(w http.ResponseWriter, r *http.Request) {
 // The public key travels in the query string, not the path: it is base64, so a
 // path segment would be split by any "/" or "+" in the key.
 func (s *Server) handlePeerDelete(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	name := s.pathName(w, r)
 	if name == "" {
 		return
@@ -956,6 +975,19 @@ func (s *Server) handlePeerDelete(w http.ResponseWriter, r *http.Request) {
 // Multi-file generators (e.g. "tls" returns both "cert" and "key") set every key
 // they produce, so the handler does not need to deduce which keys were affected.
 //
+// Whether a generator runs is decided per GENERATOR, not per spec, in a first
+// pass over the declarations. Deciding it per spec meant partial operator input
+// went undetected: the loop skipped a spec whose value was already supplied
+// before recording that its generator had been considered, so
+//
+//	POST {"protocol":"openvpn","options":{"key":"/etc/my/server.key"}}
+//
+// left "ca" empty, ran x509-chain anyway, O_TRUNC-wrote all three PEMs, and
+// then merged only into the empty keys -- storing a generated certificate
+// alongside the operator's unrelated private key. The listener answered 201 and
+// failed every handshake. A generator is all-or-nothing, so a partial supply is
+// refused rather than half-honoured.
+//
 // The returned map is the generated material the protocol does NOT declare as an
 // option (a WireGuard public key, which the parse never reads but the operator
 // must distribute): the handler merges it into cfg.Options so it persists with
@@ -969,6 +1001,19 @@ func generateListenerKeys(configDir string, cfg *supervisor.ListenerConfig) (map
 	for _, spec := range decl {
 		declared[spec.Key] = true
 	}
+	// First pass: for each generator, which of its keys the operator supplied.
+	supplied := map[string][]string{}
+	missing := map[string][]string{}
+	for _, spec := range decl {
+		if spec.Generate == "" {
+			continue
+		}
+		if cfg.Options[spec.Key] != "" {
+			supplied[spec.Generate] = append(supplied[spec.Generate], spec.Key)
+		} else {
+			missing[spec.Generate] = append(missing[spec.Generate], spec.Key)
+		}
+	}
 	generated := map[string]string{}
 	seen := map[string]bool{}
 	for _, spec := range decl {
@@ -978,15 +1023,26 @@ func generateListenerKeys(configDir string, cfg *supervisor.ListenerConfig) (map
 		if cfg.Options == nil {
 			cfg.Options = map[string]string{}
 		}
-		if cfg.Options[spec.Key] != "" {
-			continue
-		}
 		if seen[spec.Generate] {
 			continue
 		}
 		seen[spec.Generate] = true
+		// Nothing missing: the operator brought their own, in full.
+		if len(missing[spec.Generate]) == 0 {
+			continue
+		}
+		// Something missing and something supplied: refuse rather than write
+		// over half of a set that has to agree with itself.
+		if got := supplied[spec.Generate]; len(got) > 0 {
+			slices.Sort(got)
+			want := slices.Clone(missing[spec.Generate])
+			slices.Sort(want)
+			return nil, fmt.Errorf(
+				"mgmt: %q generates %s together: supply all of them or none (missing %s)",
+				spec.Generate, strings.Join(got, ", "), strings.Join(want, ", "))
+		}
 
-		kv, err := keygen.Generate(cfg.Name, configDir, spec.Generate, spec.Key)
+		kv, err := keygen.Generate(cfg.Name, configDir, spec.Generate, spec.Key, cfg.Hostnames)
 		if err != nil {
 			return nil, fmt.Errorf("mgmt: keygen %q for %q: %w", spec.Generate, cfg.Name, err)
 		}
@@ -1021,12 +1077,13 @@ func generateListenerKeys(configDir string, cfg *supervisor.ListenerConfig) (map
 // the API at all. Pointers distinguish the two cases, which is the whole reason
 // they are here.
 type listenerPatch struct {
-	Name     *string            `json:"name,omitempty"`
-	Protocol *string            `json:"protocol,omitempty"`
-	Options  *map[string]string `json:"options,omitempty"`
-	SetupNAT *bool              `json:"setup_nat,omitempty"`
-	WAN      *string            `json:"wan,omitempty"`
-	Enabled  *bool              `json:"enabled,omitempty"`
+	Name      *string            `json:"name,omitempty"`
+	Protocol  *string            `json:"protocol,omitempty"`
+	Options   *map[string]string `json:"options,omitempty"`
+	SetupNAT  *bool              `json:"setup_nat,omitempty"`
+	WAN       *string            `json:"wan,omitempty"`
+	Enabled   *bool              `json:"enabled,omitempty"`
+	Hostnames *[]string          `json:"hostnames,omitempty"`
 }
 
 // applyTo merges the fields the request actually carried onto existing, leaving
@@ -1050,6 +1107,45 @@ func (p listenerPatch) applyTo(existing supervisor.ListenerConfig) supervisor.Li
 	}
 	if p.Enabled != nil {
 		out.Enabled = *p.Enabled
+	}
+	if p.Hostnames != nil {
+		out.Hostnames = *p.Hostnames
+	}
+	// A protocol change re-bases which keys are secret, because redaction is
+	// resolved against the CURRENT protocol's specs. Carrying the old
+	// protocol's options across meant a single PATCH could declassify them:
+	//
+	//	POST  {"protocol":"ikev2","options":{"psk":"REAL"}}
+	//	PATCH {"protocol":"toy"}          -- toy declares no psk spec
+	//	GET   -> {"options":{"psk":"REAL"}}   in the clear
+	//
+	// Dropping what the new protocol does not declare is both the safe answer
+	// and the correct one: a key the new parse never reads is dead config
+	// either way, and keeping it only preserved it somewhere it could leak.
+	if p.Protocol != nil && *p.Protocol != existing.Protocol {
+		out.Options = keepDeclaredOptions(out.Protocol, out.Options)
+	}
+	return out
+}
+
+// keepDeclaredOptions drops every key the protocol does not declare a server
+// OptSpec for. A protocol with no declaration is left alone: the API cannot
+// tell which of its keys are meaningful, and every registered protocol declares
+// one, so this is a fallback rather than a live path.
+func keepDeclaredOptions(protocol string, opts map[string]string) map[string]string {
+	specs, ok := client.ServerOptsFor(protocol)
+	if !ok || opts == nil {
+		return opts
+	}
+	declared := make(map[string]bool, len(specs))
+	for _, sp := range specs {
+		declared[sp.Key] = true
+	}
+	out := make(map[string]string, len(opts))
+	for k, v := range opts {
+		if declared[k] {
+			out[k] = v
+		}
 	}
 	return out
 }
@@ -1081,6 +1177,45 @@ func mergeOptions(existing, patch map[string]string) map[string]string {
 	return out
 }
 
+// tailCount reads the ?n= tail bound shared by /api/logs and /api/audit. Zero
+// means "everything the ring holds", which is bounded by construction.
+//
+// A malformed value is a 400 rather than a silent fallback to everything. It
+// used to be the latter -- ?n=abc, ?n=-5 and ?n=0 all quietly meant the whole
+// ring, so a typo in a curl returned a thousand lines with nothing to say the
+// parameter had been ignored.
+func tailCount(r *http.Request) (int, error) {
+	q := r.URL.Query().Get("n")
+	if q == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(q)
+	if err != nil {
+		return 0, fmt.Errorf("mgmt: n=%q is not a number", q)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("mgmt: n=%d is negative", n)
+	}
+	return n, nil
+}
+
+// firstRedactedLiteral returns the first key whose value is the redaction
+// sentinel, or "" if none is. Sorted, so the message a form full of them
+// produces is the same one every time.
+func firstRedactedLiteral(opts map[string]string) string {
+	keys := make([]string, 0, len(opts))
+	for k, v := range opts {
+		if v == redacted {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) == 0 {
+		return ""
+	}
+	slices.Sort(keys)
+	return keys[0]
+}
+
 // redactOptions returns a copy of opts with the values of the secret keys a
 // protocol declares replaced by the "<redacted>" sentinel.
 //
@@ -1100,22 +1235,27 @@ func redactOptions(protocol string, opts map[string]string) map[string]string {
 
 // decodeJSON reads a request body sized for the small config documents the API
 // accepts, into a target pointer. A nil body or a body over 1 MiB is rejected.
+//
+// Every error here is prefixed, because these four are not internal: they are
+// the 400 body an operator reads, and they are what s.audit.record stores, so
+// /api/audit showed a bare "empty body" with nothing naming the subsystem it
+// came from.
 func decodeJSON(r *http.Request, v any) error {
 	const maxBody = 1 << 20 // 1 MiB; a listener config is much smaller
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
 	if err != nil {
-		return fmt.Errorf("reading body: %w", err)
+		return fmt.Errorf("mgmt: reading body: %w", err)
 	}
 	if len(body) == 0 {
-		return fmt.Errorf("empty body")
+		return errors.New("mgmt: empty body")
 	}
 	if len(body) > maxBody {
-		return fmt.Errorf("body exceeds 1 MiB")
+		return errors.New("mgmt: body exceeds 1 MiB")
 	}
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
-		return fmt.Errorf("decoding JSON: %w", err)
+		return fmt.Errorf("mgmt: decoding JSON: %w", err)
 	}
 	return nil
 }
@@ -1132,9 +1272,4 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	enc.SetEscapeHTML(false)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(v)
-}
-
-// nowUnix is a slim wrapper kept for testability.
-func nowUnix() int64 {
-	return time.Now().Unix()
 }

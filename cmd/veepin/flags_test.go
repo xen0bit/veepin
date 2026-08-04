@@ -17,17 +17,27 @@ package main
 // change the option map when it changes.
 
 import (
+	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
+	"encoding/pem"
 	"flag"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"maps"
+	"math/big"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xen0bit/veepin/client"
 )
@@ -367,10 +377,80 @@ func TestClientOptSpecsMatchTheKeysTheProtocolReads(t *testing.T) {
 	}
 }
 
-// plausibleValue is a value the given spec's kind will parse. The Required
-// guard has to hand each protocol a map it would otherwise accept, or every
-// parse fails for the wrong reason and the test proves nothing.
-func plausibleValue(sp client.OptSpec) string {
+// specificValues are the options whose parse wants something more specific than
+// their Kind implies. Keyed "<protocol>.<key>".
+//
+// Every entry here is a protocol that was silently outside the Required guard
+// until the precondition below started being checked: the placeholder failed
+// the parse for its own reasons, so every single-key deletion produced the same
+// unrelated error and the guard agreed with everything.
+//
+// A Kind is a form-rendering hint, not a grammar. OptCommaList says "several of
+// these, separated by commas" and nothing about what one of them is -- a
+// WireGuard allowed-ip is a prefix and a nebula lighthouse is a bare address --
+// so a single per-Kind placeholder cannot satisfy both.
+var specificValues = map[string]func(dir string) string{
+	// 32 bytes of base64, which is what a Curve25519 key is.
+	"wireguard.private-key":   func(string) string { return base64.StdEncoding.EncodeToString(make([]byte, 32)) },
+	"wireguard.public-key":    func(string) string { return base64.StdEncoding.EncodeToString(make([]byte, 32)) },
+	"amneziawg.private-key":   func(string) string { return base64.StdEncoding.EncodeToString(make([]byte, 32)) },
+	"amneziawg.public-key":    func(string) string { return base64.StdEncoding.EncodeToString(make([]byte, 32)) },
+	"wireguard.preshared-key": func(string) string { return base64.StdEncoding.EncodeToString(make([]byte, 32)) },
+	"amneziawg.preshared-key": func(string) string { return base64.StdEncoding.EncodeToString(make([]byte, 32)) },
+	// The spec's own default is "-1", meaning "unset", which the parse rejects
+	// when the key is present. Only 0 and 1 are values.
+	"openvpn.key-direction": func(string) string { return "0" },
+	"wireguard.endpoint":    func(string) string { return "192.0.2.1:51820" },
+	"amneziawg.endpoint":    func(string) string { return "192.0.2.1:51820" },
+	// Resolvers are addresses, not prefixes. Bare key: every protocol that has
+	// a dns option means the same thing by it.
+	"dns": func(string) string { return "10.0.0.53" },
+	// Overlay addresses, not prefixes.
+	"nebula.lighthouses": func(string) string { return "10.42.0.1" },
+	"nebula.static-hosts": func(string) string {
+		return "10.42.0.1=192.0.2.10:4242"
+	},
+}
+
+// excludedFromFull are options that cannot be in the full map alongside
+// everything else, keyed "<protocol>.<key>" or bare to mean every protocol.
+// Leaving one out costs the guard nothing: the loop below asks "does the parse
+// reject this key's ABSENCE", and a key absent from a map that parses has
+// already answered no.
+var excludedFromFull = map[string]string{
+	// openvpn, wireguard and amneziawg accept a whole profile file through it,
+	// and every other option becomes optional the moment one is named -- so
+	// including it would make the parse tolerate every absence and this guard
+	// would prove nothing.
+	"config": "supplies every other option, making them all optional",
+	// Two spellings of the same control-channel protection, and the one
+	// combination openvpn refuses outright.
+	"openvpn.tls-crypt": "mutually exclusive with tls-auth",
+}
+
+// excluded reports whether a key is left out of the full option map.
+func excluded(protocol, key string) bool {
+	if _, ok := excludedFromFull[key]; ok {
+		return true
+	}
+	_, ok := excludedFromFull[protocol+"."+key]
+	return ok
+}
+
+// plausibleValue is a value the given spec will parse. The Required guard has to
+// hand each protocol a map it would otherwise accept, or every parse fails for
+// the wrong reason and the test proves nothing -- which is exactly what it did.
+//
+// dir holds real files for the file-path options: "/nonexistent/veepin-test"
+// made every protocol that reads its CA at parse time fail before the guard
+// could learn anything from it.
+func plausibleValue(protocol string, sp client.OptSpec, dir string) string {
+	if fn, ok := specificValues[protocol+"."+sp.Key]; ok {
+		return fn(dir)
+	}
+	if fn, ok := specificValues[sp.Key]; ok {
+		return fn(dir)
+	}
 	if sp.Default != "" && sp.Kind != client.OptFilePath {
 		return sp.Default
 	}
@@ -384,10 +464,47 @@ func plausibleValue(sp client.OptSpec) string {
 	case client.OptCommaList:
 		return "10.0.0.0/8"
 	case client.OptFilePath:
-		return "/nonexistent/veepin-test"
+		return filepath.Join(dir, "cert.pem")
 	default:
 		return "veepin-test"
 	}
+}
+
+// fixtureDir writes the files the file-path options point at: a real
+// certificate and its key, in one file, so a spec reading either finds
+// something that parses.
+func fixtureDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "veepin-test"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		DNSNames:              []string{"veepin-test"},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	_ = pem.Encode(&buf, &pem.Block{Type: "CERTIFICATE", Bytes: der})
+	_ = pem.Encode(&buf, &pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	if err := os.WriteFile(filepath.Join(dir, "cert.pem"), buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 // requiredOptions builds the full option map a protocol's spec describes, so
@@ -397,13 +514,13 @@ func plausibleValue(sp client.OptSpec) string {
 // whole profile file through it, and every other option becomes optional the
 // moment one is named — so including it would make the parse tolerate every
 // absence and this guard would prove nothing.
-func requiredOptions(specs []client.OptSpec) map[string]string {
+func requiredOptions(protocol string, specs []client.OptSpec, dir string) map[string]string {
 	out := make(map[string]string, len(specs))
 	for _, sp := range specs {
-		if sp.Key == "config" {
+		if excluded(protocol, sp.Key) {
 			continue
 		}
-		out[sp.Key] = plausibleValue(sp)
+		out[sp.Key] = plausibleValue(protocol, sp, dir)
 	}
 	return out
 }
@@ -439,14 +556,27 @@ func missingKeyError(err error, key string) bool {
 // parse. Asserting it mechanically would mean weakening the flag on protocols
 // where it is telling operators something true.
 func TestRequiredClientOptsAreTheOnesTheParseRejects(t *testing.T) {
+	dir := fixtureDir(t)
 	for _, protocol := range client.Protocols() {
 		specs, ok := client.ClientOptsFor(protocol)
 		if !ok {
 			continue // covered by TestClientOptSpecsMatchTheKeysTheProtocolReads
 		}
-		full := requiredOptions(specs)
+		full := requiredOptions(protocol, specs, dir)
+		// The precondition, asserted rather than assumed. Without this the guard
+		// was asleep for seven of the seventeen protocols: where the full map
+		// did not parse, every single-key deletion below returned the same
+		// unrelated error, missingKeyError was false for every key, and the loop
+		// agreed with anything. Removing Required from wireguard's private-key
+		// left CI green.
+		if err := client.ValidateOptions(protocol, full); err != nil {
+			t.Errorf("%s: the full option map does not parse (%v) — every deletion below fails for "+
+				"this reason instead, so this protocol is silently outside the guard. Give the option "+
+				"a value the parse accepts, in specificValues.", protocol, err)
+			continue
+		}
 		for _, sp := range specs {
-			if sp.Required || sp.Key == "config" {
+			if sp.Required || excluded(protocol, sp.Key) {
 				continue
 			}
 			without := maps.Clone(full)
@@ -455,6 +585,72 @@ func TestRequiredClientOptsAreTheOnesTheParseRejects(t *testing.T) {
 				t.Errorf("%s: the parse rejects a config without %q (%v) but the OptSpec does not mark it "+
 					"Required — the panel will happily save a profile that cannot dial", protocol, sp.Key, err)
 			}
+		}
+	}
+}
+
+// TestSecretFlagsAgreeAcrossBothTables: a key that appears in both a protocol's
+// client and server OptSpec tables must carry the same Secret flag in each.
+//
+// Nothing checked Secret at all. AGENTS.md claimed three guards enforced it and
+// none of them did -- docs_test checks const-to-key coverage, and the two guards
+// above compare key SETS, so Secret, Kind and Help sat outside every check.
+// Which is how l2tpv3 shipped a file saying "the cookies are check values, not
+// credentials, so none are flagged secret" next to a file marking the same two
+// constants Secret: true. `GET /api/listeners/pw-a` redacted the cookie and
+// `veepin profile show pw-a` printed it, and nothing could tell you which of the
+// two files was wrong.
+//
+// It cannot check a key that appears in only one table -- whether a lone option
+// is key material is a judgement, and doc/security.md is where the rule it is
+// judged against is written down. Two tables disagreeing is not a judgement.
+// One of them is wrong.
+func TestSecretFlagsAgreeAcrossBothTables(t *testing.T) {
+	for _, protocol := range client.ServerProtocols() {
+		serverSpecs, ok := client.ServerOptsFor(protocol)
+		if !ok {
+			continue
+		}
+		clientSpecs, ok := client.ClientOptsFor(protocol)
+		if !ok {
+			continue
+		}
+		serverSecret := make(map[string]bool, len(serverSpecs))
+		for _, sp := range serverSpecs {
+			serverSecret[sp.Key] = sp.Secret
+		}
+		for _, sp := range clientSpecs {
+			want, both := serverSecret[sp.Key]
+			if !both || want == sp.Secret {
+				continue
+			}
+			t.Errorf("%s: %q is Secret=%v on the client and Secret=%v on the server. "+
+				"One redacts it and the other prints it; decide which is right.",
+				protocol, sp.Key, sp.Secret, want)
+		}
+	}
+}
+
+// TestSecretOptionsAreNeverRenderedAsBooleans is the small structural companion:
+// a Secret option has to hold a value the operator types or a path to one, and a
+// checkbox holds neither. A Secret bool is a spec that got its Kind from the
+// wrong row.
+func TestSecretOptionsAreNeverRenderedAsBooleans(t *testing.T) {
+	check := func(t *testing.T, protocol, side string, specs []client.OptSpec) {
+		for _, sp := range specs {
+			if sp.Secret && sp.Kind == client.OptBool {
+				t.Errorf("%s (%s): %q is Secret with Kind=bool, which renders as a checkbox", protocol, side, sp.Key)
+			}
+		}
+	}
+	for _, protocol := range client.Protocols() {
+		if specs, ok := client.ClientOptsFor(protocol); ok {
+			check(t, protocol, "client", specs)
+		}
+	}
+	for _, protocol := range client.ServerProtocols() {
+		if specs, ok := client.ServerOptsFor(protocol); ok {
+			check(t, protocol, "server", specs)
 		}
 	}
 }

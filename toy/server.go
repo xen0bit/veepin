@@ -34,7 +34,7 @@ func init() {
 		{Key: OptServerUser, Kind: client.OptStr, Required: true, Help: "the one username to accept"},
 		{Key: OptServerSecret, Kind: client.OptStr, Required: true, Secret: true, Help: "that user's secret; provides no real protection"},
 		{Key: OptServerMTU, Kind: client.OptInt, Help: "inner MTU offered to clients"},
-		{Key: OptServerTUN, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
+		client.TUNOpt(OptServerTUN),
 	})
 }
 

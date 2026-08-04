@@ -514,7 +514,7 @@ func TestStopTearsDownFromThePersistedState(t *testing.T) {
 // nothing.
 //
 // (Its previous form rewrote the config on disk and claimed to prove teardown
-// ignored the edit. stopLocked reads r.cfg, the config captured at build time,
+// ignored the edit. stopListener reads r.cfg, the config captured at build time,
 // and Stop never reloads, so the rewrite had no effect on the code under test
 // and the test was a duplicate of the one above under a name that promised
 // otherwise.)
@@ -901,7 +901,7 @@ func (s *wedgedServer) Close() error {
 	return nil
 }
 
-// TestAWedgedCloseDoesNotFreezeTheFleet is the containment. stopLocked runs
+// TestAWedgedCloseDoesNotFreezeTheFleet is the containment. stopListener runs
 // under Manager.mu, so an unbounded Close would hold the manager lock forever
 // and every Status, Apply, and Rebuild in the fleet would block behind it: one
 // listener taking down the entire management plane, which is the failure this
@@ -967,19 +967,39 @@ func TestCloseTearsDownEveryListener(t *testing.T) {
 	}
 }
 
-// TestManagerDefaultCtorIsNewServer pins the default constructor: with a nil
-// ctor argument the Manager uses the real production registry. The test only
-// verifies codegen/dispatch shape; it does not call Apply (which would require
-// privileges), it just confirms the logger field isn't panicking.
+// TestManagerDefaultCtorIsNewServer pins the default constructor: a nil ctor
+// means the real registry, so a supervisor built the production way can
+// actually construct servers.
+//
+// The previous version asserted `m != nil && m.listeners != nil` under a
+// comment conceding it "only verifies codegen/dispatch shape" -- it passed with
+// ctor left nil, which is the one thing it was named for. Calling the ctor is
+// the assertion: it reaches client.NewServer, which answers for a registered
+// protocol and refuses an unregistered one. No privileges are needed, because a
+// bad protocol name fails before anything is opened.
 func TestManagerDefaultCtorIsNewServer(t *testing.T) {
-	dir := t.TempDir()
-	// Constructing the manager with a nil ctor must not panic.
-	m := NewManager(dir, nil, nil)
+	m := NewManager(t.TempDir(), nil, nil)
 	if m == nil {
 		t.Fatal("nil manager")
 	}
 	if m.listeners == nil {
-		t.Errorf("listeners map not initialized")
+		t.Fatal("listeners map not initialized")
+	}
+	if m.ctor == nil {
+		t.Fatal("a nil ctor argument left the manager with no constructor at all")
+	}
+	// An unregistered protocol must be refused by the real registry. A stub
+	// ctor that ignored its argument would happily return something here.
+	if _, err := m.ctor("not-a-registered-protocol", map[string]string{}); err == nil {
+		t.Error("the default ctor accepted a protocol the registry has never heard of")
+	}
+	// And a registered one is dispatched to that protocol's parse, which
+	// rejects an empty option map by name rather than by "unknown protocol".
+	_, err := m.ctor("wireguard", map[string]string{})
+	if err == nil {
+		t.Error("the default ctor built a wireguard server from no options at all")
+	} else if strings.Contains(err.Error(), "unknown protocol") {
+		t.Errorf("the default ctor does not reach the registry: %v", err)
 	}
 }
 
@@ -1034,8 +1054,8 @@ func TestPeersDoesNotRaceARebuild(t *testing.T) {
 		}()
 	}
 	for range 300 {
-		peers, exists := mgr.Peers("site-a")
-		if !exists {
+		peers, avail := mgr.Peers("site-a")
+		if avail != PeersOK {
 			// A rebuild stops the listener briefly; Peers may see the gap and
 			// report it as not-running, which is fine. What must never happen is
 			// a peer slice read from a server that was being Close()d.
@@ -1048,13 +1068,28 @@ func TestPeersDoesNotRaceARebuild(t *testing.T) {
 	wg.Wait()
 }
 
-// TestPeersUnknownListener: Peers of a name the manager never heard of reports
-// not-exists, so the API can answer 404 rather than an empty peer list.
+// TestPeersUnknownListener: Peers of a name the manager never heard of says so
+// specifically, so the API can answer 404 -- and says something DIFFERENT for a
+// listener that exists but is not running, which used to be the same answer.
+// That collapse made the panel report "no such listener" for a listener in
+// error state, next to a status panel that had just rendered it.
 func TestPeersUnknownListener(t *testing.T) {
 	dir := t.TempDir()
 	mgr := NewManager(dir, testLogger(t), (&fakeCtor{}).construct)
-	if _, exists := mgr.Peers("never-existed"); exists {
-		t.Errorf("Peers of an unknown listener reported exists")
+	if _, avail := mgr.Peers("never-existed"); avail != PeersNoSuchListener {
+		t.Errorf("Peers of an unknown listener = %v, want PeersNoSuchListener", avail)
+	}
+
+	// A disabled listener is tracked, has no server handle, and must not read
+	// as missing.
+	mustWriteFile(t, filepath.Join(dir, "site-a.json"), "site-a.json",
+		`{"name":"site-a","protocol":"toy","enabled":false}`)
+	if err := mgr.Apply(); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	t.Cleanup(func() { _ = mgr.Close() })
+	if _, avail := mgr.Peers("site-a"); avail != PeersNotRunning {
+		t.Errorf("Peers of a disabled listener = %v, want PeersNotRunning", avail)
 	}
 }
 

@@ -23,6 +23,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/xen0bit/veepin/client"
 )
 
 // mgmtHTTPTimeout bounds every request the management CLI makes. The API's
@@ -156,13 +158,26 @@ func buildErrorOf(v any) string {
 	return ""
 }
 
-// prettyEncode pretty-prints v to the writer.
+// prettyEncode renders v as indented JSON and returns it. On a marshal failure
+// it falls back to %v rather than returning an error: this is the terminal
+// output path, and showing the operator a Go-syntax dump of the response beats
+// showing them nothing.
+//
+// HTML escaping is off. encoding/json escapes <, > and & by default so its
+// output is safe to embed in a <script> block, which is exactly what this is
+// not: the destination is a terminal, and the escaping turns the <redacted>
+// sentinel -- the one string an operator most needs to recognise on sight --
+// into <redacted>.
 func prettyEncode(v any) string {
-	b, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(v); err != nil {
 		return fmt.Sprintf("%v", v)
 	}
-	return string(b)
+	// Encode appends a newline; the callers add their own.
+	return strings.TrimRight(buf.String(), "\n")
 }
 
 // mgmtPrint renders v the way the subcommand asked: pretty JSON by default (a
@@ -410,7 +425,8 @@ func mgmtRm(args []string) error {
 	yes := false
 	filtered := make([]string, 0, len(rest))
 	for _, a := range rest {
-		if a == "-y" || a == "--y" {
+		// -yes too: see profile.go's confirmDelete caller.
+		if a == "-y" || a == "--y" || a == "-yes" || a == "--yes" {
 			yes = true
 			continue
 		}
@@ -471,6 +487,7 @@ func mgmtClientConfig(args []string) error {
 	endpoint := fs.String("endpoint", "", "server address clients dial, host[:port] (required for most protocols)")
 	var sets setList
 	fs.Var(&sets, "set", "override a client option, key=value (repeatable)")
+	showSecrets := fs.Bool("secrets", false, "print secret values instead of <redacted> (stdout only; -o always writes them)")
 	jsonOut, err := mgmtFlags(fs, rest)
 	if err != nil {
 		return err
@@ -478,7 +495,10 @@ func mgmtClientConfig(args []string) error {
 	if name == "" {
 		return fmt.Errorf("usage: veepin mgmt client-config <name> [-endpoint host[:port]] [-set k=v] [-o dir] [-json]")
 	}
-	overrides, err := applyOverrides(nil, sets)
+	// No protocol name: only the server knows what this listener runs, and it
+	// validates the override keys against that protocol's client OptSpecs. An
+	// empty protocol skips the local key check and keeps the key=value one.
+	overrides, err := applyOverrides("mgmt client-config", "", nil, sets)
 	if err != nil {
 		return err
 	}
@@ -494,8 +514,66 @@ func mgmtClientConfig(args []string) error {
 	if *outDir != "" {
 		return writeClientConfigBundle(*outDir, v)
 	}
+	// Without -o the profile goes to stdout, and it carries the client's real
+	// private key and every secret the listener supplied -- a generated profile
+	// is complete by construction. `veepin profile show` redacts by default and
+	// takes -secrets to opt in; this printed everything and took nothing, which
+	// is the opposite default for strictly more sensitive output. It lands in
+	// scrollback and, piped, in whatever consumed it.
+	if !*showSecrets {
+		v = redactClientConfigResponse(v)
+	}
 	mgmtPrint(jsonOut, v)
 	return nil
+}
+
+// redactClientConfigResponse replaces the secret option values in a
+// client-config response with the same sentinel the API uses on reads.
+//
+// Best-effort over an any-shaped decode: a response whose shape it does not
+// recognise is returned unchanged rather than half-redacted, because a caller
+// who asked for the profile and got a mangled one is worse off than one who
+// got what they asked for. The complete profile is always available with -o
+// (mode 0600) or -secrets.
+func redactClientConfigResponse(v any) any {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return v
+	}
+	prof, ok := m["profile"].(map[string]any)
+	if !ok {
+		return v
+	}
+	protocol, _ := prof["protocol"].(string)
+	specs, ok := client.ClientOptsFor(protocol)
+	if !ok {
+		return v
+	}
+	opts, ok := prof["options"].(map[string]any)
+	if !ok {
+		return v
+	}
+	for _, sp := range specs {
+		if !sp.Secret {
+			continue
+		}
+		if cur, present := opts[sp.Key]; present && cur != "" {
+			opts[sp.Key] = client.Redacted
+		}
+	}
+	// The companion files are key material too -- a bundled client.key is the
+	// private half in full.
+	if files, ok := m["files"].([]any); ok {
+		for _, f := range files {
+			fm, ok := f.(map[string]any)
+			if !ok {
+				continue
+			}
+			fm["content"] = client.Redacted
+		}
+	}
+	m["note"] = "secrets redacted; re-run with -o <dir> to write the real profile, or -secrets to print it"
+	return m
 }
 
 // writeClientConfigBundle writes the generated profile.json and its companion
@@ -547,10 +625,27 @@ func writeClientConfigBundle(dir string, v any) error {
 		return err
 	}
 	defer func() { _ = os.RemoveAll(staging) }()
-	installed := []string{}
+	// installed records what to undo, and how. A name we created is removed on
+	// rollback; a name we REPLACED is put back.
+	//
+	// Removing either was wrong: re-running `client-config -o ./bundle` over an
+	// existing bundle overwrote the operator's previous ca.crt, and a failure on
+	// the next companion then deleted it -- so the "all-or-nothing" promise
+	// restored a state that had never existed, with their file gone.
+	type undo struct {
+		name   string
+		backup string // "" when the name did not exist before
+	}
+	var installed []undo
 	rollback := func() {
-		for _, n := range installed {
-			_ = os.Remove(filepath.Join(dir, n))
+		for i := len(installed) - 1; i >= 0; i-- {
+			u := installed[i]
+			target := filepath.Join(dir, u.name)
+			if u.backup == "" {
+				_ = os.Remove(target)
+				continue
+			}
+			_ = os.Rename(u.backup, target)
 		}
 	}
 	install := func(name string, body []byte) error {
@@ -558,10 +653,28 @@ func writeClientConfigBundle(dir string, v any) error {
 		if err := os.WriteFile(staged, body, 0o600); err != nil {
 			return err
 		}
-		if err := os.Rename(staged, filepath.Join(dir, name)); err != nil {
+		target := filepath.Join(dir, name)
+		u := undo{name: name}
+		if fi, err := os.Stat(target); err == nil {
+			// Only a regular file is ours to replace. A directory (or a socket,
+			// or a device) under one of our names is the operator having
+			// something else there entirely, and moving it aside to drop a PEM
+			// in its place is not a decision this command should make.
+			if !fi.Mode().IsRegular() {
+				return fmt.Errorf("mgmt client-config: %s exists and is not a regular file", target)
+			}
+			// Move the existing file aside into the staging dir, which is on the
+			// same filesystem as dir (os.MkdirTemp under filepath.Dir(dir)), so
+			// the rename is atomic and cannot half-copy.
+			u.backup = filepath.Join(staging, ".backup-"+name)
+			if err := os.Rename(target, u.backup); err != nil {
+				return err
+			}
+		}
+		if err := os.Rename(staged, target); err != nil {
 			return err
 		}
-		installed = append(installed, name)
+		installed = append(installed, u)
 		return nil
 	}
 	if err := install("profile.json", profBody); err != nil {

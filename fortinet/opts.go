@@ -16,6 +16,6 @@ func init() {
 		{Key: OptNoDTLS, Kind: client.OptBool, Help: "stay on the TLS tunnel even where the gateway offers DTLS"},
 		{Key: OptToken, Kind: client.OptStr, Secret: true, Help: "one-time code to answer a 2FA challenge (single use)"},
 		{Key: OptTOTP, Kind: client.OptStr, Secret: true, Help: "base32 TOTP secret, to generate codes as the gateway asks"},
-		{Key: OptTUN, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
+		client.TUNOpt(OptTUN),
 	})
 }

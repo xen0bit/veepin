@@ -16,7 +16,7 @@ func init() {
 		{Key: OptAllowedIPs, Kind: client.OptCommaList, Default: "0.0.0.0/0", Help: "comma-separated allowed IPs"},
 		{Key: OptDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers to install"},
 		{Key: OptMTU, Kind: client.OptInt, Default: "0", Help: "tunnel MTU (0 = protocol default)"},
-		{Key: OptShape, Kind: client.OptInt, Default: "0", Help: "per-flow upstream shaping budget in bytes (0 = off)"},
+		client.ShapeOpt(OptShape, "upstream"),
 		{Key: OptTypeInit, Kind: client.OptInt, Default: "0", Help: "H1: message type replacing handshake initiation (0 = stock 1)"},
 		{Key: OptTypeResp, Kind: client.OptInt, Default: "0", Help: "H2: message type replacing handshake response (0 = stock 2)"},
 		{Key: OptTypeCookie, Kind: client.OptInt, Default: "0", Help: "H3: message type replacing cookie reply (0 = stock 3)"},
@@ -28,6 +28,6 @@ func init() {
 		{Key: OptJunkCount, Kind: client.OptInt, Default: "0", Help: "Jc: junk datagrams sent before the handshake (0 = none)"},
 		{Key: OptJunkMin, Kind: client.OptInt, Default: "0", Help: "Jmin: smallest junk datagram in bytes"},
 		{Key: OptJunkMax, Kind: client.OptInt, Default: "0", Help: "Jmax: largest junk datagram in bytes"},
-		{Key: OptTUNName, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
+		client.TUNOpt(OptTUNName),
 	})
 }

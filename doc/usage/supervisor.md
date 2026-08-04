@@ -63,6 +63,41 @@ does not decode and the supervisor refuses the file.
 `enabled` may be omitted; it defaults to `true`. A file that names a protocol
 and its options describes a listener you want running.
 
+`hostnames` is optional and only used by the certificate generators — see below.
+
+## Generated key material
+
+An option a protocol declares with a `Generate` kind, left empty when the
+listener is created, is filled in by the supervisor rather than rejected. What
+that means depends on the protocol: a WireGuard private key or a PSK is written
+into the `options` map itself, while a TLS chain becomes three files under
+`<config>/<name>/` with the config carrying their paths.
+
+The create response's `generated` map is the one place a generated value is
+shown — a WireGuard server's public key has to reach clients somehow, and the
+path to the CA an operator must distribute is not otherwise written down.
+
+**`hostnames` is what the generated certificate covers.** Go dropped the
+Common Name fallback in 1.15, so a leaf with no subjectAltName is valid for no
+name at all, and every verifying client rejects it:
+
+```json
+{"name": "vpn-a", "protocol": "sstp",
+ "hostnames": ["vpn.example.com", "203.0.113.4"],
+ "options": {"listen": "0.0.0.0", "listen-port": "443"}}
+```
+
+Names go in as DNS entries and literal addresses as IP entries; the split is
+automatic. Omitted, it defaults to `localhost`, `127.0.0.1`, `::1` and the
+listener's own name, which is enough for a loopback test and nothing else — so
+set it to the names clients will actually dial. Client-config generation warns
+when the `-endpoint` you give it is not one of them, because that certificate
+will be rejected at the point a client tries to use it.
+
+Changing `hostnames` later does not re-issue: the options already name existing
+files, and a generator skips an option that has a value. Delete the listener's
+`<config>/<name>/` directory and restart it, or delete and re-create.
+
 `name` must match `[a-z0-9][a-z0-9-]{0,31}` -- it is used verbatim as the
 `iptables --comment veepin:<name>` tag the supervisor's `setup_nat` path
 installs, so an unsafe character in `name` would be an unsafe shell fragment
@@ -96,6 +131,36 @@ Client connection profiles are a second entity type the panel
 manages — see [Client profiles](mgmt.md#client-profiles) and the `-profiles`
 flag below.
 
+## Reaching the panel from anywhere but the host
+
+The panel is unauthenticated by necessity — it is the thing that hands the
+browser the token — so its boundary is the `Host` header. `mgmt.RequireHost`
+answers 403 unless `Host` names loopback, `localhost`, or the exact `-listen`
+address. That is what stops a page the operator visits from rebinding its own
+hostname to `127.0.0.1`, becoming same-origin with the panel, and reading the
+token out of the DOM.
+
+Seeding the allow-list from `-listen` alone makes any non-loopback bind
+unusable, because the Host a browser sends is a name and the bind is a literal:
+
+```sh
+veepin serve -config /etc/veepin -listen 0.0.0.0:8443
+# Host: vpn.example:8443  -> 403.  Host: 0.0.0.0:8443 -> nobody sends that.
+```
+
+`-allow-host` is the escape hatch, repeatable:
+
+```sh
+veepin serve -config /etc/veepin -listen 0.0.0.0:8443 \
+  -allow-host vpn.example.com -allow-host 203.0.113.4
+```
+
+Name the hosts operators will actually type — including the one a reverse proxy
+forwards, or the one on the near side of an `ssh -L` tunnel. Loopback stays
+allowed regardless. This does not make a routable bind *safe*: the transport is
+still plaintext HTTP and the token still crosses the wire in the clear, so put
+TLS in front of it. See [doc/security.md](../security.md).
+
 ## Profiles
 
 `-profiles <dir>` points the panel's profile endpoints at a directory of client
@@ -127,9 +192,12 @@ runtime mutation methods on a Server, so reconfiguration is rebuild by design.
 
 ## What the supervisor does *not* do
 
-- It does not generate or rotate protocol keys. Key material arrives in the
-  `options` map and is written to disk mode `0600`, root-only, the same posture
-  PEM files and the IKEv2 EAP user file already rely on.
+- It does not *rotate* keys. It does generate them: an option a protocol marks
+  `Generate` in its OptSpec table, left empty on create, is filled in — a
+  WireGuard keypair, a PSK, a self-signed TLS chain (see [Generated key
+  material](#generated-key-material)). Rotation is a delete and a re-create.
+  Key material, generated or supplied, is written mode `0600` root-only, the
+  same posture PEM files and the IKEv2 EAP user file already rely on.
 - It does not hot-add peers to a running WireGuard server by hand. WireGuard's
   peer set is fixed at `NewServer` time, so a peer change is a rebuild — which
   is exactly what client-config generation does for you: it appends the peer to

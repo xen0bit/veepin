@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -37,25 +38,13 @@ func toyListener(name string, port int) ListenerConfig {
 		Protocol: "toy",
 		Options: map[string]string{
 			"listen": "127.0.0.1",
-			"port":   itoa(port),
+			"port":   strconv.Itoa(port),
 			"pool":   "10.99.0.0/24",
 			"user":   "u",
 			"secret": "s",
 		},
 		Enabled: true,
 	}
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var b []byte
-	for n > 0 {
-		b = append([]byte{byte('0' + n%10)}, b...)
-		n /= 10
-	}
-	return string(b)
 }
 
 func writeListener(t *testing.T, dir string, cfg ListenerConfig) {
@@ -156,7 +145,7 @@ func TestRealListenerServesAndStops(t *testing.T) {
 
 	// A rebuild closes the old socket and binds a new one on the same port. If
 	// the teardown did not actually release it, the rebuild fails with "address
-	// already in use" -- which is the whole reason stopLocked waits for the serve
+	// already in use" -- which is the whole reason stopListener waits for the serve
 	// goroutine rather than just closing and moving on.
 	if err := mgr.Rebuild("site-a"); err != nil {
 		t.Fatalf("Rebuild: %v", err)

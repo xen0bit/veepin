@@ -31,10 +31,6 @@ func (s *Server) profileStore() *confstore.Store[profile.Config] {
 }
 
 func (s *Server) handleListProfiles(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	cfgs, err := s.profileStore().LoadDir()
 	if err != nil {
 		// A profile directory that does not exist yet is an empty fleet, not a
@@ -57,10 +53,6 @@ func (s *Server) handleListProfiles(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetProfile(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	name := s.pathName(w, r)
 	if name == "" {
 		return
@@ -79,22 +71,18 @@ func (s *Server) handleGetProfile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateProfile(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	// Body first, then the lock: see handleCreateListener.
+	var cfg profile.Config
+	if err := decodeJSON(r, &cfg); err != nil {
+		s.audit.record("profile.create", "", err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	s.mutate.Lock()
 	defer s.mutate.Unlock()
-	var name string
 	var res error
+	name := cfg.Name
 	defer func() { s.audit.record("profile.create", name, res) }()
-	var cfg profile.Config
-	if err := decodeJSON(r, &cfg); err != nil {
-		res = err
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	name = cfg.Name
 	if err := cfg.Validate(); err != nil {
 		res = err
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -103,6 +91,18 @@ func (s *Server) handleCreateProfile(w http.ResponseWriter, r *http.Request) {
 	if !knownClientProtocol(cfg.Protocol) {
 		res = fmt.Errorf("mgmt: unknown protocol %q", cfg.Protocol)
 		http.Error(w, "unknown protocol", http.StatusBadRequest)
+		return
+	}
+	// Run the protocol's own parse over the options, exactly as `veepin profile
+	// add` does. Config.Validate above checks only the envelope -- a name and a
+	// known protocol -- so without this the panel happily saved
+	// {"protocol":"wireguard","options":{}} with a 201, and the operator found
+	// out at `veepin connect` that private-key was required. That is the gap
+	// client.ValidateOptions exists to close, and the panel is the consumer the
+	// OptSpec tables were written for.
+	if err := client.ValidateOptions(cfg.Protocol, cfg.Options); err != nil {
+		res = err
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	// POST creates; a repeated create is a conflict, mirroring the listener
@@ -146,16 +146,44 @@ func (p profilePatch) applyTo(existing profile.Config) profile.Config {
 	if p.Options != nil {
 		out.Options = mergeOptions(existing.Options, *p.Options)
 	}
+	// Same reasoning as listenerPatch.applyTo: redaction resolves against the
+	// current protocol, so carrying the old protocol's keys across a protocol
+	// change would move a stored secret out of the redaction set.
+	if p.Protocol != nil && *p.Protocol != existing.Protocol {
+		out.Options = keepDeclaredClientOptions(out.Protocol, out.Options)
+	}
+	return out
+}
+
+// keepDeclaredClientOptions is keepDeclaredOptions against the client registry.
+func keepDeclaredClientOptions(protocol string, opts map[string]string) map[string]string {
+	specs, ok := client.ClientOptsFor(protocol)
+	if !ok || opts == nil {
+		return opts
+	}
+	declared := make(map[string]bool, len(specs))
+	for _, sp := range specs {
+		declared[sp.Key] = true
+	}
+	out := make(map[string]string, len(opts))
+	for k, v := range opts {
+		if declared[k] {
+			out[k] = v
+		}
+	}
 	return out
 }
 
 func (s *Server) handlePatchProfile(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPatch {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	name := s.pathName(w, r)
 	if name == "" {
+		return
+	}
+	// Body first, then the lock: see handleCreateListener.
+	var in profilePatch
+	if err := decodeJSON(r, &in); err != nil {
+		s.audit.record("profile.patch", name, err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	s.mutate.Lock()
@@ -171,12 +199,6 @@ func (s *Server) handlePatchProfile(w http.ResponseWriter, r *http.Request) {
 		}
 		res = err
 		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	var in profilePatch
-	if err := decodeJSON(r, &in); err != nil {
-		res = err
-		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	if in.Name != nil && *in.Name != name {
@@ -196,6 +218,11 @@ func (s *Server) handlePatchProfile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown protocol", http.StatusBadRequest)
 		return
 	}
+	if err := client.ValidateOptions(merged.Protocol, merged.Options); err != nil {
+		res = err
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if err := s.profileStore().Write(merged); err != nil {
 		res = err
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -206,10 +233,6 @@ func (s *Server) handlePatchProfile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteProfile(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	name := s.pathName(w, r)
 	if name == "" {
 		return

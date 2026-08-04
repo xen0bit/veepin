@@ -44,6 +44,11 @@
     <label id="row-enabled"><input id="enabled" type="checkbox" checked> enabled</label>
     <label id="row-setup-nat"><input id="setup_nat" type="checkbox"> -setup-nat (manage host iptables/routing)</label>
     <label id="row-wan">WAN interface<input id="wan" type="text" placeholder="eth0"></label>
+    <label id="row-hostnames">hostnames clients will dial
+      <input id="hostnames" type="text" placeholder="vpn.example.com, 203.0.113.4">
+      <small class="muted">Comma-separated. Becomes the SANs of any certificate generated below.
+        Empty means loopback plus the listener name, which no remote client can verify.</small>
+    </label>
     <input id="save" type="submit" value="save">
     <button id="apply" type="button">restart listener</button>
     <button id="delete" type="button">delete</button>
@@ -146,6 +151,10 @@ function collect() {
   body.enabled = document.getElementById("enabled").checked;
   body.setup_nat = document.getElementById("setup_nat").checked;
   body.wan = document.getElementById("wan").value.trim();
+  // Always sent, even empty: hostnames is a PATCH pointer field, so omitting it
+  // means "leave alone" and an operator clearing the box would see no change.
+  body.hostnames = document.getElementById("hostnames").value
+    .split(",").map(s => s.trim()).filter(s => s.length > 0);
   return body;
 }
 
@@ -171,6 +180,7 @@ function configureBody() {
   document.getElementById("row-enabled").style.display = isProfile() ? "none" : "";
   document.getElementById("row-setup-nat").style.display = isProfile() ? "none" : "";
   document.getElementById("row-wan").style.display = isProfile() ? "none" : "";
+  document.getElementById("row-hostnames").style.display = isProfile() ? "none" : "";
   // Restart and delete act on an existing entity. On a "new" page both would
   // fire at a name that has not been saved yet and 404 with a confusing
   // banner; hide them rather than let an operator click a button whose only
@@ -197,6 +207,8 @@ function loadEntity() {
       document.getElementById("setup_nat").checked = !!setupNat;
       document.getElementById("wan").value = wan || "";
       document.getElementById("enabled").checked = enabled !== false;
+      const hostnames = body.hostnames || body.config?.hostnames || [];
+      document.getElementById("hostnames").value = hostnames.join(", ");
     }
     renderFields(document.getElementById("protocol").value, opts);
     const st = body.state || body.status || "";

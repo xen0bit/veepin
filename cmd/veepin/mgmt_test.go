@@ -52,14 +52,27 @@ func (f *cliFakeMgr) Stop(name string) error {
 	return nil
 }
 func (f *cliFakeMgr) Close() error { return nil }
-func (f *cliFakeMgr) Peers(name string) ([]client.PeerInfo, bool) {
-	return nil, false
+func (f *cliFakeMgr) Peers(name string) ([]client.PeerInfo, supervisor.PeerAvailability) {
+	if _, ok := f.statuses[name]; !ok {
+		return nil, supervisor.PeersNoSuchListener
+	}
+	return nil, supervisor.PeersUnsupported
 }
 
 // startMgmtTestServer launches a real mgmt.Server (with a fake manager) bound
 // to a httptest.Server and returns the URL + token. The CLI's env vars point at
 // it.
 func startMgmtTestServer(t *testing.T, statuses map[string]supervisor.Status) (url, token string) {
+	u, tok, _, _ := startMgmtTestServerWithDir(t, statuses)
+	return u, tok
+}
+
+// startMgmtTestServerWithDir is the same, and also hands back the config
+// directory and the fake manager. The dir was previously created and dropped on
+// the floor, so a test that wanted to assert `mgmt add` had written a file was
+// told in a comment that it could not reach it -- it could, the helper just did
+// not return it.
+func startMgmtTestServerWithDir(t *testing.T, statuses map[string]supervisor.Status) (string, string, string, *cliFakeMgr) {
 	t.Helper()
 	dir := t.TempDir()
 	for name := range statuses {
@@ -74,8 +87,8 @@ func startMgmtTestServer(t *testing.T, statuses map[string]supervisor.Status) (u
 		t.Fatalf("mgmt.NewServer: %v", err)
 	}
 	ts := httptest.NewServer(srv.Handler())
-	t.Cleanup(func() { _ = srv.Close(); ts.Close() })
-	return ts.URL, string(srv.Token())
+	t.Cleanup(func() { _ = srv.CloseFleet(); ts.Close() })
+	return ts.URL, string(srv.Token()), dir, mgr
 }
 
 func TestMgmtLsAndStatus(t *testing.T) {
@@ -101,30 +114,54 @@ func TestMgmtProtocols(t *testing.T) {
 	}
 }
 
+// TestMgmtRestart: `veepin mgmt restart <name>` reaches the manager's Rebuild
+// for that listener, and no other.
+//
+// It used to assert only that runMgmt returned nil. The fake has recorded
+// rebuildOf since it was written and no test ever read it -- state kept
+// specifically for an assertion nobody made -- so a restart that POSTed to the
+// wrong listener, or to nothing at all, passed.
 func TestMgmtRestart(t *testing.T) {
-	url, token := startMgmtTestServer(t, map[string]supervisor.Status{
+	url, token, _, mgr := startMgmtTestServerWithDir(t, map[string]supervisor.Status{
 		"site-a": {Name: "site-a", State: "running"},
+		"site-b": {Name: "site-b", State: "running"},
 	})
 	t.Setenv("VEEPIN_MGMT_URL", url)
 	t.Setenv("VEEPIN_MGMT_TOKEN", token)
 	if err := runMgmt([]string{"restart", "site-a"}); err != nil {
 		t.Fatalf("restart: %v", err)
 	}
+	if mgr.rebuildOf != "site-a" {
+		t.Errorf("rebuilt %q, want site-a", mgr.rebuildOf)
+	}
 }
 
+// TestMgmtRm: `veepin mgmt rm <name> -y` stops the listener and removes its
+// config file. Same story as restart -- stopOf was recorded and never read, and
+// the file on disk was never checked, so an rm that deleted nothing passed.
 func TestMgmtRm(t *testing.T) {
-	url, token := startMgmtTestServer(t, map[string]supervisor.Status{
+	url, token, dir, mgr := startMgmtTestServerWithDir(t, map[string]supervisor.Status{
 		"site-a": {Name: "site-a", State: "running"},
+		"site-b": {Name: "site-b", State: "running"},
 	})
 	t.Setenv("VEEPIN_MGMT_URL", url)
 	t.Setenv("VEEPIN_MGMT_TOKEN", token)
 	if err := runMgmt([]string{"rm", "site-a", "-y"}); err != nil {
 		t.Fatalf("rm: %v", err)
 	}
+	if mgr.stopOf != "site-a" {
+		t.Errorf("stopped %q, want site-a", mgr.stopOf)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "site-a.json")); !os.IsNotExist(err) {
+		t.Errorf("site-a.json survives rm: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "site-b.json")); err != nil {
+		t.Errorf("rm took another listener with it: %v", err)
+	}
 }
 
-// TestMgmtRmNeedsConfirmation: rm is destructive, so a terminal run must be
-// asked before it deletes. Scripts (non-terminal stdin) proceed as before; the
+// TestMgmtRmConfirmDelete: rm is destructive, so a terminal run must be asked
+// before it deletes. Scripts (non-terminal stdin) proceed as before; the
 // guard is the interactive case, which a test cannot fake without a pty, so the
 // -y path and the non-terminal path are what are pinned here.
 func TestMgmtRmConfirmDelete(t *testing.T) {
@@ -178,7 +215,7 @@ func TestMgmtEditSurfacesABuildError(t *testing.T) {
 		t.Fatalf("mgmt.NewServer: %v", err)
 	}
 	ts := httptest.NewServer(srv.Handler())
-	t.Cleanup(func() { _ = srv.Close(); ts.Close() })
+	t.Cleanup(func() { _ = srv.CloseFleet(); ts.Close() })
 	t.Setenv("VEEPIN_MGMT_URL", ts.URL)
 	t.Setenv("VEEPIN_MGMT_TOKEN", string(srv.Token()))
 
@@ -232,6 +269,55 @@ func TestClientConfigBundleIsAllOrNothing(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(out, "profile.json")); !os.IsNotExist(err) {
 		t.Errorf("profile.json survived a failed bundle")
+	}
+}
+
+// TestClientConfigBundleRollbackRestoresWhatItReplaced: rollback removed every
+// name it had installed, including the ones that already existed and had been
+// overwritten. So re-running client-config over an existing bundle, and failing
+// partway, took the operator's previous files with it -- and the all-or-nothing
+// comment was wrong about which state it restored.
+func TestClientConfigBundleRollbackRestoresWhatItReplaced(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "bundle")
+	if err := os.MkdirAll(out, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A previous bundle the operator already has.
+	const oldProfile = `{"name":"site-a","note":"the one that works"}`
+	const oldCA = "-----BEGIN CERTIFICATE-----\nOLD\n-----END CERTIFICATE-----\n"
+	for name, body := range map[string]string{"profile.json": oldProfile, "ca.crt": oldCA} {
+		if err := os.WriteFile(filepath.Join(out, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The SECOND companion cannot be installed, so the run fails after
+	// profile.json and ca.crt have both been replaced.
+	if err := os.MkdirAll(filepath.Join(out, "client.key"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	resp := map[string]any{
+		"protocol": "openvpn",
+		"profile": map[string]any{
+			"name": "site-a", "protocol": "openvpn",
+			"options": map[string]any{"remote": "vpn.example.com", "ca": "ca.crt"},
+		},
+		"files": []any{
+			map[string]any{"name": "ca.crt", "content": "NEW"},
+			map[string]any{"name": "client.key", "content": "NEW"},
+		},
+	}
+	if err := writeClientConfigBundle(out, resp); err == nil {
+		t.Fatal("bundle succeeded despite an uninstallable companion")
+	}
+	for name, want := range map[string]string{"profile.json": oldProfile, "ca.crt": oldCA} {
+		got, err := os.ReadFile(filepath.Join(out, name))
+		if err != nil {
+			t.Errorf("%s was deleted by the rollback rather than restored: %v", name, err)
+			continue
+		}
+		if string(got) != want {
+			t.Errorf("%s = %q, want the operator's original %q", name, got, want)
+		}
 	}
 }
 
@@ -293,7 +379,7 @@ func TestMgmtClientConfigWritesBundle(t *testing.T) {
 		t.Fatalf("mgmt.NewServer: %v", err)
 	}
 	ts := httptest.NewServer(srv.Handler())
-	t.Cleanup(func() { _ = srv.Close(); ts.Close() })
+	t.Cleanup(func() { _ = srv.CloseFleet(); ts.Close() })
 	t.Setenv("VEEPIN_MGMT_URL", ts.URL)
 	t.Setenv("VEEPIN_MGMT_TOKEN", string(srv.Token()))
 
@@ -318,6 +404,59 @@ func TestMgmtClientConfigWritesBundle(t *testing.T) {
 	}
 	if strings.Contains(string(profBody), "<redacted>") {
 		t.Errorf("written profile contains a redaction placeholder: %s", profBody)
+	}
+}
+
+// TestMgmtClientConfigRedactsOnStdoutUnlessAsked: without -o the generated
+// profile goes to the terminal, and it is strictly more sensitive than anything
+// `veepin profile show` prints -- it carries the client's freshly minted private
+// key as well as every secret the listener supplied. `profile show` redacts by
+// default and takes -secrets to opt in; this printed the lot and took nothing.
+// A profile in scrollback, or in whatever a pipe fed, is a leak the operator
+// never asked for.
+func TestMgmtClientConfigRedactsOnStdoutUnlessAsked(t *testing.T) {
+	dir := t.TempDir()
+	cfg := supervisor.ListenerConfig{Name: "site-a", Protocol: "toy", Enabled: true,
+		Options: map[string]string{"user": "alice", "secret": "s3cret"}}
+	body, _ := json.Marshal(cfg)
+	_ = os.WriteFile(filepath.Join(dir, "site-a.json"), body, 0o600)
+	mgr := &cliFakeMgr{statuses: map[string]supervisor.Status{}}
+	srv, err := mgmt.NewServer(dir, mgr, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatalf("mgmt.NewServer: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(func() { _ = srv.CloseFleet(); ts.Close() })
+	t.Setenv("VEEPIN_MGMT_URL", ts.URL)
+	t.Setenv("VEEPIN_MGMT_TOKEN", string(srv.Token()))
+
+	out, err := captureStdout(t, func() error {
+		return runMgmt([]string{"client-config", "site-a", "-endpoint", "vpn.example.com"})
+	})
+	if err != nil {
+		t.Fatalf("client-config: %v", err)
+	}
+	if strings.Contains(out, "s3cret") {
+		t.Errorf("client-config printed a secret value to stdout: %s", out)
+	}
+	if !strings.Contains(out, "<redacted>") {
+		t.Errorf("client-config did not mark the secret redacted: %s", out)
+	}
+	// The non-secret options are still there: a redacted profile is meant to be
+	// readable, not useless.
+	if !strings.Contains(out, "vpn.example.com") {
+		t.Errorf("redaction ate the endpoint too: %s", out)
+	}
+
+	// -secrets is the opt-in, and it must print the real value.
+	out, err = captureStdout(t, func() error {
+		return runMgmt([]string{"client-config", "site-a", "-endpoint", "vpn.example.com", "-secrets"})
+	})
+	if err != nil {
+		t.Fatalf("client-config -secrets: %v", err)
+	}
+	if !strings.Contains(out, "s3cret") {
+		t.Errorf("-secrets did not print the value: %s", out)
 	}
 }
 
@@ -352,7 +491,7 @@ func TestMgmtNoSubcommandPrintsUsage(t *testing.T) {
 // the API's response names the listener, so a zero-error `add` plus a status
 // round trip is the assertion that the file landed on disk.
 func TestMgmtAddCreatesListener(t *testing.T) {
-	url, token := startMgmtTestServer(t, nil)
+	url, token, dir, _ := startMgmtTestServerWithDir(t, nil)
 	t.Setenv("VEEPIN_MGMT_URL", url)
 	t.Setenv("VEEPIN_MGMT_TOKEN", token)
 
@@ -369,7 +508,17 @@ func TestMgmtAddCreatesListener(t *testing.T) {
 	if err := runMgmt([]string{"add"}); err != nil {
 		t.Fatalf("add: %v", err)
 	}
-	// The temp-dir path the API writes into is internal to the mgmt server, so
-	// we cannot reach its file from here; the absence of an error from `add`
-	// is the assertion the file landed on disk plus a status probe would.
+	// The config directory IS reachable -- the helper creates it and now
+	// returns it. The previous version asserted nothing at all and explained in
+	// a comment that it could not, which was not true.
+	stored, err := supervisor.ParseListenerFile(filepath.Join(dir, "added.json"))
+	if err != nil {
+		t.Fatalf("add wrote no config file: %v", err)
+	}
+	if stored.Protocol != "wireguard" || stored.Options["address"] != "10.10.0.1/24" {
+		t.Errorf("stored config is not the one submitted: %+v", stored)
+	}
+	if !stored.Enabled {
+		t.Error("the listener was stored disabled")
+	}
 }

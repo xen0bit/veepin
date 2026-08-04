@@ -40,8 +40,8 @@ func init() {
 		{Key: OptServerUser, Kind: client.OptStr, Required: true, Help: "username to accept"},
 		{Key: OptServerPass, Kind: client.OptStr, Required: true, Secret: true, Help: "the user's password"},
 		{Key: OptServerNoESP, Kind: client.OptBool, Help: "serve the IF-T/TLS data path only, leaving the UDP port unbound"},
-		{Key: OptServerTUN, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
-		{Key: OptServerShape, Kind: client.OptInt, Default: "0", Help: "per-flow downstream shaping budget in bytes (0 = off)"},
+		client.TUNOpt(OptServerTUN),
+		client.ShapeOpt(OptServerShape, "downstream"),
 	})
 }
 

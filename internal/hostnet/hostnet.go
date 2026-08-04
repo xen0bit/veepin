@@ -198,13 +198,11 @@ func applyWith(name string, cfg Config, run Commander) error {
 		return fmt.Errorf("hostnet: ip link set %s up: %v: %s",
 			cfg.TUNName, err, strings.TrimSpace(string(out)))
 	}
-	if out, err := run("sysctl", "-w", "net.ipv4.ip_forward=1"); err != nil {
-		// Forwarding is host-wide: a previous veepin instance or another VPN
-		// daemon may have set it. The failure here is benign in practice, but
-		// surfacing it would make a shared host unable to start any listener
-		// once it had already been set. Treat as advisory.
-		_ = out
-	}
+	// Advisory, deliberately: forwarding is host-wide, so a previous veepin
+	// instance or another VPN daemon may already own it, and failing here would
+	// make a shared host unable to start any listener once it had been set. The
+	// branch that discarded the output was doing exactly this, at more length.
+	_, _ = run("sysctl", "-w", "net.ipv4.ip_forward=1")
 
 	tag := comment(name)
 	if cfg.WAN != "" {
@@ -305,7 +303,14 @@ func teardownByTagWith(name string, run Commander) error {
 			if len(fields) < 2 || fields[0] != "-A" || !ruleHasTag(fields, tag) {
 				continue
 			}
-			args := append([]string{"-t", c.table}, fields...)
+			// Unquoted, because `iptables -S` prints the comment quoted --
+			// `--comment "veepin:site-a"` -- and there is no shell between here
+			// and execve to take the quotes off. Passing them through made every
+			// -D name a comment no installed rule has, so each one failed, the
+			// loop returned on the first, and the rules stayed on the host
+			// forever. ruleHasTag below already knew to unquote to MATCH; only
+			// the rebuild did not.
+			args := append([]string{"-t", c.table}, unquoteFields(fields)...)
 			args[2] = "-D"
 			if o, derr := run("iptables", args...); derr != nil {
 				return fmt.Errorf("hostnet: tagged teardown: iptables %s: %v: %s",
@@ -314,6 +319,18 @@ func teardownByTagWith(name string, run Commander) error {
 		}
 	}
 	return nil
+}
+
+// unquoteFields strips the double quotes `iptables -S` puts around values that
+// contain spaces (in practice, the comment). exec.Command passes each argument
+// through untouched, so a quote that survives here is a literal quote in the
+// value iptables compares against.
+func unquoteFields(fields []string) []string {
+	out := make([]string, len(fields))
+	for i, f := range fields {
+		out[i] = strings.Trim(f, `"`)
+	}
+	return out
 }
 
 // ruleHasTag reports whether an `iptables -S` rule carries exactly this tag as
@@ -337,10 +354,13 @@ func ensureRule(run Commander, rule []string) error {
 	if _, err := run("iptables", iptablesCheckArgs(rule)...); err == nil {
 		return nil // rule already exists
 	}
-	addArgs := iptablesMutateArgs(rule)
-	if out, err := run("iptables", addArgs...); err != nil {
+	// rule is already in -A form, so it is passed straight through. It went via
+	// an iptablesMutateArgs helper that copied the slice and returned it
+	// unchanged, described by its own comment as "a place to swap operations
+	// later" -- a hook for a caller that never arrived.
+	if out, err := run("iptables", rule...); err != nil {
 		return fmt.Errorf("iptables %s: %v: %s",
-			strings.Join(addArgs, " "), err, strings.TrimSpace(string(out)))
+			strings.Join(rule, " "), err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -350,7 +370,7 @@ func ensureRule(run Commander, rule []string) error {
 // defensive) do not survive teardown.
 func removeRule(run Commander, rule []string) error {
 	deleteArgs := iptablesDeleteArgs(rule)
-	for i := 0; i < 64; i++ {
+	for range 64 {
 		checkArgs := iptablesCheckArgs(rule)
 		if _, err := run("iptables", checkArgs...); err != nil {
 			return nil // no matching rule left
@@ -361,15 +381,6 @@ func removeRule(run Commander, rule []string) error {
 		}
 	}
 	return nil
-}
-
-// iptablesMutateArgs rewrites a rule slice (with -A or -t nat -A ...) into the
-// form passed to iptables to add it. The rule slice is already in -A form; it
-// is returned as-is so the helper reads as a place to swap operations later.
-func iptablesMutateArgs(rule []string) []string {
-	out := make([]string, len(rule))
-	copy(out, rule)
-	return out
 }
 
 // iptablesCheckArgs swaps the operation token (-A / -D) in rule for -C, which

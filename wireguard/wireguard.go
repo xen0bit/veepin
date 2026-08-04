@@ -117,6 +117,18 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 	return dialer{cfg}, nil
 }
 
+// Validate reports whether a Config has everything a dial needs, running the
+// same checks parseOptions runs and discarding what they build.
+//
+// It is exported for amneziawg, which fills this exact struct from its own
+// option map and had no way to reach resolve(). The result was that its four
+// Required flags claimed something nothing enforced: an entirely empty
+// amneziawg profile saved and listed cleanly and failed only at dial.
+func (c *Config) Validate() error {
+	_, err := c.resolve()
+	return err
+}
+
 // dialer adapts a Config to client.Dialer.
 type dialer struct{ cfg *Config }
 

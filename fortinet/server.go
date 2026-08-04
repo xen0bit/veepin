@@ -39,8 +39,8 @@ func init() {
 		{Key: OptServerPass, Kind: client.OptStr, Required: true, Secret: true, Help: "the user's password"},
 		{Key: OptServerNoDTLS, Kind: client.OptBool, Help: "serve the TLS tunnel only, leaving the UDP port unbound"},
 		{Key: OptServerTOTP, Kind: client.OptStr, Secret: true, Help: "base32 TOTP secret; set it to require a second factor from the user"},
-		{Key: OptServerTUN, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
-		{Key: OptServerShape, Kind: client.OptInt, Default: "0", Help: "per-flow downstream shaping budget in bytes (0 = off)"},
+		client.TUNOpt(OptServerTUN),
+		client.ShapeOpt(OptServerShape, "downstream"),
 	})
 }
 

@@ -14,7 +14,7 @@ func init() {
 		{Key: OptCA, Kind: client.OptFilePath, Help: "PEM bundle to verify the gateway against"},
 		{Key: OptInsecure, Kind: client.OptBool, Help: "skip TLS certificate verification (self-signed gateways)"},
 		{Key: OptNoESP, Kind: client.OptBool, Help: "stay on the IF-T/TLS data path even where the gateway hands out ESP keys"},
-		{Key: OptShape, Kind: client.OptInt, Default: "0", Help: "per-flow outbound shaping budget in bytes (0 = off)"},
-		{Key: OptTUN, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
+		client.ShapeOpt(OptShape, "outbound"),
+		client.TUNOpt(OptTUN),
 	})
 }

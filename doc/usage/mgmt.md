@@ -111,7 +111,15 @@ because the supervisor cannot know its own public hostname. Everything else
 derives from the listener: the PSK/password, the server identity, and any
 file-path credentials (CA, server cert) are bundled as companion files next to
 `profile.json` with the profile's paths rewritten to their names. `-set k=v`
-overrides any client option.
+overrides any client option; a key the protocol does not declare is refused,
+rather than accepted and ignored.
+
+Without `-o` the profile goes to stdout with its secrets shown as `<redacted>`,
+matching `veepin profile show`. That output is for reading, not for dialling —
+a generated profile is complete by construction, carrying the client's freshly
+minted private key as well as everything the listener supplied, and it should
+not land in scrollback by default. `-o <dir>` writes the real thing at mode
+`0600`; `-secrets` prints it.
 
 **WireGuard and AmneziaWG** are the one case that provisions rather than
 assembles: generation mints a fresh client keypair, allocates the next free

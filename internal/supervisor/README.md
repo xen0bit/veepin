@@ -42,7 +42,7 @@ makes it look, and it has to be: `Manager.Status` looks a handle up under
 `Manager.mu` and then *releases it* before reading the handle, so `Manager.mu` is
 not a second layer of protection over those fields the way it is over the map.
 
-`running.done` doubles as a generation marker. `stopLocked` clears it, so a
+`running.done` doubles as a generation marker. `stopListener` clears it, so a
 serve goroutine that returns late — after a rebuild installed a new server, or
 after the stop gave up waiting — can tell its outcome is stale and decline to
 publish it over the live listener's state.

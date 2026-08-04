@@ -6,6 +6,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -41,7 +42,8 @@ func TestProfileAddValidatesName(t *testing.T) {
 // that saves cleanly and fails at `veepin connect` with a mystery error -- the
 // exact gap client.ValidateOptions exists to close.
 func TestProfileAddRejectsUndialableConfigs(t *testing.T) {
-	// Flag form: an ikev2 profile with no identity option the parse requires.
+	// Stdin form: a wireguard profile with an endpoint and none of the keys the
+	// parse requires.
 	_ = tempProfileDir(t)
 	writeStdin(t, `{"name":"bad-stdin","protocol":"wireguard","options":{"endpoint":"1.2.3.4:51820"}}`)
 	if err := runProfile([]string{"add"}); err == nil {
@@ -50,7 +52,7 @@ func TestProfileAddRejectsUndialableConfigs(t *testing.T) {
 		t.Errorf("error does not name the missing option: %v", err)
 	}
 
-	// Stdin form: an unknown protocol must be refused, not silently saved.
+	// And an unknown protocol must be refused, not silently saved.
 	_ = tempProfileDir(t)
 	writeStdin(t, `{"name":"bogus","protocol":"not-a-protocol","options":{}}`)
 	if err := runProfile([]string{"add"}); err == nil {
@@ -69,8 +71,19 @@ func TestProfileRm(t *testing.T) {
 	if err := runProfile([]string{"rm", "home", "-y"}); err != nil {
 		t.Fatalf("rm: %v", err)
 	}
+	// The profile file is gone. This used to stat the DIRECTORY, which `rm`
+	// never touches, so a no-op profile.Delete passed.
+	if _, err := os.Stat(filepath.Join(dir, "home.json")); !os.IsNotExist(err) {
+		t.Errorf("home.json survives rm: %v", err)
+	}
+	// And the directory it lived in is still there, ready for the next one.
 	if _, err := os.Stat(dir); err != nil {
-		t.Errorf("dir removed? %v", err)
+		t.Errorf("rm removed the profile directory: %v", err)
+	}
+	// A second rm has nothing to remove and says so, rather than reporting
+	// success for a profile that does not exist.
+	if err := runProfile([]string{"rm", "home", "-y"}); err == nil {
+		t.Error("rm of a missing profile reported success")
 	}
 }
 
@@ -91,7 +104,7 @@ func TestKnownProfileFallback(t *testing.T) {
 // mutated (so a later dial without -set sees the original values).
 func TestApplyOverrides(t *testing.T) {
 	orig := map[string]string{"server": "old.example", "user": "alice"}
-	out, err := applyOverrides(orig, []string{"server=new.example", "port=8443"})
+	out, err := applyOverrides("connect", "toy", orig, []string{"server=new.example", "port=8443"})
 	if err != nil {
 		t.Fatalf("applyOverrides: %v", err)
 	}
@@ -104,8 +117,19 @@ func TestApplyOverrides(t *testing.T) {
 	if orig["server"] != "old.example" {
 		t.Errorf("the profile's own map was mutated: %v", orig)
 	}
-	if _, err := applyOverrides(orig, []string{"not-an-override"}); err == nil {
+	if _, err := applyOverrides("connect", "toy", orig, []string{"not-an-override"}); err == nil {
 		t.Errorf("a -set without '=' was accepted")
+	}
+	// A key the protocol does not declare is refused rather than added.
+	// ikev2's flag is -server and its option key is "gateway", so
+	// `-set server=...` on an ikev2 profile used to be accepted, change
+	// nothing, and dial the old gateway.
+	_, err = applyOverrides("connect", "ikev2", map[string]string{"gateway": "old.example"},
+		[]string{"server=new.example"})
+	if err == nil {
+		t.Error("a -set naming an option the protocol does not have was accepted")
+	} else if !strings.Contains(err.Error(), "gateway") {
+		t.Errorf("the error does not list the options ikev2 takes: %v", err)
 	}
 }
 
@@ -184,6 +208,15 @@ func TestProfileShowSecretsFlagDisplaysValues(t *testing.T) {
 // returns what it printed, so a test can assert on output the command owns.
 func runProfileCapturing(t *testing.T, args []string) (string, error) {
 	t.Helper()
+	return captureStdout(t, func() error { return runProfile(args) })
+}
+
+// captureStdout swaps os.Stdout for a pipe, runs fn, and returns what fn
+// printed. The reader runs in a goroutine and is drained to completion before
+// stdout is restored, so a command that writes more than a pipe buffer holds
+// does not deadlock.
+func captureStdout(t *testing.T, fn func() error) (string, error) {
+	t.Helper()
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
@@ -200,7 +233,7 @@ func runProfileCapturing(t *testing.T, args []string) (string, error) {
 		}
 		done <- buf.String()
 	}()
-	err := runProfile(args)
+	err := fn()
 	_ = w.Close()
 	out := <-done
 	os.Stdout = old
@@ -249,9 +282,8 @@ func TestConnectResolvesProfilesFromVEEPIN_PROFILE_DIR(t *testing.T) {
 	}
 }
 
-// writeStdin replaces os.Stdin with a pipe carrying content. Callers should
-// restore the original stdin after the test (temp dir cleanup does this via
-// the test's TempDir, but stdin is a global so t.Setenv doesn't cover it).
+// writeStdin replaces os.Stdin with a pipe carrying content, and restores it
+// when the test ends. stdin is a global, so nothing else would.
 func writeStdin(t *testing.T, content string) {
 	t.Helper()
 	r, w, _ := os.Pipe()

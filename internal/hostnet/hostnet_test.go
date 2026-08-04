@@ -8,6 +8,7 @@ package hostnet
 import (
 	"errors"
 	"net"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -49,37 +50,75 @@ func mustCIDR(t *testing.T, s string) *net.IPNet {
 // rule is installed, so the window in which the TUN is up and forwarding true
 // but MASQUERADE absent is bounded by the speed of the iptables call rather
 // than by anything else between them.
+// It also has to check the iptables calls, and used to check none: the fake
+// answered every -C successfully, so every rule looked already-installed and no
+// -A was ever issued. The test then asserted three `ip`/`sysctl` lines and
+// returned, and would have passed against an Apply that installed no firewall
+// rules at all. The -C calls now fail, which is what a fresh host does.
 func TestApplyRunsTheExpectedCommands(t *testing.T) {
-	rec := &recCommander{}
+	rec := &recCommander{errs: map[call]error{}}
 	cfg := Config{
 		TUNName: "tun0",
 		Gateway: net.ParseIP("10.10.0.1"),
 		Network: mustCIDR(t, "10.10.0.0/24"),
 		WAN:     "eth0",
 	}
-	if err := ApplyWithName("site-a", cfg, rec.run); err != nil {
+	// Every -C fails, as it does on a host that has none of our rules yet, so
+	// ensureRule takes the -A path and this test can see it.
+	run := func(name string, args ...string) ([]byte, error) {
+		if slices.Contains(args, "-C") {
+			rec.logs = append(rec.logs, call(name+" "+strings.Join(args, " ")))
+			return nil, errors.New("no such rule")
+		}
+		return rec.run(name, args...)
+	}
+	if err := ApplyWithName("site-a", cfg, run); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	var got []string
 	for _, c := range rec.logs {
 		got = append(got, string(c))
 	}
-	// All four iptables rules are checked with -C before any are added (the
-	// idempotent path runs -C, then -A only if -C failed). With a fresh record
-	// returning "no entry" success for every call, ensureRule should run -C
-	// then -A. The recCommander returns nil for unknown -- so -C succeeds, which
-	// means the rule appears to already exist and no -A is run. To exercise the
-	// add path, send -C the failure it expects on a fresh host.
-	rec.errs = map[call]error{}
 	for _, want := range []string{
 		"ip addr add 10.10.0.1/24 dev tun0",
 		"ip link set tun0 up",
 		"sysctl -w net.ipv4.ip_forward=1",
+		"iptables -t nat -A POSTROUTING -s 10.10.0.0/24 -o eth0 -j MASQUERADE",
+		"iptables -A FORWARD -i tun0 -j ACCEPT",
+		"iptables -A FORWARD -o tun0 -j ACCEPT",
 	} {
 		if !containsPrefix(got, want) {
 			t.Errorf("missing: %q\nfull sequence:\n%s", want, strings.Join(got, "\n"))
 		}
 	}
+	// The ordering claim in this test's own name. Forwarding is enabled before
+	// the NAT rule is installed, so the window where the TUN is up and
+	// forwarding on but MASQUERADE absent is bounded by one iptables call.
+	// containsPrefix is order-blind, so the claim went unchecked.
+	forwardAt := indexOfPrefix(got, "sysctl -w net.ipv4.ip_forward=1")
+	masqAt := indexOfPrefix(got, "iptables -t nat -A POSTROUTING")
+	if forwardAt < 0 || masqAt < 0 || forwardAt > masqAt {
+		t.Errorf("forwarding is enabled at %d and MASQUERADE installed at %d; forwarding must come first\n%s",
+			forwardAt, masqAt, strings.Join(got, "\n"))
+	}
+	// Every rule we install carries our tag, or teardown cannot find it.
+	for _, g := range got {
+		if strings.Contains(g, "iptables") && slices.Contains(strings.Fields(g), "-A") &&
+			!strings.Contains(g, "veepin:site-a") {
+			t.Errorf("an installed rule carries no teardown tag: %s", g)
+		}
+	}
+}
+
+// indexOfPrefix returns the position of the first string starting with prefix,
+// or -1.
+func indexOfPrefix(got []string, prefix string) int {
+	for i, g := range got {
+		if strings.HasPrefix(g, prefix) {
+			return i
+		}
+	}
+	return -1
 }
 
 // containsPrefix reports whether got holds any string that starts with prefix.
@@ -142,31 +181,48 @@ func TestEnsureRuleIsIdempotentWhenRuleAlreadyExists(t *testing.T) {
 }
 
 // TestEnsureRuleAddsWhenAbsent is the add path: -C fails, -A runs.
+//
+// It used to assert only err == nil, and built a `checkCall` variable it never
+// compared against anything -- so an ensureRule that issued no command at all
+// passed. Both halves of the claim are checked now: the -C happens, and the -A
+// follows it.
 func TestEnsureRuleAddsWhenAbsent(t *testing.T) {
-	rec := &recCommander{
-		// Every -C fails (iptables returns non-zero for a missing rule).
-		errs: nil,
-	}
-	// Use a commander that fails every call it does not explicitly know, so -C
-	// fails and -A then runs.
-	rec.errs = map[call]error{}
-	checkCall := call("iptables -A FORWARD -i tun0 -j ACCEPT -m comment --comment veepin:site-a")
-	// Map -C call (built from the rule) to a failure by stripping the " -A "
-	// back together; we just iterate and replace with -C inline by hooking the
-	// run function via a custom run function.
+	rule := []string{"-A", "FORWARD", "-i", "tun0", "-j", "ACCEPT",
+		"-m", "comment", "--comment", "veepin:site-a"}
+	var issued []string
 	run := func(name string, args ...string) ([]byte, error) {
-		full := name + " " + strings.Join(args, " ")
-		if strings.Contains(full, "-C FORWARD") || strings.Contains(full, "-C POSTROUTING") {
+		issued = append(issued, name+" "+strings.Join(args, " "))
+		if slices.Contains(args, "-C") {
 			return nil, errors.New("not present")
-		}
-		if full == string(checkCall) {
-			return nil, nil
 		}
 		return nil, nil
 	}
-	if err := ensureRule(run, []string{"-A", "FORWARD", "-i", "tun0", "-j", "ACCEPT",
-		"-m", "comment", "--comment", "veepin:site-a"}); err != nil {
+	if err := ensureRule(run, rule); err != nil {
 		t.Fatalf("ensureRule: %v", err)
+	}
+	want := []string{
+		"iptables -C FORWARD -i tun0 -j ACCEPT -m comment --comment veepin:site-a",
+		"iptables -A FORWARD -i tun0 -j ACCEPT -m comment --comment veepin:site-a",
+	}
+	if !slices.Equal(issued, want) {
+		t.Errorf("issued:\n%s\nwant:\n%s", strings.Join(issued, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// TestEnsureRuleAddsNothingWhenPresent is the other half, and the one that
+// makes the test above mean something: when -C succeeds the rule is already
+// installed and no -A may follow, or every reconcile would stack duplicates.
+func TestEnsureRuleAddsNothingWhenPresent(t *testing.T) {
+	var issued []string
+	run := func(name string, args ...string) ([]byte, error) {
+		issued = append(issued, name+" "+strings.Join(args, " "))
+		return nil, nil // -C succeeds: the rule is there
+	}
+	if err := ensureRule(run, []string{"-A", "FORWARD", "-i", "tun0", "-j", "ACCEPT"}); err != nil {
+		t.Fatalf("ensureRule: %v", err)
+	}
+	if len(issued) != 1 || !strings.Contains(issued[0], "-C") {
+		t.Errorf("expected exactly one -C and no -A, got:\n%s", strings.Join(issued, "\n"))
 	}
 }
 
@@ -389,20 +445,65 @@ func TestApplyNonNetAdminFailsWithHelpfulError(t *testing.T) {
 // mis-routing).
 func TestSwapOpNotFoundLeavesRule(t *testing.T) {
 	rule := []string{"-t", "nat", "-X", "POSTROUTING"}
-	if got := swapOp(rule, "-C"); !equalStrings(got, rule) {
+	if got := swapOp(rule, "-C"); !slices.Equal(got, rule) {
 		t.Errorf("swapOp mutated rule with no -A/-D: got %v want %v", got, rule)
 	}
 }
 
 // equalStrings compares two string slices elementwise.
-func equalStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
+// TestTaggedTeardownDeletesRulesItFindsInRealIptablesOutput: the tagged teardown
+// is the recovery path -- it runs when the persisted state file is gone, which
+// is exactly the case the state file was added to survive. It rebuilt its -D
+// arguments from raw `iptables -S` fields, and -S prints the comment QUOTED:
+//
+//	-A POSTROUTING -o eth0 -m comment --comment "veepin:site-a" -j MASQUERADE
+//
+// There is no shell between here and execve, so the literal quote characters
+// reached iptables, which then found no rule with that comment. Every -D failed,
+// the loop returned on the first, and the MASQUERADE plus both FORWARD rules
+// stayed on the host forever. The only test that touched this path fed unquoted
+// comments -- a format iptables never produces -- so it could not see it.
+func TestTaggedTeardownDeletesRulesItFindsInRealIptablesOutput(t *testing.T) {
+	natRules := `-P POSTROUTING ACCEPT
+-A POSTROUTING -s 10.0.0.0/24 -o eth0 -m comment --comment "veepin:site-a" -j MASQUERADE
+-A POSTROUTING -s 10.9.0.0/24 -o eth0 -m comment --comment "veepin:other" -j MASQUERADE
+`
+	filterRules := `-P FORWARD DROP
+-A FORWARD -i veepin0 -o eth0 -m comment --comment "veepin:site-a" -j ACCEPT
+`
+	var deletes [][]string
+	run := func(name string, args ...string) ([]byte, error) {
+		if len(args) >= 3 && args[2] == "-S" {
+			switch args[1] {
+			case "nat":
+				return []byte(natRules), nil
+			case "filter":
+				return []byte(filterRules), nil
+			}
+		}
+		if slices.Contains(args, "-D") {
+			deletes = append(deletes, slices.Clone(args))
+		}
+		return nil, nil
 	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
+
+	if err := teardownByTagWith("site-a", run); err != nil {
+		t.Fatalf("teardown: %v", err)
+	}
+	if len(deletes) != 2 {
+		t.Fatalf("deleted %d rules, want the 2 tagged veepin:site-a: %v", len(deletes), deletes)
+	}
+	for _, args := range deletes {
+		for _, a := range args {
+			if strings.Contains(a, `"`) {
+				t.Errorf("a delete argument still carries a literal quote, which matches no installed rule: %q in %v", a, args)
+			}
+		}
+		if !slices.Contains(args, "veepin:site-a") {
+			t.Errorf("delete does not carry the unquoted tag: %v", args)
+		}
+		if slices.Contains(args, "veepin:other") {
+			t.Errorf("delete touched another listener's rule: %v", args)
 		}
 	}
-	return true
 }

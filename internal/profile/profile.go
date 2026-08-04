@@ -57,7 +57,7 @@ func (c Config) ConfigName() string { return c.Name }
 // Validate checks the profile's fields.
 func (c Config) Validate() error {
 	if !confstore.ValidName(c.Name) {
-		return fmt.Errorf("profile: name %q must match %s", c.Name, confstore.NameGrammar())
+		return fmt.Errorf("profile: name %q: %s", c.Name, confstore.NameRefusal(c.Name))
 	}
 	if c.Protocol == "" {
 		return errors.New("profile: protocol is required")

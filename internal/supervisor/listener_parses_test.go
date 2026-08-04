@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -53,9 +54,6 @@ func TestParseListenerBytesRejectsUnknownFields(t *testing.T) {
 	}
 }
 
-// TestValidateRejectsBadName covers the name grammar: each rejected case is
-// either an unsafe filename character or an unsafe iptables comment fragment.
-// The list is not exhaustive -- it names the categories that matter.
 // TestEnabledDefaultsToTrue: the obvious minimal config -- name, protocol,
 // options and nothing else -- describes a listener the operator wants running.
 // A zero-value Go bool defaulted the other way, so such a file parsed,
@@ -100,6 +98,9 @@ func TestDisabledSurvivesAWriteReadRoundTrip(t *testing.T) {
 	}
 }
 
+// TestValidateRejectsBadName covers the name grammar: each rejected case is
+// either an unsafe filename character or an unsafe iptables comment fragment.
+// The list is not exhaustive -- it names the categories that matter.
 func TestValidateRejectsBadName(t *testing.T) {
 	for _, bad := range []string{
 		"", "UPPER", "with space", "with.dot", "with/slash", "with\\back",
@@ -196,9 +197,21 @@ func TestWriteListenerFileIsAtomicAndPermsLocked(t *testing.T) {
 	if info.Mode().Perm() != 0o600 {
 		t.Errorf("listener file mode = %v, want 0600", info.Mode().Perm())
 	}
-	matches, _ := filepath.Glob(filepath.Join(dir, "*.tmp"))
-	if len(matches) != 0 {
-		t.Errorf("temp file left behind: %v", matches)
+	// The temp files confstore leaves mid-write are named "site-a.tmp.1234567",
+	// from os.CreateTemp's random suffix -- so the "*.tmp" this used to glob
+	// matched nothing, ever, and the atomicity half of this test's own name was
+	// checking that no file matched a pattern no file can have.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp.") {
+			t.Errorf("temp file left behind: %s", e.Name())
+		}
+	}
+	if len(entries) != 1 {
+		t.Errorf("write left %d files, want just site-a.json: %v", len(entries), entries)
 	}
 }
 

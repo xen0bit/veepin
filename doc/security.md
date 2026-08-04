@@ -266,6 +266,34 @@ The negotiation is also not interop-tested against strongSwan yet, so by this
 repo's own standard the wire format is unproven: a veepin↔veepin test shows the
 two halves agree, not that either is right.
 
+## What counts as a secret option, and why the rule needs writing down
+
+Redaction — in the API, in the panel, in `veepin profile show` — is driven
+entirely by `OptSpec.Secret`. A key whose spec omits it is printed in the clear,
+so the flag is the whole of the policy and a judgement call in each facade.
+
+The rule:
+
+- **Key material is secret.** Private keys, PSKs, passwords, group keys.
+- **A path to key material is secret**, not because the path is sensitive but
+  because it names the file to go after, and because the panel showing
+  `/etc/veepin/site-a/tls.key` in a field next to `<redacted>` teaches the wrong
+  lesson about which of the two matters. `tls-auth` and `tls-crypt` are the
+  awkward case: they are paths to an OpenVPN *static* key, symmetric material
+  protecting the control channel, and they are secret.
+- **A value whose only security property is being unguessable is secret**, even
+  where it authenticates nothing. L2TPv3's cookies are the example. RFC 3931
+  §5.4.3 calls them "a modest level of protection against blind insertion of
+  data", which is protection that survives exactly as long as the value is not
+  printed in a profile listing.
+- **A public value is not secret**, even when it is cryptographic: a WireGuard
+  *public* key, a certificate, a CA bundle.
+
+`cmd/veepin`'s `TestSecretFlagsAgreeAcrossBothTables` enforces the one part of
+this a test can: a key in both a protocol's client and server tables must be
+flagged the same in each. It cannot decide whether a lone option is key
+material, which is why the rule is here.
+
 ## The management plane binds to localhost; do not bind it to a routable interface
 
 The supervisor (`veepin serve -config <dir>`) starts a management HTTP API and
@@ -330,8 +358,34 @@ JSON files. Secrets inside them (private keys, PSKs, passphrases, TOTP seeds)
 are plaintext at rest and redacted as the literal `<redacted>` on every API
 read. A PATCH that submits `<redacted>` for a secret key preserves the on-disk
 value rather than overwriting it with the placeholder, so a GET-then-PATCH
-round trip cannot destroy a stored key — but a copy-paste of the redacted
-value to a fresh POST will, which is the trade-off of a per-call bearer model.
+round trip cannot destroy a stored key. A POST cannot preserve anything — there
+is nothing on disk yet — so it refuses the sentinel as a literal value with a
+`400` naming the key, rather than storing the placeholder as if it were a key.
+That was the shape of a GET-then-POST-under-a-new-name copy: a `201 Created` and
+a listener whose private key was the eleven characters `<redacted>`.
+
+### Secrets reach the CLI as command-line arguments
+
+`veepin serve <proto> -psk …`, `veepin profile add … -password …` and the
+`-set key=value` overrides all take secret values on argv. On Linux that means
+the value is in `/proc/<pid>/cmdline`, readable by any process of the same user
+(and by root), and it lands in the invoking shell's history file. There is no
+`@/path/to/file` indirection and no interactive prompt; adding one is worthwhile
+and has not been done.
+
+Until then, the two surfaces that avoid argv entirely are the ones to prefer for
+key material:
+
+- **`veepin profile add` reading a JSON document on stdin** — the whole config,
+  secrets included, arrives through a pipe. `veepin profile show` redacts by
+  default and needs `-secrets` to print values.
+- **A listener JSON file the supervisor reads** — mode `0600`, root-only, never
+  on a command line. This is what the panel and `veepin mgmt add` write.
+
+`veepin mgmt client-config` likewise redacts on stdout by default; `-o <dir>`
+writes the real profile at mode `0600`, and `-secrets` is the explicit opt-in to
+put it on the terminal. The bearer token itself is never accepted on argv: it
+comes from `VEEPIN_MGMT_TOKEN` or `<config>/mgmt/token`.
 
 The supervisor is **the only `veepin` subsystem that mutates host state.**
 Single-protocol `veepin serve <proto>` opens a TUN and binds sockets but

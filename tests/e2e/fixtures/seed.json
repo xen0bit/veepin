@@ -42,6 +42,17 @@
       "options": {
         "server": "sstp.example.com"
       }
+    },
+    {
+      "name": "markup",
+      "protocol": "toy",
+      "state": "error",
+      "error": "constructing toy server: dial \"<img src=x onerror=window.__xss_error=1>\": no such host",
+      "enabled": true,
+      "options": {
+        "user": "<script>window.__xss_option=1</script>",
+        "server": "</td><td>injected"
+      }
     }
   ],
   "profiles": [
@@ -56,8 +67,9 @@
     }
   ],
   "logs": [
-    "supervisor ready: 2 of 4 listener(s) running",
+    "supervisor ready: 2 of 5 listener(s) running",
     "supervisor: broken/toy: constructing toy server: user is required",
+    "supervisor: markup/toy: dial \"<img src=x onerror=window.__xss_log=1>\": no such host",
     "mgmt: GET /api/listeners -> 200"
   ]
 }

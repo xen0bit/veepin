@@ -5,24 +5,75 @@ package ui
 // page so the browser can authenticate its fetches.
 
 import (
+	"html/template"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 )
 
-func TestNewHandlerParsesTemplates(t *testing.T) {
-	h, err := NewHandler("test-token")
+// TestEveryPanelPageRenders: each path the handler routes to executes its
+// template all the way through and answers 200 with a body.
+//
+// This replaced an assertion that NewHandler returned a non-nil struct with a
+// non-nil field, which no reachable change could have made false: ParseFS on an
+// embed.FS either succeeds at build time or fails at every call. A template that
+// references a field pageData does not have, or a {{range}} over a nil, fails at
+// execute time -- which is what this reaches.
+func TestEveryPanelPageRenders(t *testing.T) {
+	h, err := NewHandler("test-token", nil)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
-	if h == nil || h.tmpl == nil {
-		t.Fatalf("nil handler or templates")
+	for _, path := range []string{
+		"/",                 // dashboard
+		"/listeners/new",    // form, InitialJS "new"
+		"/profiles/new",     // form, InitialJS "new-profile"
+		"/listeners/site-a", // form, InitialJS naming a listener
+		"/profiles/home",    // form, InitialJS naming a profile
+		"/assets/panel.js",  // the shared asset, not a template
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if rec.Code != 200 {
+			t.Errorf("GET %s: status = %d, want 200", path, rec.Code)
+			continue
+		}
+		if rec.Body.Len() == 0 {
+			t.Errorf("GET %s: 200 with an empty body", path)
+		}
+	}
+}
+
+// TestARenderFailureIsA500WithABody: render executes into a buffer, so a
+// template that fails can still produce a real error response. Executing
+// straight into the ResponseWriter meant a failure halfway through had already
+// sent 200 and a truncated page, and the handler could only log about it.
+func TestARenderFailureIsA500WithABody(t *testing.T) {
+	h, err := NewHandler("test-token", nil)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	// A template that always fails: pageData has no Missing method.
+	h.tmpl = template.Must(h.tmpl.New("boom.html").Parse(`ok so far{{ .Missing }}`))
+
+	rec := httptest.NewRecorder()
+	h.render(rec, "boom.html")
+	if rec.Code != 500 {
+		t.Errorf("status = %d, want 500", rec.Code)
+	}
+	if rec.Body.Len() == 0 {
+		t.Error("a failed render sent no body at all")
+	}
+	// And none of the partial output escaped into the response.
+	if strings.Contains(rec.Body.String(), "ok so far") {
+		t.Errorf("the half-rendered page reached the client: %q", rec.Body.String())
 	}
 }
 
 func TestDashboardRendersToken(t *testing.T) {
-	h, _ := NewHandler("test-token")
+	h, _ := NewHandler("test-token", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
 	if rec.Code != 200 {
@@ -38,7 +89,7 @@ func TestDashboardRendersToken(t *testing.T) {
 }
 
 func TestNewListenerFormRenders(t *testing.T) {
-	h, _ := NewHandler("test-token")
+	h, _ := NewHandler("test-token", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/listeners/new", nil))
 	if rec.Code != 200 {
@@ -50,7 +101,7 @@ func TestNewListenerFormRenders(t *testing.T) {
 }
 
 func TestEditListenerFormRendersName(t *testing.T) {
-	h, _ := NewHandler("test-token")
+	h, _ := NewHandler("test-token", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/listeners/site-a", nil))
 	if rec.Code != 200 {
@@ -92,14 +143,130 @@ func TestDashboardEscapesEveryFieldItRenders(t *testing.T) {
 			t.Errorf("dashboard.html no longer renders %s; this test was guarding a field that is gone", field)
 			continue
 		}
-		// Every mention of a field must be inside an esc(...) call or an
-		// encodeURIComponent(...) one; a bare "+ l.error +" is the bug.
-		for _, bare := range []string{"+ " + field + " +", "+ " + field + ")", "(" + field + "||"} {
-			if strings.Contains(src, bare) {
-				t.Errorf("dashboard.html concatenates %s unescaped (found %q)", field, bare)
+		// Every mention of a field must be lexically inside an esc(...) or
+		// encodeURIComponent(...) call.
+		//
+		// This used to reject three literal spellings -- "+ l.error +",
+		// "+ l.error)" and "(l.error||" -- which is a blacklist, and a
+		// blacklist of three entries against an infinite set. Writing
+		// '</td><td>'+l.error+'</td>' with no spaces passed. So did a template
+		// literal, and so did reading the field into a local first. The test's
+		// own comment says it guards a token-exfiltration path.
+		for _, at := range indexesOf(src, field) {
+			// Only interpolation into a string matters. Using the value as an
+			// object key (expanded[l.name]) or passing it to a function
+			// (loadDetail(l.name)) puts nothing into markup.
+			if !interpolatedIntoAString(src, at, len(field)) {
+				continue
+			}
+			if !wrappedInCall(src, at, "esc", "encodeURIComponent") {
+				t.Errorf("dashboard.html interpolates %s without escaping it, at:\n\t%s",
+					field, lineAround(src, at))
 			}
 		}
 	}
+}
+
+// indexesOf returns every offset at which needle occurs as a whole identifier
+// reference -- not as a prefix of a longer one, so "l.name" does not match
+// inside "l.namespace".
+func indexesOf(src, needle string) []int {
+	var out []int
+	for i := 0; ; {
+		j := strings.Index(src[i:], needle)
+		if j < 0 {
+			return out
+		}
+		at := i + j
+		end := at + len(needle)
+		if end >= len(src) || !isIdentRune(src[end]) {
+			out = append(out, at)
+		}
+		i = end
+	}
+}
+
+// interpolatedIntoAString reports whether the occurrence at `at` is being
+// concatenated with, or substituted into, a string: `'x' + f`, `f + 'x'`, or
+// `${f}`. Those are the ways a value reaches innerHTML; a subscript or a call
+// argument is not one of them.
+func interpolatedIntoAString(src string, at, width int) bool {
+	before := at - 1
+	for before >= 0 && (src[before] == ' ' || src[before] == '\t') {
+		before--
+	}
+	if before >= 0 && src[before] == '+' {
+		return true
+	}
+	if before >= 1 && src[before] == '{' && src[before-1] == '$' {
+		return true
+	}
+	after := at + width
+	for after < len(src) && (src[after] == ' ' || src[after] == '\t') {
+		after++
+	}
+	return after < len(src) && src[after] == '+'
+}
+
+func isIdentRune(b byte) bool {
+	return b == '_' || b == '$' ||
+		(b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+}
+
+// wrappedInCall reports whether the byte at `at` sits inside the argument list
+// of a call to one of the named functions.
+//
+// It walks backwards balancing parentheses: each unmatched '(' encountered is an
+// enclosing call, and the identifier immediately before it is that call's name.
+// Crude next to a JS parser, and enough to tell esc(x) from a bare
+// concatenation, which is the whole question.
+func wrappedInCall(src string, at int, names ...string) bool {
+	depth := 0
+	for i := at - 1; i >= 0; i-- {
+		switch src[i] {
+		case ')':
+			depth++
+		case '(':
+			if depth > 0 {
+				depth--
+				continue
+			}
+			// Unmatched: read the identifier that precedes it.
+			end := i
+			for end > 0 && src[end-1] == ' ' {
+				end--
+			}
+			start := end
+			for start > 0 && isIdentRune(src[start-1]) {
+				start--
+			}
+			if slices.Contains(names, src[start:end]) {
+				return true
+			}
+			// An enclosing call that is not one of ours: keep walking out, so
+			// esc(String(l.error)) still counts as escaped.
+		case '\n':
+			// A newline with no unmatched '(' open means the statement began
+			// on this line and nothing wraps the field.
+			if depth == 0 {
+				return false
+			}
+		}
+	}
+	return false
+}
+
+// lineAround returns the source line containing offset, for an error message
+// that points at the code rather than describing it.
+func lineAround(src string, at int) string {
+	start := strings.LastIndexByte(src[:at], '\n') + 1
+	end := strings.IndexByte(src[at:], '\n')
+	if end < 0 {
+		end = len(src)
+	} else {
+		end += at
+	}
+	return strings.TrimSpace(src[start:end])
 }
 
 // TestFormEscapesTheProtocolOptionsItBuilds extends the same discipline to
@@ -124,7 +291,7 @@ func TestFormEscapesTheProtocolOptionsItBuilds(t *testing.T) {
 // substring test for "profile" on the whole hint pointed the entire form --
 // load, save, delete -- at /api/profiles for those names.
 func TestFormRoutesAListenerNamedProfileAsAListener(t *testing.T) {
-	h, _ := NewHandler("test-token")
+	h, _ := NewHandler("test-token", nil)
 	for _, name := range []string{"profiles", "vpn-profile", "profile-a"} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest("GET", "/listeners/"+name, nil))
@@ -146,7 +313,7 @@ func TestFormRoutesAListenerNamedProfileAsAListener(t *testing.T) {
 // TestProfileRoutesCarryTheProfileEditHint pins the profile add/edit routes that the
 // dashboard's profile table links to.
 func TestProfileRoutesCarryTheProfileEditHint(t *testing.T) {
-	h, _ := NewHandler("test-token")
+	h, _ := NewHandler("test-token", nil)
 	for _, path := range []string{"/profiles/new", "/profiles/home"} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
@@ -197,7 +364,7 @@ func TestDashboardRestartConfirms(t *testing.T) {
 
 // TestPanelJSIsServedAsJavaScriptAndNotSniffable pins the shared-asset route both templates load.
 func TestPanelJSIsServedAsJavaScriptAndNotSniffable(t *testing.T) {
-	h, _ := NewHandler("test-token")
+	h, _ := NewHandler("test-token", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/assets/panel.js", nil))
 	if rec.Code != 200 {
@@ -215,7 +382,7 @@ func TestPanelJSIsServedAsJavaScriptAndNotSniffable(t *testing.T) {
 // uptime fetched from /api/health, so a dead management plane is visible in the
 // page rather than silently freezing the listener table.
 func TestDashboardRendersHealthHeader(t *testing.T) {
-	h, _ := NewHandler("test-token")
+	h, _ := NewHandler("test-token", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
 	if rec.Code != 200 {
@@ -281,10 +448,12 @@ func TestFormSurfacesErrorsInABanner(t *testing.T) {
 	if !strings.Contains(src, "showBanner(") {
 		t.Errorf("form.html does not use the shared showBanner helper")
 	}
-	// The save handler's redirect is a setTimeout (delayed, and only after any
-	// generated key material has been shown); an immediate "if (status < 300)
-	// window.location" belongs to the delete handler only. The 202 branch must
-	// exist and must return before any redirect.
+	// The 202 branch must exist and must return before any redirect: the config
+	// IS saved, so redirecting away would hide the fact that the listener is
+	// down. (This comment used to describe the redirect as a setTimeout waiting
+	// on the generated-key panel. form.html has no setTimeout -- the redirect is
+	// `window.location = "/"`, and the generated-key panel gates it with a
+	// button the operator clicks.)
 	if !strings.Contains(src, "status === 202 && body && body.build_error") {
 		t.Errorf("form.html does not surface the 202 'saved but rebuild failed' outcome")
 	}
@@ -370,7 +539,7 @@ func TestDashboardOffersPeerRemoval(t *testing.T) {
 // TestUnknownPathReturns404 checks that paths the panel does not own are not
 // silently swallowed.
 func TestUnknownPathReturns404(t *testing.T) {
-	h, _ := NewHandler("test-token")
+	h, _ := NewHandler("test-token", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/nope", nil))
 	if rec.Code != http.StatusNotFound {
@@ -394,11 +563,4 @@ func TestDetailLoadIsCalledWithTheName(t *testing.T) {
 		t.Error("dashboard.html calls loadDetail with the listener object; " +
 			"encodeURIComponent(obj) matches no data-detail cell and the detail view never renders")
 	}
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

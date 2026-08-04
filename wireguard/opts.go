@@ -29,7 +29,7 @@ func init() {
 		{Key: OptRekeySeconds, Kind: client.OptInt, Default: "120", Help: "seconds between key refreshes (0 = protocol default 120)"},
 		{Key: OptDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers"},
 		{Key: OptMTU, Kind: client.OptInt, Default: "1420", Help: "inner MTU (default 1420)"},
-		{Key: OptShape, Kind: client.OptInt, Default: "0", Help: "per-flow upstream shaping budget in bytes (0 = off)"},
-		{Key: OptTUNName, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
+		client.ShapeOpt(OptShape, "upstream"),
+		client.TUNOpt(OptTUNName),
 	})
 }

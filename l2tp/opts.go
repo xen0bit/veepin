@@ -12,6 +12,6 @@ func init() {
 		{Key: OptUser, Kind: client.OptStr, Required: true, Help: "MS-CHAPv2 username"},
 		{Key: OptPassword, Kind: client.OptStr, Secret: true, Required: true, Help: "MS-CHAPv2 password"},
 		{Key: OptDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers (fallback if PPP assigns none)"},
-		{Key: OptTUNName, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
+		client.TUNOpt(OptTUNName),
 	})
 }

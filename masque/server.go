@@ -34,7 +34,7 @@ func init() {
 		{Key: OptServerPort, Kind: client.OptInt, Default: "443", Help: "UDP port to listen on (default 443)"},
 		{Key: OptServerPool, Kind: client.OptCIDR, Default: "10.30.0.0/24", Help: "internal address pool handed to clients (default 10.30.0.0/24)"},
 		{Key: OptServerMTU, Kind: client.OptInt, Default: "1350", Help: "inner MTU offered to clients (default 1350)"},
-		{Key: OptServerTUN, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
+		client.TUNOpt(OptServerTUN),
 	})
 }
 

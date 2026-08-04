@@ -14,7 +14,7 @@ func init() {
 		{Key: OptGroupPSK, Kind: client.OptStr, Secret: true, Required: true, Help: "the group's pre-shared key"},
 		{Key: OptUser, Kind: client.OptStr, Required: true, Help: "XAuth username"},
 		{Key: OptPassword, Kind: client.OptStr, Secret: true, Help: "XAuth password"},
-		{Key: OptShape, Kind: client.OptInt, Default: "0", Help: "per-flow outbound shaping budget in bytes (0 = off)"},
-		{Key: OptTUN, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
+		client.ShapeOpt(OptShape, "outbound"),
+		client.TUNOpt(OptTUN),
 	})
 }

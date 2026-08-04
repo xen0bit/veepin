@@ -164,7 +164,7 @@ func run() error {
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/api/", mgmtSrv.Handler())
-	uiHandler, err := ui.NewHandler(string(mgmtSrv.Token()))
+	uiHandler, err := ui.NewHandler(string(mgmtSrv.Token()), logger)
 	if err != nil {
 		return err
 	}
@@ -178,7 +178,11 @@ func run() error {
 		Handler:  mgmt.RequireHost([]string{ln.Addr().String()}, mux),
 		ErrorLog: logger,
 	}
-	logger.Printf("listening on http://%s (token %q)", ln.Addr(), *token)
+	// The address, not the token. It is a fixed test token so printing it leaks
+	// nothing, but this log goes to CI output verbatim and a bearer token in a
+	// build log is a habit worth not having. The suite gets the token from
+	// lib/config.ts, which is where the default is written down.
+	logger.Printf("listening on http://%s", ln.Addr())
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- httpSrv.Serve(ln) }()
@@ -328,21 +332,20 @@ func (m *e2eMgr) Close() error { return nil }
 
 // Peers returns the WireGuard-family peer list derived from the listener's
 // on-disk config, so a peer provisioned through client-config generation
-// actually shows up in the panel's peer table. exists is true only for a
-// running listener, mirroring the real manager (a server handle is nil
-// otherwise).
-func (m *e2eMgr) Peers(name string) ([]client.PeerInfo, bool) {
+// actually shows up in the panel's peer table. It mirrors the real manager's
+// four cases: only a running listener has a server handle to ask.
+func (m *e2eMgr) Peers(name string) ([]client.PeerInfo, supervisor.PeerAvailability) {
 	cfg, err := supervisor.ParseListenerFile(supervisor.ListenerPath(m.dir, name))
 	if err != nil {
-		return nil, false
+		return nil, supervisor.PeersNoSuchListener
 	}
 	m.mu.Lock()
 	st := m.statuses[name]
 	m.mu.Unlock()
 	if st.State != "running" {
-		return nil, false
+		return nil, supervisor.PeersNotRunning
 	}
-	return peersFromConfig(cfg), true
+	return peersFromConfig(cfg), supervisor.PeersOK
 }
 
 // deriveStatus is the fake's version of what the real manager publishes after a

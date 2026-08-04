@@ -73,10 +73,12 @@ round trip:
 | `cmd/veepin/main_test.go` | every registered protocol has a `connect` case |
 | `cmd/veepin/flags_test.go` | every registered server protocol has a `serve` case; every bound flag reaches the option map (it perturbs each one and requires the map to change); every emitted key has a matching `Opt*` const |
 | `cmd/veepin/flags_test.go` — `TestClientOptSpecsMatchTheKeysTheProtocolReads` | every registered client protocol declares `RegisterClientOpts`, and its spec keys and `connect` flags are the same set |
-| `cmd/veepin/flags_test.go` — `TestRequiredClientOptsAreTheOnesTheParseRejects` | an option whose absence the parse rejects with "is required" is marked `Required: true` |
+| `cmd/veepin/flags_test.go` — `TestRequiredClientOptsAreTheOnesTheParseRejects` | an option whose absence the parse rejects with "is required" is marked `Required: true` — **and** that the full option map built from the specs parses at all, without which the check is vacuous for that protocol |
+| `cmd/veepin/flags_test.go` — `TestSecretFlagsAgreeAcrossBothTables` | a key in both a protocol's client and server tables carries the same `Secret` flag in each |
 | `docs_test.go` — `TestEveryOptConstIsDescribedByAnOptSpec` | every `Opt*` const a facade declares is named as a `Key` in one of its two OptSpec tables — this is what catches an option the parse reads that no flag emits, which both flag-driven guards above are blind to |
 | `internal/livingreadme/interop_test.go` | every test named in the matrix exists, and every `TestInterop*` is in the matrix — **a test absent from the matrix runs in no CI shard and therefore never runs** |
 | `nm/cmd/.../TestAllSupportedProtocolsRegistered` | `nmconfig.SupportedProtocols` and the service's blank imports agree |
+| `tests/e2e/harness/registry_test.go` | the Playwright harness blank-imports every facade, so the panel it serves has the same registry the real binary does |
 
 `docs_test.go` reaches the registry through blank imports of every facade
 package. Forget to add yours and the count check passes — against a registry
@@ -102,8 +104,16 @@ Roughly the order that works. One commit per phase.
    `veepin profile add` and client-config generation validate against; without it
    the protocol is dialable but unmanageable. Mark `Secret` on anything that is
    key material *or a path to it*, and `Required` on anything the parse rejects
-   the absence of. Three guards in the table above enforce all of this, and the
-   third catches the case the other two structurally cannot.
+   the absence of.
+
+   Four guards in the table above cover this, and none of them can check a
+   `Secret` flag on a key that appears in only one of the two tables — whether a
+   lone option is key material is a judgement, and `doc/security.md` is where
+   the rule it is judged against is written down. What is mechanical: if a key
+   is in **both** tables it must be flagged the same way in each, and the option
+   map built from the specs must actually parse. Both are asserted; the second
+   is the precondition the `Required` guard needs, and for seven of seventeen
+   protocols it silently did not hold.
 4. **CLI cases** in `cmd/veepin/connect.go` and `serve.go`, plus direct imports.
 5. **Docs**: `doc.go`, the README protocol table + usage-runbook table + the
    spelled-out counts, `doc/usage/<proto>.md`, `internal/<proto>/README.md`, and
@@ -120,6 +130,9 @@ Roughly the order that works. One commit per phase.
    `requireKeys`, `secretMissing`), `nm/Makefile` (`VEEPIN_PROTOCOLS` +
    `LABEL_<proto>`), `nm/editor/veepin-editor.c` (a `FieldDef` table + a `PROTO`
    row), and a blank import in `nm/cmd/nm-veepin-service/main.go`.
+10. **The panel harness** — a blank import in `tests/e2e/harness/main.go`, so the
+   management panel the browser suite drives renders your protocol's forms. The
+   guard in that directory names the import to add.
 
 ### The gate before pushing
 
@@ -175,10 +188,27 @@ embedded `ui.Handler`, and `mgmt.RequireHost` — with a fake `ManagerBackend`
 standing in for the supervisor, so no TUN, Docker, or root is needed. The harness
 is `tests/e2e/harness` (a Go `main`; `go build ./...` compiles it) and the world
 it serves comes from `tests/e2e/fixtures/seed.json`. Run locally with `make e2e`
-(needs Node ≥ 20.6 and `npx playwright install chromium` once); CI runs it in the
+(needs Node ≥ 20.6; the target installs the browser itself); CI runs it in the
 path-filtered `e2e` workflow. The Go tests pin the API's HTTP behavior; these pin
 that the DOM renders it — redaction sentinels visible, destructive actions gated
-on `confirm()`, the client-config dialog provisioning a real peer.
+on `confirm()`, the client-config dialog provisioning a real peer, and every
+operator-supplied string reaching the page as text rather than markup.
+
+Three rules the suite is built on, each of which it broke once:
+
+- **The harness world is mutable and shared, so every test puts back what it
+  changed.** Tests create uniquely-named entities (`lib/unique.ts`) and delete
+  them; the one test that touches a *seeded* entity restores it in an
+  `afterEach`. Without that the suite is green exactly once per harness process,
+  and `--repeat-each=2` is the cheapest way to find out.
+- **The harness is never reused between runs** (`reuseExistingServer: false`) and
+  binds a port picked at config load, not a fixed one. Same reasoning as tearing
+  down `docker compose` between interop runs: a survivor answers with the last
+  run's state and the result looks plausible.
+- **A `confirm()` test must assert that no request went out**, not that the page
+  looks unchanged. The banner shows only on failure, so "cancel leaves the banner
+  hidden" is true whether or not `confirm` was honoured. Count the audit events,
+  or ask the API.
 
 ## Protocol work: things learned the hard way
 

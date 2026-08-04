@@ -17,6 +17,6 @@ func init() {
 		{Key: OptAmLighthouse, Kind: client.OptBool, Help: "answer lighthouse queries from other hosts"},
 		{Key: OptCipher, Kind: client.OptStr, Default: "aes", Help: "aes (default) or chachapoly; must match the mesh"},
 		{Key: OptMTU, Kind: client.OptInt, Default: "1300", Help: "inner MTU (default 1300)"},
-		{Key: OptTUN, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
+		client.TUNOpt(OptTUN),
 	})
 }

@@ -1,13 +1,8 @@
-package client
-
 // The client-side counterpart of RegisterServerOpts: metadata about the keys a
-// protocol's Dial ParseFunc reads. It exists for the same consumers -- the
-// management panel rendering a profile form, `veepin profile add` validating
-// and helping, and redaction if client options are ever exposed over an API --
-// and with the same contract: a spec is a static description of the protocol's
-// surface, Key is the option-map key the parse function reads, Required marks
-// the keys the parse refuses to run without, and Secret marks key material that
-// must never be shown in the clear.
+// protocol's Dial ParseFunc reads, plus the spec helpers for the options every
+// protocol shares. OptSpec's own contract is documented on the type in
+// server.go; this file does not restate it.
+package client
 
 import (
 	"fmt"
@@ -98,6 +93,36 @@ func ValidateOptions(protocol string, opts map[string]string) error {
 		return fmt.Errorf("client: %s: %w", protocol, err)
 	}
 	return nil
+}
+
+// TUNOpt is the spec for a protocol's TUN-interface-name option. Thirty of
+// these were spelled out identically across the seventeen facades, differing
+// only in which const held the string "tun".
+//
+// The point of collapsing them is not the saved lines. A table where the shared
+// rows are one call each says only what that protocol does differently, so an
+// option carrying an unusual flag stands out as the row that is written out in
+// full -- which is how the l2tpv3 and openvpn Secret disagreements survived
+// review sitting in plain sight.
+func TUNOpt(key string) OptSpec {
+	return OptSpec{Key: key, Kind: OptStr, Help: "TUN interface name (empty = kernel picks)"}
+}
+
+// ShapeOpt is the spec for a protocol's traffic-shaping budget. direction is the
+// word that describes which way the padding is applied from this end's point of
+// view -- "upstream" on a client, "downstream" on a server, "outbound" where the
+// protocol is symmetric.
+//
+// A protocol whose shaping needs more said than that (l2tpv3 pads only the
+// frames that carry IP) writes its own spec out in full, which is the intended
+// signal.
+func ShapeOpt(key, direction string) OptSpec {
+	return OptSpec{
+		Key:     key,
+		Kind:    OptInt,
+		Default: "0",
+		Help:    "per-flow " + direction + " shaping budget in bytes (0 = off)",
+	}
 }
 
 // ClientProtocolsWithOpts lists every protocol that declared client OptSpec
