@@ -62,6 +62,16 @@ type ListenerConfig struct {
 	SetupNAT bool `json:"setup_nat,omitempty"`
 	// WAN is the upstream interface for NAT, passed to hostnet.
 	WAN string `json:"wan,omitempty"`
+	// Hostnames are the names and addresses clients will dial this listener by.
+	// They become the SANs of any certificate the management plane generates
+	// for it, and nothing else reads them -- a listener whose certificate the
+	// operator supplied can leave this empty.
+	//
+	// Empty means keygen.DefaultHostnames: loopback plus the listener's own
+	// name, which is enough for a laptop and not enough for a public gateway.
+	// It has to be said somewhere, because the supervisor cannot know its own
+	// public name, and a certificate that omits it is one no client accepts.
+	Hostnames []string `json:"hostnames,omitempty"`
 	// Enabled false means parse it, list it, but do not start it. Lets a
 	// config disable a listener without deleting the file.
 	//

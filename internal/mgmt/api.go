@@ -1047,7 +1047,7 @@ func generateListenerKeys(configDir string, cfg *supervisor.ListenerConfig) (map
 				spec.Generate, strings.Join(got, ", "), strings.Join(want, ", "))
 		}
 
-		kv, err := keygen.Generate(cfg.Name, configDir, spec.Generate, spec.Key)
+		kv, err := keygen.Generate(cfg.Name, configDir, spec.Generate, spec.Key, cfg.Hostnames)
 		if err != nil {
 			return nil, fmt.Errorf("mgmt: keygen %q for %q: %w", spec.Generate, cfg.Name, err)
 		}
@@ -1082,12 +1082,13 @@ func generateListenerKeys(configDir string, cfg *supervisor.ListenerConfig) (map
 // the API at all. Pointers distinguish the two cases, which is the whole reason
 // they are here.
 type listenerPatch struct {
-	Name     *string            `json:"name,omitempty"`
-	Protocol *string            `json:"protocol,omitempty"`
-	Options  *map[string]string `json:"options,omitempty"`
-	SetupNAT *bool              `json:"setup_nat,omitempty"`
-	WAN      *string            `json:"wan,omitempty"`
-	Enabled  *bool              `json:"enabled,omitempty"`
+	Name      *string            `json:"name,omitempty"`
+	Protocol  *string            `json:"protocol,omitempty"`
+	Options   *map[string]string `json:"options,omitempty"`
+	SetupNAT  *bool              `json:"setup_nat,omitempty"`
+	WAN       *string            `json:"wan,omitempty"`
+	Enabled   *bool              `json:"enabled,omitempty"`
+	Hostnames *[]string          `json:"hostnames,omitempty"`
 }
 
 // applyTo merges the fields the request actually carried onto existing, leaving
@@ -1111,6 +1112,9 @@ func (p listenerPatch) applyTo(existing supervisor.ListenerConfig) supervisor.Li
 	}
 	if p.Enabled != nil {
 		out.Enabled = *p.Enabled
+	}
+	if p.Hostnames != nil {
+		out.Hostnames = *p.Hostnames
 	}
 	// A protocol change re-bases which keys are secret, because redaction is
 	// resolved against the CURRENT protocol's specs. Carrying the old

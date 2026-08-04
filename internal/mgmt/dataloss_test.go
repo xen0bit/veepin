@@ -204,3 +204,58 @@ func TestProfileCreateRunsTheProtocolsOwnParse(t *testing.T) {
 		t.Errorf("the rejected PATCH still changed the stored profile: %v", stored)
 	}
 }
+
+// TestClientConfigWarnsWhenTheCertDoesNotCoverTheEndpoint: a listener's
+// certificate SANs are fixed when it is created; the endpoint is supplied here,
+// possibly months later by someone else. Nothing compared them, so the generated
+// profile was well-formed and every connection made with it failed name
+// verification -- which reads as a certificate problem long after anyone could
+// connect it to a hostnames field they left empty.
+func TestClientConfigWarnsWhenTheCertDoesNotCoverTheEndpoint(t *testing.T) {
+	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	resp, body := s.do("POST", "/api/listeners", map[string]any{
+		"name": "site-a", "protocol": "openvpn",
+		"options": map[string]string{"subnet": "10.8.0.0/24"},
+		"enabled": true})
+	if resp.StatusCode != 201 {
+		t.Fatalf("create = %d: %s", resp.StatusCode, body)
+	}
+	// No hostnames given, so the chain covers loopback and "site-a" only.
+	_, body = s.do("POST", "/api/listeners/site-a/client-config",
+		map[string]any{"endpoint": "vpn.example.com"})
+	var out clientConfigResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("response not JSON: %v", err)
+	}
+	var found string
+	for _, w := range out.Warnings {
+		if strings.Contains(w, "vpn.example.com") {
+			found = w
+		}
+	}
+	if found == "" {
+		t.Fatalf("no warning that the cert does not cover the endpoint: %+v", out.Warnings)
+	}
+	if !strings.Contains(found, "hostnames") {
+		t.Errorf("the warning does not say how to fix it: %q", found)
+	}
+
+	// A listener whose hostnames DO cover the endpoint warns about nothing.
+	resp, body = s.do("POST", "/api/listeners", map[string]any{
+		"name": "site-b", "protocol": "openvpn",
+		"options":   map[string]string{"subnet": "10.8.1.0/24"},
+		"hostnames": []string{"vpn.example.com"},
+		"enabled":   true})
+	if resp.StatusCode != 201 {
+		t.Fatalf("create site-b = %d: %s", resp.StatusCode, body)
+	}
+	_, body = s.do("POST", "/api/listeners/site-b/client-config",
+		map[string]any{"endpoint": "vpn.example.com"})
+	out = clientConfigResponse{}
+	_ = json.Unmarshal(body, &out)
+	for _, w := range out.Warnings {
+		if strings.Contains(w, "does not cover") {
+			t.Errorf("warned about a certificate that does cover the endpoint: %q", w)
+		}
+	}
+}

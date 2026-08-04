@@ -105,6 +105,31 @@ per-host certificate — fails the generation with a 400 naming the keys, so the
 operator re-runs with them as overrides. The alternative is a profile that looks
 complete, saves cleanly, and fails at dial with nothing pointing back here.
 
+### Generated key material and the names it covers
+
+A listener whose protocol declares `Generate` on an `OptSpec` gets its key
+material minted on create — a WireGuard keypair, a PSK, an SSH host key, or a
+certificate chain. A generator is all-or-nothing: supplying some of
+`x509-chain`'s `ca`/`cert`/`key` and leaving the rest empty is refused, because
+the alternative was writing a fresh certificate next to the operator's unrelated
+private key and answering 201.
+
+For the certificate generators, the listener's `hostnames` field is what the
+leaf's SANs are built from. It matters more than it looks:
+
+```jsonc
+{"name": "site-a", "protocol": "anyconnect",
+ "hostnames": ["vpn.example.com", "203.0.113.4"], ...}
+```
+
+Empty means loopback plus the listener's own name, which is enough to dial from
+the same machine and covers no remote client. There is no way to infer better —
+the supervisor cannot know its own public name — and a leaf with no matching SAN
+verifies against nothing at all, since Go and every browser dropped the Common
+Name fallback years ago. `client-config` compares the two and warns when the
+endpoint it is given is not one the certificate covers, which is the only point
+in the flow where both facts are in the same place.
+
 nebula is the narrow case: only the mesh CA carries across. A host's own
 certificate and X25519 key are its identity, and copying the lighthouse's would
 clone the lighthouse rather than provision a peer. Issuing a per-host
@@ -145,8 +170,18 @@ config directory has the keys.
 **Redaction depends on the metadata being right.** A key whose `OptSpec` is
 missing `Secret: true` is returned in the clear. `cmd/veepin`'s
 `TestServerOptSpecsMatchTheKeysTheProtocolReads` checks that every key the
-protocol reads has a spec, but nothing can check that a spec's `Secret` flag is
-*correct* — that is a judgement call in each facade.
+protocol reads has a spec, and `TestSecretFlagsAgreeAcrossBothTables` checks
+that a key appearing in both a protocol's client and server tables is flagged
+the same way in each — which is what caught l2tpv3 calling its cookies secret in
+one file and explicitly not-secret in the other. Neither can check that a flag
+is *correct* where a key appears in only one table; that is a judgement call in
+each facade, and `doc/security.md` records the rule it is judged against.
+
+**Generated certificates are trusted by nobody but the operator.** The CA is
+self-signed, minted per listener, and distributed by hand. That is the right
+shape for a VPN — the client should pin exactly one issuer — but it means the
+`ca.crt` in the listener's key directory is load-bearing, and losing it strands
+every client that verified against it.
 
 **Transport is plaintext HTTP.** There is no TLS here at all. On loopback that is
 fine; anywhere else the token crosses the wire in the clear and a reverse proxy

@@ -22,7 +22,9 @@ package mgmt
 // file's base name, so the operator places the companion next to the profile.
 
 import (
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -54,6 +56,59 @@ type ClientConfigRequest struct {
 	// Overrides are additional client options (validated against the protocol's
 	// client OptSpec), e.g. a client identity or hub name.
 	Overrides map[string]string `json:"overrides,omitempty"`
+}
+
+// endpointCoverageWarnings reports that the listener's own server certificate
+// does not cover the address the operator says clients will dial.
+//
+// The two facts arrive from different places and nothing used to compare them:
+// the certificate's SANs are fixed when the listener is created (from its
+// hostnames field, or the loopback defaults), and the endpoint is supplied here,
+// possibly months later by someone else. When they disagree the profile is
+// perfectly well-formed and every connection made with it fails name
+// verification -- which reads as a certificate problem long after the moment
+// anyone could connect it to a form field they left empty.
+//
+// A warning, not an error: an operator who intends to pin the certificate, or
+// to dial with verification off, is doing something legitimate.
+func endpointCoverageWarnings(serverOpts map[string]string, endpoint string) []string {
+	certPath := serverOpts["cert"]
+	if endpoint == "" || certPath == "" {
+		return nil
+	}
+	host := endpoint
+	if h, _, err := net.SplitHostPort(endpoint); err == nil {
+		host = h
+	}
+	body, err := os.ReadFile(certPath)
+	if err != nil {
+		// Unreadable here is already reported by the bundler where it bundles,
+		// and is not this check's news to break.
+		return nil
+	}
+	block, _ := pem.Decode(body)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return nil
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil
+	}
+	if cert.VerifyHostname(host) == nil {
+		return nil
+	}
+	names := slices.Clone(cert.DNSNames)
+	for _, ip := range cert.IPAddresses {
+		names = append(names, ip.String())
+	}
+	covers := "nothing"
+	if len(names) > 0 {
+		covers = strings.Join(names, ", ")
+	}
+	return []string{fmt.Sprintf(
+		"the server certificate does not cover %q (it covers %s); clients will fail name verification "+
+			"unless the listener's hostnames include it and the key material is regenerated",
+		host, covers)}
 }
 
 // clientConfigFile is one companion file bundled with a generated profile.
@@ -363,6 +418,11 @@ func (s *Server) bundleClientConfig(cfg supervisor.ListenerConfig, req ClientCon
 		opts[k] = base
 		files = append(files, clientConfigFile{Name: base, Content: string(body)})
 	}
+	// Against the listener's own certificate, not against whatever was bundled:
+	// OpenVPN ships the client the CA and not the leaf, so a check over the
+	// bundle would silently cover nothing for the protocol most likely to need
+	// it. What matters is the certificate this listener will present.
+	warnings = append(warnings, endpointCoverageWarnings(cfg.Options, req.Endpoint)...)
 	if err := requireDeclaredOptions(cfg.Protocol, opts); err != nil {
 		return nil, err
 	}

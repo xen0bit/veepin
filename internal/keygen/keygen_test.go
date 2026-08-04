@@ -128,9 +128,9 @@ func TestGenEd25519WritesAParseablePKCS8(t *testing.T) {
 
 func TestGenTLSWritesAValidChain(t *testing.T) {
 	dir := t.TempDir()
-	kv, err := genTLS(dir)
+	kv, err := genChain(dir, DefaultHostnames("site-a"), tlsSpec)
 	if err != nil {
-		t.Fatalf("genTLS: %v", err)
+		t.Fatalf("genChain(tls): %v", err)
 	}
 	assertCertKeyPair(t, kv["cert"], kv["key"])
 	// The CA is written so the operator can distribute it, though only cert and
@@ -142,9 +142,9 @@ func TestGenTLSWritesAValidChain(t *testing.T) {
 
 func TestGenX509ChainWritesAValidChain(t *testing.T) {
 	dir := t.TempDir()
-	kv, err := genX509Chain(dir)
+	kv, err := genChain(dir, DefaultHostnames("site-a"), openVPNSpec)
 	if err != nil {
-		t.Fatalf("genX509Chain: %v", err)
+		t.Fatalf("genChain(x509): %v", err)
 	}
 	assertCertKeyPair(t, kv["cert"], kv["key"])
 	if _, err := os.Stat(kv["ca"]); err != nil {
@@ -237,8 +237,8 @@ func TestGeneratedKeyMaterialIsNotWorldReadable(t *testing.T) {
 		gen  func(dir string) (map[string]string, error)
 	}{
 		{"ed25519", func(dir string) (map[string]string, error) { return genEd25519(dir, "host-key") }},
-		{"tls", genTLS},
-		{"x509-chain", genX509Chain},
+		{"tls", func(dir string) (map[string]string, error) { return genChain(dir, nil, tlsSpec) }},
+		{"x509-chain", func(dir string) (map[string]string, error) { return genChain(dir, nil, openVPNSpec) }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -266,7 +266,7 @@ func TestGeneratedKeyMaterialIsNotWorldReadable(t *testing.T) {
 // user, even where the files themselves are 0600.
 func TestGenerateOwnsItsListenerDirectoryTightly(t *testing.T) {
 	root := t.TempDir()
-	if _, err := Generate("site-a", root, "tls", "cert"); err != nil {
+	if _, err := Generate("site-a", root, "tls", "cert", nil); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
 	fi, err := os.Stat(filepath.Join(root, "site-a"))
@@ -279,7 +279,7 @@ func TestGenerateOwnsItsListenerDirectoryTightly(t *testing.T) {
 }
 
 func TestGenerateUnknownTypeErrors(t *testing.T) {
-	kv, err := Generate("site-a", t.TempDir(), "not-a-generator", "psk")
+	kv, err := Generate("site-a", t.TempDir(), "not-a-generator", "psk", nil)
 	if err == nil {
 		t.Fatalf("Generate with an unknown type succeeded: %v", kv)
 	}
