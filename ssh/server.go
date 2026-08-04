@@ -409,7 +409,7 @@ func init() {
 		{Key: OptServerUser, Kind: client.OptStr, Help: "username to accept (password auth)"},
 		{Key: OptServerPassword, Kind: client.OptStr, Secret: true, Help: "the user's password"},
 		{Key: OptServerAuthorizedKeys, Kind: client.OptFilePath, Help: "path to an authorized_keys file (public-key auth)"},
-		{Key: OptServerTUN, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
+		client.TUNOpt(OptServerTUN),
 	})
 }
 

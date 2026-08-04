@@ -198,13 +198,11 @@ func applyWith(name string, cfg Config, run Commander) error {
 		return fmt.Errorf("hostnet: ip link set %s up: %v: %s",
 			cfg.TUNName, err, strings.TrimSpace(string(out)))
 	}
-	if out, err := run("sysctl", "-w", "net.ipv4.ip_forward=1"); err != nil {
-		// Forwarding is host-wide: a previous veepin instance or another VPN
-		// daemon may have set it. The failure here is benign in practice, but
-		// surfacing it would make a shared host unable to start any listener
-		// once it had already been set. Treat as advisory.
-		_ = out
-	}
+	// Advisory, deliberately: forwarding is host-wide, so a previous veepin
+	// instance or another VPN daemon may already own it, and failing here would
+	// make a shared host unable to start any listener once it had been set. The
+	// branch that discarded the output was doing exactly this, at more length.
+	_, _ = run("sysctl", "-w", "net.ipv4.ip_forward=1")
 
 	tag := comment(name)
 	if cfg.WAN != "" {
@@ -356,10 +354,13 @@ func ensureRule(run Commander, rule []string) error {
 	if _, err := run("iptables", iptablesCheckArgs(rule)...); err == nil {
 		return nil // rule already exists
 	}
-	addArgs := iptablesMutateArgs(rule)
-	if out, err := run("iptables", addArgs...); err != nil {
+	// rule is already in -A form, so it is passed straight through. It went via
+	// an iptablesMutateArgs helper that copied the slice and returned it
+	// unchanged, described by its own comment as "a place to swap operations
+	// later" -- a hook for a caller that never arrived.
+	if out, err := run("iptables", rule...); err != nil {
 		return fmt.Errorf("iptables %s: %v: %s",
-			strings.Join(addArgs, " "), err, strings.TrimSpace(string(out)))
+			strings.Join(rule, " "), err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -380,15 +381,6 @@ func removeRule(run Commander, rule []string) error {
 		}
 	}
 	return nil
-}
-
-// iptablesMutateArgs rewrites a rule slice (with -A or -t nat -A ...) into the
-// form passed to iptables to add it. The rule slice is already in -A form; it
-// is returned as-is so the helper reads as a place to swap operations later.
-func iptablesMutateArgs(rule []string) []string {
-	out := make([]string, len(rule))
-	copy(out, rule)
-	return out
 }
 
 // iptablesCheckArgs swaps the operation token (-A / -D) in rule for -C, which

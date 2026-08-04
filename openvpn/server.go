@@ -786,8 +786,8 @@ func init() {
 		{Key: OptServerListenPort, Kind: client.OptInt, Default: "1194", Help: "UDP port to listen on (default 1194)"},
 		{Key: OptServerPool, Kind: client.OptCIDR, Default: "10.8.0.0/24", Help: "internal address pool handed to clients (default 10.8.0.0/24)"},
 		{Key: OptServerDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers pushed to clients"},
-		{Key: OptServerTUN, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
-		{Key: OptServerShape, Kind: client.OptInt, Default: "0", Help: "per-flow downstream shaping budget in bytes (0 = off)"},
+		client.TUNOpt(OptServerTUN),
+		client.ShapeOpt(OptServerShape, "downstream"),
 	})
 }
 

@@ -232,6 +232,25 @@ func optConstsAndSpecKeys(proto string) (declared, used map[string]bool, err err
 				if id, ok := v.Value.(*ast.Ident); ok {
 					used[id.Name] = true
 				}
+			case *ast.CallExpr:
+				// A shared-spec helper: client.TUNOpt(OptTUN),
+				// client.ShapeOpt(OptShape, "upstream"). Its first argument is
+				// the key, so it covers the const exactly as a literal Key
+				// field does. Matching on the "...Opt" suffix rather than a
+				// fixed list means a helper added later is covered without
+				// anyone remembering to come back here -- and forgetting would
+				// take this guard's whole coverage of that option away
+				// silently, which is the failure it exists to prevent.
+				sel, ok := v.Fun.(*ast.SelectorExpr)
+				if !ok || !strings.HasSuffix(sel.Sel.Name, "Opt") || len(v.Args) == 0 {
+					return true
+				}
+				if pkg, ok := sel.X.(*ast.Ident); !ok || pkg.Name != "client" {
+					return true
+				}
+				if id, ok := v.Args[0].(*ast.Ident); ok {
+					used[id.Name] = true
+				}
 			}
 			return true
 		})

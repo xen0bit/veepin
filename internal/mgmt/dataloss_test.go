@@ -28,7 +28,7 @@ import (
 // until the next restart mints a new one and every stored token goes dead.
 func TestDeleteRefusesTheConfigRootsOwnDirectories(t *testing.T) {
 	profiles := t.TempDir()
-	s, _, _ := newTestServerWithProfiles(t, map[string]supervisor.Status{}, profiles)
+	s := newTestServerWithProfiles(t, map[string]supervisor.Status{}, profiles)
 	s.do("POST", "/api/profiles", map[string]any{"name": "home", "protocol": "toy",
 		"options": map[string]string{"server": "vpn.example.com", "user": "a", "secret": "s"}})
 
@@ -62,7 +62,7 @@ func TestDeleteRefusesTheConfigRootsOwnDirectories(t *testing.T) {
 // delete would be no help if a listener could be created under the name in the
 // first place, since generateListenerKeys writes its PEMs into <dir>/<name>/.
 func TestReservedNamesCannotBeCreatedEither(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	for _, name := range []string{"mgmt", "profiles"} {
 		resp, body := s.do("POST", "/api/listeners", map[string]any{
 			"name": name, "protocol": "toy", "enabled": true})
@@ -81,7 +81,7 @@ func TestReservedNamesCannotBeCreatedEither(t *testing.T) {
 //	PATCH {"protocol":"toy"}
 //	GET   -> the psk, in the clear, because toy declares no psk spec
 func TestPatchToAnotherProtocolDoesNotDeclassifyTheOldOnesSecrets(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	const secret = "the-real-preshared-key"
 	resp, body := s.do("POST", "/api/listeners", map[string]any{
 		"name": "site-a", "protocol": "ikev2",
@@ -118,7 +118,7 @@ func TestPatchToAnotherProtocolDoesNotDeclassifyTheOldOnesSecrets(t *testing.T) 
 // the private key. Being non-empty it then suppressed key generation, and the
 // whole thing answered 201.
 func TestCreateRefusesTheRedactionSentinelAsAValue(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	resp, body := s.do("POST", "/api/listeners", map[string]any{
 		"name": "clone", "protocol": "wireguard",
 		"options": map[string]string{"private-key": redacted, "address": "10.10.0.1/24"},
@@ -142,7 +142,7 @@ func TestCreateRefusesTheRedactionSentinelAsAValue(t *testing.T) {
 // storing a freshly generated certificate next to the operator's unrelated
 // private key. 201 Created, and every TLS handshake fails.
 func TestPartialKeySupplyIsRefusedRatherThanHalfGenerated(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	keyPath := filepath.Join(t.TempDir(), "my-own.key")
 	const mine = "-----BEGIN EC PRIVATE KEY-----\nMINE\n-----END EC PRIVATE KEY-----\n"
 	if err := os.WriteFile(keyPath, []byte(mine), 0o600); err != nil {
@@ -176,7 +176,7 @@ func TestPartialKeySupplyIsRefusedRatherThanHalfGenerated(t *testing.T) {
 // the consumer the OptSpec tables were actually written for, did not.
 func TestProfileCreateRunsTheProtocolsOwnParse(t *testing.T) {
 	profiles := t.TempDir()
-	s, _, _ := newTestServerWithProfiles(t, map[string]supervisor.Status{}, profiles)
+	s := newTestServerWithProfiles(t, map[string]supervisor.Status{}, profiles)
 
 	resp, body := s.do("POST", "/api/profiles",
 		map[string]any{"name": "home", "protocol": "wireguard", "options": map[string]string{}})
@@ -215,7 +215,7 @@ func TestProfileCreateRunsTheProtocolsOwnParse(t *testing.T) {
 // verification -- which reads as a certificate problem long after anyone could
 // connect it to a hostnames field they left empty.
 func TestClientConfigWarnsWhenTheCertDoesNotCoverTheEndpoint(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	resp, body := s.do("POST", "/api/listeners", map[string]any{
 		"name": "site-a", "protocol": "openvpn",
 		"options": map[string]string{"subnet": "10.8.0.0/24"},
@@ -272,7 +272,7 @@ func TestPeersOfAStoppedListenerIsNotAFourOhFour(t *testing.T) {
 	statuses := map[string]supervisor.Status{
 		"site-a": {Name: "site-a", Protocol: "wireguard", State: "error", Error: "bind: address in use"},
 	}
-	s, _, _ := newTestServer(t, statuses)
+	s := newTestServer(t, statuses)
 	s.mgr.(*fakeMgr).notRunning = true
 
 	resp, body := s.do("GET", "/api/listeners/site-a/peers", nil)
@@ -304,7 +304,7 @@ func TestPeersOfAStoppedListenerIsNotAFourOhFour(t *testing.T) {
 // text, so an exhausted address pool -- a server-side condition the operator
 // can do nothing about from the request -- was reported as 400 Bad Request.
 func TestClientConfigServerFaultsAreNotFourHundreds(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	// A /30 leaves exactly one host address besides the server's own.
 	resp, body := s.do("POST", "/api/listeners", map[string]any{
 		"name": "wg", "protocol": "wireguard",
@@ -380,7 +380,7 @@ func TestRequireHostAdmitsTheHostsItWasToldAbout(t *testing.T) {
 // whole ring", so a typo in a curl returned everything with nothing to say the
 // parameter had been ignored.
 func TestTailCountRejectsWhatItCannotRead(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	WithLogRing(NewLogRing())(s)
 
 	for _, q := range []string{"abc", "-5", "1e3", " "} {

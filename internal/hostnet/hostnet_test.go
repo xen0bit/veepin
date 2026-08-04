@@ -445,24 +445,12 @@ func TestApplyNonNetAdminFailsWithHelpfulError(t *testing.T) {
 // mis-routing).
 func TestSwapOpNotFoundLeavesRule(t *testing.T) {
 	rule := []string{"-t", "nat", "-X", "POSTROUTING"}
-	if got := swapOp(rule, "-C"); !equalStrings(got, rule) {
+	if got := swapOp(rule, "-C"); !slices.Equal(got, rule) {
 		t.Errorf("swapOp mutated rule with no -A/-D: got %v want %v", got, rule)
 	}
 }
 
 // equalStrings compares two string slices elementwise.
-func equalStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 // TestTaggedTeardownDeletesRulesItFindsInRealIptablesOutput: the tagged teardown
 // is the recovery path -- it runs when the persisted state file is gone, which
 // is exactly the case the state file was added to survive. It rebuilt its -D

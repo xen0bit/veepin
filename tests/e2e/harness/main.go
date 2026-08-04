@@ -164,7 +164,7 @@ func run() error {
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/api/", mgmtSrv.Handler())
-	uiHandler, err := ui.NewHandler(string(mgmtSrv.Token()))
+	uiHandler, err := ui.NewHandler(string(mgmtSrv.Token()), logger)
 	if err != nil {
 		return err
 	}

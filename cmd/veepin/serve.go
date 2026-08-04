@@ -861,7 +861,7 @@ func runSupervisorMode(args []string) error {
 		}
 		mux := http.NewServeMux()
 		mux.Handle("/api/", mgmtServer.Handler())
-		uiHandler, err := ui.NewHandler(string(mgmtServer.Token()))
+		uiHandler, err := ui.NewHandler(string(mgmtServer.Token()), logger)
 		if err != nil {
 			_ = mgr.Close()
 			return fmt.Errorf("ui: %w", err)

@@ -22,10 +22,10 @@ func init() {
 		{Key: OptCA, Kind: client.OptFilePath, Help: "CA bundle PEM to verify the server (default system roots)"},
 		{Key: OptRekey, Kind: client.OptInt, Default: "3600", Help: "Child SA rekey interval in seconds (0 = default 3600)"},
 		{Key: OptIKERekey, Kind: client.OptInt, Default: "14400", Help: "IKE SA rekey interval in seconds (0 = default 14400)"},
-		{Key: OptShape, Kind: client.OptInt, Default: "0", Help: "per-flow upstream shaping budget in bytes (0 = off)"},
+		client.ShapeOpt(OptShape, "upstream"),
 		{Key: OptPQ, Kind: client.OptBool, Help: "offer ML-KEM-768 as an additional key exchange (RFC 9370)"},
 		{Key: OptIPTFS, Kind: client.OptBool, Help: "enable AGGFRAG aggregation and fragmentation (RFC 9347)"},
 		{Key: OptIPTFSRate, Kind: client.OptInt, Default: "0", Help: "constant-rate IP-TFS transmission in bytes/sec; 0 = aggregation only"},
-		{Key: OptTUNName, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
+		client.TUNOpt(OptTUNName),
 	})
 }

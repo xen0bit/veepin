@@ -195,9 +195,11 @@ a deliberate boundary: accounts and per-user authorization are a separate
 problem from running a VPN fleet, and the token file's filesystem protection is
 the real gate.
 
-**`Server.Close` closes the whole fleet**, not just the HTTP server — it
-delegates to the manager. The name is a trap and the caller in `cmd/veepin` does
-not use it.
+**`Server.CloseFleet` closes the whole fleet**, not just the HTTP server — it
+delegates to the manager, and the Server owns no listening socket to close. It
+was spelled `Close`, which is exactly the trap it looks like: the conventional
+teardown call on the HTTP-shaped object shutting down every VPN listener on the
+host. `cmd/veepin` closes the manager directly and never calls this.
 
 **Mutations are serialized by one lock over the whole config directory.** Every
 handler that reads a listener file, changes it and writes it back holds

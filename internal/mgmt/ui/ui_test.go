@@ -5,6 +5,7 @@ package ui
 // page so the browser can authenticate its fetches.
 
 import (
+	"html/template"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -12,18 +13,67 @@ import (
 	"testing"
 )
 
-func TestNewHandlerParsesTemplates(t *testing.T) {
-	h, err := NewHandler("test-token")
+// TestEveryPanelPageRenders: each path the handler routes to executes its
+// template all the way through and answers 200 with a body.
+//
+// This replaced an assertion that NewHandler returned a non-nil struct with a
+// non-nil field, which no reachable change could have made false: ParseFS on an
+// embed.FS either succeeds at build time or fails at every call. A template that
+// references a field pageData does not have, or a {{range}} over a nil, fails at
+// execute time -- which is what this reaches.
+func TestEveryPanelPageRenders(t *testing.T) {
+	h, err := NewHandler("test-token", nil)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
-	if h == nil || h.tmpl == nil {
-		t.Fatalf("nil handler or templates")
+	for _, path := range []string{
+		"/",                 // dashboard
+		"/listeners/new",    // form, InitialJS "new"
+		"/profiles/new",     // form, InitialJS "new-profile"
+		"/listeners/site-a", // form, InitialJS naming a listener
+		"/profiles/home",    // form, InitialJS naming a profile
+		"/assets/panel.js",  // the shared asset, not a template
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if rec.Code != 200 {
+			t.Errorf("GET %s: status = %d, want 200", path, rec.Code)
+			continue
+		}
+		if rec.Body.Len() == 0 {
+			t.Errorf("GET %s: 200 with an empty body", path)
+		}
+	}
+}
+
+// TestARenderFailureIsA500WithABody: render executes into a buffer, so a
+// template that fails can still produce a real error response. Executing
+// straight into the ResponseWriter meant a failure halfway through had already
+// sent 200 and a truncated page, and the handler could only log about it.
+func TestARenderFailureIsA500WithABody(t *testing.T) {
+	h, err := NewHandler("test-token", nil)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	// A template that always fails: pageData has no Missing method.
+	h.tmpl = template.Must(h.tmpl.New("boom.html").Parse(`ok so far{{ .Missing }}`))
+
+	rec := httptest.NewRecorder()
+	h.render(rec, "boom.html")
+	if rec.Code != 500 {
+		t.Errorf("status = %d, want 500", rec.Code)
+	}
+	if rec.Body.Len() == 0 {
+		t.Error("a failed render sent no body at all")
+	}
+	// And none of the partial output escaped into the response.
+	if strings.Contains(rec.Body.String(), "ok so far") {
+		t.Errorf("the half-rendered page reached the client: %q", rec.Body.String())
 	}
 }
 
 func TestDashboardRendersToken(t *testing.T) {
-	h, _ := NewHandler("test-token")
+	h, _ := NewHandler("test-token", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
 	if rec.Code != 200 {
@@ -39,7 +89,7 @@ func TestDashboardRendersToken(t *testing.T) {
 }
 
 func TestNewListenerFormRenders(t *testing.T) {
-	h, _ := NewHandler("test-token")
+	h, _ := NewHandler("test-token", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/listeners/new", nil))
 	if rec.Code != 200 {
@@ -51,7 +101,7 @@ func TestNewListenerFormRenders(t *testing.T) {
 }
 
 func TestEditListenerFormRendersName(t *testing.T) {
-	h, _ := NewHandler("test-token")
+	h, _ := NewHandler("test-token", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/listeners/site-a", nil))
 	if rec.Code != 200 {
@@ -241,7 +291,7 @@ func TestFormEscapesTheProtocolOptionsItBuilds(t *testing.T) {
 // substring test for "profile" on the whole hint pointed the entire form --
 // load, save, delete -- at /api/profiles for those names.
 func TestFormRoutesAListenerNamedProfileAsAListener(t *testing.T) {
-	h, _ := NewHandler("test-token")
+	h, _ := NewHandler("test-token", nil)
 	for _, name := range []string{"profiles", "vpn-profile", "profile-a"} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest("GET", "/listeners/"+name, nil))
@@ -263,7 +313,7 @@ func TestFormRoutesAListenerNamedProfileAsAListener(t *testing.T) {
 // TestProfileRoutesCarryTheProfileEditHint pins the profile add/edit routes that the
 // dashboard's profile table links to.
 func TestProfileRoutesCarryTheProfileEditHint(t *testing.T) {
-	h, _ := NewHandler("test-token")
+	h, _ := NewHandler("test-token", nil)
 	for _, path := range []string{"/profiles/new", "/profiles/home"} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
@@ -314,7 +364,7 @@ func TestDashboardRestartConfirms(t *testing.T) {
 
 // TestPanelJSIsServedAsJavaScriptAndNotSniffable pins the shared-asset route both templates load.
 func TestPanelJSIsServedAsJavaScriptAndNotSniffable(t *testing.T) {
-	h, _ := NewHandler("test-token")
+	h, _ := NewHandler("test-token", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/assets/panel.js", nil))
 	if rec.Code != 200 {
@@ -332,7 +382,7 @@ func TestPanelJSIsServedAsJavaScriptAndNotSniffable(t *testing.T) {
 // uptime fetched from /api/health, so a dead management plane is visible in the
 // page rather than silently freezing the listener table.
 func TestDashboardRendersHealthHeader(t *testing.T) {
-	h, _ := NewHandler("test-token")
+	h, _ := NewHandler("test-token", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
 	if rec.Code != 200 {
@@ -398,10 +448,12 @@ func TestFormSurfacesErrorsInABanner(t *testing.T) {
 	if !strings.Contains(src, "showBanner(") {
 		t.Errorf("form.html does not use the shared showBanner helper")
 	}
-	// The save handler's redirect is a setTimeout (delayed, and only after any
-	// generated key material has been shown); an immediate "if (status < 300)
-	// window.location" belongs to the delete handler only. The 202 branch must
-	// exist and must return before any redirect.
+	// The 202 branch must exist and must return before any redirect: the config
+	// IS saved, so redirecting away would hide the fact that the listener is
+	// down. (This comment used to describe the redirect as a setTimeout waiting
+	// on the generated-key panel. form.html has no setTimeout -- the redirect is
+	// `window.location = "/"`, and the generated-key panel gates it with a
+	// button the operator clicks.)
 	if !strings.Contains(src, "status === 202 && body && body.build_error") {
 		t.Errorf("form.html does not surface the 202 'saved but rebuild failed' outcome")
 	}
@@ -487,7 +539,7 @@ func TestDashboardOffersPeerRemoval(t *testing.T) {
 // TestUnknownPathReturns404 checks that paths the panel does not own are not
 // silently swallowed.
 func TestUnknownPathReturns404(t *testing.T) {
-	h, _ := NewHandler("test-token")
+	h, _ := NewHandler("test-token", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/nope", nil))
 	if rec.Code != http.StatusNotFound {

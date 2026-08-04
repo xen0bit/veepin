@@ -122,7 +122,7 @@ func (f *fakeMgr) Peers(name string) ([]client.PeerInfo, supervisor.PeerAvailabi
 // newTestServer wires a real mgmt.Server with a fake manager and a temp config
 // dir, returning the server and its token-bearing client. One helper covers
 // every test in this file.
-func newTestServer(t *testing.T, statuses map[string]supervisor.Status) (*Server, string, []byte) {
+func newTestServer(t *testing.T, statuses map[string]supervisor.Status) *Server {
 	t.Helper()
 	dir := t.TempDir()
 	// Pre-seed a couple of listener files for the GET endpoints to find.
@@ -139,7 +139,7 @@ func newTestServer(t *testing.T, statuses map[string]supervisor.Status) (*Server
 		t.Fatalf("NewServer: %v", err)
 	}
 	t.Cleanup(func() { _ = srv.mgr.Close() })
-	return srv, "http://test", srv.token
+	return srv
 }
 
 // do sends an authenticated request and returns the response status plus body.
@@ -173,7 +173,7 @@ func (s *Server) doNoToken(method, path string, body any) *http.Response {
 }
 
 func TestHealthEndpoint(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	resp, body := s.do("GET", "/api/health", nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -184,7 +184,7 @@ func TestHealthEndpoint(t *testing.T) {
 }
 
 func TestUnknownEndpointReturnsMuxDefault(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	resp, _ := s.do("GET", "/api/missing", nil)
 	if resp.StatusCode != 404 {
 		t.Errorf("status = %d, want 404 (no route)", resp.StatusCode)
@@ -192,7 +192,7 @@ func TestUnknownEndpointReturnsMuxDefault(t *testing.T) {
 }
 
 func TestMissingTokenReturns401(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	resp := s.doNoToken("GET", "/api/health", nil)
 	if resp.StatusCode != 401 {
 		t.Errorf("status = %d, want 401 (no auth)", resp.StatusCode)
@@ -200,7 +200,7 @@ func TestMissingTokenReturns401(t *testing.T) {
 }
 
 func TestBadTokenReturns401(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	req := httptest.NewRequest("GET", "/api/health", nil)
 	req.Header.Set("Authorization", "Bearer wrong-token-of-deceptive-length")
 	rec := httptest.NewRecorder()
@@ -215,7 +215,7 @@ func TestBadTokenReturns401(t *testing.T) {
 // OptSpec metadata. Since the test file's imports populate the registry, this
 // verifies the API and the facade side-effect both cover the full set.
 func TestProtocolsEndpointListsEveryRegisteredProtocol(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	resp, body := s.do("GET", "/api/protocols", nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -227,8 +227,12 @@ func TestProtocolsEndpointListsEveryRegisteredProtocol(t *testing.T) {
 	names := make(map[string]bool, len(out.Protocols))
 	for _, p := range out.Protocols {
 		names[p.Name] = true
-		if !p.Known {
-			t.Errorf("protocol %q reported Known=false", p.Name)
+		// Options, not a Known flag. The flag was hardcoded true and asserting
+		// it was asserting a constant; what the panel actually needs from this
+		// endpoint is the option schema it renders the form from, and a
+		// protocol that arrives with an empty one renders an empty form.
+		if len(p.Options) == 0 {
+			t.Errorf("protocol %q carries no option specs, so its form renders empty", p.Name)
 		}
 	}
 	// Cross-check against the registry; the two lists must be equal as sets.
@@ -251,7 +255,7 @@ func TestListListenersReturnsStatuses(t *testing.T) {
 		"site-a": {Name: "site-a", Protocol: "wireguard", State: "running"},
 		"site-c": {Name: "site-c", Protocol: "toy", State: "stopped"},
 	}
-	s, _, _ := newTestServer(t, statuses)
+	s := newTestServer(t, statuses)
 	resp, body := s.do("GET", "/api/listeners", nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d body=%s", resp.StatusCode, body)
@@ -278,7 +282,7 @@ func TestListListenersReturnsStatuses(t *testing.T) {
 }
 
 func TestGetListenerStatusUnknownReturns404(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	resp, _ := s.do("GET", "/api/listeners/never-existed", nil)
 	if resp.StatusCode != 404 {
 		t.Errorf("status = %d, want 404", resp.StatusCode)
@@ -287,7 +291,7 @@ func TestGetListenerStatusUnknownReturns404(t *testing.T) {
 
 func TestGetListenerReturnsConfigWithSecretsRedacted(t *testing.T) {
 	statuses := map[string]supervisor.Status{"site-a": {Name: "site-a", Protocol: "wireguard", State: "running"}}
-	s, _, _ := newTestServer(t, statuses)
+	s := newTestServer(t, statuses)
 	resp, body := s.do("GET", "/api/listeners/site-a", nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d body=%s", resp.StatusCode, body)
@@ -301,7 +305,7 @@ func TestGetListenerReturnsConfigWithSecretsRedacted(t *testing.T) {
 }
 
 func TestCreateListenerPersistsAndApplies(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	cfg := supervisor.ListenerConfig{Name: "new-one", Protocol: "wireguard",
 		Options: map[string]string{"private-key": "k", "address": "10.10.0.1/24"}, Enabled: true}
 	resp, _ := s.do("POST", "/api/listeners", cfg)
@@ -323,7 +327,7 @@ func TestCreateListenerPersistsAndApplies(t *testing.T) {
 // in the response. The config file stores both halves so a later GET can still
 // recover the public key.
 func TestCreateGeneratesKeysAndSurfacesThem(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	cfg := supervisor.ListenerConfig{Name: "wg-1", Protocol: "wireguard",
 		Options: map[string]string{"address": "10.10.0.1/24"}, Enabled: true}
 	resp, body := s.do("POST", "/api/listeners", cfg)
@@ -352,7 +356,7 @@ func TestCreateGeneratesKeysAndSurfacesThem(t *testing.T) {
 // must not overwrite it. Generation is a convenience, not a claim on the
 // operator's own key material.
 func TestCreateRespectsOperatorSuppliedKeys(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	cfg := supervisor.ListenerConfig{Name: "wg-2", Protocol: "wireguard",
 		Options: map[string]string{"private-key": "operator-key", "address": "10.10.0.1/24"}, Enabled: true}
 	resp, body := s.do("POST", "/api/listeners", cfg)
@@ -376,7 +380,7 @@ func TestCreateRespectsOperatorSuppliedKeys(t *testing.T) {
 // out. The file was never written into a live set, so DELETE can never reach
 // the orphan -- it is unreachable garbage that only this cleanup removes.
 func TestCreateApplyFailureLeavesNoOrphanKeyDir(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	s.mgr.(*fakeMgr).applyErr = errors.New("wireguard: listen udp 51820: address in use")
 	cfg := supervisor.ListenerConfig{Name: "wg-fail", Protocol: "wireguard",
 		Options: map[string]string{"address": "10.10.0.1/24"}, Enabled: true}
@@ -397,7 +401,7 @@ func TestCreateApplyFailureLeavesNoOrphanKeyDir(t *testing.T) {
 // config file to DELETE. The cleanup must run even on the 404 path, or the
 // orphan survives every delete forever.
 func TestDeleteRemovesKeyDirEvenWhenTheConfigFileIsGone(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	keyDir := filepath.Join(s.dir, "site-a")
 	if err := os.MkdirAll(keyDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -418,7 +422,7 @@ func TestDeleteRemovesKeyDirEvenWhenTheConfigFileIsGone(t *testing.T) {
 // check it also silently overwrote, so a double-submitted form or a re-run
 // script replaced a live listener's config -- keys and all -- and answered 201.
 func TestCreateListenerRefusesToOverwrite(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{"site-a": {Name: "site-a", State: "running"}})
+	s := newTestServer(t, map[string]supervisor.Status{"site-a": {Name: "site-a", State: "running"}})
 	cfg := supervisor.ListenerConfig{Name: "site-a", Protocol: "wireguard",
 		Options: map[string]string{"private-key": "different", "address": "10.9.0.1/24"}, Enabled: true}
 	resp, _ := s.do("POST", "/api/listeners", cfg)
@@ -448,7 +452,7 @@ func readListenerFile(t *testing.T, dir, name string) supervisor.ListenerConfig 
 // every boolean was one-way: unchecking "enabled" in the panel silently did
 // nothing, and there was no way to disable a listener through the API at all.
 func TestPatchCanTurnABooleanOff(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{"site-a": {Name: "site-a", State: "running"}})
+	s := newTestServer(t, map[string]supervisor.Status{"site-a": {Name: "site-a", State: "running"}})
 	resp, body := s.do("PATCH", "/api/listeners/site-a", map[string]any{"enabled": false})
 	if resp.StatusCode >= 300 {
 		t.Fatalf("status = %d: %s", resp.StatusCode, body)
@@ -462,7 +466,7 @@ func TestPatchCanTurnABooleanOff(t *testing.T) {
 // a partial PATCH -- the shape a hand-written curl sends -- must not reset the
 // fields it did not mention to their zero values.
 func TestPatchLeavesUnmentionedFieldsAlone(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{"site-a": {Name: "site-a", State: "running"}})
+	s := newTestServer(t, map[string]supervisor.Status{"site-a": {Name: "site-a", State: "running"}})
 	resp, body := s.do("PATCH", "/api/listeners/site-a", map[string]any{"wan": "eth1"})
 	if resp.StatusCode >= 300 {
 		t.Fatalf("status = %d: %s", resp.StatusCode, body)
@@ -487,7 +491,7 @@ func TestPatchLeavesUnmentionedFieldsAlone(t *testing.T) {
 // Reading that literal back as "keep what you have" is what stops a
 // GET-then-PATCH round trip from replacing a private key with the placeholder.
 func TestPatchRedactedSecretKeepsTheStoredValue(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{"site-a": {Name: "site-a", State: "running"}})
+	s := newTestServer(t, map[string]supervisor.Status{"site-a": {Name: "site-a", State: "running"}})
 	resp, body := s.do("PATCH", "/api/listeners/site-a", map[string]any{
 		"options": map[string]string{"private-key": redacted, "address": "10.11.0.1/24"},
 	})
@@ -508,7 +512,7 @@ func TestPatchRedactedSecretKeepsTheStoredValue(t *testing.T) {
 // that way, and it is safe to overload because the server parse functions
 // already read a missing key and an empty one identically.
 func TestPatchEmptyOptionValueClearsTheKey(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{"site-a": {Name: "site-a", State: "running"}})
+	s := newTestServer(t, map[string]supervisor.Status{"site-a": {Name: "site-a", State: "running"}})
 	resp, body := s.do("PATCH", "/api/listeners/site-a", map[string]any{
 		"options": map[string]string{"address": ""},
 	})
@@ -529,7 +533,7 @@ func TestPatchEmptyOptionValueClearsTheKey(t *testing.T) {
 // <newname>.json, left <oldname>.json in place, and rebuilt the old name -- so
 // one edit produced two listeners.
 func TestPatchRefusesARename(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{"site-a": {Name: "site-a", State: "running"}})
+	s := newTestServer(t, map[string]supervisor.Status{"site-a": {Name: "site-a", State: "running"}})
 	resp, _ := s.do("PATCH", "/api/listeners/site-a", map[string]any{"name": "site-b"})
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
@@ -541,7 +545,7 @@ func TestPatchRefusesARename(t *testing.T) {
 
 // TestPatchUnknownListenerReturns404 pins that PATCH does not create.
 func TestPatchUnknownListenerReturns404(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	resp, _ := s.do("PATCH", "/api/listeners/nope", map[string]any{"wan": "eth0"})
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", resp.StatusCode)
@@ -549,7 +553,7 @@ func TestPatchUnknownListenerReturns404(t *testing.T) {
 }
 
 func TestCreateListenerValidatesName(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	bad := supervisor.ListenerConfig{Name: "UPPERCASE", Protocol: "wireguard"}
 	resp, _ := s.do("POST", "/api/listeners", bad)
 	if resp.StatusCode != 400 {
@@ -558,7 +562,7 @@ func TestCreateListenerValidatesName(t *testing.T) {
 }
 
 func TestCreateListenerRejectsUnknownProtocol(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	cfg := supervisor.ListenerConfig{Name: "x", Protocol: "nonsense-example"}
 	resp, _ := s.do("POST", "/api/listeners", cfg)
 	if resp.StatusCode != 400 {
@@ -567,7 +571,7 @@ func TestCreateListenerRejectsUnknownProtocol(t *testing.T) {
 }
 
 func TestCreateListenerRequiresAuth(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	resp := s.doNoToken("POST", "/api/listeners", supervisor.ListenerConfig{Name: "x"})
 	if resp.StatusCode != 401 {
 		t.Errorf("status = %d, want 401 (no auth)", resp.StatusCode)
@@ -580,7 +584,7 @@ func TestCreateListenerRequiresAuth(t *testing.T) {
 // present.
 func TestDeleteListenerRemovesFileAndCallsStop(t *testing.T) {
 	statuses := map[string]supervisor.Status{"site-a": {Name: "site-a", State: "running"}}
-	s, _, _ := newTestServer(t, statuses)
+	s := newTestServer(t, statuses)
 	resp, _ := s.do("DELETE", "/api/listeners/site-a", nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -595,7 +599,7 @@ func TestDeleteListenerRemovesFileAndCallsStop(t *testing.T) {
 
 func TestRestartEndpointCallsRebuild(t *testing.T) {
 	statuses := map[string]supervisor.Status{"site-a": {Name: "site-a", State: "running"}}
-	s, _, _ := newTestServer(t, statuses)
+	s := newTestServer(t, statuses)
 	resp, _ := s.do("POST", "/api/listeners/site-a/restart", nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d", resp.StatusCode)
@@ -611,7 +615,7 @@ func TestRestartEndpointCallsRebuild(t *testing.T) {
 // panel keeps the page open on this status instead of redirecting.
 func TestPatchRebuildFailureIsSavedNotSunk(t *testing.T) {
 	statuses := map[string]supervisor.Status{"site-a": {Name: "site-a", State: "running"}}
-	s, _, _ := newTestServer(t, statuses)
+	s := newTestServer(t, statuses)
 	s.mgr.(*fakeMgr).rebuildErr = errors.New("wireguard: listen udp 51820: address in use")
 	resp, body := s.do("PATCH", "/api/listeners/site-a",
 		map[string]any{"options": map[string]string{"address": "10.20.0.1/24"}})
@@ -641,18 +645,14 @@ func TestPatchRebuildFailureIsSavedNotSunk(t *testing.T) {
 
 // newTestServerWithProfiles wires the same fake-manager server as
 // newTestServer, plus a profile directory for the /api/profiles endpoints.
-func newTestServerWithProfiles(t *testing.T, statuses map[string]supervisor.Status, profiles string) (*Server, string, []byte) {
+func newTestServerWithProfiles(t *testing.T, statuses map[string]supervisor.Status, profiles string) *Server {
 	t.Helper()
-	// The token is read off the server that is returned, not off a discarded
-	// one: an earlier version built a server via newTestServer purely to borrow
-	// its dir and manager, then handed back the DISCARDED server's URL and
-	// token alongside the new server.
-	s, _, _ := newTestServer(t, statuses)
+	s := newTestServer(t, statuses)
 	withProfiles, err := NewServer(s.dir, s.mgr, log.New(io.Discard, "", 0), WithProfileDir(profiles))
 	if err != nil {
 		t.Fatalf("NewServer with profiles: %v", err)
 	}
-	return withProfiles, "http://test", withProfiles.token
+	return withProfiles
 }
 
 // TestProfileListIsEmptyBeforeTheDirectoryExists: the supervisor defaults
@@ -660,7 +660,7 @@ func newTestServerWithProfiles(t *testing.T, statuses map[string]supervisor.Stat
 // used to surface as a 500 that the dashboard re-polled every five seconds
 // forever. An absent directory is an empty fleet.
 func TestProfileListIsEmptyBeforeTheDirectoryExists(t *testing.T) {
-	s, _, _ := newTestServerWithProfiles(t, map[string]supervisor.Status{},
+	s := newTestServerWithProfiles(t, map[string]supervisor.Status{},
 		filepath.Join(t.TempDir(), "never-created"))
 	resp, body := s.do("GET", "/api/profiles", nil)
 	if resp.StatusCode != 200 {
@@ -681,7 +681,7 @@ func TestProfileListIsEmptyBeforeTheDirectoryExists(t *testing.T) {
 // endpoints are not registered, so a request is a plain 404 rather than a
 // misleading empty list.
 func TestProfilesNotMountedWithoutDir(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	resp, _ := s.do("GET", "/api/profiles", nil)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("status = %d, want 404 when no profile dir is configured", resp.StatusCode)
@@ -692,7 +692,7 @@ func TestProfilesNotMountedWithoutDir(t *testing.T) {
 // file, list returns it with secrets redacted, and get reads it back.
 func TestProfileCreateStoresAndListsItRedacted(t *testing.T) {
 	dir := t.TempDir()
-	s, _, _ := newTestServerWithProfiles(t, map[string]supervisor.Status{}, dir)
+	s := newTestServerWithProfiles(t, map[string]supervisor.Status{}, dir)
 	cfg := map[string]any{"name": "home", "protocol": "toy",
 		"options": map[string]string{"server": "1.2.3.4", "user": "alice", "secret": "topsecret"}}
 	resp, body := s.do("POST", "/api/profiles", cfg)
@@ -718,7 +718,7 @@ func TestProfileCreateStoresAndListsItRedacted(t *testing.T) {
 // preserves a redacted secret round trip.
 func TestProfilePatchMergesOptions(t *testing.T) {
 	dir := t.TempDir()
-	s, _, _ := newTestServerWithProfiles(t, map[string]supervisor.Status{}, dir)
+	s := newTestServerWithProfiles(t, map[string]supervisor.Status{}, dir)
 	s.do("POST", "/api/profiles", map[string]any{"name": "home", "protocol": "toy",
 		"options": map[string]string{"server": "old.example", "user": "alice", "secret": "s3cret"}})
 	resp, _ := s.do("PATCH", "/api/profiles/home", map[string]any{
@@ -753,7 +753,7 @@ func TestProfilePatchMergesOptions(t *testing.T) {
 // TestProfileDeleteRemovesTheFileAndIsNotIdempotent removes the file.
 func TestProfileDeleteRemovesTheFileAndIsNotIdempotent(t *testing.T) {
 	dir := t.TempDir()
-	s, _, _ := newTestServerWithProfiles(t, map[string]supervisor.Status{}, dir)
+	s := newTestServerWithProfiles(t, map[string]supervisor.Status{}, dir)
 	s.do("POST", "/api/profiles", map[string]any{"name": "home", "protocol": "toy",
 		"options": map[string]string{"server": "vpn.example.com", "user": "a", "secret": "s"}})
 	resp, _ := s.do("DELETE", "/api/profiles/home", nil)
@@ -779,7 +779,7 @@ func readProfileFile(t *testing.T, dir, name string) profile.Config {
 // outcome, so the panel's "recent activity" and `veepin mgmt audit` answer
 // "what changed on this fleet" without accounts or storage.
 func TestAuditRecordsMutations(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	s.do("POST", "/api/listeners", map[string]any{"name": "site-a", "protocol": "wireguard",
 		"options": map[string]string{"private-key": "k", "address": "10.0.0.1/24"}})
 	s.do("POST", "/api/listeners/site-a/restart", nil)
@@ -820,7 +820,7 @@ func TestAuditRecordsMutations(t *testing.T) {
 // red failure in "recent activity" next to the delete's own 200. The fake used
 // by TestAuditRecordsMutations always succeeds, so nothing caught it.
 func TestDeletingAStoppedListenerIsNotAnAuditFailure(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	s.do("POST", "/api/listeners", map[string]any{"name": "site-a", "protocol": "wireguard",
 		"options": map[string]string{"private-key": "k", "address": "10.0.0.1/24"}})
 	s.mgr.(*fakeMgr).stopErr = errors.New("supervisor: no listener named \"site-a\"")
@@ -978,7 +978,7 @@ func TestClientConfigMapKeysAreDeclared(t *testing.T) {
 // a complete profile from the listener's stored options plus the endpoint, with
 // real secrets and no "<redacted>" placeholder.
 func TestClientConfigGeneratesProfile(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	s.do("POST", "/api/listeners", map[string]any{"name": "site-a", "protocol": "toy",
 		"options": map[string]string{"user": "alice", "secret": "s3cret"}, "enabled": true})
 	resp, body := s.do("POST", "/api/listeners/site-a/client-config",
@@ -1008,7 +1008,7 @@ func TestClientConfigGeneratesProfile(t *testing.T) {
 // hostname, so an endpoint is required for every protocol whose client carries
 // one.
 func TestClientConfigRequiresEndpoint(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	s.do("POST", "/api/listeners", map[string]any{"name": "site-a", "protocol": "toy",
 		"options": map[string]string{"user": "alice", "secret": "s3cret"}, "enabled": true})
 	resp, _ := s.do("POST", "/api/listeners/site-a/client-config", map[string]any{})
@@ -1030,7 +1030,7 @@ var ovpnClientIdentity = map[string]string{
 }
 
 func TestClientConfigBundlesFileCompanions(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	caPath := filepath.Join(s.dir, "ca.crt")
 	if err := os.WriteFile(caPath, []byte("-----BEGIN CERTIFICATE-----\nMOCK\n-----END CERTIFICATE-----\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1088,7 +1088,7 @@ func TestClientConfigPutsThePortInThePortOption(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+			s := newTestServer(t, map[string]supervisor.Status{})
 			opts := map[string]string{"ca": ""}
 			if c.listenPort != "" {
 				opts["port"] = c.listenPort
@@ -1143,7 +1143,7 @@ func TestEveryDerivedProtocolDeclaresThePortOption(t *testing.T) {
 // has no control plane, so the two ends are mirror images. This derivation used
 // to sit behind an early return that made it unreachable.
 func TestL2TPv3ClientConfigSwapsTheEndsOfEverySymmetricPair(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	s.do("POST", "/api/listeners", map[string]any{"name": "pw", "protocol": "l2tpv3",
 		"options": map[string]string{
 			"session-id": "10", "peer-session-id": "20",
@@ -1179,7 +1179,7 @@ func TestL2TPv3ClientConfigSwapsTheEndsOfEverySymmetricPair(t *testing.T) {
 // and X25519 key are its identity; bundling them would clone the lighthouse
 // rather than provision a peer.
 func TestNebulaClientConfigCarriesTheCAButNotTheLighthouseIdentity(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	write := func(name, body string) string {
 		p := filepath.Join(s.dir, name)
 		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
@@ -1232,7 +1232,7 @@ func TestNebulaClientConfigCarriesTheCAButNotTheLighthouseIdentity(t *testing.T)
 // operator misunderstood. Dropping it silently would hand back a profile that
 // looks right and is not.
 func TestNebulaClientConfigRefusesAnEndpoint(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	s.do("POST", "/api/listeners", map[string]any{"name": "mesh", "protocol": "nebula",
 		"options": map[string]string{"ca": "/x/ca.crt"}, "enabled": true})
 	resp, _ := s.do("POST", "/api/listeners/mesh/client-config",
@@ -1248,7 +1248,7 @@ func TestNebulaClientConfigRefusesAnEndpoint(t *testing.T) {
 // back out of the bundle — as root. Overridden paths are passed through, never
 // opened.
 func TestClientConfigNeverReadsAnOperatorSuppliedPath(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	secret := filepath.Join(s.dir, "not-mine")
 	if err := os.WriteFile(secret, []byte("root:$6$SUPERSECRETHASH"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1283,7 +1283,7 @@ func TestClientConfigNeverReadsAnOperatorSuppliedPath(t *testing.T) {
 // swallowed, leaving a profile that pointed at an absolute path on the server
 // with no companion file and nothing to say the bundle was incomplete.
 func TestClientConfigWarnsAboutAFileItCannotBundle(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	missing := filepath.Join(s.dir, "gone.crt")
 	// cert and key are supplied too, so x509-chain does not run: this test is
 	// about a file the bundler cannot read, not about a partial key set.
@@ -1346,7 +1346,7 @@ func TestAllocationStopsBeforeTheIPv4Broadcast(t *testing.T) {
 // client keypair, allocates an address, appends the peer to the listener, and
 // rebuilds it — and the returned profile has everything the client needs.
 func TestClientConfigWireGuardProvisionsPeer(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	serverPriv, serverPub, err := keygen.WireGuardKeypair()
 	if err != nil {
 		t.Fatal(err)
@@ -1414,7 +1414,7 @@ func TestClientConfigWireGuardProvisionsPeer(t *testing.T) {
 // a private key the server has never heard of. Both peers must survive and hold
 // different addresses.
 func TestConcurrentClientConfigAllocatesDistinctAddresses(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	serverPriv, _, err := keygen.WireGuardKeypair()
 	if err != nil {
 		t.Fatal(err)
@@ -1471,7 +1471,7 @@ func TestConcurrentClientConfigAllocatesDistinctAddresses(t *testing.T) {
 // trace. Otherwise the listener permanently carries a peer nobody holds the key
 // for, and its address is consumed for good.
 func TestFailedRebuildRollsBackTheProvisionedPeer(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	serverPriv, _, err := keygen.WireGuardKeypair()
 	if err != nil {
 		t.Fatal(err)
@@ -1661,7 +1661,7 @@ func TestRequireHostRejectsRebinding(t *testing.T) {
 // matched into a path. Go's ServeMux makes that hard to abuse, but a string that
 // becomes a filename gets checked.
 func TestPathNameIsValidatedBeforeItBecomesAFilename(t *testing.T) {
-	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	s := newTestServer(t, map[string]supervisor.Status{})
 	for _, bad := range []string{"UPPERCASE", "has.dot", "-leading-hyphen", "with%20space"} {
 		resp, _ := s.do("GET", "/api/listeners/"+bad, nil)
 		if resp.StatusCode != http.StatusNotFound {
@@ -1977,7 +1977,3 @@ func TestFailedRequestsAreStillLogged(t *testing.T) {
 		t.Errorf("a mutation was not logged")
 	}
 }
-
-// Suppress "unused" errors for net.IP we want to keep imported for parity with
-// a future IPv6 listener status field.
-var _ = net.IP{}

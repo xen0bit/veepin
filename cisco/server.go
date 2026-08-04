@@ -38,8 +38,8 @@ func init() {
 		{Key: OptServerBanner, Kind: client.OptStr, Help: "login banner shown to clients"},
 		{Key: OptServerSplitInclude, Kind: client.OptCommaList, Help: "comma-separated CIDRs clients should route into the tunnel (empty = everything)"},
 		{Key: OptServerPublicIP, Kind: client.OptStr, Help: "address clients reach this gateway on (empty = the bound address)"},
-		{Key: OptServerTUN, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
-		{Key: OptServerShape, Kind: client.OptInt, Default: "0", Help: "per-flow downstream shaping budget in bytes (0 = off)"},
+		client.TUNOpt(OptServerTUN),
+		client.ShapeOpt(OptServerShape, "downstream"),
 	})
 }
 

@@ -552,8 +552,8 @@ func init() {
 		{Key: OptServerDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers assigned to clients"},
 		{Key: OptServerUser, Kind: client.OptStr, Required: true, Help: "MS-CHAPv2 username to accept"},
 		{Key: OptServerPassword, Kind: client.OptStr, Required: true, Secret: true, Help: "the user's password"},
-		{Key: OptServerTUN, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
-		{Key: OptServerShape, Kind: client.OptInt, Default: "0", Help: "per-flow downstream shaping budget in bytes (0 = off)"},
+		client.TUNOpt(OptServerTUN),
+		client.ShapeOpt(OptServerShape, "downstream"),
 	})
 }
 

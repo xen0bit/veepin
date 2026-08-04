@@ -282,9 +282,8 @@ func TestConnectResolvesProfilesFromVEEPIN_PROFILE_DIR(t *testing.T) {
 	}
 }
 
-// writeStdin replaces os.Stdin with a pipe carrying content. Callers should
-// restore the original stdin after the test (temp dir cleanup does this via
-// the test's TempDir, but stdin is a global so t.Setenv doesn't cover it).
+// writeStdin replaces os.Stdin with a pipe carrying content, and restores it
+// when the test ends. stdin is a global, so nothing else would.
 func writeStdin(t *testing.T, content string) {
 	t.Helper()
 	r, w, _ := os.Pipe()

@@ -11,6 +11,6 @@ func init() {
 		{Key: OptUser, Kind: client.OptStr, Required: true, Help: "MS-CHAPv2 username"},
 		{Key: OptPassword, Kind: client.OptStr, Secret: true, Required: true, Help: "MS-CHAPv2 password"},
 		{Key: OptInsecure, Kind: client.OptBool, Help: "skip TLS certificate verification (self-signed servers)"},
-		{Key: OptTUNName, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
+		client.TUNOpt(OptTUNName),
 	})
 }

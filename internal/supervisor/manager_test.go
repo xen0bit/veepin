@@ -514,7 +514,7 @@ func TestStopTearsDownFromThePersistedState(t *testing.T) {
 // nothing.
 //
 // (Its previous form rewrote the config on disk and claimed to prove teardown
-// ignored the edit. stopLocked reads r.cfg, the config captured at build time,
+// ignored the edit. stopListener reads r.cfg, the config captured at build time,
 // and Stop never reloads, so the rewrite had no effect on the code under test
 // and the test was a duplicate of the one above under a name that promised
 // otherwise.)
@@ -901,7 +901,7 @@ func (s *wedgedServer) Close() error {
 	return nil
 }
 
-// TestAWedgedCloseDoesNotFreezeTheFleet is the containment. stopLocked runs
+// TestAWedgedCloseDoesNotFreezeTheFleet is the containment. stopListener runs
 // under Manager.mu, so an unbounded Close would hold the manager lock forever
 // and every Status, Apply, and Rebuild in the fleet would block behind it: one
 // listener taking down the entire management plane, which is the failure this

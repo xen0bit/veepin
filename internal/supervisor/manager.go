@@ -37,14 +37,18 @@ type Constructor func(protocol string, opts map[string]string) (client.Server, e
 // returns; Network is stringified so json.Marshal produces a self-describing
 // field rather than the opaque *net.IPNet the Server interface exposes.
 type Status struct {
-	Name     string    `json:"name"`
-	Protocol string    `json:"protocol"`
-	State    string    `json:"state"` // "running", "building", "stopped", "error", "disabled"
-	TUNName  string    `json:"tun,omitempty"`
-	Gateway  string    `json:"gateway,omitempty"`
-	Network  string    `json:"network,omitempty"`
-	Error    string    `json:"error,omitempty"`
-	Since    time.Time `json:"since,omitempty"`
+	Name     string `json:"name"`
+	Protocol string `json:"protocol"`
+	State    string `json:"state"` // "running", "building", "stopped", "error", "disabled"
+	TUNName  string `json:"tun,omitempty"`
+	Gateway  string `json:"gateway,omitempty"`
+	Network  string `json:"network,omitempty"`
+	Error    string `json:"error,omitempty"`
+	// No omitempty: it does nothing on a struct, so a zero Since serialised as
+	// "0001-01-01T00:00:00Z" regardless and the tag only read as though it did
+	// not. omitzero is the tag that would work, and the panel handles the zero
+	// value fine, so this stays plain rather than changing the wire shape.
+	Since time.Time `json:"since"`
 }
 
 // running is the live handle for one listener: the constructed server, the
@@ -58,7 +62,7 @@ type Status struct {
 // version wrote cfg/state/serveErr on the rebuild-failed path while holding only
 // Manager.mu and raced Status for exactly that reason.
 //
-// done is also the generation marker. stopLocked clears it, so a serve goroutine
+// done is also the generation marker. stopListener clears it, so a serve goroutine
 // that returns late — after the 5s wait gave up, or after a rebuild already
 // installed a new server — can tell that the state it is holding is stale and
 // decline to publish it.
@@ -162,7 +166,7 @@ func (m *Manager) teardownHostnet(name string, cfg hostnet.Config) error {
 }
 
 // teardownHostnetState is the persisted-state form of teardownHostnet, used by
-// stopLocked so rules are removed for what Apply actually installed, not for
+// stopListener so rules are removed for what Apply actually installed, not for
 // whatever the listener's config now says.
 func (m *Manager) teardownHostnetState(name string, st hostnet.State) error {
 	if m.run == nil {
@@ -306,12 +310,12 @@ func (m *Manager) Apply() error {
 	for name, r := range m.listeners {
 		cfg, ok := cfgs[name]
 		if !ok {
-			m.stopLocked(r)
+			m.stopListener(r)
 			delete(m.listeners, name)
 			continue
 		}
 		if !cfg.Enabled {
-			m.stopLocked(r)
+			m.stopListener(r)
 			r.mu.Lock()
 			r.cfg = cfg
 			r.state = "disabled"
@@ -473,7 +477,7 @@ func (m *Manager) Rebuild(name string) error {
 	//
 	// Tearing down is also the right answer in the other order, where the
 	// removal landed before start() and the server we just built is genuinely
-	// running untracked: this is the only thing that stops it. stopLocked is a
+	// running untracked: this is the only thing that stops it. stopListener is a
 	// no-op on a handle the remover already closed, so both cases are covered by
 	// the same call. It runs without Manager.mu, like the rebuild above, so a
 	// slow Close cannot freeze the fleet.
@@ -485,7 +489,7 @@ func (m *Manager) Rebuild(name string) error {
 	still := m.listeners[name] == r
 	m.mu.Unlock()
 	if !still {
-		m.stopLocked(r)
+		m.stopListener(r)
 	}
 	return err
 }
@@ -500,7 +504,7 @@ func (m *Manager) Stop(name string) error {
 	if !ok {
 		return fmt.Errorf("supervisor: no listener named %q", name)
 	}
-	m.stopLocked(r)
+	m.stopListener(r)
 	delete(m.listeners, name)
 	return nil
 }
@@ -523,9 +527,9 @@ func (m *Manager) Close() error {
 	m.closed = true
 	var firstErr error
 	for name, r := range m.listeners {
-		m.stopLocked(r)
+		m.stopListener(r)
 		delete(m.listeners, name)
-		// serveErr under r.mu like every other field on the handle. stopLocked
+		// serveErr under r.mu like every other field on the handle. stopListener
 		// waits for the serve goroutine before returning, so this read is
 		// already ordered -- and being ordered by a wait somewhere else is
 		// exactly the kind of thing a refactor moves. The package README says
@@ -567,7 +571,7 @@ const (
 // implements client.PeerDescriber, and says which of the four cases applies.
 //
 // The PeerDescriber call runs while holding r.mu. That ordering is the point:
-// stopLocked clears r.srv and spawns srv.Close while holding r.mu, so a
+// stopListener clears r.srv and spawns srv.Close while holding r.mu, so a
 // concurrent rebuild or stop blocks on r.mu before it can tear the server down
 // underneath this call. Reading the live server through Server() and calling
 // Peers() afterward released r.mu first, which left the raw handle open to a
@@ -704,7 +708,7 @@ func (m *Manager) rebuildLocked(r *running, cfg ListenerConfig) error {
 	r.state = "building"
 	r.since = time.Now()
 	r.mu.Unlock()
-	m.stopLockedInner(r)
+	m.stopListenerLocked(r)
 	return m.start(r, cfg)
 }
 
@@ -713,10 +717,17 @@ func (m *Manager) rebuildLocked(r *running, cfg ListenerConfig) error {
 // exit together, so one listener's teardown cannot exceed it.
 const stopGrace = 5 * time.Second
 
-// stopLocked closes the listener's server and waits for the goroutine to exit,
-// then tears down any host-networking rules it owned. Called under Manager.mu;
-// acquires buildMu and r.mu. rebuildLocked calls stopLockedInner directly while
-// holding buildMu, so the whole stop-then-start stays one critical section.
+// stopListener closes the listener's server and waits for the goroutine to exit,
+// then tears down any host-networking rules it owned. It acquires buildMu and
+// r.mu itself. rebuildLocked calls stopListenerLocked directly while holding
+// buildMu, so the whole stop-then-start stays one critical section.
+//
+// It was called stopLocked, which named a lock it does not take and does not
+// require: Stop, Close and Apply call it holding Manager.mu, and Rebuild calls
+// it having released Manager.mu deliberately, so a slow Close cannot freeze the
+// fleet. A name asserting an invariant that half the call sites break is worse
+// than no name at all -- the whole -Locked convention stops meaning anything.
+// The paragraph below about Manager.mu describes the callers that do hold it.
 //
 // Both waits are bounded, and Close is called on a goroutine rather than inline,
 // because Close can block. The once-central cause is fixed: dataplane's TUN fd
@@ -727,7 +738,7 @@ const stopGrace = 5 * time.Second
 // listener can never freeze the fleet.
 //
 // That is invisible to `veepin serve <proto>`: it calls Close and exits, and the
-// kernel cleans up. It is not invisible here. stopLocked runs under Manager.mu,
+// kernel cleans up. It is not invisible here. stopListener runs under Manager.mu,
 // so an unbounded Close would freeze every Status, Apply, and Rebuild in the
 // fleet behind it -- one listener wedging the entire management plane, which is
 // the failure this whole package exists to avoid. Bounded, the listener is
@@ -738,14 +749,14 @@ const stopGrace = 5 * time.Second
 // internal/supervisor/README.md; the real fix is for dataplane to make a blocked
 // TUN read interruptible, which is a change to the allocation-guarded data path
 // and belongs on its own.
-func (m *Manager) stopLocked(r *running) {
+func (m *Manager) stopListener(r *running) {
 	r.buildMu.Lock()
 	defer r.buildMu.Unlock()
-	m.stopLockedInner(r)
+	m.stopListenerLocked(r)
 }
 
-// stopLockedInner is the teardown itself. Callers must hold r.buildMu.
-func (m *Manager) stopLockedInner(r *running) {
+// stopListenerLocked is the teardown itself. Callers must hold r.buildMu.
+func (m *Manager) stopListenerLocked(r *running) {
 	r.mu.Lock()
 	srv, done, cfg := r.srv, r.done, r.cfg
 	r.srv = nil
@@ -825,14 +836,14 @@ func (m *Manager) stopLockedInner(r *running) {
 }
 
 // serve is the goroutine that owns one listener's ListenAndServe. It records the
-// result and signals completion via a deferred close(done) so stopLocked can
+// result and signals completion via a deferred close(done) so stopListener can
 // wait deterministically.
 //
 // srv and done are parameters, not reads off r, because this goroutine belongs
 // to one generation of the listener: a rebuild installs a new server and a new
 // done channel on the same handle. Publishing the result is gated on r.done
 // still being this generation's channel, so a goroutine that returns after its
-// server was replaced (or after stopLocked gave up waiting) cannot overwrite the
+// server was replaced (or after stopListener gave up waiting) cannot overwrite the
 // live listener's state with its own stale outcome.
 func serve(r *running, logger *log.Logger, srv client.Server, done chan struct{}) {
 	defer close(done)

@@ -21,6 +21,6 @@ func init() {
 		{Key: OptPeer, Kind: client.OptStr, Help: "server tunnel address (point-to-point peer), e.g. 10.200.0.1"},
 		{Key: OptPeerUnit, Kind: client.OptInt, Default: "-1", Help: "remote tun unit to request (default: any)"},
 		{Key: OptDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers"},
-		{Key: OptTUNName, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
+		client.TUNOpt(OptTUNName),
 	})
 }

@@ -186,7 +186,7 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 	// failed only at dial. wireguard/opts.go's comment claims both facades fill
 	// the same Config and that Config.resolve rejects an absent private key
 	// before anything else -- true of one of them.
-	if err := cfg.Config.Validate(); err != nil {
+	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
 	return dialer{cfg: cfg}, nil
@@ -232,14 +232,14 @@ func init() {
 		{Key: OptServerListenPort, Kind: client.OptInt, Default: "51820", Help: "UDP port to listen on (default 51820)"},
 		{Key: OptServerAddress, Kind: client.OptCIDR, Help: "server tunnel address in CIDR form, e.g. 10.10.0.1/24"},
 		{Key: OptServerMTU, Kind: client.OptInt, Default: "1420", Help: "inner MTU (default 1420)"},
-		{Key: OptServerTUNName, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
+		client.TUNOpt(OptServerTUNName),
 		{Key: OptServerPeerPublicKey, Kind: client.OptStr, Help: "a single peer's static public key, base64 (adds one peer)"},
 		{Key: OptServerPeerPresharedKey, Kind: client.OptStr, Secret: true, Help: "the -peer-public-key peer's preshared key, base64 (optional)"},
 		{Key: OptServerPeerAllowedIPs, Kind: client.OptCommaList, Help: "the -peer-public-key peer's allowed IPs, comma-separated CIDRs"},
 		// OptStr, not OptCommaList: a JSON document, which a comma-list editor
 		// in the panel would split on the commas inside it.
 		{Key: OptServerPeers, Kind: client.OptStr, Help: "additional peers as a JSON array (managed by client-config generation)"},
-		{Key: OptServerShape, Kind: client.OptInt, Default: "0", Help: "per-flow downstream shaping budget in bytes (0 = off)"},
+		client.ShapeOpt(OptServerShape, "downstream"),
 		{Key: OptTypeInit, Kind: client.OptInt, Help: "H1: message type replacing handshake initiation (0 = stock 1)"},
 		{Key: OptTypeResp, Kind: client.OptInt, Help: "H2: message type replacing handshake response (0 = stock 2)"},
 		{Key: OptTypeCookie, Kind: client.OptInt, Help: "H3: message type replacing cookie reply (0 = stock 3)"},

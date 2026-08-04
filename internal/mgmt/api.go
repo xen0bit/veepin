@@ -49,10 +49,11 @@ import (
 	"github.com/xen0bit/veepin/wireguard"
 )
 
-// redacted is the package-local spelling of client.Redacted: the value the API
-// writes in place of a secret option. It cannot collide with a real protocol
-// value -- not a valid key, not a valid PSK, not valid base64 -- and sending it
-// back on a PATCH is treated as "leave unchanged".
+// redacted is the package-local spelling of client.Redacted, used often enough
+// here to earn the short name. Sending it back on a PATCH means "leave
+// unchanged"; sending it on a POST is refused, because there is nothing to
+// leave. client.Redacted's own doc says why the value cannot collide with a
+// real one.
 const redacted = client.Redacted
 
 // tokenName is the mgmt-bearer-token file name within the config dir.
@@ -168,7 +169,7 @@ func NewServer(dir string, mgr ManagerBackend, logger *log.Logger, opts ...Optio
 	// its own mux (it also serves the panel at the root) and never went through
 	// a Start method, so an uptime the serve path was supposed to set stayed
 	// zero and /api/health reported the whole Unix epoch as uptime.
-	s.startedAt.Store(nowUnix())
+	s.startedAt.Store(time.Now().Unix())
 	if fresh {
 		logger.Printf("mgmt: no bearer token found; generated one at %s (mode 0600)", tokenPath)
 	}
@@ -213,10 +214,14 @@ func (s *Server) Handler() http.Handler {
 // the UI handler) can inject it into the embedded dashboard template.
 func (s *Server) Token() []byte { return s.token }
 
-// Close delegates to the manager; it is exposed so a caller wiring the API
-// server into a wider HTTP mux can tear it down cleanly the same way the
-// management CLI does.
-func (s *Server) Close() error { return s.mgr.Close() }
+// CloseFleet stops every listener the Server's manager is running. It closes no
+// HTTP anything -- the Server does not own a listening socket, its caller does.
+//
+// It was called Close, which is the trap the README named: a caller reaching for
+// the conventional teardown on the HTTP-shaped object got a fleet-wide shutdown.
+// The name now says so, and the mismatch is a compile error rather than an
+// outage.
+func (s *Server) CloseFleet() error { return s.mgr.Close() }
 
 // --- Token boot ---
 
@@ -432,12 +437,9 @@ func bearer(h string) []byte {
 // --- Endpoints ---
 
 // pathName pulls the {name} segment out of the route and checks it against the
-// listener-name grammar before it is ever joined into a filesystem path. Only
-// DeleteListenerFile validated, so the GET and PATCH handlers built a filename
-// out of whatever the router happened to match. Go's ServeMux makes that hard to
-// abuse -- a {name} wildcard spans one segment and the request path is cleaned
-// before routing -- but "hard to abuse" is not the bar for a string that becomes
-// a filename, and the check is one line.
+// listener-name grammar before it is ever joined into a filesystem path. ServeMux
+// makes an escape hard, but "hard" is not the bar for a string that becomes a
+// filename, and the check is one line.
 //
 // Returns "" and writes the response when the name is not one the supervisor
 // could ever have written; the caller returns on an empty result.
@@ -463,7 +465,7 @@ func (s *Server) pathName(w http.ResponseWriter, r *http.Request) string {
 // handleHealth answers a basic liveness probe.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	start := s.startedAt.Load()
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "uptime": nowUnix() - start})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "uptime": time.Now().Unix() - start})
 }
 
 // handleAudit returns the recent mutation log, newest first. It is the answer
@@ -510,10 +512,14 @@ type ProtocolsResp struct {
 }
 
 // ProtocolDesc is one protocol's surface the panel can render.
+//
+// There was a `known bool` here, set to true on both of the two lines that
+// construct one, while the `ok` from the OptsFor lookup that could have made it
+// false was discarded. A JSON field with one possible value tells a consumer
+// nothing, and this one read as though it might.
 type ProtocolDesc struct {
 	Name    string           `json:"name"`
 	Options []client.OptSpec `json:"options,omitempty"`
-	Known   bool             `json:"known"` // always true for client.ServerProtocols() entries
 }
 
 func (s *Server) handleProtocols(w http.ResponseWriter, r *http.Request) {
@@ -521,13 +527,13 @@ func (s *Server) handleProtocols(w http.ResponseWriter, r *http.Request) {
 	out := ProtocolsResp{Protocols: make([]ProtocolDesc, 0, len(names))}
 	for _, name := range names {
 		opts, _ := client.ServerOptsFor(name)
-		out.Protocols = append(out.Protocols, ProtocolDesc{Name: name, Options: opts, Known: true})
+		out.Protocols = append(out.Protocols, ProtocolDesc{Name: name, Options: opts})
 	}
 	clientNames := client.Protocols()
 	out.ClientProtocols = make([]ProtocolDesc, 0, len(clientNames))
 	for _, name := range clientNames {
 		opts, _ := client.ClientOptsFor(name)
-		out.ClientProtocols = append(out.ClientProtocols, ProtocolDesc{Name: name, Options: opts, Known: true})
+		out.ClientProtocols = append(out.ClientProtocols, ProtocolDesc{Name: name, Options: opts})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -1217,22 +1223,27 @@ func redactOptions(protocol string, opts map[string]string) map[string]string {
 
 // decodeJSON reads a request body sized for the small config documents the API
 // accepts, into a target pointer. A nil body or a body over 1 MiB is rejected.
+//
+// Every error here is prefixed, because these four are not internal: they are
+// the 400 body an operator reads, and they are what s.audit.record stores, so
+// /api/audit showed a bare "empty body" with nothing naming the subsystem it
+// came from.
 func decodeJSON(r *http.Request, v any) error {
 	const maxBody = 1 << 20 // 1 MiB; a listener config is much smaller
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
 	if err != nil {
-		return fmt.Errorf("reading body: %w", err)
+		return fmt.Errorf("mgmt: reading body: %w", err)
 	}
 	if len(body) == 0 {
-		return fmt.Errorf("empty body")
+		return errors.New("mgmt: empty body")
 	}
 	if len(body) > maxBody {
-		return fmt.Errorf("body exceeds 1 MiB")
+		return errors.New("mgmt: body exceeds 1 MiB")
 	}
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
-		return fmt.Errorf("decoding JSON: %w", err)
+		return fmt.Errorf("mgmt: decoding JSON: %w", err)
 	}
 	return nil
 }
@@ -1249,9 +1260,4 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	enc.SetEscapeHTML(false)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(v)
-}
-
-// nowUnix is a slim wrapper kept for testability.
-func nowUnix() int64 {
-	return time.Now().Unix()
 }

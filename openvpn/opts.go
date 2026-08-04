@@ -33,7 +33,7 @@ func init() {
 		{Key: OptKeyDirection, Kind: client.OptInt, Default: "-1", Help: "tls-auth key direction: 0 or 1 (default: bidirectional)"},
 		{Key: OptUsername, Kind: client.OptStr, Help: "auth-user-pass username"},
 		{Key: OptPassword, Kind: client.OptStr, Secret: true, Help: "auth-user-pass password"},
-		{Key: OptShape, Kind: client.OptInt, Default: "0", Help: "per-flow upstream shaping budget in bytes (0 = off)"},
-		{Key: OptTUNName, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
+		client.ShapeOpt(OptShape, "upstream"),
+		client.TUNOpt(OptTUNName),
 	})
 }

@@ -107,14 +107,14 @@ func init() {
 		{Key: OptServerListenPort, Kind: client.OptInt, Default: "51820", Help: "UDP port to listen on (default 51820)"},
 		{Key: OptServerAddress, Kind: client.OptCIDR, Help: "server tunnel address in CIDR form (required unless in -config)"},
 		{Key: OptServerMTU, Kind: client.OptInt, Default: "1420", Help: "inner MTU (default 1420)"},
-		{Key: OptServerTUN, Kind: client.OptStr, Help: "TUN interface name (empty = kernel picks)"},
+		client.TUNOpt(OptServerTUN),
 		{Key: OptServerPeerPublicKey, Kind: client.OptStr, Help: "a single peer's static public key, base64"},
 		{Key: OptServerPeerPresharedKey, Kind: client.OptStr, Secret: true, Help: "the -peer-public-key peer's preshared key, base64 (optional)"},
 		{Key: OptServerPeerAllowedIPs, Kind: client.OptCommaList, Help: "the -peer-public-key peer's allowed IPs, comma-separated CIDRs"},
 		// OptStr, not OptCommaList: the value is a JSON document, and a
 		// comma-list editor in the panel would split it on the commas inside it.
 		{Key: OptServerPeers, Kind: client.OptStr, Help: "additional peers as a JSON array, e.g. [{\"public-key\":\"...\",\"allowed-ips\":[\"10.0.0.2/32\"]}] (managed by client-config generation)"},
-		{Key: OptServerShape, Kind: client.OptInt, Default: "0", Help: "per-flow downstream shaping budget in bytes (0 = off)"},
+		client.ShapeOpt(OptServerShape, "downstream"),
 	})
 }
 

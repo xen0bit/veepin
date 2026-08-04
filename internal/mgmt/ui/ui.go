@@ -14,9 +14,12 @@
 package ui
 
 import (
+	"bytes"
 	"embed"
 	"fmt"
 	"html/template"
+	"io"
+	"log"
 	"net/http"
 	"strings"
 )
@@ -28,18 +31,27 @@ var templatesFS embed.FS
 type Handler struct {
 	token string
 	tmpl  *template.Template
+	log   *log.Logger
 }
 
 // NewHandler parses the embedded templates once and stores the bearer token
 // for injection into the dashboard; the browser uses it for its /api fetches.
 // Returns an error if the embedded templates fail to parse, which a build
 // embeds once and which should therefore never happen.
-func NewHandler(token string) (*Handler, error) {
+//
+// logger is the supervisor's logger -- the same one feeding mgmt.LogRing, so a
+// render failure shows up in the panel's own /api/logs tail. It was an
+// fmt.Printf to stdout, which meant the panel's one failure mode was the one
+// thing the panel could not show you. A nil logger discards.
+func NewHandler(token string, logger *log.Logger) (*Handler, error) {
 	tmpl, err := template.ParseFS(templatesFS, "templates/*.html")
 	if err != nil {
 		return nil, fmt.Errorf("ui: parsing embedded templates: %w", err)
 	}
-	return &Handler{token: token, tmpl: tmpl}, nil
+	if logger == nil {
+		logger = log.New(io.Discard, "", 0)
+	}
+	return &Handler{token: token, tmpl: tmpl, log: logger}, nil
 }
 
 // pageData is the dashboard render context. The Token field is the only
@@ -102,23 +114,27 @@ func (h *Handler) serveAsset(w http.ResponseWriter, r *http.Request, name, ctype
 	_, _ = w.Write(body)
 }
 
+// render executes a template into the response.
+//
+// It renders into a buffer first, so a failure can still become a 500 with a
+// body. Executing straight into the ResponseWriter meant a template that failed
+// halfway had already sent 200 and a truncated page, and the code that noticed
+// could do nothing about it -- the comment there promised "write a 500 in the
+// body" above a line that wrote nothing to the body at all.
 func (h *Handler) render(w http.ResponseWriter, name string, data ...pageData) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	var ctx pageData
 	if len(data) > 0 {
 		ctx = data[0]
 	}
-	// The dashboard template reads only .Token; the form template reads
-	// .Token and .InitialJS. A zero InitialJS defaults to "" which the form
-	// JS treats as "edit with no name" -- but its only call with no InitialJS
-	// is the dashboard path, which uses a different template, so the empty
-	// value never reaches the form.
 	ctx.Token = h.token
-	if err := h.tmpl.ExecuteTemplate(w, name, ctx); err != nil {
-		// ExecuteTemplate writes directly to w; once we have started sending
-		// bytes, write a 500 in the body. Log via fmt since this package has
-		// no logger field and the panel never speaks to an operator beyond the
-		// browser.
-		fmt.Printf("ui: template %s failed: %v\n", name, err)
+
+	var buf bytes.Buffer
+	if err := h.tmpl.ExecuteTemplate(&buf, name, ctx); err != nil {
+		h.log.Printf("ui: template %s failed: %v", name, err)
+		http.Error(w, "panel template failed to render; see the supervisor log",
+			http.StatusInternalServerError)
+		return
 	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(buf.Bytes())
 }

@@ -87,7 +87,7 @@ func startMgmtTestServerWithDir(t *testing.T, statuses map[string]supervisor.Sta
 		t.Fatalf("mgmt.NewServer: %v", err)
 	}
 	ts := httptest.NewServer(srv.Handler())
-	t.Cleanup(func() { _ = srv.Close(); ts.Close() })
+	t.Cleanup(func() { _ = srv.CloseFleet(); ts.Close() })
 	return ts.URL, string(srv.Token()), dir, mgr
 }
 
@@ -160,8 +160,8 @@ func TestMgmtRm(t *testing.T) {
 	}
 }
 
-// TestMgmtRmNeedsConfirmation: rm is destructive, so a terminal run must be
-// asked before it deletes. Scripts (non-terminal stdin) proceed as before; the
+// TestMgmtRmConfirmDelete: rm is destructive, so a terminal run must be asked
+// before it deletes. Scripts (non-terminal stdin) proceed as before; the
 // guard is the interactive case, which a test cannot fake without a pty, so the
 // -y path and the non-terminal path are what are pinned here.
 func TestMgmtRmConfirmDelete(t *testing.T) {
@@ -215,7 +215,7 @@ func TestMgmtEditSurfacesABuildError(t *testing.T) {
 		t.Fatalf("mgmt.NewServer: %v", err)
 	}
 	ts := httptest.NewServer(srv.Handler())
-	t.Cleanup(func() { _ = srv.Close(); ts.Close() })
+	t.Cleanup(func() { _ = srv.CloseFleet(); ts.Close() })
 	t.Setenv("VEEPIN_MGMT_URL", ts.URL)
 	t.Setenv("VEEPIN_MGMT_TOKEN", string(srv.Token()))
 
@@ -379,7 +379,7 @@ func TestMgmtClientConfigWritesBundle(t *testing.T) {
 		t.Fatalf("mgmt.NewServer: %v", err)
 	}
 	ts := httptest.NewServer(srv.Handler())
-	t.Cleanup(func() { _ = srv.Close(); ts.Close() })
+	t.Cleanup(func() { _ = srv.CloseFleet(); ts.Close() })
 	t.Setenv("VEEPIN_MGMT_URL", ts.URL)
 	t.Setenv("VEEPIN_MGMT_TOKEN", string(srv.Token()))
 
@@ -426,7 +426,7 @@ func TestMgmtClientConfigRedactsOnStdoutUnlessAsked(t *testing.T) {
 		t.Fatalf("mgmt.NewServer: %v", err)
 	}
 	ts := httptest.NewServer(srv.Handler())
-	t.Cleanup(func() { _ = srv.Close(); ts.Close() })
+	t.Cleanup(func() { _ = srv.CloseFleet(); ts.Close() })
 	t.Setenv("VEEPIN_MGMT_URL", ts.URL)
 	t.Setenv("VEEPIN_MGMT_TOKEN", string(srv.Token()))
 
