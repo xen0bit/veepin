@@ -104,7 +104,7 @@ func TestKnownProfileFallback(t *testing.T) {
 // mutated (so a later dial without -set sees the original values).
 func TestApplyOverrides(t *testing.T) {
 	orig := map[string]string{"server": "old.example", "user": "alice"}
-	out, err := applyOverrides(orig, []string{"server=new.example", "port=8443"})
+	out, err := applyOverrides("connect", "toy", orig, []string{"server=new.example", "port=8443"})
 	if err != nil {
 		t.Fatalf("applyOverrides: %v", err)
 	}
@@ -117,8 +117,19 @@ func TestApplyOverrides(t *testing.T) {
 	if orig["server"] != "old.example" {
 		t.Errorf("the profile's own map was mutated: %v", orig)
 	}
-	if _, err := applyOverrides(orig, []string{"not-an-override"}); err == nil {
+	if _, err := applyOverrides("connect", "toy", orig, []string{"not-an-override"}); err == nil {
 		t.Errorf("a -set without '=' was accepted")
+	}
+	// A key the protocol does not declare is refused rather than added.
+	// ikev2's flag is -server and its option key is "gateway", so
+	// `-set server=...` on an ikev2 profile used to be accepted, change
+	// nothing, and dial the old gateway.
+	_, err = applyOverrides("connect", "ikev2", map[string]string{"gateway": "old.example"},
+		[]string{"server=new.example"})
+	if err == nil {
+		t.Error("a -set naming an option the protocol does not have was accepted")
+	} else if !strings.Contains(err.Error(), "gateway") {
+		t.Errorf("the error does not list the options ikev2 takes: %v", err)
 	}
 }
 
@@ -197,6 +208,15 @@ func TestProfileShowSecretsFlagDisplaysValues(t *testing.T) {
 // returns what it printed, so a test can assert on output the command owns.
 func runProfileCapturing(t *testing.T, args []string) (string, error) {
 	t.Helper()
+	return captureStdout(t, func() error { return runProfile(args) })
+}
+
+// captureStdout swaps os.Stdout for a pipe, runs fn, and returns what fn
+// printed. The reader runs in a goroutine and is drained to completion before
+// stdout is restored, so a command that writes more than a pipe buffer holds
+// does not deadlock.
+func captureStdout(t *testing.T, fn func() error) (string, error) {
+	t.Helper()
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
@@ -213,7 +233,7 @@ func runProfileCapturing(t *testing.T, args []string) (string, error) {
 		}
 		done <- buf.String()
 	}()
-	err := runProfile(args)
+	err := fn()
 	_ = w.Close()
 	out := <-done
 	os.Stdout = old

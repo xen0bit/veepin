@@ -20,6 +20,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"slices"
 	"strings"
@@ -71,8 +72,11 @@ func profileList(args []string) error {
 	}
 	// Print one line per profile: name, protocol. No JSON envelope — the output
 	// is meant for a human, not a pipeline (use the mgmt API for that).
-	for _, c := range cfgs {
-		fmt.Printf("%-24s %s\n", c.Name, c.Protocol)
+	//
+	// Sorted, because LoadDir returns a map and ranging one gave a different
+	// order on every run. Every other listing in the tree sorts.
+	for _, name := range slices.Sorted(maps.Keys(cfgs)) {
+		fmt.Printf("%-24s %s\n", name, cfgs[name].Protocol)
 	}
 	return nil
 }
@@ -216,7 +220,9 @@ func profileRm(args []string) error {
 	yes := false
 	filtered := make([]string, 0, len(args))
 	for _, a := range args {
-		if a == "-y" || a == "--y" {
+		// -yes too: it is what an operator types, and accepting only -y meant
+		// the long form fell through to be read as a name.
+		if a == "-y" || a == "--y" || a == "-yes" || a == "--yes" {
 			yes = true
 			continue
 		}

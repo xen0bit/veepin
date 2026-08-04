@@ -138,11 +138,21 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 	cfg.Address = splitList(opts[OptAddress])
 	cfg.DNS = splitList(opts[OptDNS])
 	cfg.TUNName = opts[OptTUNName]
+	// Reported, not discarded. `_` here meant -mtu not-a-number silently became
+	// 0, which is the silent-drop shape the CLI's flag guards exist to prevent.
 	if v := opts[OptMTU]; v != "" {
-		cfg.MTU, _ = strconv.Atoi(v)
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("amneziawg: %s %q: not a number", OptMTU, v)
+		}
+		cfg.MTU = n
 	}
 	if v := opts[OptShape]; v != "" {
-		cfg.Shape, _ = strconv.Atoi(v)
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("amneziawg: %s %q: not a number", OptShape, v)
+		}
+		cfg.Shape = n
 	}
 	// Set up a single peer.
 	pub := opts[OptPublicKey]
@@ -169,6 +179,16 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 	}
 
 	cfg.Obfuscation = parseObfuscation(opts)
+	// The same validation wireguard's own parseOptions runs. Without it this
+	// function filled the struct and returned, so the four Required flags in
+	// opts.go enforced nothing: an amneziawg profile with no options at all
+	// saved cleanly through `veepin profile add` and the panel alike, and
+	// failed only at dial. wireguard/opts.go's comment claims both facades fill
+	// the same Config and that Config.resolve rejects an absent private key
+	// before anything else -- true of one of them.
+	if err := cfg.Config.Validate(); err != nil {
+		return nil, err
+	}
 	return dialer{cfg: cfg}, nil
 }
 

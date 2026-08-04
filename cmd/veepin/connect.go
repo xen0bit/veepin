@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"slices"
+	"sort"
 	"strings"
 	"syscall"
 
@@ -123,7 +124,7 @@ func runConnectProfile(cfg profile.Config, args ...string) error {
 	if fs.NArg() != 0 {
 		return fmt.Errorf("connect: unexpected argument %q", fs.Arg(0))
 	}
-	opts, err := applyOverrides(cfg.Options, sets)
+	opts, err := applyOverrides("connect", cfg.Protocol, cfg.Options, sets)
 	if err != nil {
 		return err
 	}
@@ -133,8 +134,27 @@ func runConnectProfile(cfg profile.Config, args ...string) error {
 
 // applyOverrides merges repeatable -set key=value pairs onto opts, so a profile
 // dial can override one option without editing the file. An entry that is not
-// key=value is an error, not a silent no-op.
-func applyOverrides(opts map[string]string, sets []string) (map[string]string, error) {
+// key=value is an error, not a silent no-op, and neither is a key the protocol
+// does not declare.
+//
+// The key check matters more than it looks. A flag and its option key are not
+// always spelled the same -- ikev2's flag is -server and its option key is
+// "gateway" -- so
+//
+//	veepin connect home -set server=other.example.com
+//
+// was accepted, changed nothing, and dialled the old gateway. That is the
+// silent-drop shape flags_test.go's own header calls the worst kind of bug
+// here, and the spec table that answers it was already in the registry.
+//
+// cmd names the caller, since both `connect` and `mgmt client-config` reach
+// this and the error used to say "connect:" for both.
+func applyOverrides(cmd, protocol string, opts map[string]string, sets []string) (map[string]string, error) {
+	specs, haveSpecs := client.ClientOptsFor(protocol)
+	declared := make(map[string]bool, len(specs))
+	for _, sp := range specs {
+		declared[sp.Key] = true
+	}
 	out := maps.Clone(opts)
 	if out == nil {
 		out = map[string]string{}
@@ -142,7 +162,16 @@ func applyOverrides(opts map[string]string, sets []string) (map[string]string, e
 	for _, kv := range sets {
 		k, v, ok := strings.Cut(kv, "=")
 		if !ok || k == "" {
-			return nil, fmt.Errorf("connect: -set %q is not key=value", kv)
+			return nil, fmt.Errorf("%s: -set %q is not key=value", cmd, kv)
+		}
+		if haveSpecs && !declared[k] {
+			keys := make([]string, 0, len(declared))
+			for d := range declared {
+				keys = append(keys, d)
+			}
+			sort.Strings(keys)
+			return nil, fmt.Errorf("%s: -set %q: %s has no option %q (it takes: %s)",
+				cmd, kv, protocol, k, strings.Join(keys, ", "))
 		}
 		out[k] = v
 	}

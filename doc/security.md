@@ -358,8 +358,34 @@ JSON files. Secrets inside them (private keys, PSKs, passphrases, TOTP seeds)
 are plaintext at rest and redacted as the literal `<redacted>` on every API
 read. A PATCH that submits `<redacted>` for a secret key preserves the on-disk
 value rather than overwriting it with the placeholder, so a GET-then-PATCH
-round trip cannot destroy a stored key — but a copy-paste of the redacted
-value to a fresh POST will, which is the trade-off of a per-call bearer model.
+round trip cannot destroy a stored key. A POST cannot preserve anything — there
+is nothing on disk yet — so it refuses the sentinel as a literal value with a
+`400` naming the key, rather than storing the placeholder as if it were a key.
+That was the shape of a GET-then-POST-under-a-new-name copy: a `201 Created` and
+a listener whose private key was the eleven characters `<redacted>`.
+
+### Secrets reach the CLI as command-line arguments
+
+`veepin serve <proto> -psk …`, `veepin profile add … -password …` and the
+`-set key=value` overrides all take secret values on argv. On Linux that means
+the value is in `/proc/<pid>/cmdline`, readable by any process of the same user
+(and by root), and it lands in the invoking shell's history file. There is no
+`@/path/to/file` indirection and no interactive prompt; adding one is worthwhile
+and has not been done.
+
+Until then, the two surfaces that avoid argv entirely are the ones to prefer for
+key material:
+
+- **`veepin profile add` reading a JSON document on stdin** — the whole config,
+  secrets included, arrives through a pipe. `veepin profile show` redacts by
+  default and needs `-secrets` to print values.
+- **A listener JSON file the supervisor reads** — mode `0600`, root-only, never
+  on a command line. This is what the panel and `veepin mgmt add` write.
+
+`veepin mgmt client-config` likewise redacts on stdout by default; `-o <dir>`
+writes the real profile at mode `0600`, and `-secrets` is the explicit opt-in to
+put it on the terminal. The bearer token itself is never accepted on argv: it
+comes from `VEEPIN_MGMT_TOKEN` or `<config>/mgmt/token`.
 
 The supervisor is **the only `veepin` subsystem that mutates host state.**
 Single-protocol `veepin serve <proto>` opens a TUN and binds sockets but

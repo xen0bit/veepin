@@ -1,14 +1,22 @@
 // Command veepin is a userspace VPN client and server.
 //
-// It dispatches on a subcommand and a protocol:
+// It dispatches on a subcommand, most of them on a protocol:
 //
-//	veepin connect <protocol> [flags]   bring up a tunnel to a server
-//	veepin serve   <protocol> [flags]   run a VPN server
-//	veepin probe   <protocol> [flags]   diagnostic: handshake and one data packet
+//	veepin connect   <protocol|profile> [flags]  bring up a tunnel to a server
+//	veepin serve     <protocol> [flags]          run one VPN server
+//	veepin serve     -config <dir>               run a fleet of them, with a
+//	                                             management API and HTML panel
+//	veepin profile   <subcmd>                    manage client connection profiles
+//	veepin mgmt      <subcmd> [flags]            talk to a running supervisor's API
+//	veepin probe     <protocol> [flags]          diagnostic: handshake + one packet
+//	veepin udp-proxy [flags]                     forward a local UDP socket over
+//	                                             MASQUE CONNECT-UDP
 //
 // Running it bare prints the protocols the registry holds, which is the
 // authoritative list — every protocol package registers itself, so the command
-// never carries a copy of it that can go stale.
+// never carries a copy of it that can go stale. usage() in this file is the
+// same list; it is printed, this one is read, and they are checked against each
+// other by nothing, so keep them together.
 //
 // Creating a TUN device and editing the routing table require CAP_NET_ADMIN —
 // run as root, or grant the binary the capability once:

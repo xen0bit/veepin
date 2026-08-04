@@ -272,6 +272,55 @@ func TestClientConfigBundleIsAllOrNothing(t *testing.T) {
 	}
 }
 
+// TestClientConfigBundleRollbackRestoresWhatItReplaced: rollback removed every
+// name it had installed, including the ones that already existed and had been
+// overwritten. So re-running client-config over an existing bundle, and failing
+// partway, took the operator's previous files with it -- and the all-or-nothing
+// comment was wrong about which state it restored.
+func TestClientConfigBundleRollbackRestoresWhatItReplaced(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "bundle")
+	if err := os.MkdirAll(out, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A previous bundle the operator already has.
+	const oldProfile = `{"name":"site-a","note":"the one that works"}`
+	const oldCA = "-----BEGIN CERTIFICATE-----\nOLD\n-----END CERTIFICATE-----\n"
+	for name, body := range map[string]string{"profile.json": oldProfile, "ca.crt": oldCA} {
+		if err := os.WriteFile(filepath.Join(out, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The SECOND companion cannot be installed, so the run fails after
+	// profile.json and ca.crt have both been replaced.
+	if err := os.MkdirAll(filepath.Join(out, "client.key"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	resp := map[string]any{
+		"protocol": "openvpn",
+		"profile": map[string]any{
+			"name": "site-a", "protocol": "openvpn",
+			"options": map[string]any{"remote": "vpn.example.com", "ca": "ca.crt"},
+		},
+		"files": []any{
+			map[string]any{"name": "ca.crt", "content": "NEW"},
+			map[string]any{"name": "client.key", "content": "NEW"},
+		},
+	}
+	if err := writeClientConfigBundle(out, resp); err == nil {
+		t.Fatal("bundle succeeded despite an uninstallable companion")
+	}
+	for name, want := range map[string]string{"profile.json": oldProfile, "ca.crt": oldCA} {
+		got, err := os.ReadFile(filepath.Join(out, name))
+		if err != nil {
+			t.Errorf("%s was deleted by the rollback rather than restored: %v", name, err)
+			continue
+		}
+		if string(got) != want {
+			t.Errorf("%s = %q, want the operator's original %q", name, got, want)
+		}
+	}
+}
+
 // TestMgmtRequiresToken: without VEEPIN_MGMT_TOKEN, every subcommand fails
 // before sending a request so a misconfigured CLI never leaks its existence to
 // an unauthorised peer.
@@ -355,6 +404,59 @@ func TestMgmtClientConfigWritesBundle(t *testing.T) {
 	}
 	if strings.Contains(string(profBody), "<redacted>") {
 		t.Errorf("written profile contains a redaction placeholder: %s", profBody)
+	}
+}
+
+// TestMgmtClientConfigRedactsOnStdoutUnlessAsked: without -o the generated
+// profile goes to the terminal, and it is strictly more sensitive than anything
+// `veepin profile show` prints -- it carries the client's freshly minted private
+// key as well as every secret the listener supplied. `profile show` redacts by
+// default and takes -secrets to opt in; this printed the lot and took nothing.
+// A profile in scrollback, or in whatever a pipe fed, is a leak the operator
+// never asked for.
+func TestMgmtClientConfigRedactsOnStdoutUnlessAsked(t *testing.T) {
+	dir := t.TempDir()
+	cfg := supervisor.ListenerConfig{Name: "site-a", Protocol: "toy", Enabled: true,
+		Options: map[string]string{"user": "alice", "secret": "s3cret"}}
+	body, _ := json.Marshal(cfg)
+	_ = os.WriteFile(filepath.Join(dir, "site-a.json"), body, 0o600)
+	mgr := &cliFakeMgr{statuses: map[string]supervisor.Status{}}
+	srv, err := mgmt.NewServer(dir, mgr, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatalf("mgmt.NewServer: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(func() { _ = srv.Close(); ts.Close() })
+	t.Setenv("VEEPIN_MGMT_URL", ts.URL)
+	t.Setenv("VEEPIN_MGMT_TOKEN", string(srv.Token()))
+
+	out, err := captureStdout(t, func() error {
+		return runMgmt([]string{"client-config", "site-a", "-endpoint", "vpn.example.com"})
+	})
+	if err != nil {
+		t.Fatalf("client-config: %v", err)
+	}
+	if strings.Contains(out, "s3cret") {
+		t.Errorf("client-config printed a secret value to stdout: %s", out)
+	}
+	if !strings.Contains(out, "<redacted>") {
+		t.Errorf("client-config did not mark the secret redacted: %s", out)
+	}
+	// The non-secret options are still there: a redacted profile is meant to be
+	// readable, not useless.
+	if !strings.Contains(out, "vpn.example.com") {
+		t.Errorf("redaction ate the endpoint too: %s", out)
+	}
+
+	// -secrets is the opt-in, and it must print the real value.
+	out, err = captureStdout(t, func() error {
+		return runMgmt([]string{"client-config", "site-a", "-endpoint", "vpn.example.com", "-secrets"})
+	})
+	if err != nil {
+		t.Fatalf("client-config -secrets: %v", err)
+	}
+	if !strings.Contains(out, "s3cret") {
+		t.Errorf("-secrets did not print the value: %s", out)
 	}
 }
 
