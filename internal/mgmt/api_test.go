@@ -375,24 +375,58 @@ func TestCreateRespectsOperatorSuppliedKeys(t *testing.T) {
 	}
 }
 
-// TestCreateApplyFailureLeavesNoOrphanKeyDir: a create whose key generation
-// succeeded but whose Apply failed must take the generated key directory back
-// out. The file was never written into a live set, so DELETE can never reach
-// the orphan -- it is unreachable garbage that only this cleanup removes.
-func TestCreateApplyFailureLeavesNoOrphanKeyDir(t *testing.T) {
+// TestCreateApplyFailureKeepsTheConfigAndItsKeys: a create whose config was
+// written but whose Apply failed answers 202 "saved, but it did not come up" --
+// the same shape PATCH uses -- and leaves BOTH the config file and the key
+// material it names on disk, so POST .../restart can finish the job once the
+// operator has fixed whatever it was.
+//
+// This asserted a 500 with the key directory removed, and the pair was the
+// actual defect: a stored config naming ca.crt, tls.crt and tls.key at paths
+// that no longer existed, and no way to get them back, because
+// generateListenerKeys skips any spec whose option already has a value -- and
+// after the first create every one of them did. Found by running a real
+// supervisor without CAP_NET_ADMIN, which is the ordinary first-run failure.
+func TestCreateApplyFailureKeepsTheConfigAndItsKeys(t *testing.T) {
 	s := newTestServer(t, map[string]supervisor.Status{})
-	s.mgr.(*fakeMgr).applyErr = errors.New("wireguard: listen udp 51820: address in use")
-	cfg := supervisor.ListenerConfig{Name: "wg-fail", Protocol: "wireguard",
-		Options: map[string]string{"address": "10.10.0.1/24"}, Enabled: true}
-	resp, _ := s.do("POST", "/api/listeners", cfg)
-	if resp.StatusCode != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500 (the Apply failure must surface)", resp.StatusCode)
+	s.mgr.(*fakeMgr).applyErr = errors.New("dataplane: TUNSETIFF: operation not permitted")
+	// A TLS protocol, so key generation writes real files into <dir>/<name>/.
+	// WireGuard's generator puts its key in the config itself and would not
+	// exercise the path that mattered.
+	cfg := supervisor.ListenerConfig{Name: "tls-fail", Protocol: "sstp",
+		Options: map[string]string{"listen": "127.0.0.1", "user": "a:b"}, Enabled: true}
+	resp, body := s.do("POST", "/api/listeners", cfg)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (saved, but it did not come up); body=%s",
+			resp.StatusCode, body)
 	}
-	// keygen writes the WireGuard keypair into the config, not into files, so
-	// exercise the file-writing path too: a TLS listener's ca.crt/tls.key land
-	// in <dir>/<name>/ and are exactly what would be orphaned.
-	if _, err := os.Stat(filepath.Join(s.dir, "wg-fail")); err == nil {
-		t.Errorf("key dir was left behind after a failed create: <dir>/wg-fail exists")
+	var out struct {
+		BuildError string `json:"build_error"`
+	}
+	_ = json.Unmarshal(body, &out)
+	if !strings.Contains(out.BuildError, "TUNSETIFF") {
+		t.Errorf("the 202 does not carry the reason it failed: %s", body)
+	}
+
+	// The config survived, and every file path it names still resolves.
+	got := readListenerFile(t, s.dir, "tls-fail")
+	for _, key := range []string{"ca", "cert", "key"} {
+		path := got.Options[key]
+		if path == "" {
+			t.Errorf("generation did not fill the %q option: %v", key, got.Options)
+			continue
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("the stored config names %s=%q, which is not there: %v", key, path, err)
+		}
+	}
+
+	// And DELETE still reaches the directory, so nothing is stranded.
+	if resp, _ := s.do("DELETE", "/api/listeners/tls-fail", nil); resp.StatusCode != 200 {
+		t.Fatalf("delete status = %d, want 200", resp.StatusCode)
+	}
+	if _, err := os.Stat(filepath.Join(s.dir, "tls-fail")); err == nil {
+		t.Error("the key dir survived the delete")
 	}
 }
 

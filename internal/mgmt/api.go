@@ -657,14 +657,26 @@ func (s *Server) handleCreateListener(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.mgr.Apply(); err != nil {
-		// Same cleanup, one step later: the file landed but the listener never
-		// came up, and an orphan key directory with no running listener is
-		// unreachable by DELETE. The Apply failure itself is reported, so the
-		// operator sees why; the material they must keep (a generated public
-		// key) is recoverable from the written config file.
-		_ = os.RemoveAll(filepath.Join(s.dir, cfg.Name))
+		// The config file is on disk and the key material stays with it: 202,
+		// the same "saved, but it did not come up" answer PATCH gives, and the
+		// operator retries with POST .../restart once they have fixed whatever
+		// it was. A failing build is usually something outside the config --
+		// no CAP_NET_ADMIN, a port already bound -- not a reason to throw the
+		// request away.
+		//
+		// This used to RemoveAll the key directory and keep the config file,
+		// which is the worst of the three options: a stored config naming
+		// ca.crt, tls.crt and tls.key at paths that no longer exist, and no
+		// way to regenerate them, because generateListenerKeys skips a spec
+		// whose option already has a value -- and every one of them did. Its
+		// comment justified the deletion by saying the material an operator
+		// must keep is recoverable from the config, which holds for a
+		// WireGuard public key (it IS the config) and not at all for a TLS
+		// chain, where the config holds only paths.
 		res = err
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeJSON(w, http.StatusAccepted,
+			map[string]any{"status": "saved", "build_error": err.Error(),
+				"generated": generated})
 		return
 	}
 	// The generated map is surfaced once, on the create response: it carries the
