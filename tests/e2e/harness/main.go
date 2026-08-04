@@ -178,7 +178,11 @@ func run() error {
 		Handler:  mgmt.RequireHost([]string{ln.Addr().String()}, mux),
 		ErrorLog: logger,
 	}
-	logger.Printf("listening on http://%s (token %q)", ln.Addr(), *token)
+	// The address, not the token. It is a fixed test token so printing it leaks
+	// nothing, but this log goes to CI output verbatim and a bearer token in a
+	// build log is a habit worth not having. The suite gets the token from
+	// lib/config.ts, which is where the default is written down.
+	logger.Printf("listening on http://%s", ln.Addr())
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- httpSrv.Serve(ln) }()

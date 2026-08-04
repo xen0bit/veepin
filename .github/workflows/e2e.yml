@@ -97,11 +97,19 @@ jobs:
           PANEL_HARNESS: /tmp/veepin-panel-harness
         run: npx playwright test
 
-      - name: Upload traces on failure
+      - name: Upload the report and traces on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report
-          path: tests/e2e/test-results/
+          # Both directories, because they are different artifacts and only one
+          # of them was being uploaded under the other's name: the HTML report
+          # (playwright.config.ts's `html` reporter) lands in playwright-report/,
+          # and the per-test traces the `trace: retain-on-failure` setting keeps
+          # land in test-results/. Downloading "playwright-report" and finding no
+          # report in it is how that was noticed.
+          path: |
+            tests/e2e/playwright-report/
+            tests/e2e/test-results/
           if-no-files-found: ignore
           retention-days: 7

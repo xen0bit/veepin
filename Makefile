@@ -140,11 +140,17 @@ test-short:
 interop:
 	$(GO) test -tags interop -count=1 -timeout 20m ./tests/interop/...
 
-## e2e: Playwright browser tests of the management panel (needs Node >= 20.6 + Chromium; not in `test`)
+## e2e: Playwright browser tests of the management panel (needs Node >= 20.6; not in `test`)
 .PHONY: e2e
 e2e:
 	$(GO) build -o /tmp/veepin-panel-harness ./tests/e2e/harness
-	cd tests/e2e && npm ci && PANEL_HARNESS=/tmp/veepin-panel-harness npx playwright test
+	# `playwright install` is a no-op once the browser is in the shared cache, so
+	# running it every time costs nothing and makes this target work on a machine
+	# that has never run it. Without it the first run failed with playwright's
+	# "Executable doesn't exist" wall of text, and the only cure was a command
+	# documented nowhere the target could point at.
+	cd tests/e2e && npm ci && npx playwright install chromium && \
+		PANEL_HARNESS=/tmp/veepin-panel-harness npx playwright test
 
 ## test-v: run all tests verbosely with the race detector
 .PHONY: test-v
