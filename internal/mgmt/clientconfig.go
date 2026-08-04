@@ -247,12 +247,15 @@ var clientProtoMaps = map[string]clientProtoMap{
 // WireGuard-family protocols it also provisions a peer and cold-rebuilds the
 // listener, which is why this is a POST and not a GET.
 func (s *Server) handleClientConfig(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	name := s.pathName(w, r)
 	if name == "" {
+		return
+	}
+	// Body first, then the lock: see handleCreateListener.
+	var req ClientConfigRequest
+	if err := decodeJSON(r, &req); err != nil {
+		s.audit.record("listener.client-config", name, err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	// Held even for the assembly-only protocols: they read the listener file,
@@ -273,26 +276,39 @@ func (s *Server) handleClientConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	var req ClientConfigRequest
-	if err := decodeJSON(r, &req); err != nil {
-		res = err
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
 	out, err := s.buildClientConfig(cfg, req)
 	if err != nil {
 		res = err
-		// A derivation error is the operator's input, not a server fault; a
-		// rebuild failure during provisioning is the only server-side case and
-		// is reported as such by the error text.
-		status := http.StatusBadRequest
-		if strings.HasPrefix(err.Error(), "mgmt: provisioning") {
-			status = http.StatusInternalServerError
-		}
-		http.Error(w, err.Error(), status)
+		// Most derivation failures are the operator's input; the rest are ours.
+		// Which is which was decided by strings.HasPrefix over the error text,
+		// so every genuine server fault on the WireGuard path -- an entropy
+		// failure, an exhausted subnet, a key that will not derive -- was
+		// reported as 400 Bad Request, telling the operator their request was
+		// malformed when it was not.
+		http.Error(w, err.Error(), statusForBuildError(err))
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// errServerFault marks a client-config failure that is ours rather than the
+// caller's: exhausted entropy, an exhausted address pool, a listener whose
+// stored key will not derive, a rebuild that would not come back. Joined with
+// errors.Is rather than matched on message text, so rewording an error cannot
+// silently change the status code it produces.
+var errServerFault = errors.New("mgmt: server fault")
+
+// serverFault wraps err so statusForBuildError answers 500 for it.
+func serverFault(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", errServerFault, fmt.Sprintf(format, args...))
+}
+
+// statusForBuildError maps a buildClientConfig error to its HTTP status.
+func statusForBuildError(err error) int {
+	if errors.Is(err, errServerFault) {
+		return http.StatusInternalServerError
+	}
+	return http.StatusBadRequest
 }
 
 // buildClientConfig derives a client profile for the listener. It is the
@@ -463,11 +479,11 @@ func (s *Server) buildWGClientConfig(cfg supervisor.ListenerConfig, req ClientCo
 	}
 	clientPriv, clientPub, err := keygen.WireGuardKeypair()
 	if err != nil {
-		return nil, err
+		return nil, serverFault("generating a client keypair: %v", err)
 	}
 	alloc, err := allocateWGAddress(serverAddr, usedWGAddresses(cfg.Options))
 	if err != nil {
-		return nil, err
+		return nil, serverFault("allocating a tunnel address: %v", err)
 	}
 
 	// Provision the peer: append it to the listener's peers JSON, persist, and
@@ -483,11 +499,11 @@ func (s *Server) buildWGClientConfig(cfg supervisor.ListenerConfig, req ClientCo
 	})
 	body, err := json.Marshal(peers)
 	if err != nil {
-		return nil, fmt.Errorf("mgmt: serializing peers: %w", err)
+		return nil, serverFault("serializing peers: %v", err)
 	}
 	cfg.Options[wireguard.OptServerPeers] = string(body)
 	if err := supervisor.WriteListenerFile(s.dir, cfg); err != nil {
-		return nil, fmt.Errorf("mgmt: provisioning peer: %w", err)
+		return nil, serverFault("provisioning peer: %v", err)
 	}
 	if err := s.mgr.Rebuild(cfg.Name); err != nil {
 		// Roll the peer back out. The client's private key exists only in this
@@ -502,7 +518,7 @@ func (s *Server) buildWGClientConfig(cfg supervisor.ListenerConfig, req ClientCo
 		if rerr := supervisor.WriteListenerFile(s.dir, cfg); rerr != nil {
 			s.log.Printf("mgmt: %s: rolling back a failed peer provision: %v", cfg.Name, rerr)
 		}
-		return nil, fmt.Errorf("mgmt: provisioning peer: %w", err)
+		return nil, serverFault("provisioning peer: %v", err)
 	}
 
 	opts := map[string]string{
@@ -539,7 +555,11 @@ func serverPublicKey(priv, stored string) (string, error) {
 	if priv == "" {
 		return "", errors.New("mgmt: the listener has no server key to derive the public key from")
 	}
-	return keygen.WireGuardPublicKey(priv)
+	pub, err := keygen.WireGuardPublicKey(priv)
+	if err != nil {
+		return "", serverFault("deriving the server public key: %v", err)
+	}
+	return pub, nil
 }
 
 // usedWGAddresses is the set of host addresses already claimed within the

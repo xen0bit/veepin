@@ -7,6 +7,9 @@ package mgmt
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -256,6 +259,140 @@ func TestClientConfigWarnsWhenTheCertDoesNotCoverTheEndpoint(t *testing.T) {
 	for _, w := range out.Warnings {
 		if strings.Contains(w, "does not cover") {
 			t.Errorf("warned about a certificate that does cover the endpoint: %q", w)
+		}
+	}
+}
+
+// TestPeersOfAStoppedListenerIsNotAFourOhFour: Manager.Peers returned one bool
+// for three different answers, so a listener that exists but has no live server
+// -- stopped, disabled, or in ERROR -- was reported as "no such listener". That
+// is the row an operator opens, and the status half of the same panel view had
+// just answered 200 for it.
+func TestPeersOfAStoppedListenerIsNotAFourOhFour(t *testing.T) {
+	statuses := map[string]supervisor.Status{
+		"site-a": {Name: "site-a", Protocol: "wireguard", State: "error", Error: "bind: address in use"},
+	}
+	s, _, _ := newTestServer(t, statuses)
+	s.mgr.(*fakeMgr).notRunning = true
+
+	resp, body := s.do("GET", "/api/listeners/site-a/peers", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("peers of a listener in error state = %d, want 200: %s", resp.StatusCode, body)
+	}
+	var out struct {
+		Peers       []map[string]any `json:"peers"`
+		Unavailable string           `json:"unavailable"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("response not JSON: %v", err)
+	}
+	if out.Peers == nil {
+		t.Error("peers is null rather than an empty array; the panel iterates it")
+	}
+	if out.Unavailable == "" {
+		t.Error("nothing says why the peer list is empty, so it reads as 'no clients'")
+	}
+	// A name that really is unknown still 404s -- the point is the distinction,
+	// not that everything now answers 200.
+	if resp, _ := s.do("GET", "/api/listeners/never-existed/peers", nil); resp.StatusCode != 404 {
+		t.Errorf("peers of an unknown listener = %d, want 404", resp.StatusCode)
+	}
+}
+
+// TestClientConfigServerFaultsAreNotFourHundreds: which failures were the
+// caller's and which were ours was decided by strings.HasPrefix over the error
+// text, so an exhausted address pool -- a server-side condition the operator
+// can do nothing about from the request -- was reported as 400 Bad Request.
+func TestClientConfigServerFaultsAreNotFourHundreds(t *testing.T) {
+	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	// A /30 leaves exactly one host address besides the server's own.
+	resp, body := s.do("POST", "/api/listeners", map[string]any{
+		"name": "wg", "protocol": "wireguard",
+		"options": map[string]string{"address": "10.9.0.1/30"},
+		"enabled": true})
+	if resp.StatusCode != 201 {
+		t.Fatalf("create = %d: %s", resp.StatusCode, body)
+	}
+	// Drain the pool, then ask for one more.
+	var lastStatus int
+	var lastBody []byte
+	for range 6 {
+		resp, body = s.do("POST", "/api/listeners/wg/client-config",
+			map[string]any{"endpoint": "vpn.example.com"})
+		lastStatus, lastBody = resp.StatusCode, body
+		if lastStatus >= 400 {
+			break
+		}
+	}
+	if lastStatus < 400 {
+		t.Fatalf("the address pool never ran out; the test cannot see the case it is for")
+	}
+	if lastStatus != 500 {
+		t.Errorf("an exhausted address pool = %d, want 500: %s", lastStatus, lastBody)
+	}
+
+	// And a genuine caller error is still a 400.
+	resp, body = s.do("POST", "/api/listeners/wg/client-config",
+		map[string]any{"endpoint": "vpn.example.com", "overrides": map[string]string{"not-an-option": "x"}})
+	if resp.StatusCode != 400 {
+		t.Errorf("an unknown override = %d, want 400: %s", resp.StatusCode, body)
+	}
+}
+
+// TestRequireHostAdmitsTheHostsItWasToldAbout: the allow set was seeded only
+// from the literal -listen address, so binding 0.0.0.0 admitted the Host
+// "0.0.0.0" -- which no browser sends -- and 403'd every real request, panel
+// and API alike. Same for a reverse proxy or an `ssh -L` tunnel. The existing
+// test passed "10.0.0.5:8443" as the bind, the one shape where the literal
+// happens to equal the Host, so it could not see this.
+func TestRequireHostAdmitsTheHostsItWasToldAbout(t *testing.T) {
+	ok := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+	h := RequireHost([]string{"0.0.0.0:8443", "vpn.example.com"}, ok)
+
+	for _, host := range []string{
+		"vpn.example.com:8443", // named explicitly
+		"vpn.example.com",      // and without the port
+		"127.0.0.1:8443",       // loopback is always allowed
+		"localhost:8443",
+	} {
+		req := httptest.NewRequest("GET", "http://x/api/health", nil)
+		req.Host = host
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Errorf("Host %q = %d, want 200", host, rec.Code)
+		}
+	}
+	// Still strict about everything else -- an escape hatch that admitted any
+	// Host would be no guard at all.
+	for _, host := range []string{"attacker.example", "", "localhost.attacker.example"} {
+		req := httptest.NewRequest("GET", "http://x/api/health", nil)
+		req.Host = host
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != 403 {
+			t.Errorf("Host %q = %d, want 403", host, rec.Code)
+		}
+	}
+}
+
+// TestTailCountRejectsWhatItCannotRead: ?n=abc, ?n=-5 all silently meant "the
+// whole ring", so a typo in a curl returned everything with nothing to say the
+// parameter had been ignored.
+func TestTailCountRejectsWhatItCannotRead(t *testing.T) {
+	s, _, _ := newTestServer(t, map[string]supervisor.Status{})
+	WithLogRing(NewLogRing())(s)
+
+	for _, q := range []string{"abc", "-5", "1e3", " "} {
+		resp, _ := s.do("GET", "/api/logs?n="+url.QueryEscape(q), nil)
+		if resp.StatusCode != 400 {
+			t.Errorf("?n=%q = %d, want 400", q, resp.StatusCode)
+		}
+	}
+	for _, q := range []string{"", "0", "10"} {
+		resp, body := s.do("GET", "/api/logs?n="+q, nil)
+		if resp.StatusCode != 200 {
+			t.Errorf("?n=%q = %d, want 200: %s", q, resp.StatusCode, body)
 		}
 	}
 }

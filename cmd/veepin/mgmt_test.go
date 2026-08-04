@@ -52,8 +52,11 @@ func (f *cliFakeMgr) Stop(name string) error {
 	return nil
 }
 func (f *cliFakeMgr) Close() error { return nil }
-func (f *cliFakeMgr) Peers(name string) ([]client.PeerInfo, bool) {
-	return nil, false
+func (f *cliFakeMgr) Peers(name string) ([]client.PeerInfo, supervisor.PeerAvailability) {
+	if _, ok := f.statuses[name]; !ok {
+		return nil, supervisor.PeersNoSuchListener
+	}
+	return nil, supervisor.PeersUnsupported
 }
 
 // startMgmtTestServer launches a real mgmt.Server (with a fake manager) bound

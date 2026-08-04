@@ -328,21 +328,20 @@ func (m *e2eMgr) Close() error { return nil }
 
 // Peers returns the WireGuard-family peer list derived from the listener's
 // on-disk config, so a peer provisioned through client-config generation
-// actually shows up in the panel's peer table. exists is true only for a
-// running listener, mirroring the real manager (a server handle is nil
-// otherwise).
-func (m *e2eMgr) Peers(name string) ([]client.PeerInfo, bool) {
+// actually shows up in the panel's peer table. It mirrors the real manager's
+// four cases: only a running listener has a server handle to ask.
+func (m *e2eMgr) Peers(name string) ([]client.PeerInfo, supervisor.PeerAvailability) {
 	cfg, err := supervisor.ParseListenerFile(supervisor.ListenerPath(m.dir, name))
 	if err != nil {
-		return nil, false
+		return nil, supervisor.PeersNoSuchListener
 	}
 	m.mu.Lock()
 	st := m.statuses[name]
 	m.mu.Unlock()
 	if st.State != "running" {
-		return nil, false
+		return nil, supervisor.PeersNotRunning
 	}
-	return peersFromConfig(cfg), true
+	return peersFromConfig(cfg), supervisor.PeersOK
 }
 
 // deriveStatus is the fake's version of what the real manager publishes after a

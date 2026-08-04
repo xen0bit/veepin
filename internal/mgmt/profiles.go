@@ -31,10 +31,6 @@ func (s *Server) profileStore() *confstore.Store[profile.Config] {
 }
 
 func (s *Server) handleListProfiles(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	cfgs, err := s.profileStore().LoadDir()
 	if err != nil {
 		// A profile directory that does not exist yet is an empty fleet, not a
@@ -57,10 +53,6 @@ func (s *Server) handleListProfiles(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetProfile(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	name := s.pathName(w, r)
 	if name == "" {
 		return
@@ -79,22 +71,18 @@ func (s *Server) handleGetProfile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateProfile(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	// Body first, then the lock: see handleCreateListener.
+	var cfg profile.Config
+	if err := decodeJSON(r, &cfg); err != nil {
+		s.audit.record("profile.create", "", err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	s.mutate.Lock()
 	defer s.mutate.Unlock()
-	var name string
 	var res error
+	name := cfg.Name
 	defer func() { s.audit.record("profile.create", name, res) }()
-	var cfg profile.Config
-	if err := decodeJSON(r, &cfg); err != nil {
-		res = err
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	name = cfg.Name
 	if err := cfg.Validate(); err != nil {
 		res = err
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -187,12 +175,15 @@ func keepDeclaredClientOptions(protocol string, opts map[string]string) map[stri
 }
 
 func (s *Server) handlePatchProfile(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPatch {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	name := s.pathName(w, r)
 	if name == "" {
+		return
+	}
+	// Body first, then the lock: see handleCreateListener.
+	var in profilePatch
+	if err := decodeJSON(r, &in); err != nil {
+		s.audit.record("profile.patch", name, err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	s.mutate.Lock()
@@ -208,12 +199,6 @@ func (s *Server) handlePatchProfile(w http.ResponseWriter, r *http.Request) {
 		}
 		res = err
 		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	var in profilePatch
-	if err := decodeJSON(r, &in); err != nil {
-		res = err
-		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	if in.Name != nil && *in.Name != name {
@@ -248,10 +233,6 @@ func (s *Server) handlePatchProfile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteProfile(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	name := s.pathName(w, r)
 	if name == "" {
 		return

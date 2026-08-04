@@ -68,7 +68,7 @@ type ManagerBackend interface {
 	Rebuild(name string) error
 	Stop(name string) error
 	Close() error
-	Peers(name string) ([]client.PeerInfo, bool)
+	Peers(name string) ([]client.PeerInfo, supervisor.PeerAvailability)
 }
 
 // Option adjusts a Server before its routes are wired. NewServer takes none,
@@ -462,10 +462,6 @@ func (s *Server) pathName(w http.ResponseWriter, r *http.Request) string {
 
 // handleHealth answers a basic liveness probe.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	start := s.startedAt.Load()
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "uptime": nowUnix() - start})
 }
@@ -475,11 +471,15 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 // recent activity, and an operator investigating a misconfiguration can see
 // which listener was edited and whether the edit took.
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	n, err := tailCount(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"events": s.audit.recent(auditCapacity)})
+	if n == 0 {
+		n = auditCapacity
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"events": s.audit.recent(n)})
 }
 
 // handleLogs returns the supervisor's recent log lines, newest first. It is
@@ -487,21 +487,14 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 // field carries the last failure, but the log shows the sequence (build errors,
 // hostnet messages, request lines) that produced it.
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	if s.logs == nil {
 		http.Error(w, "no log ring configured", http.StatusNotFound)
 		return
 	}
-	// An explicit ?n bounds the response; the panel asks for the tail. The
-	// default is everything the ring holds, which is bounded by construction.
-	n := 0
-	if q := r.URL.Query().Get("n"); q != "" {
-		if parsed, err := strconv.Atoi(q); err == nil && parsed > 0 {
-			n = parsed
-		}
+	n, err := tailCount(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"lines": s.logs.Recent(n)})
 }
@@ -524,10 +517,6 @@ type ProtocolDesc struct {
 }
 
 func (s *Server) handleProtocols(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	names := client.ServerProtocols()
 	out := ProtocolsResp{Protocols: make([]ProtocolDesc, 0, len(names))}
 	for _, name := range names {
@@ -544,10 +533,6 @@ func (s *Server) handleProtocols(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListListeners(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	statuses := s.mgr.All()
 	// Add the on-disk configs for listeners that are not yet built (disabled).
 	// The status' State="disabled" or "stopped" carries the info; full config
@@ -563,10 +548,6 @@ type listenerResponse struct {
 }
 
 func (s *Server) handleGetListener(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	name := s.pathName(w, r)
 	if name == "" {
 		return
@@ -592,25 +573,26 @@ func (s *Server) handleGetListener(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateListener(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	s.mutate.Lock()
-	defer s.mutate.Unlock()
-	var name string
-	var res error
-	defer func() { s.audit.record("listener.create", name, res) }()
+	// Read the body BEFORE taking the fleet lock. Taking it first meant an
+	// authenticated client trickling one byte per minute held the lock that
+	// serialises every create, patch, delete, restart and client-config in the
+	// directory -- and with no ReadTimeout on the server there was no outer
+	// bound on how long.
+	//
 	// Start from the same defaults a hand-written config file gets, so a create
 	// that stays silent about "enabled" produces a running listener rather than
 	// one that is stored, listed, and never started.
 	cfg := supervisor.NewListenerConfig()
 	if err := decodeJSON(r, &cfg); err != nil {
-		res = err
+		s.audit.record("listener.create", "", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	name = cfg.Name
+	s.mutate.Lock()
+	defer s.mutate.Unlock()
+	var res error
+	name := cfg.Name
+	defer func() { s.audit.record("listener.create", name, res) }()
 	if err := cfg.Validate(); err != nil {
 		res = err
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -690,12 +672,15 @@ func (s *Server) handleCreateListener(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePatchListener(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPatch {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	name := s.pathName(w, r)
 	if name == "" {
+		return
+	}
+	// Body first, then the lock: see handleCreateListener.
+	var in listenerPatch
+	if err := decodeJSON(r, &in); err != nil {
+		s.audit.record("listener.patch", name, err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	s.mutate.Lock()
@@ -711,12 +696,6 @@ func (s *Server) handlePatchListener(w http.ResponseWriter, r *http.Request) {
 		}
 		res = err
 		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	var in listenerPatch
-	if err := decodeJSON(r, &in); err != nil {
-		res = err
-		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	// A rename would have to move the file and retire the old listener. The
@@ -760,10 +739,6 @@ func (s *Server) handlePatchListener(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteListener(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	name := s.pathName(w, r)
 	if name == "" {
 		return
@@ -808,10 +783,6 @@ func (s *Server) handleDeleteListener(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRestartListener(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	name := s.pathName(w, r)
 	if name == "" {
 		return
@@ -833,10 +804,6 @@ func (s *Server) handleRestartListener(w http.ResponseWriter, r *http.Request) {
 // an empty array; the panel renders nothing rather than showing a misleading
 // "no peers" which could be read as "no clients".
 func (s *Server) handlePeerList(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	name := s.pathName(w, r)
 	if name == "" {
 		return
@@ -847,15 +814,29 @@ func (s *Server) handlePeerList(w http.ResponseWriter, r *http.Request) {
 	// rebuild or stop that Close()s the server mid-call -- a panel poll racing
 	// a rekey is exactly when peer lists are wanted, and a use-after-close on
 	// the management plane is not a diagnostic anyone asked for.
-	peers, exists := s.mgr.Peers(name)
-	if !exists {
+	peers, avail := s.mgr.Peers(name)
+	switch avail {
+	case supervisor.PeersNoSuchListener:
 		http.Error(w, "no such listener", http.StatusNotFound)
+		return
+	case supervisor.PeersNotRunning:
+		// 200, not 404. The listener exists; it just has no live server to ask.
+		// Answering 404 told an operator inspecting a listener in error state
+		// that the listener did not exist, while the status half of the same
+		// panel view answered 200 for it.
+		writeJSON(w, http.StatusOK, map[string]any{
+			"peers":       []client.PeerInfo{},
+			"unavailable": "the listener is not running",
+		})
+		return
+	case supervisor.PeersUnsupported:
+		writeJSON(w, http.StatusOK, map[string]any{
+			"peers":       []client.PeerInfo{},
+			"unavailable": "this protocol does not report peers",
+		})
 		return
 	}
 	if peers == nil {
-		// Protocols without a PeerDescriber return a true exists with a nil
-		// slice; the panel renders nothing rather than a misleading "no peers"
-		// which could be read as "no clients".
 		peers = []client.PeerInfo{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"peers": peers})
@@ -871,10 +852,6 @@ func (s *Server) handlePeerList(w http.ResponseWriter, r *http.Request) {
 // The public key travels in the query string, not the path: it is base64, so a
 // path segment would be split by any "/" or "+" in the key.
 func (s *Server) handlePeerDelete(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	name := s.pathName(w, r)
 	if name == "" {
 		return
@@ -1180,6 +1157,28 @@ func mergeOptions(existing, patch map[string]string) map[string]string {
 		}
 	}
 	return out
+}
+
+// tailCount reads the ?n= tail bound shared by /api/logs and /api/audit. Zero
+// means "everything the ring holds", which is bounded by construction.
+//
+// A malformed value is a 400 rather than a silent fallback to everything. It
+// used to be the latter -- ?n=abc, ?n=-5 and ?n=0 all quietly meant the whole
+// ring, so a typo in a curl returned a thousand lines with nothing to say the
+// parameter had been ignored.
+func tailCount(r *http.Request) (int, error) {
+	q := r.URL.Query().Get("n")
+	if q == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(q)
+	if err != nil {
+		return 0, fmt.Errorf("mgmt: n=%q is not a number", q)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("mgmt: n=%d is negative", n)
+	}
+	return n, nil
 }
 
 // firstRedactedLiteral returns the first key whose value is the redaction

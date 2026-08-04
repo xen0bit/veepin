@@ -1054,8 +1054,8 @@ func TestPeersDoesNotRaceARebuild(t *testing.T) {
 		}()
 	}
 	for range 300 {
-		peers, exists := mgr.Peers("site-a")
-		if !exists {
+		peers, avail := mgr.Peers("site-a")
+		if avail != PeersOK {
 			// A rebuild stops the listener briefly; Peers may see the gap and
 			// report it as not-running, which is fine. What must never happen is
 			// a peer slice read from a server that was being Close()d.
@@ -1068,13 +1068,28 @@ func TestPeersDoesNotRaceARebuild(t *testing.T) {
 	wg.Wait()
 }
 
-// TestPeersUnknownListener: Peers of a name the manager never heard of reports
-// not-exists, so the API can answer 404 rather than an empty peer list.
+// TestPeersUnknownListener: Peers of a name the manager never heard of says so
+// specifically, so the API can answer 404 -- and says something DIFFERENT for a
+// listener that exists but is not running, which used to be the same answer.
+// That collapse made the panel report "no such listener" for a listener in
+// error state, next to a status panel that had just rendered it.
 func TestPeersUnknownListener(t *testing.T) {
 	dir := t.TempDir()
 	mgr := NewManager(dir, testLogger(t), (&fakeCtor{}).construct)
-	if _, exists := mgr.Peers("never-existed"); exists {
-		t.Errorf("Peers of an unknown listener reported exists")
+	if _, avail := mgr.Peers("never-existed"); avail != PeersNoSuchListener {
+		t.Errorf("Peers of an unknown listener = %v, want PeersNoSuchListener", avail)
+	}
+
+	// A disabled listener is tracked, has no server handle, and must not read
+	// as missing.
+	mustWriteFile(t, filepath.Join(dir, "site-a.json"), "site-a.json",
+		`{"name":"site-a","protocol":"toy","enabled":false}`)
+	if err := mgr.Apply(); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	t.Cleanup(func() { _ = mgr.Close() })
+	if _, avail := mgr.Peers("site-a"); avail != PeersNotRunning {
+		t.Errorf("Peers of a disabled listener = %v, want PeersNotRunning", avail)
 	}
 }
 

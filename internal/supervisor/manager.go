@@ -19,7 +19,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 
@@ -105,8 +105,12 @@ type Manager struct {
 	// the server half.
 	run hostnet.Commander
 
-	mu        sync.Mutex // guards listeners map
+	mu        sync.Mutex // guards listeners map and closed
 	listeners map[string]*running
+	// closed is latched by Close. Apply and Rebuild refuse afterwards, so a
+	// mutation already in flight on an HTTP goroutine cannot rebuild the fleet
+	// out from under a shutdown that has already torn it down.
+	closed bool
 }
 
 // NewManager returns a Manager whose ctor is real if none is supplied.
@@ -128,10 +132,15 @@ func NewManager(dir string, logger *log.Logger, ctor Constructor) *Manager {
 
 // SetCommander replaces the external command runner the host-networking calls
 // use. It exists for tests -- production leaves it unset, which means
-// ip/iptables/sysctl via os/exec. Call it before Apply.
+// ip/iptables/sysctl via os/exec.
+//
+// Call it before Apply, and only then. It takes no lock deliberately: the
+// readers (applyHostnet, teardownHostnet, and start by way of Rebuild) run with
+// Manager.mu released, so locking only the writer would have made the field
+// read as protected while protecting nothing -- which is worse than not locking
+// it, because the next person to touch this would believe the guarantee.
+// "Before Apply" is the real contract, and it is one a caller can keep.
 func (m *Manager) SetCommander(run hostnet.Commander) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.run = run
 }
 
@@ -280,15 +289,33 @@ func (m *Manager) Apply() error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closed {
+		return errClosed
+	}
 
 	var errs []error
 
-	// 1. Stop and remove listeners that are gone or now disabled.
+	// 1. Stop listeners that are gone or now disabled. A disabled one stays in
+	// the map, stopped; only a listener whose file has disappeared is removed.
+	//
+	// Deleting the disabled ones meant step 2 rebuilt them on the very next
+	// pass, because they were no longer present -- so every SIGHUP tore down
+	// and reconstructed each disabled listener, ran its hostnet teardown (a
+	// full `iptables -S` scan, for rules it never installed), and reset its
+	// Status.Since, which is why "disabled since" was always "just now".
 	for name, r := range m.listeners {
 		cfg, ok := cfgs[name]
-		if !ok || !cfg.Enabled {
+		if !ok {
 			m.stopLocked(r)
 			delete(m.listeners, name)
+			continue
+		}
+		if !cfg.Enabled {
+			m.stopLocked(r)
+			r.mu.Lock()
+			r.cfg = cfg
+			r.state = "disabled"
+			r.mu.Unlock()
 			continue
 		}
 		if configChanged(r.cfg, cfg) {
@@ -393,7 +420,7 @@ func (m *Manager) All() []Status {
 	for n := range m.listeners {
 		byName = append(byName, n)
 	}
-	sort.Strings(byName)
+	slices.Sort(byName)
 	for _, n := range byName {
 		out = append(out, statusOf(m.listeners[n]))
 	}
@@ -412,6 +439,10 @@ func (m *Manager) All() []Status {
 // concurrent Apply stopped and removed it while we were building.
 func (m *Manager) Rebuild(name string) error {
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return errClosed
+	}
 	r, ok := m.listeners[name]
 	if !ok {
 		m.mu.Unlock()
@@ -446,8 +477,12 @@ func (m *Manager) Rebuild(name string) error {
 	// no-op on a handle the remover already closed, so both cases are covered by
 	// the same call. It runs without Manager.mu, like the rebuild above, so a
 	// slow Close cannot freeze the fleet.
+	// By IDENTITY, not by name. A Stop followed by an Apply can put a DIFFERENT
+	// handle under this name, and a presence-by-name check then reads as "still
+	// tracked" -- leaving the server this rebuild just built neither torn down
+	// nor reachable, running untracked until the process exits.
 	m.mu.Lock()
-	_, still := m.listeners[name]
+	still := m.listeners[name] == r
 	m.mu.Unlock()
 	if !still {
 		m.stopLocked(r)
@@ -477,23 +512,59 @@ func (m *Manager) Stop(name string) error {
 func (m *Manager) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// Latched before anything is torn down, so a concurrent Apply or Rebuild
+	// refuses rather than rebuilding the fleet from disk behind us.
+	//
+	// cmd/veepin calls Close on SIGTERM while the management API's create
+	// handler can be inside Apply on an HTTP goroutine. Without the flag, Close
+	// emptied the map and that in-flight Apply then reopened every TUN, rebound
+	// every socket and reinstalled every iptables rule -- after the process had
+	// decided to exit, and with nothing left to tear any of it down again.
+	m.closed = true
 	var firstErr error
 	for name, r := range m.listeners {
 		m.stopLocked(r)
 		delete(m.listeners, name)
-		_ = name
-		if r.serveErr != nil && !errors.Is(r.serveErr, net.ErrClosed) && firstErr == nil {
-			firstErr = r.serveErr
+		// serveErr under r.mu like every other field on the handle. stopLocked
+		// waits for the serve goroutine before returning, so this read is
+		// already ordered -- and being ordered by a wait somewhere else is
+		// exactly the kind of thing a refactor moves. The package README says
+		// every field, without exception; this was the exception.
+		r.mu.Lock()
+		serveErr := r.serveErr
+		r.mu.Unlock()
+		if serveErr != nil && !errors.Is(serveErr, net.ErrClosed) && firstErr == nil {
+			firstErr = serveErr
 		}
 	}
 	return firstErr
 }
 
+// errClosed is what Apply and Rebuild answer after Close.
+var errClosed = errors.New("supervisor: manager is closed")
+
+// PeerAvailability says why a peer list is or is not available, which used to
+// be one bool covering three different answers.
+type PeerAvailability int
+
+const (
+	// PeersNoSuchListener: nothing by that name is tracked.
+	PeersNoSuchListener PeerAvailability = iota
+	// PeersNotRunning: the listener exists but has no server handle -- it is
+	// stopped, disabled, or in error. Collapsing this into "no such listener"
+	// made the panel's expanded detail for a listener in error state report
+	// that the listener did not exist, while the status half of the same view
+	// answered 200. That row is exactly the one an operator opens.
+	PeersNotRunning
+	// PeersUnsupported: running, but the protocol implements no PeerDescriber.
+	// The caller renders "no peer feature", not "no peers".
+	PeersUnsupported
+	// PeersOK: the returned slice is the live peer list.
+	PeersOK
+)
+
 // Peers returns the live peer list for a running listener whose protocol
-// implements client.PeerDescriber. exists is false when the listener is not
-// tracked or is not running (its server handle is nil); a true exists with a
-// nil slice means the protocol does not describe peers, which the caller must
-// render as "no peer feature" rather than "no peers".
+// implements client.PeerDescriber, and says which of the four cases applies.
 //
 // The PeerDescriber call runs while holding r.mu. That ordering is the point:
 // stopLocked clears r.srv and spawns srv.Close while holding r.mu, so a
@@ -501,23 +572,30 @@ func (m *Manager) Close() error {
 // underneath this call. Reading the live server through Server() and calling
 // Peers() afterward released r.mu first, which left the raw handle open to a
 // use-after-close exactly when a panel poll raced a rekey or a rebuild.
-func (m *Manager) Peers(name string) ([]client.PeerInfo, bool) {
+//
+// m.mu is released before the callback. Holding it across a protocol's Peers()
+// -- which may take that protocol's own lock, contended by a rekey -- froze
+// every Status, All, Apply and Stop in the process for the duration, which is
+// the opposite of the argument the rest of this file is built on. r.mu alone
+// gives the use-after-close protection above; the manager lock was only ever
+// needed to look the handle up.
+func (m *Manager) Peers(name string) ([]client.PeerInfo, PeerAvailability) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	r, ok := m.listeners[name]
+	m.mu.Unlock()
 	if !ok {
-		return nil, false
+		return nil, PeersNoSuchListener
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.srv == nil {
-		return nil, false
+		return nil, PeersNotRunning
 	}
 	pd, ok := r.srv.(client.PeerDescriber)
 	if !ok {
-		return nil, true
+		return nil, PeersUnsupported
 	}
-	return pd.Peers(), true
+	return pd.Peers(), PeersOK
 }
 
 // build allocates a fresh handle and starts it. The handle is returned whether
@@ -559,7 +637,7 @@ func (m *Manager) start(r *running, cfg ListenerConfig) error {
 	r.mu.Unlock()
 	srv, err := m.ctor(cfg.Protocol, cfg.Options)
 	if err != nil {
-		err = fmt.Errorf("constructing %s server: %w", cfg.Protocol, err)
+		err = fmt.Errorf("supervisor: constructing %s server: %w", cfg.Protocol, err)
 		r.setState(cfg, "error", err)
 		return err
 	}
@@ -589,7 +667,7 @@ func (m *Manager) start(r *running, cfg ListenerConfig) error {
 			// whatever half of the rule set landed.
 			_ = m.teardownHostnet(cfg.Name, hn)
 			_ = srv.Close()
-			aerr = fmt.Errorf("host networking: %w", aerr)
+			aerr = fmt.Errorf("supervisor: host networking: %w", aerr)
 			r.setState(cfg, "error", aerr)
 			return aerr
 		}

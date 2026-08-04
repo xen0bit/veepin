@@ -96,6 +96,36 @@ Client connection profiles are a second entity type the panel
 manages — see [Client profiles](mgmt.md#client-profiles) and the `-profiles`
 flag below.
 
+## Reaching the panel from anywhere but the host
+
+The panel is unauthenticated by necessity — it is the thing that hands the
+browser the token — so its boundary is the `Host` header. `mgmt.RequireHost`
+answers 403 unless `Host` names loopback, `localhost`, or the exact `-listen`
+address. That is what stops a page the operator visits from rebinding its own
+hostname to `127.0.0.1`, becoming same-origin with the panel, and reading the
+token out of the DOM.
+
+Seeding the allow-list from `-listen` alone makes any non-loopback bind
+unusable, because the Host a browser sends is a name and the bind is a literal:
+
+```sh
+veepin serve -config /etc/veepin -listen 0.0.0.0:8443
+# Host: vpn.example:8443  -> 403.  Host: 0.0.0.0:8443 -> nobody sends that.
+```
+
+`-allow-host` is the escape hatch, repeatable:
+
+```sh
+veepin serve -config /etc/veepin -listen 0.0.0.0:8443 \
+  -allow-host vpn.example.com -allow-host 203.0.113.4
+```
+
+Name the hosts operators will actually type — including the one a reverse proxy
+forwards, or the one on the near side of an `ssh -L` tunnel. Loopback stays
+allowed regardless. This does not make a routable bind *safe*: the transport is
+still plaintext HTTP and the token still crosses the wire in the clear, so put
+TLS in front of it. See [doc/security.md](../security.md).
+
 ## Profiles
 
 `-profiles <dir>` points the panel's profile endpoints at a directory of client

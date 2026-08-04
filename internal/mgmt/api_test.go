@@ -65,6 +65,7 @@ type fakeMgr struct {
 	rebuildErr error
 	stopErr    error
 	peerServer client.Server // optional, returned by Server()
+	notRunning bool          // Peers reports PeersNotRunning for a tracked listener
 }
 
 func (f *fakeMgr) Apply() error { f.applyCalls++; return f.applyErr }
@@ -97,15 +98,25 @@ func (f *fakeMgr) Stop(name string) error {
 	return f.stopErr
 }
 func (f *fakeMgr) Close() error { return nil }
-func (f *fakeMgr) Peers(name string) ([]client.PeerInfo, bool) {
+
+// Peers models the four cases the real manager distinguishes. notRunning lets a
+// test ask for the state an operator actually opens the panel on: a listener
+// that exists and has no live server.
+func (f *fakeMgr) Peers(name string) ([]client.PeerInfo, supervisor.PeerAvailability) {
+	if _, tracked := f.statuses[name]; !tracked && f.peerServer == nil {
+		return nil, supervisor.PeersNoSuchListener
+	}
+	if f.notRunning {
+		return nil, supervisor.PeersNotRunning
+	}
 	if f.peerServer == nil {
-		return nil, false
+		return nil, supervisor.PeersNoSuchListener
 	}
 	pd, ok := f.peerServer.(client.PeerDescriber)
 	if !ok {
-		return nil, true
+		return nil, supervisor.PeersUnsupported
 	}
-	return pd.Peers(), true
+	return pd.Peers(), supervisor.PeersOK
 }
 
 // newTestServer wires a real mgmt.Server with a fake manager and a temp config
