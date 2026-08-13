@@ -9,7 +9,7 @@ func init() {
 		{Key: OptServer, Kind: client.OptStr, Required: true, Help: "Fortinet SSL VPN server host or IP"},
 		{Key: OptPort, Kind: client.OptInt, Default: "443", Help: "server HTTPS port (default 443)"},
 		{Key: OptUser, Kind: client.OptStr, Required: true, Help: "username"},
-		{Key: OptPassword, Kind: client.OptStr, Secret: true, Help: "password"},
+		{Key: OptPassword, Flag: "pass", Kind: client.OptStr, Secret: true, Help: "password"},
 		{Key: OptRealm, Kind: client.OptStr, Help: "FortiOS realm"},
 		{Key: OptCA, Kind: client.OptFilePath, Help: "PEM bundle to verify the server against"},
 		{Key: OptInsecure, Kind: client.OptBool, Help: "skip TLS certificate verification (self-signed servers)"},

@@ -10,7 +10,7 @@ func init() {
 		{Key: OptServer, Kind: client.OptStr, Required: true, Help: "TOY server host or IP"},
 		{Key: OptPort, Kind: client.OptInt, Default: "5555", Help: "server UDP port (default 5555)"},
 		{Key: OptUser, Kind: client.OptStr, Required: true, Help: "username"},
-		{Key: OptSecret, Kind: client.OptStr, Secret: true, Required: true, Help: "shared secret; provides no real protection"},
+		{Key: OptSecret, Flag: "insecure-shared-secret", Kind: client.OptStr, Secret: true, Required: true, Help: "shared secret; provides no real protection"},
 		client.TUNOpt(OptTUN),
 	})
 }

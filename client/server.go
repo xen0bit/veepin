@@ -63,6 +63,16 @@ type OptSpec struct {
 	Secret   bool    `json:"secret,omitempty"`
 	Default  string  `json:"default,omitempty"`
 	Generate string  `json:"generate,omitempty"`
+
+	// Flag is the command-line spelling when it differs from Key. ikev2's key
+	// is "gateway" and its flag has always been -server; renaming either would
+	// break every runbook or every profile on disk, so the mapping is declared
+	// here rather than inferred.
+	//
+	// Empty means the two are the same, which is the overwhelming majority.
+	// It is deliberately not serialised: it is a fact about the command line,
+	// and the management API and panel speak in keys.
+	Flag string `json:"-"`
 }
 
 // OptKind is the panel-side type of an option value. It is loose -- the server

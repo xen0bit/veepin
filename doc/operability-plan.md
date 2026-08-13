@@ -38,14 +38,14 @@ which is where the plan and the tree are reconciled when they disagree.
 | # | Item | Value | Risk | Verdict | Status |
 |---|------|-------|------|---------|--------|
 | 6 | Seven facades accept exactly one user each — the engines don't | **High** | Low | **Do first** | ✅ landed |
-| 7 | Secrets arrive as flags, so they are in `ps` | Medium | Low | Do | ⬜ |
+| 7 | Secrets arrive as flags, so they are in `ps` | Medium | Low | Do | ✅ landed (with 9) |
 | 8 | Nothing anywhere counts a byte | **High** | Low | **Do** | ✅ landed |
 
 ### Part 3 — structure and reach
 
 | # | Item | Value | Risk | Verdict | Status |
 |---|------|-------|------|---------|--------|
-| 9 | 1,200 lines of flag switch restating the OptSpec tables | High | Medium | **Do** | ⬜ |
+| 9 | 1,200 lines of flag switch restating the OptSpec tables | High | Medium | **Do** | ✅ landed |
 | 10 | Sixteen protocols, one operating system | **Very high** | Medium | Do (macOS); don't (Windows) | ⬜ |
 | 11 | Logging has no level and no shape | Low | Low | Fold into 9 | ⬜ |
 | 12 | `client_route.go` has no build tag and shells out to `ip` | Low | Low | Fold into 10 | ⬜ |
@@ -427,6 +427,29 @@ by hand in seven `case` blocks that are about to be deleted.
 
 **Risk:** low.
 
+### ✅ Landed (with item 9)
+
+Nearly free, as predicted, once the flag set came from the specs: `Secret` on a
+spec now also produces a `-<flag>-file` companion. Sixty-odd of them, from one
+rule.
+
+Three decisions in the writing:
+
+- **It reads the file at parse time, not at collection time.** A file that
+  cannot be read is then reported by `fs.Parse` alongside every other
+  command-line error, rather than having to be threaded back through a
+  collector whose whole signature exists to be simple.
+- **Only the line terminator is trimmed.** `echo hunter2 > pass` is how every
+  operator will create one of these and the newline it adds is not part of the
+  secret — but a secret with leading or interior spaces *is* the secret, and
+  trimming it would produce a login that fails with no explanation anywhere.
+- **`Get()` returns the path, never the contents.** `-h` and every flag walker
+  read a flag's value back, and a Getter that hands out key material is one
+  that will eventually print some.
+
+A spec whose `Kind` is already `OptFilePath` is skipped: its value *is* a path,
+and `-key-file-file` would be nonsense.
+
 ## 8. Nothing anywhere counts a byte
 
 ```sh
@@ -554,6 +577,62 @@ existing `flags_test.go` perturbs every bound flag and requires the option map
 to change, so it holds the *current* behaviour against the generated one. Land
 it one subcommand at a time (`connect`, then `serve`), and diff `-h` output
 before and after for all seventeen.
+
+### ✅ Landed
+
+`cmd/veepin/optflags.go` generates both flag sets from the spec tables.
+`connectFlags` and `serveFlags` are eleven lines each. Net: **1,366 lines
+deleted, 196 added.** Item 7 came with it and is described below.
+
+The de-risking was done by dumping every flag every protocol bound today —
+name, type, default, help, and the key it reached, discovered by perturbation —
+and diffing that against the spec tables before writing a line of the binder.
+That dump answered the one question that decided the design:
+
+- **`OptSpec.Default` and "the flag's default" are not the same claim.** The
+  spec's `Default` is what the *protocol* does when the option is unset: 443 for
+  an HTTPS port, `AES-256-GCM` for an OpenVPN cipher. Making that the value the
+  CLI *emits* would have broken `veepin connect openvpn -config work.ovpn`,
+  where the file names a cipher — an unset `-cipher` would have overridden it,
+  and the operator would have got a cipher they never asked for with nothing
+  saying so.
+
+  So the flag *carries* `spec.Default` (which is what finally makes `-h` tell
+  the truth about what happens when you say nothing) and the collector **omits
+  any key still holding it and not explicitly passed**. An unset flag
+  contributes nothing, exactly as the hand-written switch did; passing the
+  default on purpose still emits it, which is how you override a config file
+  with the stock value deliberately.
+
+`OptSpec.Flag` is as proposed, and the dump found exactly thirteen options
+needing it: `-pass` for the nine protocols whose key is `password`, ikev2's
+`-server`/`-id`, and toy's `-insecure-shared-secret` (named to make the
+insecurity hard to miss).
+
+What it bought, against the plan's list:
+
+- Step 4 of "Adding a protocol" is gone; it now reads "add a blank import".
+- The two "spec keys and flags are the same set" guards collapsed into
+  `TestTheFlagSetIsTheSpecTable`, which asserts the bridge rather than
+  comparing two hand-written copies — plus one thing the old pair could not
+  see: two specs claiming one flag spelling, which would bind one and silently
+  drop the other.
+- `-h` is uniform, and now prints real defaults. It also stopped printing them
+  twice: a `Help` that spells "(default 500)" out is stripped, because the flag
+  package appends its own.
+
+Two things the plan did not anticipate:
+
+- **The facade imports in `connect.go`/`serve.go` were load-bearing.** They
+  looked like ordinary imports and were the registration side effect for
+  thirteen of the seventeen protocols. They are now blank imports in `main.go`,
+  which already claimed that role for the other four and now has the whole list
+  in one place with the reason written above it.
+- **The `-file` companions needed the perturbation guard taught about them**,
+  not excluded from it. A companion takes a *path*, so the guard's sentinel
+  string failed to open and the flag would have been reported as untestable
+  rather than tested. It now hands them a real file, which keeps them inside
+  the same guard as every other flag.
 
 ## 10. Sixteen protocols, one operating system
 

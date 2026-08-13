@@ -10,13 +10,13 @@ import "github.com/xen0bit/veepin/client"
 
 func init() {
 	client.RegisterClientOpts("ikev2", []client.OptSpec{
-		{Key: OptGateway, Kind: client.OptStr, Required: true, Help: "VPN server host or IP"},
+		{Key: OptGateway, Flag: "server", Kind: client.OptStr, Required: true, Help: "VPN server host or IP"},
 		{Key: OptPort, Kind: client.OptInt, Default: "500", Help: "server IKE port (default 500)"},
 		{Key: OptPSK, Kind: client.OptStr, Secret: true, Help: "pre-shared key"},
-		{Key: OptLocalID, Kind: client.OptStr, Required: true, Help: "local identity presented to the server"},
+		{Key: OptLocalID, Flag: "id", Kind: client.OptStr, Required: true, Help: "local identity presented to the server"},
 		{Key: OptServerID, Kind: client.OptStr, Help: "expected server identity (verified if set)"},
 		{Key: OptUser, Kind: client.OptStr, Help: "EAP-MSCHAPv2 username (enables EAP instead of client PSK)"},
-		{Key: OptPassword, Kind: client.OptStr, Secret: true, Help: "EAP-MSCHAPv2 password"},
+		{Key: OptPassword, Flag: "pass", Kind: client.OptStr, Secret: true, Help: "EAP-MSCHAPv2 password"},
 		{Key: OptCert, Kind: client.OptFilePath, Help: "client certificate PEM (enables certificate auth instead of PSK)"},
 		{Key: OptKey, Kind: client.OptFilePath, Secret: true, Help: "client private-key PEM (with cert)"},
 		{Key: OptCA, Kind: client.OptFilePath, Help: "CA bundle PEM to verify the server (default system roots)"},

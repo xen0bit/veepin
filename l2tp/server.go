@@ -24,7 +24,7 @@ func init() {
 		{Key: OptServerPool, Kind: client.OptCIDR, Default: "10.20.0.0/24", Help: "internal address pool handed to clients (default 10.20.0.0/24)"},
 		{Key: OptServerDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers assigned to clients"},
 		{Key: OptServerUser, Kind: client.OptStr, Help: "MS-CHAPv2 username to accept; the one-user shorthand for users-file, and one of the two is required"},
-		{Key: OptServerPassword, Kind: client.OptStr, Secret: true, Help: "the password for user"},
+		{Key: OptServerPassword, Flag: "pass", Kind: client.OptStr, Secret: true, Help: "the password for user"},
 		{Key: OptServerUsers, Kind: client.OptFilePath, Secret: true, Help: "path to a file of username:secret lines, for more than one user; MS-CHAPv2 derives its response from the password, so the secret must be the password itself"},
 		client.TUNOpt(OptServerTUN),
 		client.ShapeOpt(OptServerShape, "downstream"),

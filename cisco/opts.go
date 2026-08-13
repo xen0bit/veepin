@@ -13,7 +13,7 @@ func init() {
 		{Key: OptGroup, Kind: client.OptStr, Required: true, Help: "group name presented as the phase-1 identity"},
 		{Key: OptGroupPSK, Kind: client.OptStr, Secret: true, Required: true, Help: "the group's pre-shared key"},
 		{Key: OptUser, Kind: client.OptStr, Required: true, Help: "XAuth username"},
-		{Key: OptPassword, Kind: client.OptStr, Secret: true, Help: "XAuth password"},
+		{Key: OptPassword, Flag: "pass", Kind: client.OptStr, Secret: true, Help: "XAuth password"},
 		client.ShapeOpt(OptShape, "outbound"),
 		client.TUNOpt(OptTUN),
 	})

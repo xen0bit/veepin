@@ -406,7 +406,7 @@ func init() {
 		{Key: OptServerPool, Kind: client.OptCIDR, Default: "10.200.0.0/24", Help: "tunnel subnet clients use (default 10.200.0.0/24)"},
 		{Key: OptServerDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers (informational)"},
 		{Key: OptServerUser, Kind: client.OptStr, Help: "username to accept (password auth)"},
-		{Key: OptServerPassword, Kind: client.OptStr, Secret: true, Help: "the user's password"},
+		{Key: OptServerPassword, Flag: "pass", Kind: client.OptStr, Secret: true, Help: "the user's password"},
 		{Key: OptServerUsers, Kind: client.OptFilePath, Secret: true, Help: "path to a file of username:secret lines, for more than one user; the secret may be a bcrypt verifier"},
 		{Key: OptServerAuthorizedKeys, Kind: client.OptFilePath, Help: "path to an authorized_keys file (public-key auth)"},
 		client.TUNOpt(OptServerTUN),

@@ -35,11 +35,30 @@ import (
 
 	"github.com/xen0bit/veepin/client"
 
-	// Registers the protocols with the client registry. Adding a protocol here
-	// is what makes it dialable by name.
+	// Registers the protocols with the client registry, and with it their
+	// OptSpec tables -- which, since the flag set is generated from those
+	// tables, is now also what gives a protocol its command-line flags. Adding
+	// a protocol here is the whole of making it reachable from this command.
+	//
+	// docs_test.go reaches the registry through these same imports: forget one
+	// and the protocol-count check passes against a registry that has not heard
+	// of your protocol, so add the import first.
+	_ "github.com/xen0bit/veepin/amneziawg"
+	_ "github.com/xen0bit/veepin/anyconnect"
+	_ "github.com/xen0bit/veepin/cisco"
+	_ "github.com/xen0bit/veepin/fortinet"
+	_ "github.com/xen0bit/veepin/gp"
 	_ "github.com/xen0bit/veepin/ikev2"
+	_ "github.com/xen0bit/veepin/l2tp"
+	_ "github.com/xen0bit/veepin/l2tpv3"
+	_ "github.com/xen0bit/veepin/masque"
+	_ "github.com/xen0bit/veepin/nebula"
 	_ "github.com/xen0bit/veepin/openvpn"
+	_ "github.com/xen0bit/veepin/pulse"
+	_ "github.com/xen0bit/veepin/softether"
+	_ "github.com/xen0bit/veepin/ssh"
 	_ "github.com/xen0bit/veepin/sstp"
+	_ "github.com/xen0bit/veepin/toy"
 	_ "github.com/xen0bit/veepin/wireguard"
 )
 
