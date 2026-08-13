@@ -39,7 +39,7 @@ which is where the plan and the tree are reconciled when they disagree.
 |---|------|-------|------|---------|--------|
 | 6 | Seven facades accept exactly one user each — the engines don't | **High** | Low | **Do first** | ✅ landed |
 | 7 | Secrets arrive as flags, so they are in `ps` | Medium | Low | Do | ⬜ |
-| 8 | Nothing anywhere counts a byte | **High** | Low | **Do** | ⬜ |
+| 8 | Nothing anywhere counts a byte | **High** | Low | **Do** | ✅ landed |
 
 ### Part 3 — structure and reach
 
@@ -459,6 +459,47 @@ reports nothing.
 **Risk:** low, with one thing to watch: counters on the hot path are exactly
 where a careless `map[string]uint64` lookup per packet would undo the
 allocation-free inbound path. Per-tunnel struct fields, not a keyed map.
+
+### ✅ Landed
+
+`dataplane/counters.go` holds `TunnelCounters` (four `atomic.Uint64` and a
+last-seen), `DropReason`, and `PumpStats`. `Pump.Stats()` is the pump-wide
+figure with drops by reason; `Pump.TunnelStats(t)` is one tunnel's.
+`client.PeerInfo` grew `RxBytes`/`TxBytes`/`RxPackets`/`TxPackets`/`LastSeen`,
+filled by the two protocols that implement `PeerDescriber`, rendered by the
+panel, and exported by `GET /api/metrics`.
+
+Where the counters sit, and what it cost:
+
+- **Inbound is free.** `decapInbound` already resolves the demux key through
+  `p.byKey`, so the counters live in that map's *value* — the lookup that was
+  already happening now yields the tunnel and its counters together. The
+  `AllocsPerRun` guards are the check that this stayed free, and they pass.
+- **Outbound pays one pointer-keyed map read**, inside the `RLock` it already
+  takes. The route trie stores a bare `Tunnel`, and threading counters through
+  it would ripple into `routes_test.go` for no gain: the outbound path
+  allocates in `Encapsulate` regardless, so it is not the path the guards pin.
+  Named here because it is the one place this deviates from "not a keyed map".
+
+Four things the writing found that the plan did not anticipate:
+
+- **A rekey must not reset a peer's counters.** WireGuard re-registers the same
+  `Tunnel` under a new inbound key every two minutes; counters keyed by the
+  key rather than by the tunnel would have reset that often, and a byte total
+  that resets every two minutes means nothing.
+- **A removed tunnel's counts must be retained in the pump total.** A peer that
+  disconnected still carried what it carried, and a counter that decreases is
+  read by every time-series database as a counter *reset*.
+- **Aggregating and segmenting paths must count inner packets, not datagrams.**
+  IP-TFS puts several inner packets in one datagram and GSO turns one
+  super-frame into many segments; counting the datagram would make both report
+  a fraction of what they moved. Counted in the loop in each case.
+- **A keepalive is an authenticated packet with no payload.** It must move
+  last-seen — it is the proof of life — and must not move the byte count.
+
+`PeerInfo.LastSeen` is the field the plan asked for and is worth naming
+separately from `LastHandshake`: a peer that handshook an hour ago and has been
+silent since is indistinguishable from a healthy one by handshake time alone.
 
 ---
 

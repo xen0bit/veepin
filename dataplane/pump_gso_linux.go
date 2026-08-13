@@ -71,12 +71,18 @@ func (p *Pump) runVnet() {
 func (p *Pump) sendSegments(segs [][]byte, outs [][]byte) [][]byte {
 	dst, ok := innerDest(segs[0])
 	if !ok {
+		p.drops[DropNotIP].Add(1)
 		return outs[:0]
 	}
 	p.mu.RLock()
 	t := p.routes.lookup(dst)
+	var c *TunnelCounters
+	if t != nil {
+		c = p.stats[t]
+	}
 	p.mu.RUnlock()
 	if t == nil {
+		p.drops[DropNoRoute].Add(1)
 		return outs[:0] // no tunnel carries this destination
 	}
 
@@ -85,6 +91,7 @@ func (p *Pump) sendSegments(segs [][]byte, outs [][]byte) [][]byte {
 	// the whole super-frame — every segment is the same flow.
 	mtu := p.innerMTU()
 	if mtu > 0 && NeedsFragmentation(segs[0], mtu) {
+		p.drops[DropTooBig].Add(uint64(len(segs)))
 		if reply := FragNeeded(segs[0], mtu); reply != nil {
 			if _, err := p.writeTUN(reply); err != nil && p.log != nil {
 				p.log.Printf("dataplane: writing ICMP frag-needed: %v", err)
@@ -104,11 +111,16 @@ func (p *Pump) sendSegments(segs [][]byte, outs [][]byte) [][]byte {
 		// handshake, so there is nothing for the shaper to hide.
 		out, err := p.encap(t, seg, mtu)
 		if err != nil {
+			p.drops[DropEncapFailed].Add(1)
 			if p.log != nil {
 				p.log.Printf("dataplane: encap failed: %v", err)
 			}
 			continue
 		}
+		// Per segment, not per super-frame: a TSO super-frame is several
+		// packets on the wire, and counting it once would report a
+		// GSO-enabled server as moving a fraction of what it moved.
+		c.countTx(len(seg))
 		outs = append(outs, out)
 	}
 	if len(outs) == 0 {

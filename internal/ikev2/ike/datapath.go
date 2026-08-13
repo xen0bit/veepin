@@ -281,6 +281,20 @@ func (d *PumpDataPath) RemoveChild(sa *IKESA, child *ChildSA) {
 	}
 }
 
+// ChildTraffic reports what one Child SA has carried, implementing the
+// interface Peers type-asserts. The SPI is the one the pump demuxes on, so this
+// is a lookup in the same map RemoveChild uses -- no separate bookkeeping to
+// fall out of step with the tunnel's lifetime.
+func (d *PumpDataPath) ChildTraffic(inboundSPI uint32) (dataplane.TunnelStats, bool) {
+	d.mu.Lock()
+	t := d.byIn[inboundSPI]
+	d.mu.Unlock()
+	if t == nil {
+		return dataplane.TunnelStats{}, false
+	}
+	return d.pump.TunnelStats(t)
+}
+
 // UpdatePeerAddr repoints every tunnel belonging to sa at addr, so ESP return
 // traffic follows a MOBIKE UPDATE_SA_ADDRESSES at once instead of waiting for
 // the first inbound ESP datagram from the new address. The caller holds sa.mu,

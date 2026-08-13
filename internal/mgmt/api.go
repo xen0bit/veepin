@@ -185,6 +185,7 @@ func NewServer(dir string, mgr ManagerBackend, logger *log.Logger, opts ...Optio
 	s.mux.HandleFunc("GET /api/listeners/{name}/peers", s.handlePeerList)
 	s.mux.HandleFunc("DELETE /api/listeners/{name}/peers", s.handlePeerDelete)
 	s.mux.HandleFunc("POST /api/listeners/{name}/client-config", s.handleClientConfig)
+	s.mux.HandleFunc("GET /api/metrics", s.handleMetrics)
 	s.mux.HandleFunc("GET /api/audit", s.handleAudit)
 	s.mux.HandleFunc("GET /api/logs", s.handleLogs)
 	if s.profiles != "" {
