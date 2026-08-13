@@ -28,7 +28,7 @@ which is where the plan and the tree are reconciled when they disagree.
 | # | Item | Value | Risk | Verdict | Status |
 |---|------|-------|------|---------|--------|
 | 1 | DNS is negotiated and then discarded | **High** | Low | **Do first** | ✅ landed |
-| 2 | Nothing re-dials, though the machinery for it exists | **High** | Low | **Do** | ⬜ |
+| 2 | Nothing re-dials, though the machinery for it exists | **High** | Low | **Do** | ✅ landed |
 | 3 | No kill switch: a dead tunnel fails open | Medium | Medium | Do, after 2 | ⬜ |
 | 4 | Split tunnel has no way to name a route | Medium | Low | Do | ⬜ |
 | 5 | `veepin probe` covers one protocol of seventeen | Low | None | Do (trivial) | ⬜ |
@@ -183,6 +183,38 @@ Three details that decide whether this is any good:
 **Risk:** low. Additive around an existing call, and the failure it introduces
 (retrying something that should have stopped) is visible in the log rather than
 silent.
+
+### ✅ Landed
+
+`dialConnect` is now the loop and `oneSession` is the body: dial, apply, wait,
+undo. `oneSession` returns how long the tunnel was up and whether the teardown
+was intended, which is the only thing the loop needs to decide. `cmd/veepin/retry.go`
+holds the backoff and the permanence rule, with the arithmetic tested rather
+than eyeballed.
+
+Four things the writing changed or added:
+
+- **Option parsing was hoisted out of the loop.** A malformed option produces
+  the identical error on every attempt, so retrying it prints the same line
+  forever instead of telling the operator their config is wrong.
+  `client.ValidateOptions` runs the same ParseFunc `Dial` does, so this costs a
+  parse and changes nothing else.
+- **The signal context is per-command, not per-session.** It was created inside
+  the body, after routing; a Ctrl-C during a sixty-second backoff would have
+  waited out the backoff. It is now created once, before the first attempt, and
+  the backoff sleep selects on it.
+- **The jitter is half-and-half rather than full.** A full-jitter draw of
+  "somewhere in [0, nominal]" can come up near zero, which turns backoff into a
+  tight loop against a server that is refusing connections. The floor at half
+  the nominal keeps the randomisation — which is what stops a fleet re-dialling
+  a restarted server in lockstep — without losing the property it is there for.
+- **`ErrUnknownProtocol` joins `ErrAuth` as permanent.** It means a missing
+  blank import, and no amount of waiting adds one.
+
+The "routes come down between attempts" detail the plan flagged is not a
+special case in the code: `oneSession`'s defers run on every path, so a re-dial
+always starts from the host as it was. Item 3 is what makes that deliberate
+rather than merely correct.
 
 ## 3. No kill switch: a dead tunnel fails open
 

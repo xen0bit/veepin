@@ -387,7 +387,18 @@ the host's real address. On disconnect (Ctrl-C) both are reverted. Useful flags:
   changes (useful for testing, or when another process manages both).
 - `-no-dns` — keep the routes but leave the host's resolvers alone, for the
   operator who manages their own.
+- `-retry=false` / `-retry-max <n>` — see below.
 - `-server-id` — verify the server presents this identity in its IDr.
+
+A dropped tunnel is re-dialled by default, with jittered exponential backoff
+from one second to a minute, resetting after a session that stayed up for a
+minute. A laptop changing Wi-Fi networks or a tether that drops for four
+seconds reconnects on its own; the host's routes, addresses and resolvers come
+all the way down between attempts, so a failed re-dial leaves nothing behind.
+**A rejected credential is never retried** — that is a lockout on any server
+that counts failures, and `client.ErrAuth` is what distinguishes it. `-retry=false`
+returns to the shell on the first drop, and `-retry-max <n>` bounds the
+attempts, for scripts and CI that need a failure to be a failure.
 
 Which mechanism installs the resolvers depends on the host, and the connect log
 line names the one that ran. Where systemd-resolved is running the servers are

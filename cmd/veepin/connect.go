@@ -8,12 +8,14 @@ import (
 	"io/fs"
 	"log"
 	"maps"
+	"math/rand/v2"
 	"os"
 	"os/signal"
 	"slices"
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/xen0bit/veepin/amneziawg"
 	"github.com/xen0bit/veepin/anyconnect"
@@ -187,19 +189,99 @@ func (s *setList) Set(v string) error {
 }
 
 // dialConnect is the shared dial+route+serve tail that bare mode and profile
-// mode both call. It houses the body that runConnect had as its second half,
-// extracted so the two paths converge on the same runtime surface.
+// mode both call, wrapped in the reconnection loop.
+//
+// The loop is the whole of the difference from what this used to be. Previously
+// a session that ended for any reason returned to the shell, which meant the
+// cross-protocol liveness monitor -- whose entire job is to notice a dead peer
+// and end the session -- converted every recoverable outage into a permanent
+// one. Now the monitor's teardown is what triggers a re-dial, which is the
+// caller its own doc comment describes and that did not exist.
+//
+// Three things decide whether this is any good, and each is enforced below:
+// a rejected credential is never retried, the host's routing state comes all
+// the way down between attempts, and a signal during a backoff exits now.
 func dialConnect(protocol string, opts map[string]string, netCfg netFlags, logger *log.Logger) error {
+	// One signal context for the whole command, not one per session: a Ctrl-C
+	// during a sixty-second backoff has to exit immediately, and a per-attempt
+	// context cannot see it.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// Parse once, up front. A malformed option produces the same error on every
+	// attempt, so retrying it is a loop that prints the same line forever
+	// instead of telling the operator their config is wrong. Dial parses again
+	// through the same function, so this costs a parse and changes no behaviour.
+	if err := client.ValidateOptions(protocol, opts); err != nil {
+		return err
+	}
+
+	rnd := rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), 0))
+	consecutive := 0 // failures since the last session that stayed up
+	for attempt := 1; ; attempt++ {
+		upFor, err := oneSession(ctx, protocol, opts, netCfg, logger)
+		switch {
+		case err == nil:
+			// An intended teardown: the operator's signal, or a session that
+			// ended without incident.
+			return nil
+		case ctx.Err() != nil:
+			// The signal arrived mid-dial or mid-session. Whatever else the
+			// error says, the operator asked to stop.
+			return nil
+		case permanent(err):
+			return err
+		case !netCfg.retry:
+			return err
+		}
+
+		// A session that carried traffic for a while was a working
+		// configuration; the next failure is a new outage, not an escalating
+		// one, and starts again from one second.
+		if upFor >= retrySettled {
+			consecutive = 0
+		}
+		consecutive++
+
+		if netCfg.retryMax > 0 && attempt >= netCfg.retryMax {
+			return fmt.Errorf("connect: giving up after %d attempts: %w", attempt, err)
+		}
+		delay := backoff(consecutive, rnd)
+		logger.Printf("disconnected: %v — reconnecting in %s%s",
+			err, delay.Round(100*time.Millisecond), attemptsLeft(attempt+1, netCfg.retryMax))
+		if !sleepCtx(ctx, delay) {
+			return nil // signalled during the backoff
+		}
+	}
+}
+
+// oneSession dials, applies the negotiated configuration, and blocks until the
+// session ends. It returns how long the tunnel was up and why it ended: a nil
+// error means the teardown was intended (the operator's signal, or a clean
+// close) and the caller should not re-dial.
+//
+// Everything it installs is undone before it returns, by defers that run on
+// every path including a panic. That is what makes the retry loop above safe:
+// a re-dial starts from a host whose routing table, addresses and resolver
+// configuration are as they were before the first attempt.
+func oneSession(
+	ctx context.Context,
+	protocol string,
+	opts map[string]string,
+	netCfg netFlags,
+	logger *log.Logger,
+) (time.Duration, error) {
 	fullTunnel, noRoute := netCfg.fullTunnel, netCfg.noRoute
 
 	// 1. Handshake + data path. Dial installs no routes -- that is this
 	// command's job, and the split is what lets NetworkManager reuse the same
 	// dial.
-	sess, res, err := client.Dial(context.Background(), protocol, opts)
+	sess, res, err := client.Dial(ctx, protocol, opts)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer sess.Close()
+	up := time.Now()
 	logger.Printf("connected on %s, internal IP %s (v6 %s), netmask %s, DNS %v",
 		res.TUNName, res.AssignedIP, res.AssignedIP6, res.Netmask, res.DNS)
 
@@ -232,14 +314,14 @@ func dialConnect(protocol string, opts map[string]string, netCfg netFlags, logge
 		// now a rewritten resolv.conf -- behind for good. Revert is guarded by
 		// what it actually installed, so calling it after a failed or partial
 		// Apply is exactly right.
-		err := router.Apply()
+		aerr := router.Apply()
 		defer func() {
 			if rerr := router.Revert(); rerr != nil {
 				logger.Printf("route cleanup: %v", rerr)
 			}
 		}()
-		if err != nil {
-			logger.Printf("routing setup failed: %v (continuing with whatever came up)", err)
+		if aerr != nil {
+			logger.Printf("routing setup failed: %v (continuing with whatever came up)", aerr)
 		} else {
 			logger.Printf("routing configured (full-tunnel=%v)", fullTunnel)
 		}
@@ -257,20 +339,20 @@ func dialConnect(protocol string, opts map[string]string, netCfg netFlags, logge
 	logger.Printf("tunnel up. Press Ctrl-C to disconnect.")
 
 	// 3. Wait for a signal or for the session to end on its own.
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-	// Report why the session ended. A tunnel that dies on its own -- a dropped
-	// carrier, a peer teardown, a protocol error -- is otherwise
-	// indistinguishable from a clean Ctrl-C, which makes a failure in the field
-	// or in CI nearly impossible to diagnose from the logs.
+	//
+	// Distinguishing the two is what tells the loop above whether to re-dial,
+	// and it is the same distinction the log line already drew: a tunnel that
+	// dies on its own -- a dropped carrier, a peer teardown, a protocol error --
+	// is otherwise indistinguishable from a clean Ctrl-C, which makes a failure
+	// in the field or in CI nearly impossible to diagnose from the logs.
 	err = sess.Wait(ctx)
 	switch {
-	case err == nil || errors.Is(err, context.Canceled):
+	case err == nil, errors.Is(err, context.Canceled):
 		logger.Printf("disconnecting")
+		return time.Since(up), nil
 	default:
-		logger.Printf("disconnecting: %v", err)
+		return time.Since(up), err
 	}
-	return nil
 }
 
 // connectFlags binds a protocol's flags onto fs and returns a function that

@@ -16,6 +16,8 @@ type netFlags struct {
 	fullTunnel bool
 	noRoute    bool
 	noDNS      bool
+	retry      bool
+	retryMax   int
 }
 
 // bindNetFlags declares the host-networking flags on fs and returns the struct
@@ -30,5 +32,11 @@ func bindNetFlags(fs *flag.FlagSet) *netFlags {
 		"leave the host's resolvers alone; by default the servers the tunnel "+
 			"offers are installed for its lifetime, because a full tunnel that "+
 			"keeps the old resolver leaks every query it was meant to hide")
+	fs.BoolVar(&n.retry, "retry", true,
+		"re-dial when the tunnel drops, with jittered backoff from 1s to 60s; "+
+			"a rejected credential is never retried. -retry=false for scripts")
+	fs.IntVar(&n.retryMax, "retry-max", 0,
+		"give up after this many attempts (0 = keep trying), for CI and scripts "+
+			"that need a bounded failure")
 	return n
 }
