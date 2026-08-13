@@ -20,6 +20,7 @@ import (
 	"github.com/xen0bit/veepin/internal/mschap"
 	"github.com/xen0bit/veepin/internal/ppp"
 	"github.com/xen0bit/veepin/internal/sstp/wire"
+	"github.com/xen0bit/veepin/internal/userdb"
 )
 
 // ServerConfig configures an SSTP responder and its userspace data path.
@@ -537,6 +538,7 @@ const (
 	OptServerDNS      = "dns"
 	OptServerUser     = "user"
 	OptServerPassword = "password"
+	OptServerUsers    = "users-file"
 	OptServerTUN      = "tun"
 	OptServerShape    = "shape" // per-flow downstream shaping budget in bytes (0 = off)
 )
@@ -550,8 +552,9 @@ func init() {
 		{Key: OptServerPort, Kind: client.OptInt, Default: "443", Help: "TCP port to listen on (default 443)"},
 		{Key: OptServerPool, Kind: client.OptCIDR, Default: "10.9.0.0/24", Help: "internal address pool handed to clients (default 10.9.0.0/24)"},
 		{Key: OptServerDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers assigned to clients"},
-		{Key: OptServerUser, Kind: client.OptStr, Required: true, Help: "MS-CHAPv2 username to accept"},
-		{Key: OptServerPassword, Kind: client.OptStr, Required: true, Secret: true, Help: "the user's password"},
+		{Key: OptServerUser, Kind: client.OptStr, Help: "MS-CHAPv2 username to accept; the one-user shorthand for users-file, and one of the two is required"},
+		{Key: OptServerPassword, Kind: client.OptStr, Secret: true, Help: "the password for user"},
+		{Key: OptServerUsers, Kind: client.OptFilePath, Secret: true, Help: "path to a file of username:secret lines, for more than one user; MS-CHAPv2 derives its response from the password, so the secret must be the password itself"},
 		client.TUNOpt(OptServerTUN),
 		client.ShapeOpt(OptServerShape, "downstream"),
 	})
@@ -574,8 +577,8 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 	if cfg.Key, err = os.ReadFile(opts[OptServerKey]); err != nil {
 		return nil, fmt.Errorf("sstp: key: %w", err)
 	}
-	if u := opts[OptServerUser]; u != "" {
-		cfg.Users[u] = opts[OptServerPassword]
+	if cfg.Users, err = userdb.Resolve(userdb.NeedsPlaintext, opts[OptServerUsers], opts[OptServerUser], opts[OptServerPassword]); err != nil {
+		return nil, fmt.Errorf("sstp: %w", err)
 	}
 	if v := opts[OptServerPort]; v != "" {
 		p, perr := strconv.Atoi(v)

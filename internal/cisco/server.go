@@ -26,6 +26,7 @@ import (
 
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/ikev1"
+	"github.com/xen0bit/veepin/internal/userdb"
 )
 
 // ServerConfig configures the gateway.
@@ -257,9 +258,13 @@ func (s *Server) groupKey(group string) ([]byte, bool) {
 }
 
 // authenticate checks XAuth credentials.
+// authenticate answers the XAuth exchange. The comparison is constant-time with
+// respect to the password (it was a bare ==, which leaked its length), and the
+// stored secret may be a bcrypt verifier: XAuth carries the password itself, so
+// the gateway never needs to hold one.
 func (s *Server) authenticate(user, password string) bool {
 	want, ok := s.cfg.Users[user]
-	return ok && want == password
+	return ok && userdb.Verify(want, password)
 }
 
 // publicIP is the address the gateway presents as its own: the configured one,

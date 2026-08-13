@@ -24,6 +24,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	igp "github.com/xen0bit/veepin/internal/gp"
+	"github.com/xen0bit/veepin/internal/userdb"
 )
 
 func init() {
@@ -37,8 +38,9 @@ func init() {
 		{Key: OptServerPublicIP, Kind: client.OptStr, Help: "address clients reach this gateway on, advertised as the ESP endpoint (empty = the address their control connection arrived on)"},
 		{Key: OptServerPool, Kind: client.OptCIDR, Default: "10.50.0.0/24", Help: "internal address pool handed to clients (default 10.50.0.0/24)"},
 		{Key: OptServerDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers offered to clients"},
-		{Key: OptServerUser, Kind: client.OptStr, Required: true, Help: "username to accept"},
-		{Key: OptServerPass, Kind: client.OptStr, Required: true, Secret: true, Help: "the user's password"},
+		{Key: OptServerUser, Kind: client.OptStr, Help: "username to accept; the one-user shorthand for users-file, and one of the two is required"},
+		{Key: OptServerPass, Kind: client.OptStr, Secret: true, Help: "the password for user"},
+		{Key: OptServerUsers, Kind: client.OptFilePath, Secret: true, Help: "path to a file of username:secret lines, for more than one user; the secret may be a bcrypt verifier"},
 		{Key: OptServerNoESP, Kind: client.OptBool, Help: "serve the SSL tunnel only, leaving the UDP port unbound"},
 		client.TUNOpt(OptServerTUN),
 		client.ShapeOpt(OptServerShape, "downstream"),
@@ -49,19 +51,20 @@ const defaultPool = "10.50.0.0/24"
 
 // Server option keys accepted by client.NewServer("gp", opts).
 const (
-	OptServerListen   = "listen"   // local IP to bind (default 0.0.0.0)
-	OptServerPort     = "port"     // HTTPS port (default 443)
-	OptServerPool     = "pool"     // client address pool CIDR
-	OptServerCert     = "cert"     // TLS certificate PEM (required)
-	OptServerKey      = "key"      // TLS private key PEM (required)
-	OptServerUser     = "user"     // username to accept (required)
-	OptServerPass     = "pass"     // that user's password (required)
-	OptServerDNS      = "dns"      // comma-separated DNS servers offered to clients
-	OptServerNoESP    = "no-esp"   // "true" to serve the SSL tunnel only
-	OptServerESPPort  = "esp-port" // UDP port for the ESP data path (default 4501)
-	OptServerPublicIP = "public"   // address clients reach this gateway on
-	OptServerTUN      = "tun"      // TUN interface name
-	OptServerShape    = "shape"    // per-flow downstream shaping budget in bytes (0 = off)
+	OptServerListen   = "listen"     // local IP to bind (default 0.0.0.0)
+	OptServerPort     = "port"       // HTTPS port (default 443)
+	OptServerPool     = "pool"       // client address pool CIDR
+	OptServerCert     = "cert"       // TLS certificate PEM (required)
+	OptServerKey      = "key"        // TLS private key PEM (required)
+	OptServerUser     = "user"       // username to accept (required)
+	OptServerPass     = "pass"       // that user's password (required)
+	OptServerUsers    = "users-file" // path to a file of username:secret lines (more than one user)
+	OptServerDNS      = "dns"        // comma-separated DNS servers offered to clients
+	OptServerNoESP    = "no-esp"     // "true" to serve the SSL tunnel only
+	OptServerESPPort  = "esp-port"   // UDP port for the ESP data path (default 4501)
+	OptServerPublicIP = "public"     // address clients reach this gateway on
+	OptServerTUN      = "tun"        // TUN interface name
+	OptServerShape    = "shape"      // per-flow downstream shaping budget in bytes (0 = off)
 )
 
 // ServerConfig configures a GlobalProtect gateway.
@@ -269,10 +272,17 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 		Logger:   log.New(logDest(), "", log.LstdFlags|log.Lmicroseconds),
 	}
 	user, pass := opts[OptServerUser], opts[OptServerPass]
-	if user == "" || pass == "" {
-		return nil, errors.New("gp: user and pass are required")
+	if user != "" && pass == "" {
+		return nil, errors.New("gp: a named user needs a pass")
 	}
-	cfg.Users = map[string]string{user: pass}
+	users, uerr := userdb.Resolve(userdb.Verifiable, opts[OptServerUsers], user, pass)
+	if uerr != nil {
+		return nil, fmt.Errorf("gp: %w", uerr)
+	}
+	if len(users) == 0 {
+		return nil, errors.New("gp: user and pass, or users-file, are required")
+	}
+	cfg.Users = users
 
 	if v := opts[OptServerPort]; v != "" {
 		p, err := strconv.Atoi(v)

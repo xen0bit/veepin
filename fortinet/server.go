@@ -24,6 +24,7 @@ import (
 	"github.com/xen0bit/veepin/dataplane"
 	ifortinet "github.com/xen0bit/veepin/internal/fortinet"
 	"github.com/xen0bit/veepin/internal/otp"
+	"github.com/xen0bit/veepin/internal/userdb"
 )
 
 func init() {
@@ -35,8 +36,9 @@ func init() {
 		{Key: OptServerPort, Kind: client.OptInt, Default: "443", Help: "HTTPS port to listen on (default 443)"},
 		{Key: OptServerPool, Kind: client.OptCIDR, Default: "10.40.0.0/24", Help: "internal address pool handed to clients (default 10.40.0.0/24)"},
 		{Key: OptServerDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers offered to clients"},
-		{Key: OptServerUser, Kind: client.OptStr, Required: true, Help: "username to accept"},
-		{Key: OptServerPass, Kind: client.OptStr, Required: true, Secret: true, Help: "the user's password"},
+		{Key: OptServerUser, Kind: client.OptStr, Help: "username to accept; the one-user shorthand for users-file, and one of the two is required"},
+		{Key: OptServerPass, Kind: client.OptStr, Secret: true, Help: "the password for user"},
+		{Key: OptServerUsers, Kind: client.OptFilePath, Secret: true, Help: "path to a file of username:secret lines, for more than one user; the secret may be a bcrypt verifier"},
 		{Key: OptServerNoDTLS, Kind: client.OptBool, Help: "serve the TLS tunnel only, leaving the UDP port unbound"},
 		{Key: OptServerTOTP, Kind: client.OptStr, Secret: true, Help: "base32 TOTP secret; set it to require a second factor from the user"},
 		client.TUNOpt(OptServerTUN),
@@ -48,18 +50,19 @@ const defaultPool = "10.40.0.0/24"
 
 // Server option keys accepted by client.NewServer("fortinet", opts).
 const (
-	OptServerListen = "listen"  // local IP to bind (default 0.0.0.0)
-	OptServerPort   = "port"    // HTTPS port (default 443)
-	OptServerPool   = "pool"    // client address pool CIDR
-	OptServerCert   = "cert"    // TLS certificate PEM (required)
-	OptServerKey    = "key"     // TLS private key PEM (required)
-	OptServerUser   = "user"    // username to accept (required)
-	OptServerPass   = "pass"    // that user's password (required)
-	OptServerDNS    = "dns"     // comma-separated DNS servers offered to clients
-	OptServerNoDTLS = "no-dtls" // "true" to serve the TLS tunnel only
-	OptServerTOTP   = "totp"    // base32 TOTP secret; set it to require a second factor
-	OptServerTUN    = "tun"     // TUN interface name
-	OptServerShape  = "shape"   // per-flow downstream shaping budget in bytes (0 = off)
+	OptServerListen = "listen"     // local IP to bind (default 0.0.0.0)
+	OptServerPort   = "port"       // HTTPS port (default 443)
+	OptServerPool   = "pool"       // client address pool CIDR
+	OptServerCert   = "cert"       // TLS certificate PEM (required)
+	OptServerKey    = "key"        // TLS private key PEM (required)
+	OptServerUser   = "user"       // username to accept (required)
+	OptServerPass   = "pass"       // that user's password (required)
+	OptServerUsers  = "users-file" // path to a file of username:secret lines (more than one user)
+	OptServerDNS    = "dns"        // comma-separated DNS servers offered to clients
+	OptServerNoDTLS = "no-dtls"    // "true" to serve the TLS tunnel only
+	OptServerTOTP   = "totp"       // base32 TOTP secret; set it to require a second factor
+	OptServerTUN    = "tun"        // TUN interface name
+	OptServerShape  = "shape"      // per-flow downstream shaping budget in bytes (0 = off)
 )
 
 // ServerConfig configures a Fortinet SSL VPN server.
@@ -287,13 +290,27 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 		Logger:   log.New(logDest(), "", log.LstdFlags|log.Lmicroseconds),
 	}
 	user, pass := opts[OptServerUser], opts[OptServerPass]
-	if user == "" || pass == "" {
-		return nil, errors.New("fortinet: user and pass are required")
+	if user != "" && pass == "" {
+		return nil, errors.New("fortinet: a named user needs a pass")
+	}
+	users, uerr := userdb.Resolve(userdb.Verifiable, opts[OptServerUsers], user, pass)
+	if uerr != nil {
+		return nil, fmt.Errorf("fortinet: %w", uerr)
+	}
+	if len(users) == 0 {
+		return nil, errors.New("fortinet: user and pass, or users-file, are required")
 	}
 	if secret := opts[OptServerTOTP]; secret != "" {
+		// The TOTP secret is still per-invocation and therefore still names one
+		// user: a second factor is a per-person enrolment, and expressing it in
+		// the credentials file would mean a file format that carries two
+		// unrelated kinds of secret. -totp without -user has nobody to enrol.
+		if user == "" {
+			return nil, errors.New("fortinet: totp names the second factor for -user, which is unset")
+		}
 		cfg.TOTPSecrets = map[string]string{user: secret}
 	}
-	cfg.Users = map[string]string{user: pass}
+	cfg.Users = users
 
 	if v := opts[OptServerPort]; v != "" {
 		p, err := strconv.Atoi(v)

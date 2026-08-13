@@ -18,6 +18,7 @@ import (
 
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/dtls"
+	"github.com/xen0bit/veepin/internal/userdb"
 )
 
 // handshakeTimeout bounds the HTTP authentication and CONNECT exchange. Once the
@@ -206,7 +207,9 @@ func (s *Server) serveAuth(conn net.Conn, br *bufio.Reader) (string, error) {
 
 // authenticate checks a username and password in constant time with respect to
 // the password, so a wrong password cannot be distinguished from a wrong one of
-// a different length by timing.
+// a different length by timing. The stored secret may be a bcrypt verifier
+// rather than the password -- this protocol receives the password and compares
+// it, so it never needs to hold one (see internal/userdb).
 func (s *Server) authenticate(user, pass string) bool {
 	want, ok := s.cfg.Users[user]
 	if !ok {
@@ -214,7 +217,7 @@ func (s *Server) authenticate(user, pass string) bool {
 		subtle.ConstantTimeCompare([]byte(pass), []byte(pass))
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(pass), []byte(want)) == 1
+	return userdb.Verify(want, pass)
 }
 
 // serveConnect answers the CONNECT request, allocating the client an address and

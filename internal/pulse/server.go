@@ -23,6 +23,7 @@ import (
 
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/ikev2/esp"
+	"github.com/xen0bit/veepin/internal/userdb"
 )
 
 // tunIO is the userspace TUN the data path reads IP from and writes IP to.
@@ -367,9 +368,13 @@ func (s *Server) awaitESPResponse(st *stream, sess *session, serverKeys *Keys, c
 	}
 }
 
+// authenticate checks a username and password. The comparison is constant-time
+// with respect to the password (it was a bare ==, which leaked its length), and
+// the stored secret may be a bcrypt verifier: this protocol receives the
+// password and compares it, so it never needs to hold one.
 func (s *Server) authenticate(user, password string) bool {
 	want, ok := s.cfg.Users[user]
-	return ok && want == password
+	return ok && userdb.Verify(want, password)
 }
 
 // ServeESP reads the ESP socket until Close. It blocks.

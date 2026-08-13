@@ -294,6 +294,45 @@ this a test can: a key in both a protocol's client and server tables must be
 flagged the same in each. It cannot decide whether a lone option is key
 material, which is why the rule is here.
 
+## Half the password protocols must store the password itself
+
+`veepin serve` takes a credentials file — one `username:secret` line per user —
+for every protocol that authenticates a person by password. Whether that secret
+may be a **bcrypt verifier** rather than the password is not a configuration
+choice. It follows from the protocol's authentication exchange, and the two
+classes below are the whole of it:
+
+| Class | Protocols | What the server stores |
+|---|---|---|
+| Receives the password and compares it | AnyConnect, Fortinet, GlobalProtect, Ivanti (Pulse), Cisco IPsec (XAuth), SSH | a bcrypt verifier, or the password |
+| Computes its response *from* the password | SSTP, L2TP/IPsec (both MS-CHAPv2) | **the password itself** |
+
+MS-CHAPv2 does not send a password. Both ends derive a response from the
+NT hash of it, so there is nothing for the server to compare a verifier
+against — the password is an *input to a derivation*, and a one-way function of
+it is not a substitute. The same is true of SoftEther's challenge/response.
+
+The consequence is worth stating plainly, because it is a property of those
+protocols that veepin inherits and cannot fix: **an SSTP or L2TP server's
+credentials file is a list of plaintext passwords.** Anyone who reads that file
+can log in as any of those users anywhere else those passwords are reused. Keep
+it `0600`, keep it off shared storage, and prefer one of the protocols in the
+first row where the choice is yours.
+
+`internal/userdb` enforces the split rather than documenting it: a bcrypt
+verifier in an MS-CHAPv2 credentials file is refused at startup, naming the
+reason. The alternative — accepting it — is a server that starts cleanly and
+then rejects every login, with no message anywhere saying why.
+
+Two smaller notes on the same file:
+
+- It is marked `Secret` in every facade's `OptSpec`, under the "a path to key
+  material is secret" rule above.
+- `veepin passwd` prints a verifier, reading the password from stdin rather
+  than taking it as an argument. The format is bcrypt's own, so `htpasswd -B`
+  output works equally well; a tool whose purpose is keeping a password out of
+  the process table should not be the thing that puts it there.
+
 ## The management plane binds to localhost; do not bind it to a routable interface
 
 The supervisor (`veepin serve -config <dir>`) starts a management HTTP API and

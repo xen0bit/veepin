@@ -32,7 +32,7 @@ import (
 	"time"
 
 	"github.com/xen0bit/veepin/dataplane"
-	"github.com/xen0bit/veepin/internal/cryptoutil"
+	"github.com/xen0bit/veepin/internal/userdb"
 )
 
 // ServerConfig configures a GlobalProtect gateway.
@@ -297,7 +297,7 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (LoginRequ
 		return LoginRequest{}, false
 	}
 	pass, ok := s.cfg.Users[req.User]
-	if !ok || !cryptoutil.SecretEqual([]byte(pass), []byte(req.Password)) {
+	if !ok || !userdb.Verify(pass, req.Password) {
 		s.log.Printf("gp: login failed for %q", req.User)
 		http.Error(w, "Invalid username or password", http.StatusForbidden)
 		return LoginRequest{}, false

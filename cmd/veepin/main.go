@@ -9,6 +9,8 @@
 //	veepin profile   <subcmd>                    manage client connection profiles
 //	veepin mgmt      <subcmd> [flags]            talk to a running supervisor's API
 //	veepin probe     <protocol> [flags]          diagnostic: handshake + one packet
+//	veepin passwd                                print a bcrypt verifier for a
+//	                                             server's users-file
 //	veepin udp-proxy [flags]                     forward a local UDP socket over
 //	                                             MASQUE CONNECT-UDP
 //
@@ -66,6 +68,8 @@ func main() {
 		run(runMgmt(os.Args[2:]))
 	case "probe":
 		run(runProbe(os.Args[2:]))
+	case "passwd":
+		run(runPasswd(os.Args[2:]))
 	case "udp-proxy":
 		run(runUDPProxy(os.Args[2:]))
 	case "-version", "--version", "version":
@@ -96,6 +100,7 @@ Usage:
   veepin profile   <subcmd>                     manage client connection profiles
   veepin mgmt      <subcmd> [flags]             talk to a running supervisor's API
   veepin probe     <protocol> [flags]           diagnostic: handshake + one data packet
+  veepin passwd                                 print a bcrypt verifier for a users-file
   veepin udp-proxy [flags]                      forward a local UDP socket via MASQUE CONNECT-UDP
   veepin version                                print build information
 

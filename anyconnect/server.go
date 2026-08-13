@@ -13,6 +13,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	engine "github.com/xen0bit/veepin/internal/anyconnect"
+	"github.com/xen0bit/veepin/internal/userdb"
 )
 
 func init() {
@@ -24,8 +25,9 @@ func init() {
 		{Key: OptServerPort, Kind: client.OptInt, Default: "443", Help: "TCP port to listen on (default 443)"},
 		{Key: OptServerPool, Kind: client.OptCIDR, Default: "10.11.0.0/24", Help: "internal address pool handed to clients (default 10.11.0.0/24)"},
 		{Key: OptServerDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers assigned to clients"},
-		{Key: OptServerUser, Kind: client.OptStr, Required: true, Help: "username to accept"},
-		{Key: OptServerPassword, Kind: client.OptStr, Required: true, Secret: true, Help: "the user's password"},
+		{Key: OptServerUser, Kind: client.OptStr, Help: "username to accept; the one-user shorthand for users-file, and one of the two is required"},
+		{Key: OptServerPassword, Kind: client.OptStr, Secret: true, Help: "the password for user"},
+		{Key: OptServerUsers, Kind: client.OptFilePath, Secret: true, Help: "path to a file of username:secret lines, for more than one user; the secret may be a bcrypt verifier"},
 		client.TUNOpt(OptServerTUN),
 		{Key: OptServerNoDTLS, Kind: client.OptBool, Help: "serve the TLS tunnel only, leaving the UDP port unbound"},
 		client.ShapeOpt(OptServerShape, "downstream"),
@@ -40,6 +42,7 @@ const (
 	OptServerPort     = "port"
 	OptServerUser     = "user"
 	OptServerPassword = "password"
+	OptServerUsers    = "users-file"
 	OptServerPool     = "pool"
 	OptServerDNS      = "dns"
 	OptServerTUN      = "tun"
@@ -259,8 +262,10 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 		}
 		cfg.ListenPort = p
 	}
-	if user := opts[OptServerUser]; user != "" {
-		cfg.Users = map[string]string{user: opts[OptServerPassword]}
+	users, uerr := userdb.Resolve(userdb.Verifiable, opts[OptServerUsers], opts[OptServerUser], opts[OptServerPassword])
+	if uerr != nil {
+		return nil, fmt.Errorf("anyconnect: %w", uerr)
 	}
+	cfg.Users = users
 	return NewServer(cfg)
 }

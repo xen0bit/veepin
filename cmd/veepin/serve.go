@@ -314,7 +314,8 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			pool     = fs.String("pool", "10.9.0.0/24", "internal address pool handed to clients")
 			dns      = fs.String("dns", "", "comma-separated DNS servers assigned to clients")
 			user     = fs.String("user", "", "MS-CHAPv2 username to accept (required)")
-			pass     = fs.String("pass", "", "the user's password (required)")
+			pass     = fs.String("pass", "", "the password for -user")
+			users    = fs.String("users-file", "", "path to a file of username:secret lines, one per user, alongside or instead of -user/-pass; MS-CHAPv2 derives its response from the password, so each secret must be the password itself")
 			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
 			shape    = fs.Int("shape", 0, "per-flow downstream shaping budget in bytes: pads each inner flow's first N bytes to the tunnel MTU, hiding an inner TLS handshake's size pattern (0 = off, 16384 recommended)")
 		)
@@ -327,6 +328,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 				sstp.OptServerDNS:      *dns,
 				sstp.OptServerUser:     *user,
 				sstp.OptServerPassword: *pass,
+				sstp.OptServerUsers:    *users,
 				sstp.OptServerTUN:      *tun,
 			}
 			if *shape != 0 {
@@ -346,7 +348,8 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			pool     = fs.String("pool", "10.40.0.0/24", "internal address pool handed to clients")
 			dns      = fs.String("dns", "", "comma-separated DNS servers offered to clients")
 			user     = fs.String("user", "", "username to accept (required)")
-			pass     = fs.String("pass", "", "the user's password (required)")
+			pass     = fs.String("pass", "", "the password for -user")
+			users    = fs.String("users-file", "", "path to a file of username:secret lines, one per user, alongside or instead of -user/-pass; the secret may be a bcrypt verifier (htpasswd -B, or `veepin passwd`), so the server need never hold the password")
 			noDTLS   = fs.Bool("no-dtls", false, "serve the TLS tunnel only, leaving the UDP port unbound")
 			totp     = fs.String("totp", "", "base32 TOTP secret; set it to require a second factor from the user")
 			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
@@ -361,6 +364,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 				fortinet.OptServerDNS:    *dns,
 				fortinet.OptServerUser:   *user,
 				fortinet.OptServerPass:   *pass,
+				fortinet.OptServerUsers:  *users,
 				fortinet.OptServerTOTP:   *totp,
 				fortinet.OptServerTUN:    *tun,
 			}
@@ -382,7 +386,8 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			group        = fs.String("group", "", "group name clients must present (required)")
 			groupPSK     = fs.String("group-psk", "", "the group's pre-shared key (required)")
 			user         = fs.String("user", "", "XAuth username to accept (required)")
-			pass         = fs.String("pass", "", "the user's password (required)")
+			pass         = fs.String("pass", "", "the password for -user")
+			users        = fs.String("users-file", "", "path to a file of username:secret lines, one per user, alongside or instead of -user/-pass; the secret may be a bcrypt verifier (htpasswd -B, or `veepin passwd`), so the server need never hold the password")
 			pool         = fs.String("pool", "10.60.0.0/24", "internal address pool handed to clients")
 			dns          = fs.String("dns", "", "comma-separated DNS servers offered to clients")
 			domain       = fs.String("domain", "", "default search domain offered to clients")
@@ -399,6 +404,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 				cisco.OptServerGroupPSK:     *groupPSK,
 				cisco.OptServerUser:         *user,
 				cisco.OptServerPass:         *pass,
+				cisco.OptServerUsers:        *users,
 				cisco.OptServerPool:         *pool,
 				cisco.OptServerDNS:          *dns,
 				cisco.OptServerDomain:       *domain,
@@ -430,7 +436,8 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			domain       = fs.String("domain", "", "DNS search domain offered to clients")
 			splitInclude = fs.String("split-include", "", "comma-separated CIDRs clients should route into the tunnel (empty = everything)")
 			user         = fs.String("user", "", "username to accept (required)")
-			pass         = fs.String("pass", "", "the user's password (required)")
+			pass         = fs.String("pass", "", "the password for -user")
+			users        = fs.String("users-file", "", "path to a file of username:secret lines, one per user, alongside or instead of -user/-pass; the secret may be a bcrypt verifier (htpasswd -B, or `veepin passwd`), so the server need never hold the password")
 			noESP        = fs.Bool("no-esp", false, "serve the IF-T/TLS data path only, leaving the UDP port unbound")
 			tun          = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
 			shape        = fs.Int("shape", 0, "per-flow downstream shaping budget in bytes: pads each inner flow's first N bytes towards the tunnel MTU (0 = off, 16384 recommended)")
@@ -446,6 +453,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 				pulse.OptServerSplitInclude: *splitInclude,
 				pulse.OptServerUser:         *user,
 				pulse.OptServerPass:         *pass,
+				pulse.OptServerUsers:        *users,
 				pulse.OptServerTUN:          *tun,
 			}
 			if *port != 0 {
@@ -476,7 +484,8 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			pool     = fs.String("pool", "10.50.0.0/24", "internal address pool handed to clients")
 			dns      = fs.String("dns", "", "comma-separated DNS servers offered to clients")
 			user     = fs.String("user", "", "username to accept (required)")
-			pass     = fs.String("pass", "", "the user's password (required)")
+			pass     = fs.String("pass", "", "the password for -user")
+			users    = fs.String("users-file", "", "path to a file of username:secret lines, one per user, alongside or instead of -user/-pass; the secret may be a bcrypt verifier (htpasswd -B, or `veepin passwd`), so the server need never hold the password")
 			noESP    = fs.Bool("no-esp", false, "serve the SSL tunnel only, leaving the UDP port unbound")
 			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
 			shape    = fs.Int("shape", 0, "per-flow downstream shaping budget in bytes: pads each inner flow's first N bytes to the tunnel MTU, hiding an inner TLS handshake's size pattern (0 = off, 16384 recommended)")
@@ -490,6 +499,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 				gp.OptServerDNS:    *dns,
 				gp.OptServerUser:   *user,
 				gp.OptServerPass:   *pass,
+				gp.OptServerUsers:  *users,
 				gp.OptServerTUN:    *tun,
 			}
 			if *port != 0 {
@@ -544,7 +554,8 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			pool     = fs.String("pool", "10.20.0.0/24", "internal address pool handed to clients")
 			dns      = fs.String("dns", "", "comma-separated DNS servers assigned to clients")
 			user     = fs.String("user", "", "MS-CHAPv2 username to accept (required)")
-			pass     = fs.String("pass", "", "the user's password (required)")
+			pass     = fs.String("pass", "", "the password for -user")
+			users    = fs.String("users-file", "", "path to a file of username:secret lines, one per user, alongside or instead of -user/-pass; MS-CHAPv2 derives its response from the password, so each secret must be the password itself")
 			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
 			shape    = fs.Int("shape", 0, "per-flow downstream shaping budget in bytes: pads each inner flow's first N bytes to the tunnel MTU, hiding an inner TLS handshake's size pattern (0 = off, 16384 recommended)")
 		)
@@ -557,6 +568,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 				l2tp.OptServerDNS:      *dns,
 				l2tp.OptServerUser:     *user,
 				l2tp.OptServerPassword: *pass,
+				l2tp.OptServerUsers:    *users,
 				l2tp.OptServerTUN:      *tun,
 			}
 			if *shape != 0 {
@@ -635,7 +647,8 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			pool     = fs.String("pool", "10.11.0.0/24", "internal address pool handed to clients")
 			dns      = fs.String("dns", "", "comma-separated DNS servers assigned to clients")
 			user     = fs.String("user", "", "username to accept (required)")
-			pass     = fs.String("pass", "", "the user's password (required)")
+			pass     = fs.String("pass", "", "the password for -user")
+			users    = fs.String("users-file", "", "path to a file of username:secret lines, one per user, alongside or instead of -user/-pass; the secret may be a bcrypt verifier (htpasswd -B, or `veepin passwd`), so the server need never hold the password")
 			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
 			noDTLS   = fs.Bool("no-dtls", false, "serve the TLS tunnel only, leaving the UDP port unbound")
 			shape    = fs.Int("shape", 0, "per-flow downstream shaping budget in bytes: pads each inner flow's first N bytes to the tunnel MTU, hiding an inner TLS handshake's size pattern (0 = off, 16384 recommended)")
@@ -649,6 +662,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 				anyconnect.OptServerDNS:      *dns,
 				anyconnect.OptServerUser:     *user,
 				anyconnect.OptServerPassword: *pass,
+				anyconnect.OptServerUsers:    *users,
 				anyconnect.OptServerTUN:      *tun,
 				anyconnect.OptServerNoDTLS:   fmt.Sprint(*noDTLS),
 			}
@@ -668,7 +682,8 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 			pool     = fs.String("pool", "10.200.0.0/24", "tunnel subnet clients use")
 			dns      = fs.String("dns", "", "comma-separated DNS servers (informational)")
 			user     = fs.String("user", "", "username to accept (password auth)")
-			pass     = fs.String("pass", "", "the user's password")
+			pass     = fs.String("pass", "", "the password for -user")
+			users    = fs.String("users-file", "", "path to a file of username:secret lines, one per user, alongside or instead of -user/-pass; the secret may be a bcrypt verifier (htpasswd -B, or `veepin passwd`), so the server need never hold the password")
 			authKeys = fs.String("authorized-keys", "", "path to an authorized_keys file (public-key auth)")
 			tun      = fs.String("tun", "", "TUN interface name (empty = kernel picks)")
 		)
@@ -680,6 +695,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 				ssh.OptServerDNS:            *dns,
 				ssh.OptServerUser:           *user,
 				ssh.OptServerPassword:       *pass,
+				ssh.OptServerUsers:          *users,
 				ssh.OptServerAuthorizedKeys: *authKeys,
 				ssh.OptServerTUN:            *tun,
 			}

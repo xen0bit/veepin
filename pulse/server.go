@@ -22,6 +22,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	ipulse "github.com/xen0bit/veepin/internal/pulse"
+	"github.com/xen0bit/veepin/internal/userdb"
 )
 
 func init() {
@@ -37,8 +38,9 @@ func init() {
 		{Key: OptServerDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers offered to clients"},
 		{Key: OptServerDomain, Kind: client.OptStr, Help: "DNS search domain offered to clients"},
 		{Key: OptServerSplitInclude, Kind: client.OptCommaList, Help: "comma-separated CIDRs clients should route into the tunnel (empty = everything)"},
-		{Key: OptServerUser, Kind: client.OptStr, Required: true, Help: "username to accept"},
-		{Key: OptServerPass, Kind: client.OptStr, Required: true, Secret: true, Help: "the user's password"},
+		{Key: OptServerUser, Kind: client.OptStr, Help: "username to accept; the one-user shorthand for users-file, and one of the two is required"},
+		{Key: OptServerPass, Kind: client.OptStr, Secret: true, Help: "the password for user"},
+		{Key: OptServerUsers, Kind: client.OptFilePath, Secret: true, Help: "path to a file of username:secret lines, for more than one user; the secret may be a bcrypt verifier"},
 		{Key: OptServerNoESP, Kind: client.OptBool, Help: "serve the IF-T/TLS data path only, leaving the UDP port unbound"},
 		client.TUNOpt(OptServerTUN),
 		client.ShapeOpt(OptServerShape, "downstream"),
@@ -56,6 +58,7 @@ const (
 	OptServerKey          = "key"           // TLS private key PEM (required)
 	OptServerUser         = "user"          // username to accept (required)
 	OptServerPass         = "pass"          // that user's password (required)
+	OptServerUsers        = "users-file"    // path to a file of username:secret lines (more than one user)
 	OptServerDNS          = "dns"           // comma-separated DNS servers offered to clients
 	OptServerDomain       = "domain"        // search domain offered to clients
 	OptServerSplitInclude = "split-include" // comma-separated CIDRs clients should route into the tunnel
@@ -272,10 +275,17 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 		Logger:   log.New(logDest(), "", log.LstdFlags|log.Lmicroseconds),
 	}
 	user, pass := opts[OptServerUser], opts[OptServerPass]
-	if user == "" || pass == "" {
-		return nil, errors.New("pulse: user and pass are required")
+	if user != "" && pass == "" {
+		return nil, errors.New("pulse: a named user needs a pass")
 	}
-	cfg.Users = map[string]string{user: pass}
+	users, uerr := userdb.Resolve(userdb.Verifiable, opts[OptServerUsers], user, pass)
+	if uerr != nil {
+		return nil, fmt.Errorf("pulse: %w", uerr)
+	}
+	if len(users) == 0 {
+		return nil, errors.New("pulse: user and pass, or users-file, are required")
+	}
+	cfg.Users = users
 
 	if v := opts[OptServerPort]; v != "" {
 		p, err := strconv.Atoi(v)

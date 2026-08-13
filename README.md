@@ -308,6 +308,30 @@ formats, and what it interoperates with — has its own page:
 | AmneziaWG | [doc/usage/amneziawg.md](doc/usage/amneziawg.md) |
 | L2TPv3 Ethernet pseudowire | [doc/usage/l2tpv3.md](doc/usage/l2tpv3.md) |
 
+### More than one user
+
+Every protocol that authenticates a person by password — AnyConnect, Cisco
+IPsec, Fortinet, GlobalProtect, Ivanti, L2TP/IPsec, SSH and SSTP — takes
+`-users-file`, a file of `username:secret` lines:
+
+```
+# /etc/veepin/users, mode 0600
+alice:$2a$12$K3sQ8xVn0zL7pR2fT9mYue1Wj4hC6bD5aE8gN0oS2uX7vZ1qM3rGy
+bob:hunter2
+```
+
+`-user`/`-pass` remain the one-user shorthand, and where a name is in both the
+command line wins. `veepin passwd` prints a verifier for the first form,
+reading the password from stdin so it never enters the process table; the
+format is bcrypt's own, so `htpasswd -B` works too.
+
+Whether the secret may be a verifier is a property of the protocol rather than
+a setting. SSTP and L2TP/IPsec are MS-CHAPv2: both ends derive their response
+*from* the password, so those files hold plaintext passwords and veepin refuses
+a hash at startup rather than accepting one and failing every login. See
+[doc/security.md](doc/security.md#half-the-password-protocols-must-store-the-password-itself)
+for the table and what it costs.
+
 To run **a fleet of servers** in one process with a localhost management API
 and embedded web panel, the supervisor mode is additive to the bare
 single-protocol command: see [Running the supervisor](doc/usage/supervisor.md)

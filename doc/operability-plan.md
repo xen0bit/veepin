@@ -37,7 +37,7 @@ which is where the plan and the tree are reconciled when they disagree.
 
 | # | Item | Value | Risk | Verdict | Status |
 |---|------|-------|------|---------|--------|
-| 6 | Seven facades accept exactly one user each — the engines don't | **High** | Low | **Do first** | ⬜ |
+| 6 | Seven facades accept exactly one user each — the engines don't | **High** | Low | **Do first** | ✅ landed |
 | 7 | Secrets arrive as flags, so they are in `ps` | Medium | Low | Do | ⬜ |
 | 8 | Nothing anywhere counts a byte | **High** | Low | **Do** | ⬜ |
 
@@ -301,6 +301,41 @@ from a file format.
 
 **Risk:** low. Additive; the single-user path stays exactly as it is and every
 interop cell keeps passing unchanged.
+
+### ✅ Landed
+
+`internal/userdb` is the shared file reader, verifier and hasher; every one of
+the eight facades takes `users-file` beside its `-user`/`-pass` pair, and where
+a name is in both the command line wins. `veepin passwd` prints a bcrypt
+verifier, reading the password from stdin rather than taking it as an argument
+— a tool for keeping a password out of the process table should not be the
+thing that puts it there.
+
+Four things the writing changed from the proposal:
+
+- **Eight facades, not seven, and the class boundary is one row off.** `ssh`
+  collapses the same map and was not in the survey's grep because its
+  assignment is spelled one key at a time, like sstp's. And the split is not
+  "the three SSL-VPNs can hash": **Cisco XAuth and SSH password auth also carry
+  the password itself**, so six protocols can hold a verifier and only the two
+  MS-CHAPv2 ones cannot. The table in `doc/security.md` is written from the
+  exchange rather than from the family name.
+- **The class is enforced, not documented.** A bcrypt verifier in an MS-CHAPv2
+  credentials file is refused at startup, naming the reason. Accepting it would
+  produce a server that starts cleanly and rejects every login, with no message
+  anywhere saying why — which is the shape of failure this whole plan is about.
+- **`Required: true` came off `user` and `pass` on all eight.** It had become a
+  false claim the moment a file could supply the same thing, and the panel
+  renders that flag as an asterisk on a form. The parse still refuses to start
+  with no credentials at all; the error names both ways to supply them.
+- **Two engines compared passwords with `==`.** `internal/pulse` and
+  `internal/cisco` both did, leaking the password's length by timing. Routing
+  every comparison through `userdb.Verify` fixed that as a side effect of
+  needing one place to decide "hash or plaintext".
+
+The other half of the value is what did *not* change: the engines. Every one of
+them already took a `Users` map and looked the username up in it, which is why
+this was cheap — and why it was easy to keep not noticing.
 
 ## 7. Secrets arrive as flags, so they are in `ps`
 
