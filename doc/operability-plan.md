@@ -17,42 +17,46 @@ user, knowing whether a byte moved — is either absent or built and unreachable
 Everything below is grounded in the tree as it stands, with the survey command
 included so each finding can be re-checked rather than taken on trust.
 
+**This plan is being executed.** The Status column below is the record; each
+item's own section carries a *Landed* note naming what was actually built,
+which is where the plan and the tree are reconciled when they disagree.
+
 ## Summary
 
 ### Part 1 — the client cannot be lived with
 
-| # | Item | Value | Risk | Verdict |
-|---|------|-------|------|---------|
-| 1 | DNS is negotiated and then discarded | **High** | Low | **Do first** |
-| 2 | Nothing re-dials, though the machinery for it exists | **High** | Low | **Do** |
-| 3 | No kill switch: a dead tunnel fails open | Medium | Medium | Do, after 2 |
-| 4 | Split tunnel has no way to name a route | Medium | Low | Do |
-| 5 | `veepin probe` covers one protocol of seventeen | Low | None | Do (trivial) |
+| # | Item | Value | Risk | Verdict | Status |
+|---|------|-------|------|---------|--------|
+| 1 | DNS is negotiated and then discarded | **High** | Low | **Do first** | ✅ landed |
+| 2 | Nothing re-dials, though the machinery for it exists | **High** | Low | **Do** | ⬜ |
+| 3 | No kill switch: a dead tunnel fails open | Medium | Medium | Do, after 2 | ⬜ |
+| 4 | Split tunnel has no way to name a route | Medium | Low | Do | ⬜ |
+| 5 | `veepin probe` covers one protocol of seventeen | Low | None | Do (trivial) | ⬜ |
 
 ### Part 2 — the server cannot be deployed
 
-| # | Item | Value | Risk | Verdict |
-|---|------|-------|------|---------|
-| 6 | Seven facades accept exactly one user each — the engines don't | **High** | Low | **Do first** |
-| 7 | Secrets arrive as flags, so they are in `ps` | Medium | Low | Do |
-| 8 | Nothing anywhere counts a byte | **High** | Low | **Do** |
+| # | Item | Value | Risk | Verdict | Status |
+|---|------|-------|------|---------|--------|
+| 6 | Seven facades accept exactly one user each — the engines don't | **High** | Low | **Do first** | ⬜ |
+| 7 | Secrets arrive as flags, so they are in `ps` | Medium | Low | Do | ⬜ |
+| 8 | Nothing anywhere counts a byte | **High** | Low | **Do** | ⬜ |
 
 ### Part 3 — structure and reach
 
-| # | Item | Value | Risk | Verdict |
-|---|------|-------|------|---------|
-| 9 | 1,200 lines of flag switch restating the OptSpec tables | High | Medium | **Do** |
-| 10 | Sixteen protocols, one operating system | **Very high** | Medium | Do (macOS); don't (Windows) |
-| 11 | Logging has no level and no shape | Low | Low | Fold into 9 |
-| 12 | `client_route.go` has no build tag and shells out to `ip` | Low | Low | Fold into 10 |
+| # | Item | Value | Risk | Verdict | Status |
+|---|------|-------|------|---------|--------|
+| 9 | 1,200 lines of flag switch restating the OptSpec tables | High | Medium | **Do** | ⬜ |
+| 10 | Sixteen protocols, one operating system | **Very high** | Medium | Do (macOS); don't (Windows) | ⬜ |
+| 11 | Logging has no level and no shape | Low | Low | Fold into 9 | ⬜ |
+| 12 | `client_route.go` has no build tag and shells out to `ip` | Low | Low | Fold into 10 | ⬜ |
 
 ### Part 4 — claims that have drifted
 
-| # | Item | Value | Risk | Verdict |
-|---|------|-------|------|---------|
-| 13 | Two protocols do not meet the sentence at the top of the README | High | Low | **Do** |
-| 14 | Three protocol counts the docs guard cannot see | Low | None | Do (trivial) |
-| 15 | Two comments describing a tree that no longer exists | Low | None | Do (trivial) |
+| # | Item | Value | Risk | Verdict | Status |
+|---|------|-------|------|---------|--------|
+| 13 | Two protocols do not meet the sentence at the top of the README | High | Low | **Do** | ⬜ |
+| 14 | Three protocol counts the docs guard cannot see | Low | None | Do (trivial) | ⬜ |
+| 15 | Two comments describing a tree that no longer exists | Low | None | Do (trivial) | ⬜ |
 
 The ordering within each part is by value. Across parts, items 1, 2, 6 and 8 are
 the ones that change whether the software can be used; everything else is
@@ -108,6 +112,37 @@ not happen. Opt out (`-no-dns`) for the person who manages their own resolver.
 
 **Risk:** low, and contained. It touches one file, and the revert path is
 already exercised by the same defer that reverts routes.
+
+### ✅ Landed
+
+`dataplane/client_dns.go` holds the two backends behind a `dnsBackend`
+interface, and `ClientRouter` applies one as its last Apply step and reverts it
+as its first Revert step. `-no-dns` is the opt-out, `-no-route` still covers
+both. `ClientRouter.DNSBackend()` names the mechanism that ran so the connect
+log line can, which is the first thing anyone asks when resolution goes wrong.
+
+Three things the writing changed from the proposal:
+
+- **The split-tunnel case needed its own answer, which the plan did not give.**
+  A full tunnel keeps only the tunnel's resolvers, because keeping any other is
+  the leak. A split tunnel cannot do that — the names outside the tunnel still
+  have to resolve, and `resolv.conf` has no way to say which server answers for
+  which name — so the tunnel's go first and the host's follow. Under resolved
+  the same distinction is the `~.` routing domain, claimed for a full tunnel
+  only. Two tests pin each half.
+- **`connect` deferred `Revert` only on a fully successful `Apply`**, so a
+  failure partway through leaked whatever had already been installed. That was
+  survivable when the state was two routes; with a rewritten `resolv.conf` in
+  the set it is not. The defer is now registered before the error is examined,
+  which `Revert`'s existing per-item guards already made safe.
+- **The backup file is on disk, not just in memory.** A `SIGKILL` runs no
+  defer; `/etc/resolv.conf.veepin.bak` is what the operator restores by hand,
+  and the generated file names it in a comment so the recovery step is written
+  on the thing they are already looking at.
+
+Also worth naming: a server that offers no DNS at all now logs a warning on a
+full tunnel, because that configuration resolves through the host's resolvers
+and is indistinguishable from the bug just fixed unless it says so.
 
 ## 2. Nothing re-dials, though the machinery for it exists
 

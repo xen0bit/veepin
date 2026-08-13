@@ -351,15 +351,29 @@ sudo ./veepin connect ikev2 -server vpn.example.com -psk 'a-strong-preshared-key
 
 By default it installs a full-tunnel default route (all traffic through the VPN)
 plus a host route to the server via the existing gateway, so the encapsulated
-ESP packets don't recurse into the tunnel. On disconnect (Ctrl-C) the routes are
-reverted. Useful flags:
+ESP packets don't recurse into the tunnel. It also installs the resolvers the
+server handed out, for the tunnel's lifetime — a full tunnel that keeps the
+host's old resolver leaks every query it was meant to hide, in plaintext, from
+the host's real address. On disconnect (Ctrl-C) both are reverted. Useful flags:
 
 - `-user` / `-pass` — authenticate with EAP-MSCHAPv2 username/password instead of
   the client PSK (the server PSK still authenticates the server).
 - `-full-tunnel=false` — only bring up the interface/address; add your own routes.
-- `-no-route` — connect and establish the data path but make no routing changes
-  (useful for testing, or when another process manages routes).
+- `-no-route` — connect and establish the data path but make no routing or DNS
+  changes (useful for testing, or when another process manages both).
+- `-no-dns` — keep the routes but leave the host's resolvers alone, for the
+  operator who manages their own.
 - `-server-id` — verify the server presents this identity in its IDr.
+
+Which mechanism installs the resolvers depends on the host, and the connect log
+line names the one that ran. Where systemd-resolved is running the servers are
+set on the tunnel link with `resolvectl`, and a full tunnel additionally claims
+the `~.` routing domain — without which resolved keeps answering from the other
+link's servers no matter what `/etc/resolv.conf` says. Everywhere else
+`/etc/resolv.conf` is rewritten, with the original copied to
+`/etc/resolv.conf.veepin.bak` and restored on teardown; a `resolv.conf` that is
+a symlink into `/run` belongs to another daemon and veepin refuses it rather
+than clobbering its state.
 
 The client speaks the same PSK and EAP-MSCHAPv2 flows the server accepts, so
 `veepin connect` ↔ `veepin serve` interoperate directly, and the client also works

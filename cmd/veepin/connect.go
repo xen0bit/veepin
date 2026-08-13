@@ -45,7 +45,7 @@ import (
 // options map, client.Dial runs the handshake, routing is applied.
 // Profile mode loads the named profile file by name and dials with the protocol
 // and options stored inside it; per-protocol flags are not bound (the profile
-// IS the flag set), only the global -full-tunnel and -no-route flags apply.
+// IS the flag set), only the global host-networking flags apply.
 func runConnect(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: veepin connect <protocol|profile> [flags]\nprotocols: %s",
@@ -93,8 +93,7 @@ func knownProtocol(name string) bool {
 // so flags_test.go and every protocol's registered flag set are untouched.
 func runConnectBare(protocol string, args []string) error {
 	fs := flag.NewFlagSet("connect "+protocol, flag.ContinueOnError)
-	fullTunnel := fs.Bool("full-tunnel", true, "route all traffic through the VPN (default route)")
-	noRoute := fs.Bool("no-route", false, "do not modify routing/addresses (diagnostic)")
+	netCfg := bindNetFlags(fs)
 
 	options, err := connectFlags(protocol, fs)
 	if err != nil {
@@ -105,17 +104,16 @@ func runConnectBare(protocol string, args []string) error {
 	}
 
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
-	return dialConnect(protocol, options(), *fullTunnel, *noRoute, logger)
+	return dialConnect(protocol, options(), *netCfg, logger)
 }
 
 // runConnectProfile loads the named profile and dials with its saved protocol
 // and options. Per-protocol flags are not bound: the profile file IS the flag
-// set; only the global -full-tunnel and -no-route flags, and -set overrides,
-// apply in args.
+// set; only the global host-networking flags (see netflags.go), and -set
+// overrides, apply in args.
 func runConnectProfile(cfg profile.Config, args ...string) error {
 	fs := flag.NewFlagSet("connect "+cfg.Name, flag.ContinueOnError)
-	fullTunnel := fs.Bool("full-tunnel", true, "route all traffic through the VPN")
-	noRoute := fs.Bool("no-route", false, "do not modify routing/addresses (diagnostic)")
+	netCfg := bindNetFlags(fs)
 	var sets setList
 	fs.Var(&sets, "set", "override a profile option for this dial, key=value (repeatable)")
 	if err := fs.Parse(args); err != nil {
@@ -129,7 +127,7 @@ func runConnectProfile(cfg profile.Config, args ...string) error {
 		return err
 	}
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
-	return dialConnect(cfg.Protocol, opts, *fullTunnel, *noRoute, logger)
+	return dialConnect(cfg.Protocol, opts, *netCfg, logger)
 }
 
 // applyOverrides merges repeatable -set key=value pairs onto opts, so a profile
@@ -191,7 +189,9 @@ func (s *setList) Set(v string) error {
 // dialConnect is the shared dial+route+serve tail that bare mode and profile
 // mode both call. It houses the body that runConnect had as its second half,
 // extracted so the two paths converge on the same runtime surface.
-func dialConnect(protocol string, opts map[string]string, fullTunnel, noRoute bool, logger *log.Logger) error {
+func dialConnect(protocol string, opts map[string]string, netCfg netFlags, logger *log.Logger) error {
+	fullTunnel, noRoute := netCfg.fullTunnel, netCfg.noRoute
+
 	// 1. Handshake + data path. Dial installs no routes -- that is this
 	// command's job, and the split is what lets NetworkManager reuse the same
 	// dial.
@@ -211,7 +211,8 @@ func dialConnect(protocol string, opts map[string]string, fullTunnel, noRoute bo
 		logger.Printf("warning: %v", err)
 	}
 
-	// 2. Routing.
+	// 2. Routing (and DNS, which the router owns for the same reason it owns
+	// the routes: identical lifetime, identical teardown).
 	if !noRoute {
 		router := dataplane.NewClientRouter(dataplane.ClientNetConfig{
 			TUNName:     res.TUNName,
@@ -221,17 +222,35 @@ func dialConnect(protocol string, opts map[string]string, fullTunnel, noRoute bo
 			Prefix6:     res.Prefix6,
 			ServerIP:    res.Gateway,
 			DNS:         res.DNS,
+			NoDNS:       netCfg.noDNS,
 			FullTunnel:  fullTunnel,
 		})
-		if err := router.Apply(); err != nil {
-			logger.Printf("routing setup failed: %v (continuing without routes)", err)
+		// Revert is deferred before the result of Apply is examined, not after.
+		// Apply installs several pieces of host state in sequence and can fail
+		// on any of them; the old shape registered the cleanup only on complete
+		// success, so a failure halfway through left addresses, routes -- and
+		// now a rewritten resolv.conf -- behind for good. Revert is guarded by
+		// what it actually installed, so calling it after a failed or partial
+		// Apply is exactly right.
+		err := router.Apply()
+		defer func() {
+			if rerr := router.Revert(); rerr != nil {
+				logger.Printf("route cleanup: %v", rerr)
+			}
+		}()
+		if err != nil {
+			logger.Printf("routing setup failed: %v (continuing with whatever came up)", err)
 		} else {
 			logger.Printf("routing configured (full-tunnel=%v)", fullTunnel)
-			defer func() {
-				if rerr := router.Revert(); rerr != nil {
-					logger.Printf("route cleanup: %v", rerr)
-				}
-			}()
+		}
+		if be := router.DNSBackend(); be != "" {
+			logger.Printf("DNS %v installed via %s", res.DNS, be)
+		} else if !netCfg.noDNS && len(res.DNS) == 0 {
+			// Said out loud, because a full tunnel with no resolvers of its own
+			// resolves through the host's -- which is the leak this warns about
+			// rather than silently permits.
+			logger.Printf("warning: the server offered no DNS servers; " +
+				"name resolution still uses the host's resolvers")
 		}
 	}
 

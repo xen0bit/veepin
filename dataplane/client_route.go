@@ -18,7 +18,12 @@ type ClientNetConfig struct {
 	AssignedIP6 net.IP   // internal IPv6 address (dual-stack), or nil
 	Prefix6     int      // IPv6 prefix length for AssignedIP6
 	ServerIP    net.IP   // VPN server's public IP (host route added outside tunnel)
-	DNS         []net.IP // informational; resolv.conf changes are left to the caller
+	DNS         []net.IP // resolvers to install for the tunnel; see client_dns.go
+	// NoDNS leaves the host's resolver configuration alone. It is for the
+	// operator who manages their own resolver and does not want a VPN client
+	// editing it -- not a default, because the default that skips DNS is the
+	// one that leaks every query while the tunnel looks fine.
+	NoDNS bool
 	// FullTunnel routes all traffic through the VPN (default route). When false,
 	// only the assigned subnet is routed and the caller adds its own routes.
 	FullTunnel bool
@@ -35,12 +40,23 @@ type ClientRouter struct {
 	addedHost bool
 	addedDef  bool
 	addedDef6 bool
-	serverV6  bool // the server's outer address is IPv6 (host route uses `ip -6`)
+	serverV6  bool       // the server's outer address is IPv6 (host route uses `ip -6`)
+	dns       dnsBackend // nil until Apply installs resolvers; see client_dns.go
 }
 
 // NewClientRouter creates a router for the given configuration.
 func NewClientRouter(cfg ClientNetConfig) *ClientRouter {
 	return &ClientRouter{cfg: cfg}
+}
+
+// DNSBackend names the mechanism Apply used to install resolvers, or "" if it
+// installed none. Callers log it: which of the two mechanisms edited the host
+// is the first thing anyone asks when name resolution goes wrong.
+func (r *ClientRouter) DNSBackend() string {
+	if r.dns == nil {
+		return ""
+	}
+	return r.dns.name()
 }
 
 // Apply configures the TUN address, brings the interface up, adds a host route
@@ -120,6 +136,18 @@ func (r *ClientRouter) Apply() error {
 			r.addedDef6 = true
 		}
 	}
+
+	// DNS last, because it is the only step that edits state outside this
+	// machine's routing table and the only one whose failure is worth
+	// distinguishing: everything above it has already succeeded by the time we
+	// get here, and Revert undoes whatever did.
+	if !r.cfg.NoDNS && len(r.cfg.DNS) > 0 {
+		be := newDNSBackend()
+		if err := be.apply(r.cfg.TUNName, r.cfg.DNS, r.cfg.FullTunnel); err != nil {
+			return fmt.Errorf("dns (%s): %w", be.name(), err)
+		}
+		r.dns = be
+	}
 	return nil
 }
 
@@ -127,6 +155,14 @@ func (r *ClientRouter) Apply() error {
 // are collected but do not stop cleanup.
 func (r *ClientRouter) Revert() error {
 	var errs []string
+	// DNS first, in reverse order of application: the resolvectl backend names
+	// the link, and the link is about to go down.
+	if r.dns != nil {
+		if err := r.dns.revert(); err != nil {
+			errs = append(errs, err.Error())
+		}
+		r.dns = nil
+	}
 	if r.addedDef {
 		for _, half := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
 			if err := run([]string{"ip", "route", "del", half, "dev", r.cfg.TUNName}); err != nil {
