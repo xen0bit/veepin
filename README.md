@@ -388,6 +388,8 @@ the host's real address. On disconnect (Ctrl-C) both are reverted. Useful flags:
 - `-no-dns` — keep the routes but leave the host's resolvers alone, for the
   operator who manages their own.
 - `-retry=false` / `-retry-max <n>` — see below.
+- `-kill-switch` — fail closed if the tunnel drops, rather than letting traffic
+  resume in plaintext. See below.
 - `-server-id` — verify the server presents this identity in its IDr.
 
 A dropped tunnel is re-dialled by default, with jittered exponential backoff
@@ -399,6 +401,19 @@ all the way down between attempts, so a failed re-dial leaves nothing behind.
 that counts failures, and `client.ErrAuth` is what distinguishes it. `-retry=false`
 returns to the shell on the first drop, and `-retry-max <n>` bounds the
 attempts, for scripts and CI that need a failure to be a failure.
+
+`-kill-switch` makes an *unintended* teardown fail closed. It installs the same
+two `/1` halves the full tunnel uses, as blackholes at a worse metric, while the
+tunnel is healthy — so they are inert until the kernel drops the TUN's routes
+with its device, and the handover has no window. A host route to the server is
+held alongside them, or the re-dial could not reach the server it is trying to
+reach. It is off by default, because a kill switch nobody asked for strands a
+machine you may only be able to reach over the network it just blackholed; when
+it engages it logs the command to reopen the host by hand, since the moment you
+need that is the moment you cannot look it up. It needs a full tunnel and a
+protocol with one outer server address, and refuses rather than half-delivering
+for a split tunnel or a mesh. A tunnel carrying IPv4 only closes IPv4 only —
+that is stated in the log, because the flag's name promises more.
 
 Which mechanism installs the resolvers depends on the host, and the connect log
 line names the one that ran. Where systemd-resolved is running the servers are

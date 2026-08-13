@@ -29,7 +29,7 @@ which is where the plan and the tree are reconciled when they disagree.
 |---|------|-------|------|---------|--------|
 | 1 | DNS is negotiated and then discarded | **High** | Low | **Do first** | ✅ landed |
 | 2 | Nothing re-dials, though the machinery for it exists | **High** | Low | **Do** | ✅ landed |
-| 3 | No kill switch: a dead tunnel fails open | Medium | Medium | Do, after 2 | ⬜ |
+| 3 | No kill switch: a dead tunnel fails open | Medium | Medium | Do, after 2 | ✅ landed |
 | 4 | Split tunnel has no way to name a route | Medium | Low | Do | ⬜ |
 | 5 | `veepin probe` covers one protocol of seventeen | Low | None | Do (trivial) | ⬜ |
 
@@ -242,6 +242,46 @@ this tree already does.
 
 **Risk:** medium, and it is the risk of stranding a host. It wants a loud log
 line and a documented recovery command.
+
+### ✅ Landed
+
+`dataplane/client_killswitch.go`, `-kill-switch`, off by default. The switch is
+created once per `connect`, outlives every session, and is disengaged by a
+defer that runs on every path including a panic.
+
+The proposal's mechanism turned out to be one step short, and the fix is the
+interesting part:
+
+- **It is armed while the tunnel is *healthy*, not in response to its death.**
+  The blackholes are the same two `/1` halves `ClientRouter` installs, at a
+  worse metric, so they are inert while the tunnel's own routes exist and take
+  over the instant the kernel drops those routes with the device. Installing
+  them on teardown — which is what "on an unintended teardown, replace the
+  tunnel's default" describes — leaves however long the teardown takes as
+  plaintext, which is exactly the window the flag exists to close.
+- **A `/1` blackhole covers the VPN server too.** Without a carve-out, the
+  reconnection loop item 2 just added could never reach the server it is
+  retrying, and the kill switch would be a brick rather than a switch. The
+  switch therefore holds its own host route to the server, at the same worse
+  metric so it is a distinct route from `ClientRouter`'s and comes and goes
+  independently.
+
+Two configurations are refused rather than half-delivered, both permanently so
+the retry loop does not repeat the refusal every sixty seconds:
+
+- **A split tunnel**, which deliberately sends some traffic outside the VPN.
+  There is nothing there to fail closed, and blackholing everything would break
+  exactly the traffic the operator asked to keep outside.
+- **A protocol whose `Result` carries no `Gateway`** — a mesh reaches peers at
+  many underlay addresses, so there is no single route to carve out. This is
+  the one worth refusing loudly: delivered, it is a host that cannot reconnect
+  while looking like it is trying.
+
+One honest gap, logged rather than papered over: a tunnel carrying IPv4 only
+closes IPv4 only. Blackholing IPv6 the tunnel never carried would break
+connectivity nobody asked us to touch, so the switch mirrors the families the
+tunnel actually routed and says so. A dual-stack host on a v4-only tunnel still
+leaks v6 — which is a real finding, and a separate one from this item.
 
 ## 4. Split tunnel has no way to name a route
 

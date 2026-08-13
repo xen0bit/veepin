@@ -216,10 +216,27 @@ func dialConnect(protocol string, opts map[string]string, netCfg netFlags, logge
 		return err
 	}
 
+	// The kill switch outlives every session, because holding across the gap is
+	// the whole point of it: a tunnel that dies during the backoff must not
+	// silently resume sending in plaintext. Disengaged by a defer that runs on
+	// every path including a panic, so the only way to leave a host closed is to
+	// kill the process outright -- for which the engage log line prints the
+	// recovery command.
+	var killer *dataplane.KillSwitch
+	defer func() {
+		if killer != nil && killer.Engaged() {
+			if err := killer.Disengage(); err != nil {
+				logger.Printf("kill switch: %v — reopen by hand with: %s", err, killer.RecoveryCommand())
+			} else {
+				logger.Printf("kill switch disengaged")
+			}
+		}
+	}()
+
 	rnd := rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), 0))
 	consecutive := 0 // failures since the last session that stayed up
 	for attempt := 1; ; attempt++ {
-		upFor, err := oneSession(ctx, protocol, opts, netCfg, logger)
+		upFor, err := oneSession(ctx, protocol, opts, netCfg, logger, &killer)
 		switch {
 		case err == nil:
 			// An intended teardown: the operator's signal, or a session that
@@ -264,12 +281,17 @@ func dialConnect(protocol string, opts map[string]string, netCfg netFlags, logge
 // every path including a panic. That is what makes the retry loop above safe:
 // a re-dial starts from a host whose routing table, addresses and resolver
 // configuration are as they were before the first attempt.
+//
+// The one exception is the kill switch, which is the point of it: killer is the
+// caller's, deliberately outlives this function, and is filled in here because
+// this is where the server's outer address becomes known.
 func oneSession(
 	ctx context.Context,
 	protocol string,
 	opts map[string]string,
 	netCfg netFlags,
 	logger *log.Logger,
+	killer **dataplane.KillSwitch,
 ) (time.Duration, error) {
 	fullTunnel, noRoute := netCfg.fullTunnel, netCfg.noRoute
 
@@ -334,6 +356,18 @@ func oneSession(
 			logger.Printf("warning: the server offered no DNS servers; " +
 				"name resolution still uses the host's resolvers")
 		}
+
+		// 2b. The kill switch, armed while the tunnel is HEALTHY rather than in
+		// response to its death. The blackholes sit at a worse metric than the
+		// tunnel's own routes, so they are inert now and take over the instant
+		// the kernel drops the TUN's routes with the device -- which is a
+		// handover with no window, where installing them on teardown would leave
+		// however long that takes as plaintext.
+		if netCfg.killSwitch {
+			if err := armKillSwitch(killer, res, fullTunnel, logger); err != nil {
+				return time.Since(up), err
+			}
+		}
 	}
 
 	logger.Printf("tunnel up. Press Ctrl-C to disconnect.")
@@ -353,6 +387,66 @@ func oneSession(
 	default:
 		return time.Since(up), err
 	}
+}
+
+// armKillSwitch engages the caller's kill switch on the first successful dial,
+// and is a no-op on every dial after it: the switch is already holding, which
+// is the state that matters.
+//
+// It refuses two configurations rather than delivering something worse than
+// what was asked for, and both refusals are permanent -- retrying them would
+// produce the same answer while the operator watched a log line repeat.
+func armKillSwitch(
+	killer **dataplane.KillSwitch,
+	res client.Result,
+	fullTunnel bool,
+	logger *log.Logger,
+) error {
+	if *killer != nil {
+		return nil
+	}
+	// A split tunnel routes some prefixes through the VPN and deliberately
+	// leaves the rest on the physical link. There is nothing to fail closed:
+	// blackholing everything would break the traffic the user asked to keep
+	// outside the tunnel.
+	if !fullTunnel {
+		return fmt.Errorf("connect: -kill-switch needs a full tunnel; "+
+			"a split tunnel deliberately sends some traffic outside the VPN, "+
+			"and there is nothing there to fail closed: %w", errNoRetry)
+	}
+	// A mesh reaches its peers at many underlay addresses, so there is no
+	// single route to carve out of the blackhole -- and a kill switch with no
+	// carve-out is a host that can never reconnect. Refused loudly here rather
+	// than delivered as a bricked machine.
+	if res.Gateway == nil {
+		return fmt.Errorf("connect: -kill-switch needs one server address to keep reachable, "+
+			"and this protocol reports none (it reaches peers at many underlay addresses). "+
+			"Engaging would leave a host that cannot re-dial: %w", errNoRetry)
+	}
+
+	k := dataplane.NewKillSwitch(dataplane.KillSwitchConfig{
+		ServerIP: res.Gateway,
+		V4:       res.AssignedIP != nil,
+		V6:       res.AssignedIP6 != nil,
+	})
+	if err := k.Engage(); err != nil {
+		return err
+	}
+	*killer = k
+	// The recovery command is logged on engage, not on failure. The moment you
+	// need it is the moment the host is closed and you cannot reach it to look
+	// it up.
+	logger.Printf("kill switch engaged: traffic fails closed if the tunnel drops. "+
+		"To reopen this host by hand: %s", k.RecoveryCommand())
+	if res.AssignedIP != nil && res.AssignedIP6 == nil {
+		// Said plainly because it is a real hole and the flag's name promises
+		// otherwise. Closing IPv6 that the tunnel never carried would break
+		// connectivity nobody asked us to touch, so the honest answer is to
+		// name it.
+		logger.Printf("warning: this tunnel carries IPv4 only, so the kill switch closes IPv4 only; " +
+			"IPv6 traffic on a dual-stack host still leaves by the physical link")
+	}
+	return nil
 }
 
 // connectFlags binds a protocol's flags onto fs and returns a function that

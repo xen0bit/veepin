@@ -60,6 +60,15 @@ func backoff(n int, rnd *rand.Rand) time.Duration {
 	return half + time.Duration(rnd.Int64N(int64(half)+1))
 }
 
+// errNoRetry marks a failure the configuration itself guarantees will recur:
+// two flags that cannot both be honoured, a flag the protocol cannot support.
+// Wrapping it is how a check inside a session says "this is not an outage".
+//
+// It exists because the alternative is worse than a wasted retry. A refusal
+// that loops prints the same line every sixty seconds forever, which reads to
+// an operator as a network problem rather than as the thing they typed.
+var errNoRetry = errors.New("not retryable")
+
 // permanent reports whether an error means "stop", so that retrying it would be
 // harmful rather than merely useless.
 //
@@ -68,7 +77,9 @@ func backoff(n int, rnd *rand.Rand) time.Duration {
 // distinguishes it exists precisely so callers can tell. ErrUnknownProtocol is
 // a missing blank import: no amount of waiting adds one.
 func permanent(err error) bool {
-	return errors.Is(err, client.ErrAuth) || errors.Is(err, client.ErrUnknownProtocol)
+	return errors.Is(err, client.ErrAuth) ||
+		errors.Is(err, client.ErrUnknownProtocol) ||
+		errors.Is(err, errNoRetry)
 }
 
 // sleepCtx waits for d or until ctx ends, reporting false if ctx ended first.

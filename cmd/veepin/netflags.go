@@ -18,6 +18,7 @@ type netFlags struct {
 	noDNS      bool
 	retry      bool
 	retryMax   int
+	killSwitch bool
 }
 
 // bindNetFlags declares the host-networking flags on fs and returns the struct
@@ -38,5 +39,12 @@ func bindNetFlags(fs *flag.FlagSet) *netFlags {
 	fs.IntVar(&n.retryMax, "retry-max", 0,
 		"give up after this many attempts (0 = keep trying), for CI and scripts "+
 			"that need a bounded failure")
+	// Off by default, deliberately. A kill switch that engages when the user did
+	// not ask for one strands a machine they may only be able to reach over the
+	// network they just blackholed.
+	fs.BoolVar(&n.killSwitch, "kill-switch", false,
+		"fail closed: if the tunnel drops, blackhole traffic instead of letting "+
+			"it resume in plaintext, until the tunnel is back or veepin exits. "+
+			"Needs a full tunnel and a server with one outer address")
 	return n
 }
