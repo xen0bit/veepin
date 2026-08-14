@@ -17,6 +17,7 @@ import (
 
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/veepin/internal/debuglog"
 	"github.com/xen0bit/veepin/internal/mschap"
 	"github.com/xen0bit/veepin/internal/ppp"
 	"github.com/xen0bit/veepin/internal/sstp/wire"
@@ -145,11 +146,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 
 	logger := cfg.Logger
 	if logger == nil {
-		out := io.Discard
-		if os.Getenv("VEEPIN_SSTP_DEBUG") != "" {
-			out = os.Stderr
-		}
-		logger = log.New(out, "", log.LstdFlags|log.Lmicroseconds)
+		logger = log.New(debuglog.Writer(), "", log.LstdFlags|log.Lmicroseconds)
 	}
 
 	tun, err := dataplane.OpenTUN(cfg.TUNName)

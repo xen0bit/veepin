@@ -391,6 +391,7 @@ the host's real address. On disconnect (Ctrl-C) both are reverted. Useful flags:
 - `-kill-switch` — fail closed if the tunnel drops, rather than letting traffic
   resume in plaintext. See below.
 - `-server-id` — verify the server presents this identity in its IDr.
+- `-log-level` / `-log-format` — see [Logging](#logging).
 
 A dropped tunnel is re-dialled by default, with jittered exponential backoff
 from one second to a minute, resetting after a session that stayed up for a
@@ -428,6 +429,21 @@ than clobbering its state.
 The client speaks the same PSK and EAP-MSCHAPv2 flows the server accepts, so
 `veepin connect` ↔ `veepin serve` interoperate directly, and the client also works
 against other RFC 7296 responders that accept these authentication methods.
+
+### Logging
+
+`connect` and `serve` take `-log-format text|json` and `-log-level
+debug|info|warn|error`. `text` is the default and is exactly the timestamped
+line the command has always printed; `json` emits one `log/slog` record per
+line, for a log shipper. `debug` turns on protocol-level detail — one switch,
+replacing the `VEEPIN_SSTP_DEBUG`-shaped environment variables that had started
+to accumulate one per protocol (the old spellings still work, and `VEEPIN_DEBUG`
+is the general one, for a Go program embedding a protocol package directly).
+
+Above `info` the informational stream is suppressed. That is the whole of what
+the level can mean while the tree logs through `*log.Logger`, which has no
+per-call level — and it is useful rather than half-implemented because a fatal
+error returns to `main` and reaches stderr directly, never through the logger.
 
 ### Embedding the client
 

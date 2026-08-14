@@ -9,7 +9,6 @@ import (
 	"log"
 	"maps"
 	"math/rand/v2"
-	"os"
 	"os/signal"
 	"slices"
 	"sort"
@@ -79,6 +78,7 @@ func knownProtocol(name string) bool {
 func runConnectBare(protocol string, args []string) error {
 	fs := flag.NewFlagSet("connect "+protocol, flag.ContinueOnError)
 	netCfg := bindNetFlags(fs)
+	logCfg := bindLogFlags(fs)
 
 	options, err := connectFlags(protocol, fs)
 	if err != nil {
@@ -88,7 +88,10 @@ func runConnectBare(protocol string, args []string) error {
 		return err
 	}
 
-	logger := log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
+	logger, err := logCfg.logger()
+	if err != nil {
+		return err
+	}
 	return dialConnect(protocol, options(), *netCfg, logger)
 }
 
@@ -99,6 +102,7 @@ func runConnectBare(protocol string, args []string) error {
 func runConnectProfile(cfg profile.Config, args ...string) error {
 	fs := flag.NewFlagSet("connect "+cfg.Name, flag.ContinueOnError)
 	netCfg := bindNetFlags(fs)
+	logCfg := bindLogFlags(fs)
 	var sets setList
 	fs.Var(&sets, "set", "override a profile option for this dial, key=value (repeatable)")
 	if err := fs.Parse(args); err != nil {
@@ -111,7 +115,10 @@ func runConnectProfile(cfg profile.Config, args ...string) error {
 	if err != nil {
 		return err
 	}
-	logger := log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
+	logger, err := logCfg.logger()
+	if err != nil {
+		return err
+	}
 	return dialConnect(cfg.Protocol, opts, *netCfg, logger)
 }
 

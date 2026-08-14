@@ -47,7 +47,7 @@ which is where the plan and the tree are reconciled when they disagree.
 |---|------|-------|------|---------|--------|
 | 9 | 1,200 lines of flag switch restating the OptSpec tables | High | Medium | **Do** | ✅ landed |
 | 10 | Sixteen protocols, one operating system | **Very high** | Medium | Do (macOS); don't (Windows) | ⬜ |
-| 11 | Logging has no level and no shape | Low | Low | Fold into 9 | ⬜ |
+| 11 | Logging has no level and no shape | Low | Low | Fold into 9 | ✅ landed |
 | 12 | `client_route.go` has no build tag and shells out to `ip` | Low | Low | Fold into 10 | ⬜ |
 
 ### Part 4 — claims that have drifted
@@ -685,6 +685,45 @@ surface, and doing them together means one pass over the two subcommands.
 successful GET is deliberately not logged" rule survives the port — that
 exclusion is what keeps the ring usable, and its reasoning is written down in
 `internal/mgmt/README.md`.
+
+### ✅ Landed
+
+`-log-level` and `-log-format` on `log/slog`, in `cmd/veepin/logging.go`, plus
+`internal/debuglog` for the one thing package `main` cannot hold.
+
+**What the level can and cannot do is the honest part**, and it is written into
+the file rather than left for someone to discover. The tree logs through
+`*log.Logger`, which has no per-call level: every line a protocol writes is one
+`Printf`. Reclassifying several hundred of those into `slog` calls is a far
+larger change than a Low/Low item justifies, so the level is a gate on the
+stream rather than a filter within it — `debug` adds protocol detail, `info` is
+what the command always printed, and above `info` the informational stream is
+suppressed.
+
+That last part is useful rather than half-implemented only because of how this
+command reports failure: a fatal error returns to `main` and is printed to
+stderr by `run()`, never through the logger. So `-log-level=error` leaves errors
+visible, which is what the person asking for it wants. The limitation to know
+about is that a protocol logging a *non-fatal* problem through the same logger
+is suppressed with the rest.
+
+Two things beyond the proposal:
+
+- **`text` is unchanged, deliberately.** A `slog` `TextHandler` renders every
+  line as `time=… level=INFO msg="…"`, which is strictly worse to read at a
+  terminal than the timestamped line this has always printed. Being able to
+  *choose* json is the feature; being made to take structured text is not.
+  `json` goes through `slog.NewLogLogger`, which hands back a `*log.Logger` —
+  so the seventeen protocol packages need not know `slog` exists.
+- **`internal/debuglog` replaces the environment variables.** `sstp` read
+  `VEEPIN_SSTP_DEBUG` in three places because there was nowhere to put it, and
+  one variable per protocol is not a design — it is what happens without one.
+  `-log-level=debug` sets it; the old spellings still work, because they are
+  what the interop entrypoints pass and the only route for a Go program
+  embedding a protocol package directly.
+
+`internal/mgmt`'s logging is untouched, so the "a successful GET is deliberately
+not logged" rule the plan flagged never came into question.
 
 ## 12. `client_route.go` has no build tag and shells out to `ip`
 

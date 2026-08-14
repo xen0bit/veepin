@@ -11,10 +11,8 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"io"
 	"log"
 	"net"
-	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -22,6 +20,7 @@ import (
 
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/veepin/internal/debuglog"
 	"github.com/xen0bit/veepin/internal/mschap"
 	ppp "github.com/xen0bit/veepin/internal/ppp"
 	"github.com/xen0bit/veepin/internal/sstp/wire"
@@ -101,11 +100,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	}
 	logger := cfg.Logger
 	if logger == nil {
-		out := io.Discard
-		if os.Getenv("VEEPIN_SSTP_DEBUG") != "" {
-			out = os.Stderr
-		}
-		logger = log.New(out, "", log.LstdFlags|log.Lmicroseconds)
+		logger = log.New(debuglog.Writer(), "", log.LstdFlags|log.Lmicroseconds)
 	}
 
 	addr := net.JoinHostPort(cfg.Server, strconv.Itoa(cfg.Port))
@@ -140,7 +135,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 		logger:      logger,
 		cfg:         cfg,
 		serverNonce: serverNonce,
-		debug:       os.Getenv("VEEPIN_SSTP_DEBUG") != "",
+		debug:       debuglog.Enabled(),
 		done:        make(chan struct{}),
 		ipReady:     make(chan struct{}),
 	}

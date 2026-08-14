@@ -51,6 +51,7 @@ func runServe(args []string) error {
 	fs := flag.NewFlagSet("serve "+protocol, flag.ContinueOnError)
 	setup := fs.Bool("setup-nat", false, "auto-configure the TUN address, routing and NAT via ip/iptables (needs privileges)")
 	wanIface := fs.String("wan", "", "WAN interface for -setup-nat masquerading (e.g. eth0)")
+	logCfg := bindLogFlags(fs)
 
 	options, err := serveFlags(protocol, fs)
 	if err != nil {
@@ -60,7 +61,10 @@ func runServe(args []string) error {
 		return err
 	}
 
-	logger := log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
+	logger, err := logCfg.logger()
+	if err != nil {
+		return err
+	}
 
 	// 1. Construct the server (opens the TUN, validates config); it is not yet
 	// listening and has changed no host state.
