@@ -226,3 +226,29 @@ func TestInteropMatrixMatchesTheTestFunctions(t *testing.T) {
 		}
 	}
 }
+
+// TestNoRowCarriesADashInTheSelfColumn turns a comment into a check.
+//
+// interop.go said, from the moment the SoftEther row was written, that "a
+// veepin↔veepin test is always possible, so a dash there is never earned" — and
+// the SoftEther row carried one anyway, for as long as the sentence sat above
+// it. A comment describing an invariant is not an invariant.
+//
+// The client and server columns legitimately carry a dash: "—†" where no
+// open-source peer exists to test against (FortiOS), "—‡" where the cell has not
+// been built. Neither reason can apply to Self. Both ends are veepin, so the
+// peer always exists — which means a dash there is never about availability. It
+// is either an afternoon nobody spent, or, as it turned out for SoftEther, a
+// data path nobody had written. Both are worth failing a build over; neither is
+// worth a dash that reads like a matrix result.
+func TestNoRowCarriesADashInTheSelfColumn(t *testing.T) {
+	for _, row := range interopMatrix {
+		if len(row.Self.Tests) > 0 {
+			continue
+		}
+		t.Errorf("%s names no test in its Self column (label %q). Both ends are veepin, "+
+			"so a peer always exists and the cell is always possible; a dash here reads "+
+			"as a matrix result while meaning nobody built it.",
+			row.Protocol, row.Self.Label)
+	}
+}

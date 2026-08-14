@@ -1,0 +1,57 @@
+# veepin SoftEther client -> veepin SoftEther server, over real TLS.
+#
+# The cell internal/livingreadme/interop.go said was owed for as long as the
+# SoftEther row existed. Building it is what found why it could not be built:
+# neither end pumped frames. softether.Dial opened a TAP and started nothing,
+# and the server's switch forwarded between sessions only, with the host's own
+# interface not on the switch at all. Both are now fixed and this is the cell
+# that proves it.
+#
+# Layer 2, like the l2tpv3 cells: neither end assigns an address through the
+# protocol, so the harness puts one on each TAP afterwards, which is what a real
+# deployment does with DHCP or a static assignment inside the bridged segment.
+#
+# Data-path check: the client pings 10.70.0.1, the server's own TAP. The frame
+# leaves the client's TAP, crosses TLS, is switched onto the server's local
+# bridge port, and arrives on an interface the server's kernel answers for -- so
+# a handshake that completes and moves no frame fails the cell, which is exactly
+# the state this protocol was in before.
+name: veepin-interop-softether-self
+
+volumes:
+  certs:
+
+services:
+  veepin-softether-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      USER: "alice"
+      PASSWORD: "s3cret"
+      TUN_IP: "10.70.0.1"
+    volumes:
+      - ./veepin/softether-server-entrypoint.sh:/entrypoint.sh:ro
+      - certs:/certs
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-softether-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-softether-server]
+    environment:
+      SERVER: "veepin-softether-server"
+      USER: "alice"
+      PASSWORD: "s3cret"
+      TUN_IP: "10.70.0.2"
+      PEER_IP: "10.70.0.1"
+    volumes:
+      - ./veepin/softether-client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

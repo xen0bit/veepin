@@ -54,7 +54,7 @@ which is where the plan and the tree are reconciled when they disagree.
 
 | # | Item | Value | Risk | Verdict | Status |
 |---|------|-------|------|---------|--------|
-| 13 | Two protocols do not meet the sentence at the top of the README | High | Low | **Do** | ⚠️ partly — see below |
+| 13 | Two protocols do not meet the sentence at the top of the README | High | Low | **Do** | ✅ landed (the cell found a missing data path, which was then written) |
 | 14 | Three protocol counts the docs guard cannot see | Low | None | Do (trivial) | ✅ landed |
 | 15 | Two comments describing a tree that no longer exists | Low | None | Do (trivial) | ✅ landed |
 
@@ -277,11 +277,29 @@ the retry loop does not repeat the refusal every sixty seconds:
   the one worth refusing loudly: delivered, it is a host that cannot reconnect
   while looking like it is trying.
 
-One honest gap, logged rather than papered over: a tunnel carrying IPv4 only
-closes IPv4 only. Blackholing IPv6 the tunnel never carried would break
-connectivity nobody asked us to touch, so the switch mirrors the families the
-tunnel actually routed and says so. A dual-stack host on a v4-only tunnel still
-leaks v6 — which is a real finding, and a separate one from this item.
+**The IPv6 gap is closed, and closing it reversed the first decision.** The
+switch originally mirrored the families the tunnel carried, on the reasoning
+that "blackholing IPv6 the tunnel never carried would break connectivity nobody
+asked us to touch". That reads like restraint and is the leak: a v4-only tunnel
+on a dual-stack host leaves every IPv6 packet going out the physical link, in
+plaintext, while the operator has explicitly asked to fail closed. **A family
+the tunnel does not carry is exactly a family that escapes it.**
+
+So `halves()` returns both families always. Link-local and every other connected
+route is more specific than a `/1` and is unaffected; a host with no IPv6 is
+unaffected by two routes matching nothing it sends. What stops is traffic that
+would otherwise have left by the physical default, which is the flag's whole
+purpose. The connect log says so out loud when the tunnel is v4-only, because it
+is a change to the host beyond what the tunnel carries and nobody should
+discover it by finding IPv6 dead.
+
+Writing that turned up a second defect the first shape had hidden: `Disengage`
+ran `ip route del` for every half unconditionally, which was harmless only while
+an unconfigured switch had an empty half-list. It is now gated on a `started`
+flag — distinct from `engaged`, because `Engage` calls `Disengage` itself to
+undo a partial install, and because `Disengage` is reached from a defer that
+also runs where `Engage` was refused. Unguarded on a privileged process it would
+have deleted four routes belonging to somebody else.
 
 ## 4. Split tunnel has no way to name a route
 
@@ -865,50 +883,59 @@ name the exceptions the matrix already names; and consider a guard —
 dash in the Self column, since the comment already says that is never legitimate
 and a comment is not a check.
 
-### ⚠️ Partly landed, and the plan was wrong about the interesting part
+### ✅ Landed — after the cell found something the plan did not expect
 
-The headline sentence is qualified and now names both exceptions plainly. The
-stale comment is corrected (item 15). **The self cell was built, run, and backed
-out**, and what it found is worth more than the cell would have been.
+The headline sentence is qualified, the stale comment is corrected (item 15),
+`TestInteropSoftEtherSelf` exists and passes (1.09 Gbit/s across the tunnel), and
+`TestNoRowCarriesADashInTheSelfColumn` is the guard the plan asked for.
 
-> **"SoftEther's self cell is a day's work and is unambiguously owed" is
-> false.** It is blocked on exactly the same work the client and server columns
-> are.
+But the estimate was wrong in a way worth recording, because it is the whole
+value of having built the cell rather than reasoning about it:
 
-The cell was written — compose file, two entrypoints, the test — and run against
-Docker. Two veepin clients connected to a veepin server, both authenticated,
-both addressed their TAPs, and no frame ever crossed. The cause is one line
-long:
+> **"SoftEther's self cell is a day's work" was wrong, and the reason was not
+> effort.** The cell could not pass because SoftEther had no data path — at
+> either end.
+
+Two veepin clients connected, authenticated, addressed their TAPs, and no frame
+crossed. The cause was two omissions that had been there since the protocol
+landed:
 
 ```go
 // softether/softether.go, Dial
 tap, err := dataplane.OpenTAP(cfg.TUNName)
 …
-return &Session{cs: cs, tap: tap}, client.Result{TUNName: tap.Name(), Layer2: true, MTU: 1500}, nil
+return &Session{cs: cs, tap: tap}, client.Result{…}, nil   // and nothing else
 ```
 
-**The client opens a TAP and starts nothing that moves frames between it and the
-TLS session.** There is no pump, no goroutine, no data path at all. The first
-attempt at the cell pinged the server's own TAP and got a clean handshake and
-"Destination Host Unreachable", which looked like the known "the server does not
-bridge to its host TAP" caveat; moving to two clients pinging each other —
-testing precisely what the bridge does — failed the same way, which is what
-narrowed it to the client.
+- **The client opened a TAP and started nothing.** No pump, no goroutine, no
+  relay between the TAP and the TLS session. Every SoftEther tunnel came up,
+  authenticated, reported an interface and carried nothing.
+- **The server's switch forwarded between *sessions* only.** `forwardTo` walked
+  the destination ports and looked each one up in the session table, so a port
+  that was not a client had nowhere to be delivered to — and the server's own
+  TAP was not a port at all. It was opened, named, and closed.
 
-So all three SoftEther columns wait on one piece of work, and the Self column is
-not the cheap one. The matrix row keeps its three dashes and its comment now
-says why, with the reason rather than "not yet built".
+Both are now written. `internal/softether/local.go` puts the server's interface
+on its own switch as an ordinary bridge port — learned, flooded to, excluded as
+a source, exactly like a client's — and `deliver` is the one place that resolves
+a port to somewhere to write, shared by the session path and the local one so
+they cannot drift. The client runs two goroutines, because both directions
+block and neither can be polled from the other's loop without starving it.
 
-**The Self-column guard is therefore not landed either**, and deliberately: a
-guard asserting "no row carries a dash in the Self column" would have to fail
-today or carry an exemption for the one row it was written for, and an exemption
-is how the next one gets through. It goes in with the SoftEther data path, in
-the same change, where it will be a check that has always been true rather than
-one that starts out excused.
+It is deliberately not `dataplane.Pump`: the pump routes layer-3 packets to a
+tunnel by inner destination, and there is nothing to route here — every frame
+goes to the one session and the switching happens at the far end.
 
-The one thing worth taking from the plan's framing: a dash in the Self column
-still is not something effort alone earns. It is a claim that the protocol
-cannot talk to itself, and for SoftEther that claim is currently correct.
+**What this says about the matrix.** The row's three dashes were read for months
+as "the cells have not been built yet". They meant "this protocol does not move
+traffic". That is the difference a cell makes over a plan, and it is why the
+Self-column guard now exists: a dash there was never about a peer being
+unavailable, and treating it as a scheduling note is what let it hide a missing
+data path.
+
+The client and server columns are still `—‡`. They now wait on a real
+cross-implementation cell against SoftEther VPN Server rather than on anything
+missing in the tree.
 
 ## 14. Three protocol counts the docs guard cannot see
 
@@ -1042,7 +1069,7 @@ each green before the next started.
 | 10 | macOS | ✅ written; **unverified on hardware**, and CI says only that it compiles |
 | 11 | Logging | ✅ `-log-level` / `-log-format`, with the level's real limits written down |
 | 12 | Route build tags | ✅ `_linux` / `_darwin` / `_other` |
-| 13 | Drifted claims | ⚠️ headline qualified; the SoftEther cell is **blocked**, see below |
+| 13 | Drifted claims | ✅ headline qualified, and the cell found + fixed a missing data path |
 | 14 | Stale counts | ✅ fixed, and the guard widened by number rather than by ignore-list |
 | 15 | Stale comments | ✅ *(landed)* markers, original text kept |
 
@@ -1051,12 +1078,13 @@ each green before the next started.
 Worth recording, because a plan that is never contradicted was not specific
 enough to be useful.
 
-- **Item 13 was the big one.** "SoftEther's self cell is a day's work and is
-  unambiguously owed" is false. Building it found that `softether.Dial` opens a
-  TAP and starts nothing that moves frames across it — the client has no data
-  path — so all three matrix columns wait on one piece of work and the Self
-  column is not the cheap one. The cell was written, run, and backed out; the
-  finding is in the matrix comment where the wrong one used to be.
+- **Item 13 was the big one.** "SoftEther's self cell is a day's work" was
+  wrong, and not about effort: building it found that neither end had a data
+  path. The client opened a TAP and started nothing; the server's switch
+  forwarded between sessions only, with its own TAP not on the switch at all.
+  Both were written, and the cell now passes. The row's three dashes had been
+  read for months as "not built yet" and meant "does not move traffic" — which
+  is the difference between running a cell and reasoning about one.
 - **Item 6 counted seven facades; there are eight**, and the class boundary was
   one row off: Cisco XAuth and SSH password auth also carry the password, so six
   protocols can hold a bcrypt verifier and only the two MS-CHAPv2 ones cannot.
@@ -1073,11 +1101,14 @@ enough to be useful.
 1. **Run `doc/verifying-macos.md` on a Mac.** The client is written and
    compiles; nobody has run it. Until someone does, macOS is "written, not
    proven" and the README says so.
-2. **SoftEther's data path**, which unblocks all three of its matrix columns —
-   and the Self-column guard, which should land in the same change so it is a
-   check that has always been true rather than one that starts out excused.
-3. **The IPv6 half of the kill switch.** A v4-only tunnel closes v4 only; a
-   dual-stack host still leaks v6. Logged, not fixed.
+2. **A SoftEther cell against SoftEther VPN Server.** The data path is written
+   and the self cell passes; the two cross-implementation columns now wait on a
+   peer image and the address assignment, since every client is still handed
+   the constant `10.70.0.2`.
+3. **A pf-based kill switch for macOS.** The route-based one cannot work there
+   (no per-route metrics), so `-kill-switch` refuses. A pf anchor is the honest
+   answer and means owning firewall state on the user's host — the same trade
+   the Linux implementation declined, and worth revisiting only deliberately.
 4. **Per-call log levels.** `-log-level` gates the stream because the tree logs
    through `*log.Logger`. Making `warn` mean something *within* the stream is a
    `slog` migration of several hundred call sites.

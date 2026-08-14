@@ -185,21 +185,25 @@ var interopMatrix = []interopRow{
 	// connected clients rather than bridging them to the host's network, and
 	// every client is assigned the same 10.70.0.2.
 	//
-	// The Self column carries a dash too, and the sentence this comment used to
-	// end with -- "a veepin↔veepin test is always possible, so a dash there is
-	// never earned" -- was wrong about why. Building the cell showed what is
-	// actually missing, and it is not effort: softether.Dial opens a TAP and
-	// never starts anything that moves frames between it and the TLS session.
-	// The client has no data path. Two veepin clients connect, authenticate,
-	// and address their TAPs, and no frame ever leaves one.
+	// SoftEther's two cross-implementation cells are not built. They carry "‡",
+	// not "†": the dagger means *no open-source peer exists*, which is true of
+	// FortiOS and false here — SoftEther VPN Server is Apache-2.0.
 	//
-	// So all three columns wait on the same work, and the Self column is not the
-	// cheap one the comment claimed. See doc/operability-plan.md item 13.
+	// The Self column is no longer a dash, and getting it there is what found
+	// the reason the others are. Neither end pumped frames: softether.Dial
+	// opened a TAP and started nothing, and the server's switch forwarded
+	// between sessions only, with the host's own interface not on the switch.
+	// The sentence this comment used to carry — "a veepin↔veepin test is always
+	// possible, so a dash there is never earned" — was right, and the dash was
+	// hiding a missing data path rather than a missing afternoon.
+	//
+	// TestNoRowCarriesADashInTheSelfColumn is now the check, because a comment
+	// is not one.
 	{
 		Protocol: "SoftEther VPN",
 		Client:   interopCell{Label: "—‡"},
 		Server:   interopCell{Label: "—‡"},
-		Self:     interopCell{Label: "—‡"},
+		Self:     interopCell{Tests: []string{"TestInteropSoftEtherSelf"}, Label: "(layer 2, switched)"},
 	},
 	{
 		Protocol: "AmneziaWG",

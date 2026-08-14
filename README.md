@@ -10,10 +10,9 @@ GlobalProtect, Cisco IPsec, Ivanti Connect Secure, SoftEther VPN (SE-VPN) and
 AmneziaWG — each verified in Docker against a real third-party implementation
 and against itself. Two rows carry an exception the
 [matrix](#interoperability-matrix) names and this sentence should not hide:
-**SoftEther has no interop cell in any direction** — its client opens a TAP and
-starts nothing that moves frames across it, so it is implemented and unproven —
-and **L2TPv3's kernel cells need an `l2tp_eth` module GitHub's runners lack**,
-so they are a local-only check.
+**SoftEther is verified against itself but has no cross-implementation cell
+yet**, and **L2TPv3's kernel cells need an `l2tp_eth` module GitHub's runners
+lack**, so they are a local-only check.
 
 Every layer is covered by tests, including full VPN integration tests:
 `TestFullVPNFlow` drives a client through the handshake and verifies a real IP
@@ -64,7 +63,7 @@ wire detail, caveats and API surface.
 | **GlobalProtect** | password | RFC 4303 ESP over UDP, keyed by the config document, with a framed layer-3 TLS tunnel as fallback | openconnect | [gp](internal/gp/README.md) |
 | **Cisco IPsec** | group PSK + XAuth password | IKEv1 Aggressive Mode, Mode-Config, tunnel-mode ESP-in-UDP | strongSwan | [cisco](internal/cisco/README.md) |
 | **Ivanti Connect Secure** | password (EAP over IF-T/TLS) | RFC 4303 ESP over UDP, with the IF-T/TLS connection as fallback | openconnect | [pulse](internal/pulse/README.md) |
-| **SoftEther VPN** | password | Ethernet frames over TLS (PACK control), layer-2 TAP | not yet — see `‡` below | [softether](internal/softether/README.md) |
+| **SoftEther VPN** | password | Ethernet frames over TLS (PACK control), layer-2 TAP | itself — see `‡` below | [softether](internal/softether/README.md) |
 | **AmneziaWG** | Noise_IKpsk2 static keys | WireGuard's ChaCha20-Poly1305 unchanged; obfuscated headers, padding and junk packets | `amneziawg-go` | [amneziawg](wireguard/obfuscate.go) |
 
 Both roles share one registry API (`client.Register`/`client.RegisterServer`),
@@ -425,8 +424,10 @@ machine you may only be able to reach over the network it just blackholed; when
 it engages it logs the command to reopen the host by hand, since the moment you
 need that is the moment you cannot look it up. It needs a full tunnel and a
 protocol with one outer server address, and refuses rather than half-delivering
-for a split tunnel or a mesh. A tunnel carrying IPv4 only closes IPv4 only —
-that is stated in the log, because the flag's name promises more.
+for a split tunnel or a mesh. **Both address families are closed whichever the
+tunnel carries** — a family the tunnel does not carry is exactly a family that
+escapes it — so a v4-only tunnel blackholes IPv6 for its lifetime, which the log
+says out loud.
 
 Which mechanism installs the resolvers depends on the host, and the connect log
 line names the one that ran. Where systemd-resolved is running the servers are

@@ -68,6 +68,13 @@ type Server struct {
 	// it the switch learns addresses and forwards nothing.
 	sessionsMu sync.RWMutex
 	sessions   map[PortID]*ServerSession
+
+	// local is the server's own interface as a switch port (local.go), or nil
+	// when nothing is attached. Guarded separately from sessions because
+	// deliver consults both, and one lock over two unrelated maps is how a
+	// deadlock gets written later.
+	localMu sync.RWMutex
+	local   *localPort
 }
 
 // NewServer creates a SoftEther VPN server. creds authenticates logins; passing
@@ -331,18 +338,7 @@ func (ss *ServerSession) forwardTo(dests []PortID, frame []byte) {
 	if ss.srv == nil {
 		return
 	}
-	for _, p := range dests {
-		if p == ss.port {
-			continue
-		}
-		peer := ss.srv.sessionFor(p)
-		if peer == nil || !peer.authenticated.Load() {
-			continue
-		}
-		if err := peer.writeFrame(frame); err != nil {
-			ss.logf("softether: forward to port %d: %v", p, err)
-		}
-	}
+	ss.srv.deliver(dests, frame, ss.port)
 }
 
 // writeFrame sends an Ethernet frame with the 4-byte length prefix.
