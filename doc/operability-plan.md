@@ -1020,3 +1020,64 @@ through, and multi-user is what turns `veepin serve` from a single-seat listener
 into a server. Every one of the three is a capability the tree already has and
 does not expose — which is why they are cheap, and also why they are easy to
 keep not noticing.
+
+---
+
+# What actually happened
+
+Every item is landed. Nine commits, one per item or per pair the plan grouped,
+each green before the next started.
+
+| # | Item | Outcome |
+|---|------|---------|
+| 1 | DNS | ✅ two backends, `-no-dns` opt-out |
+| 2 | Reconnection | ✅ jittered backoff, `ErrAuth` never retried |
+| 3 | Kill switch | ✅ armed while healthy, not on teardown |
+| 4 | Split-tunnel routes | ✅ `-route` / `-exclude` |
+| 5 | Generic `probe` | ✅ over the registry; ikev2 keeps its unprivileged path |
+| 6 | More than one user | ✅ `-users-file`, eight facades, bcrypt where the protocol allows |
+| 7 | Secrets in `ps` | ✅ `-<flag>-file` for every `Secret` spec |
+| 8 | Counters | ✅ per tunnel, drops by reason, `/api/metrics` |
+| 9 | Generated flags | ✅ **1,366 lines deleted, 196 added** |
+| 10 | macOS | ✅ written; **unverified on hardware**, and CI says only that it compiles |
+| 11 | Logging | ✅ `-log-level` / `-log-format`, with the level's real limits written down |
+| 12 | Route build tags | ✅ `_linux` / `_darwin` / `_other` |
+| 13 | Drifted claims | ⚠️ headline qualified; the SoftEther cell is **blocked**, see below |
+| 14 | Stale counts | ✅ fixed, and the guard widened by number rather than by ignore-list |
+| 15 | Stale comments | ✅ *(landed)* markers, original text kept |
+
+## Where the plan was wrong
+
+Worth recording, because a plan that is never contradicted was not specific
+enough to be useful.
+
+- **Item 13 was the big one.** "SoftEther's self cell is a day's work and is
+  unambiguously owed" is false. Building it found that `softether.Dial` opens a
+  TAP and starts nothing that moves frames across it — the client has no data
+  path — so all three matrix columns wait on one piece of work and the Self
+  column is not the cheap one. The cell was written, run, and backed out; the
+  finding is in the matrix comment where the wrong one used to be.
+- **Item 6 counted seven facades; there are eight**, and the class boundary was
+  one row off: Cisco XAuth and SSH password auth also carry the password, so six
+  protocols can hold a bcrypt verifier and only the two MS-CHAPv2 ones cannot.
+- **Item 3's mechanism was one step short.** "On an unintended teardown, replace
+  the tunnel's default" leaves the teardown's own duration as plaintext. The
+  switch has to be armed while the tunnel is *healthy*, at a worse metric.
+- **Item 5 suggested aliasing `probe` to `connect -no-route`.** That would have
+  taken the unprivileged, TUN-less path away from the one protocol that has it.
+- **Item 9's `OptSpec.Default`** could not become the emitted value, only the
+  flag's default, or an unset `-cipher` would silently override a `.ovpn` file.
+
+## What is owed next
+
+1. **Run `doc/verifying-macos.md` on a Mac.** The client is written and
+   compiles; nobody has run it. Until someone does, macOS is "written, not
+   proven" and the README says so.
+2. **SoftEther's data path**, which unblocks all three of its matrix columns —
+   and the Self-column guard, which should land in the same change so it is a
+   check that has always been true rather than one that starts out excused.
+3. **The IPv6 half of the kill switch.** A v4-only tunnel closes v4 only; a
+   dual-stack host still leaks v6. Logged, not fixed.
+4. **Per-call log levels.** `-log-level` gates the stream because the tree logs
+   through `*log.Logger`. Making `warn` mean something *within* the stream is a
+   `slog` migration of several hundred call sites.
