@@ -8,7 +8,8 @@
 //	                                             management API and HTML panel
 //	veepin profile   <subcmd>                    manage client connection profiles
 //	veepin mgmt      <subcmd> [flags]            talk to a running supervisor's API
-//	veepin probe     <protocol> [flags]          diagnostic: handshake + one packet
+//	veepin probe     <protocol> [flags]          diagnostic: handshake, no routing
+//	                                             changes; works for every protocol
 //	veepin passwd                                print a bcrypt verifier for a
 //	                                             server's users-file
 //	veepin udp-proxy [flags]                     forward a local UDP socket over
@@ -118,7 +119,7 @@ Usage:
   veepin serve     -config <dir>                run a fleet of servers
   veepin profile   <subcmd>                     manage client connection profiles
   veepin mgmt      <subcmd> [flags]             talk to a running supervisor's API
-  veepin probe     <protocol> [flags]           diagnostic: handshake + one data packet
+  veepin probe     <protocol> [flags]           diagnostic: handshake only, no routing changes
   veepin passwd                                 print a bcrypt verifier for a users-file
   veepin udp-proxy [flags]                      forward a local UDP socket via MASQUE CONNECT-UDP
   veepin version                                print build information

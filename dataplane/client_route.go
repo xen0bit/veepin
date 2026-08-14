@@ -25,8 +25,19 @@ type ClientNetConfig struct {
 	// one that leaks every query while the tunnel looks fine.
 	NoDNS bool
 	// FullTunnel routes all traffic through the VPN (default route). When false,
-	// only the assigned subnet is routed and the caller adds its own routes.
+	// only the assigned subnet is routed, plus whatever Routes names.
 	FullTunnel bool
+
+	// Routes are extra destinations to send through the tunnel, for a split
+	// tunnel that wants to name what it carries. Before this, -full-tunnel=false
+	// brought the interface up and left the operator at a shell with `ip route`,
+	// which is a reasonable thing to offer and not a feature.
+	Routes []*net.IPNet
+	// Excludes are destinations to keep OFF the tunnel, installed as
+	// more-specific routes via the physical gateway. It is the same mechanism as
+	// the server host route above -- a /32 beats a /1 -- and shares its code, so
+	// the one thing that has to stay true of both stays true in one place.
+	Excludes []*net.IPNet
 }
 
 // ClientRouter applies and reverts client-side networking. It shells out to the
@@ -42,6 +53,18 @@ type ClientRouter struct {
 	addedDef6 bool
 	serverV6  bool       // the server's outer address is IPv6 (host route uses `ip -6`)
 	dns       dnsBackend // nil until Apply installs resolvers; see client_dns.go
+	// added are the -route and -exclude prefixes this router installed, in the
+	// order it installed them, so Revert removes exactly those and no more. A
+	// prefix that failed to install is not in here, which is what stops Revert
+	// from deleting a route the host already had.
+	added []addedRoute
+}
+
+// addedRoute is one prefix this router put in the host's table.
+type addedRoute struct {
+	prefix string
+	viaGW  bool // installed via the physical gateway (an exclude) rather than the TUN
+	v6     bool
 }
 
 // NewClientRouter creates a router for the given configuration.
@@ -137,6 +160,44 @@ func (r *ClientRouter) Apply() error {
 		}
 	}
 
+	// Split-tunnel routes, before DNS so that a resolver reached through one of
+	// them is routable by the time the resolver is installed.
+	for _, n := range r.cfg.Routes {
+		v6 := n.IP.To4() == nil
+		cmd := append(ipCmd(v6), "route", "add", n.String(), "dev", r.cfg.TUNName)
+		if err := run(cmd); err != nil {
+			if !strings.Contains(err.Error(), "File exists") {
+				return fmt.Errorf("route %s: %w", n, err)
+			}
+			continue // already present and not ours; leave it alone on the way out
+		}
+		r.added = append(r.added, addedRoute{prefix: n.String(), v6: v6})
+	}
+	// Excludes go via the physical gateway, which is the same mechanism as the
+	// server host route: a more specific prefix beats the tunnel's. They need a
+	// gateway to point at, and a host with no default route in that family has
+	// none -- said plainly rather than installed as something that will not work.
+	for _, n := range r.cfg.Excludes {
+		v6 := n.IP.To4() == nil
+		exGW, exDev := gwIP, gwDev
+		if v6 != r.serverV6 {
+			// The recorded gateway is the server's family. An exclude in the
+			// other family needs that family's default route.
+			var err error
+			if exGW, exDev, err = defaultRoute(v6); err != nil {
+				return fmt.Errorf("exclude %s: no default route to send it via: %w", n, err)
+			}
+		}
+		cmd := append(ipCmd(v6), "route", "add", n.String(), "via", exGW, "dev", exDev)
+		if err := run(cmd); err != nil {
+			if !strings.Contains(err.Error(), "File exists") {
+				return fmt.Errorf("exclude %s: %w", n, err)
+			}
+			continue
+		}
+		r.added = append(r.added, addedRoute{prefix: n.String(), viaGW: true, v6: v6})
+	}
+
 	// DNS last, because it is the only step that edits state outside this
 	// machine's routing table and the only one whose failure is worth
 	// distinguishing: everything above it has already succeeded by the time we
@@ -163,6 +224,16 @@ func (r *ClientRouter) Revert() error {
 		}
 		r.dns = nil
 	}
+	// Reverse order, so a route that depended on another coming first is
+	// removed before the one it depended on.
+	for i := len(r.added) - 1; i >= 0; i-- {
+		a := r.added[i]
+		del := append(ipCmd(a.v6), "route", "del", a.prefix)
+		if err := run(del); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+	r.added = nil
 	if r.addedDef {
 		for _, half := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
 			if err := run([]string{"ip", "route", "del", half, "dev", r.cfg.TUNName}); err != nil {

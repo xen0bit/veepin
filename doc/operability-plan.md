@@ -30,8 +30,8 @@ which is where the plan and the tree are reconciled when they disagree.
 | 1 | DNS is negotiated and then discarded | **High** | Low | **Do first** | ✅ landed |
 | 2 | Nothing re-dials, though the machinery for it exists | **High** | Low | **Do** | ✅ landed |
 | 3 | No kill switch: a dead tunnel fails open | Medium | Medium | Do, after 2 | ✅ landed |
-| 4 | Split tunnel has no way to name a route | Medium | Low | Do | ⬜ |
-| 5 | `veepin probe` covers one protocol of seventeen | Low | None | Do (trivial) | ⬜ |
+| 4 | Split tunnel has no way to name a route | Medium | Low | Do | ✅ landed |
+| 5 | `veepin probe` covers one protocol of seventeen | Low | None | Do (trivial) | ✅ landed |
 
 ### Part 2 — the server cannot be deployed
 
@@ -305,6 +305,26 @@ should share its code.
 matching for the inbound side; this is host routing table state, added and
 reverted the same way the two `/1` halves are.
 
+### ✅ Landed
+
+`-route` and `-exclude`, both repeatable, parsed into `net.IPNet` on `Set` so a
+typo is a command-line error naming the value rather than a route that quietly
+never appears. `ClientRouter` installs them beside the routes it already owns
+and records exactly what it installed, so `Revert` removes those and nothing
+else — a prefix that was already present is left alone on the way out.
+
+Three details the proposal did not cover:
+
+- **`-route` with an explicit `-full-tunnel=true` is refused, not resolved.**
+  The implication only fires when the operator did not say otherwise; two
+  explicit and contradictory instructions are reported. Silently picking one is
+  how someone ends up with routing they did not ask for.
+- **`-exclude` alone leaves the full tunnel on.** Excluding a prefix *from* a
+  full tunnel is the useful case, so only `-route` carries the implication.
+- **A bare address is accepted** and read as a host route. `-exclude
+  192.0.2.10` is what an operator will type, and refusing it over a missing
+  `/32` helps nobody.
+
 ## 5. `veepin probe` covers one protocol of seventeen
 
 ```go
@@ -327,6 +347,24 @@ alias for `connect -no-route -probe-once` rather than a third code path. Decide
 that when writing it; either way it should stop naming one protocol.
 
 **Risk:** none. Worst case it stays ikev2-only and the usage text says so.
+
+### ✅ Landed
+
+Generic over the registry: dial, report the `Result`, close — with the close
+deferred, because a probe that leaves a tunnel up is a `connect` with a worse
+name. It reports the assigned addresses, the outer gateway, DNS and MTU, and
+runs `Result.Validate`, printing what it complains about rather than failing on
+it, exactly as `connect` does.
+
+**ikev2 keeps its own path, and the branch says why.** The generic
+implementation needs a TUN and therefore `CAP_NET_ADMIN`;
+`internal/ikev2/probe` does the exchange with no TUN at all and runs
+unprivileged, which is a strictly better answer to "does the handshake work"
+and the reason it was written. Collapsing it to save a branch would take that
+away from the one protocol that has it — so this went the other way from the
+plan's suggestion of aliasing `probe` to `connect -no-route`, and the alias
+would additionally have hidden the timeout that a diagnostic wants and a
+long-lived tunnel does not.
 
 ---
 

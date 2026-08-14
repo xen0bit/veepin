@@ -382,7 +382,12 @@ the host's real address. On disconnect (Ctrl-C) both are reverted. Useful flags:
 
 - `-user` / `-pass` — authenticate with EAP-MSCHAPv2 username/password instead of
   the client PSK (the server PSK still authenticates the server).
-- `-full-tunnel=false` — only bring up the interface/address; add your own routes.
+- `-full-tunnel=false` — only bring up the interface/address.
+- `-route <cidr>` — send this prefix through the tunnel (repeatable). Implies
+  `-full-tunnel=false`, since naming what to route means not routing everything.
+- `-exclude <cidr>` — keep this prefix off the tunnel (repeatable), by routing it
+  via the physical gateway — the same mechanism that keeps the tunnel's own
+  packets from recursing into it. A bare address is read as a host route.
 - `-no-route` — connect and establish the data path but make no routing or DNS
   changes (useful for testing, or when another process manages both).
 - `-no-dns` — keep the routes but leave the host's resolvers alone, for the

@@ -87,6 +87,9 @@ func runConnectBare(protocol string, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if err := netCfg.resolve(fs); err != nil {
+		return err
+	}
 
 	logger, err := logCfg.logger()
 	if err != nil {
@@ -110,6 +113,9 @@ func runConnectProfile(cfg profile.Config, args ...string) error {
 	}
 	if fs.NArg() != 0 {
 		return fmt.Errorf("connect: unexpected argument %q", fs.Arg(0))
+	}
+	if err := netCfg.resolve(fs); err != nil {
+		return err
 	}
 	opts, err := applyOverrides("connect", cfg.Protocol, cfg.Options, sets)
 	if err != nil {
@@ -318,6 +324,8 @@ func oneSession(
 			DNS:         res.DNS,
 			NoDNS:       netCfg.noDNS,
 			FullTunnel:  fullTunnel,
+			Routes:      netCfg.routes,
+			Excludes:    netCfg.excludes,
 		})
 		// Revert is deferred before the result of Apply is examined, not after.
 		// Apply installs several pieces of host state in sequence and can fail
