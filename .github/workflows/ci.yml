@@ -42,6 +42,17 @@ jobs:
       - name: Build
         run: go build -v ./...
 
+      # The macOS client (dataplane/tun_darwin.go and friends) cannot be run
+      # here -- Docker on a Mac is a Linux VM, so every interop cell runs a
+      # Linux veepin whatever laptop starts it. Cross-compiling is the most this
+      # can prove: that the syscalls, constants and build tags hold together.
+      # doc/verifying-macos.md is the procedure for the person with the hardware.
+      - name: Cross-build (macOS, both architectures)
+        run: |
+          GOOS=darwin GOARCH=amd64 go build ./...
+          GOOS=darwin GOARCH=arm64 go build ./...
+          GOOS=darwin GOARCH=arm64 go vet ./...
+
       - name: Test (race)
         run: go test -race ./...
 
