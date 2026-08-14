@@ -437,12 +437,13 @@ func armKillSwitch(
 	logger.Printf("kill switch engaged: traffic fails closed if the tunnel drops. "+
 		"To reopen this host by hand: %s", k.RecoveryCommand())
 	if res.AssignedIP != nil && res.AssignedIP6 == nil {
-		// Said plainly because it is a real hole and the flag's name promises
-		// otherwise. Closing IPv6 that the tunnel never carried would break
-		// connectivity nobody asked us to touch, so the honest answer is to
-		// name it.
-		logger.Printf("warning: this tunnel carries IPv4 only, so the kill switch closes IPv4 only; " +
-			"IPv6 traffic on a dual-stack host still leaves by the physical link")
+		// Said out loud because it is a change to the host beyond what the
+		// tunnel carries, and an operator should not discover it by finding
+		// IPv6 dead. It is deliberate: a family the tunnel does not carry is
+		// exactly a family that escapes it, and failing closed means closing
+		// it too.
+		logger.Printf("kill switch: this tunnel carries IPv4 only, so IPv6 is blackholed " +
+			"for its lifetime rather than left to leave by the physical link")
 	}
 	return nil
 }

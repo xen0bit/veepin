@@ -66,18 +66,40 @@ type KillSwitchConfig struct {
 	// re-dial can happen. Nil is a programming error here: see the package
 	// comment on why the caller must refuse that case instead.
 	ServerIP net.IP
-	// V4 and V6 say which families the tunnel actually carried, and therefore
-	// which to close. A family the tunnel never routed is left alone: closing
-	// it would break connectivity the tunnel was never carrying, which is a
-	// change to the host nobody asked for.
+	// V4 and V6 say which families the tunnel carries. They are recorded for
+	// the log line and NOT used to decide what to close.
+	//
+	// Closing only the families the tunnel carries was the first design, and it
+	// was wrong in the one way that matters here: a v4-only tunnel on a
+	// dual-stack host leaves every IPv6 packet going out the physical link, in
+	// plaintext, while the operator has explicitly asked to fail closed. "A
+	// family the tunnel never routed is left alone" reads like restraint and is
+	// actually the leak -- a family the tunnel does not carry is exactly a
+	// family that escapes it.
+	//
+	// So Engage closes both, always. Link-local and any other connected route
+	// is more specific than a /1 and is unaffected; what stops is traffic that
+	// would otherwise have left by the physical default, which is the whole
+	// point of the flag.
 	V4, V6 bool
 }
 
 // KillSwitch holds the blackhole routes. It is created once per `connect` and
 // outlives every session, because holding across the gap is the whole point.
 type KillSwitch struct {
-	cfg       KillSwitchConfig
-	engaged   bool
+	cfg     KillSwitchConfig
+	engaged bool
+	// started is set as soon as Engage begins installing anything, and is what
+	// Disengage checks. It is distinct from engaged because Engage calls
+	// Disengage itself to undo a partial install, at a point where engaged is
+	// still false -- and distinct from "never touched", because Disengage is
+	// reached from a defer that also runs on paths where Engage was refused.
+	//
+	// Without it, a Disengage on a switch that never engaged runs `ip route del`
+	// for four prefixes it did not install, which on an unprivileged process is
+	// four errors and on a privileged one is four routes belonging to somebody
+	// else.
+	started   bool
 	addedHost bool
 	gwIP      string
 	gwDev     string
@@ -100,6 +122,7 @@ func (k *KillSwitch) Engage() error {
 		return fmt.Errorf("kill switch: no server address to keep reachable; " +
 			"a protocol with no single peer cannot be fenced this way")
 	}
+	k.started = true
 	serverV6 := k.cfg.ServerIP.To4() == nil
 
 	// The carve-out first. Ordering matters on a live host: if the blackholes
@@ -138,6 +161,9 @@ func (k *KillSwitch) Engage() error {
 // error on one route must not stop the others coming down, because a partly
 // closed host is worse than either state.
 func (k *KillSwitch) Disengage() error {
+	if !k.started {
+		return nil
+	}
 	var errs []string
 	for _, h := range k.halves() {
 		if err := run(h.del()); err != nil && !strings.Contains(err.Error(), "No such process") {
@@ -152,7 +178,7 @@ func (k *KillSwitch) Disengage() error {
 		}
 		k.addedHost = false
 	}
-	k.engaged = false
+	k.engaged, k.started = false, false
 	if len(errs) > 0 {
 		return fmt.Errorf("kill switch: disengage: %s", strings.Join(errs, "; "))
 	}
@@ -172,23 +198,23 @@ func (h blackholeHalf) cmd(verb string) []string {
 func (h blackholeHalf) add() []string { return h.cmd("add") }
 func (h blackholeHalf) del() []string { return h.cmd("del") }
 
-// halves is the set of prefixes for the families this switch closes. Two /1s
-// per family rather than one /0, mirroring ClientRouter exactly: the point is
-// to sit at the same specificity as the routes being replaced, so that the
-// physical default is never the most specific match again.
+// halves is the set of prefixes this switch closes: two /1s per family, both
+// families, always.
+//
+// Two /1s rather than one /0 mirrors ClientRouter exactly -- the point is to sit
+// at the same specificity as the routes being replaced, so the physical default
+// is never the most specific match again.
+//
+// Both families regardless of what the tunnel carries, because the alternative
+// is the leak: see KillSwitchConfig. A host with no IPv6 at all is unaffected
+// by two v6 routes that match nothing it sends.
 func (k *KillSwitch) halves() []blackholeHalf {
-	var out []blackholeHalf
-	if k.cfg.V4 {
-		out = append(out,
-			blackholeHalf{prefix: "0.0.0.0/1"},
-			blackholeHalf{prefix: "128.0.0.0/1"})
+	return []blackholeHalf{
+		{prefix: "0.0.0.0/1"},
+		{prefix: "128.0.0.0/1"},
+		{prefix: "::/1", v6: true},
+		{prefix: "8000::/1", v6: true},
 	}
-	if k.cfg.V6 {
-		out = append(out,
-			blackholeHalf{prefix: "::/1", v6: true},
-			blackholeHalf{prefix: "8000::/1", v6: true})
-	}
-	return out
 }
 
 // RecoveryCommand is what an operator types to reopen a host by hand, for the

@@ -7,21 +7,23 @@ import (
 	"testing"
 )
 
-// The four prefixes, per family, exactly mirroring what ClientRouter installs
-// for a full tunnel. Two /1s rather than one /0 is the whole mechanism: at the
-// same specificity as the routes being replaced, the physical default is never
-// the most specific match again. A /0 blackhole would lose to it.
-func TestKillSwitchMirrorsTheRoutesItReplaces(t *testing.T) {
+// Both families, always, whichever the tunnel carries. Closing only the
+// carried families reads like restraint and is actually the leak: a v4-only
+// tunnel on a dual-stack host would leave every IPv6 packet going out the
+// physical link, in plaintext, while the operator has asked to fail closed.
+//
+// Two /1s per family rather than one /0 is the other half of the mechanism: at
+// the same specificity as the routes being replaced, the physical default is
+// never the most specific match again. A /0 blackhole would lose to it.
+func TestTheKillSwitchClosesBothFamiliesWhicheverTheTunnelCarries(t *testing.T) {
+	want := []string{"0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1"}
 	for _, tc := range []struct {
 		name string
 		cfg  KillSwitchConfig
-		want []string
 	}{
-		{"v4 only", KillSwitchConfig{V4: true}, []string{"0.0.0.0/1", "128.0.0.0/1"}},
-		{"v6 only", KillSwitchConfig{V6: true}, []string{"::/1", "8000::/1"}},
-		{"dual stack", KillSwitchConfig{V4: true, V6: true},
-			[]string{"0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1"}},
-		{"neither", KillSwitchConfig{}, nil},
+		{"v4 tunnel", KillSwitchConfig{V4: true}},
+		{"v6 tunnel", KillSwitchConfig{V6: true}},
+		{"dual stack", KillSwitchConfig{V4: true, V6: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			k := NewKillSwitch(tc.cfg)
@@ -29,8 +31,8 @@ func TestKillSwitchMirrorsTheRoutesItReplaces(t *testing.T) {
 			for _, h := range k.halves() {
 				got = append(got, h.prefix)
 			}
-			if !slices.Equal(got, tc.want) {
-				t.Errorf("halves = %v, want %v", got, tc.want)
+			if !slices.Equal(got, want) {
+				t.Errorf("halves = %v, want %v — a family left open is a family that leaks", got, want)
 			}
 		})
 	}
@@ -107,8 +109,13 @@ func TestRecoveryCommandUndoesExactlyWhatWasInstalled(t *testing.T) {
 
 // Disengage on a switch that never engaged must be safe: it is reached from a
 // defer that also runs on the paths where Engage was refused.
+// Disengage is reached from a defer that also runs on the paths where Engage
+// was refused, so it must install-nothing and delete-nothing when it was never
+// engaged. It must not run `ip route del` for four prefixes it did not put
+// there -- which on a privileged process is four routes belonging to somebody
+// else.
 func TestDisengageIsSafeBeforeEngage(t *testing.T) {
-	k := NewKillSwitch(KillSwitchConfig{ServerIP: net.ParseIP("192.0.2.10")})
+	k := NewKillSwitch(KillSwitchConfig{ServerIP: net.ParseIP("192.0.2.10"), V4: true})
 	if err := k.Disengage(); err != nil {
 		t.Errorf("Disengage before Engage: %v", err)
 	}
