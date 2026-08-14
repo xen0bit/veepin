@@ -11,6 +11,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	engine "github.com/xen0bit/veepin/internal/l2tp"
+	"github.com/xen0bit/veepin/internal/userdb"
 )
 
 func init() {
@@ -22,8 +23,9 @@ func init() {
 		{Key: OptServerPSK, Kind: client.OptStr, Required: true, Secret: true, Generate: "psk", Help: "IPsec pre-shared key"},
 		{Key: OptServerPool, Kind: client.OptCIDR, Default: "10.20.0.0/24", Help: "internal address pool handed to clients (default 10.20.0.0/24)"},
 		{Key: OptServerDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers assigned to clients"},
-		{Key: OptServerUser, Kind: client.OptStr, Required: true, Help: "MS-CHAPv2 username to accept"},
-		{Key: OptServerPassword, Kind: client.OptStr, Required: true, Secret: true, Help: "the user's password"},
+		{Key: OptServerUser, Kind: client.OptStr, Help: "MS-CHAPv2 username to accept; the one-user shorthand for users-file, and one of the two is required"},
+		{Key: OptServerPassword, Flag: "pass", Kind: client.OptStr, Secret: true, Help: "the password for user"},
+		{Key: OptServerUsers, Kind: client.OptFilePath, Secret: true, Help: "path to a file of username:secret lines, for more than one user; MS-CHAPv2 derives its response from the password, so the secret must be the password itself"},
 		client.TUNOpt(OptServerTUN),
 		client.ShapeOpt(OptServerShape, "downstream"),
 	})
@@ -37,6 +39,7 @@ const (
 	OptServerPSK      = "psk"
 	OptServerUser     = "user"
 	OptServerPassword = "password"
+	OptServerUsers    = "users-file"
 	OptServerPool     = "pool"
 	OptServerDNS      = "dns"
 	OptServerTUN      = "tun"
@@ -200,8 +203,10 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 		}
 		cfg.Port = p
 	}
-	if user := opts[OptServerUser]; user != "" {
-		cfg.Users = map[string]string{user: opts[OptServerPassword]}
+	users, uerr := userdb.Resolve(userdb.NeedsPlaintext, opts[OptServerUsers], opts[OptServerUser], opts[OptServerPassword])
+	if uerr != nil {
+		return nil, fmt.Errorf("l2tp: %w", uerr)
 	}
+	cfg.Users = users
 	return NewServer(cfg)
 }

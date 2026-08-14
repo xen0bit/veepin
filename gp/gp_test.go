@@ -135,14 +135,14 @@ func TestParseServerOptions(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name:    "user and pass are required",
+			name:    "some credential source is required",
 			mutate:  func(o map[string]string) { delete(o, OptServerUser); delete(o, OptServerPass) },
-			wantErr: "user and pass are required",
+			wantErr: "user and pass, or users-file, are required",
 		},
 		{
 			name:    "user alone is not enough",
 			mutate:  func(o map[string]string) { delete(o, OptServerPass) },
-			wantErr: "user and pass are required",
+			wantErr: "a named user needs a pass",
 		},
 		{
 			name:    "port must be a number",

@@ -1,7 +1,6 @@
 package ssh
 
 import (
-	"crypto/subtle"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -18,6 +17,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/sshtun"
+	"github.com/xen0bit/veepin/internal/userdb"
 )
 
 // ServerConfig configures an SSH VPN responder — an SSH server that accepts
@@ -341,7 +341,10 @@ func serverSSHConfig(cfg *ServerConfig) (*cryptossh.ServerConfig, error) {
 	if len(cfg.Users) > 0 {
 		users := cfg.Users
 		sc.PasswordCallback = func(conn cryptossh.ConnMetadata, pass []byte) (*cryptossh.Permissions, error) {
-			if want, ok := users[conn.User()]; ok && subtleEqual(want, string(pass)) {
+			// The stored secret may be a bcrypt verifier rather than the
+			// password: SSH password auth carries the password itself, so the
+			// server never needs to hold one (see internal/userdb).
+			if want, ok := users[conn.User()]; ok && userdb.Verify(want, string(pass)) {
 				return &cryptossh.Permissions{}, nil
 			}
 			return nil, fmt.Errorf("ssh: authentication failed")
@@ -357,11 +360,6 @@ func serverSSHConfig(cfg *ServerConfig) (*cryptossh.ServerConfig, error) {
 	}
 	sc.AddHostKey(signer)
 	return sc, nil
-}
-
-// subtleEqual compares two strings in constant time.
-func subtleEqual(a, b string) bool {
-	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 // ipv4Dst / ipv4Src return the destination / source address of an IPv4 packet.
@@ -394,6 +392,7 @@ const (
 	OptServerDNS            = "dns"
 	OptServerUser           = "user"
 	OptServerPassword       = "password"
+	OptServerUsers          = "users-file"
 	OptServerAuthorizedKeys = "authorized-keys"
 	OptServerTUN            = "tun"
 )
@@ -407,7 +406,8 @@ func init() {
 		{Key: OptServerPool, Kind: client.OptCIDR, Default: "10.200.0.0/24", Help: "tunnel subnet clients use (default 10.200.0.0/24)"},
 		{Key: OptServerDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers (informational)"},
 		{Key: OptServerUser, Kind: client.OptStr, Help: "username to accept (password auth)"},
-		{Key: OptServerPassword, Kind: client.OptStr, Secret: true, Help: "the user's password"},
+		{Key: OptServerPassword, Flag: "pass", Kind: client.OptStr, Secret: true, Help: "the user's password"},
+		{Key: OptServerUsers, Kind: client.OptFilePath, Secret: true, Help: "path to a file of username:secret lines, for more than one user; the secret may be a bcrypt verifier"},
 		{Key: OptServerAuthorizedKeys, Kind: client.OptFilePath, Help: "path to an authorized_keys file (public-key auth)"},
 		client.TUNOpt(OptServerTUN),
 	})
@@ -426,8 +426,8 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 	if cfg.HostKey, err = os.ReadFile(opts[OptServerHostKey]); err != nil {
 		return nil, fmt.Errorf("ssh: host-key: %w", err)
 	}
-	if u := opts[OptServerUser]; u != "" {
-		cfg.Users[u] = opts[OptServerPassword]
+	if cfg.Users, err = userdb.Resolve(userdb.Verifiable, opts[OptServerUsers], opts[OptServerUser], opts[OptServerPassword]); err != nil {
+		return nil, fmt.Errorf("ssh: %w", err)
 	}
 	if path := opts[OptServerAuthorizedKeys]; path != "" {
 		data, rerr := os.ReadFile(path)

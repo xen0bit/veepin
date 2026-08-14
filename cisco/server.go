@@ -21,6 +21,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	icisco "github.com/xen0bit/veepin/internal/cisco"
+	"github.com/xen0bit/veepin/internal/userdb"
 )
 
 func init() {
@@ -30,8 +31,9 @@ func init() {
 		{Key: OptServerPort, Kind: client.OptInt, Default: "500", Help: "IKE port to listen on (default 500; the NAT-T port is always 4500)"},
 		{Key: OptServerGroup, Kind: client.OptStr, Required: true, Help: "group name clients must present"},
 		{Key: OptServerGroupPSK, Kind: client.OptStr, Required: true, Secret: true, Generate: "psk", Help: "the group's pre-shared key"},
-		{Key: OptServerUser, Kind: client.OptStr, Required: true, Help: "XAuth username to accept"},
-		{Key: OptServerPass, Kind: client.OptStr, Required: true, Secret: true, Help: "the user's password"},
+		{Key: OptServerUser, Kind: client.OptStr, Help: "XAuth username to accept; the one-user shorthand for users-file, and one of the two is required"},
+		{Key: OptServerPass, Kind: client.OptStr, Secret: true, Help: "the password for user"},
+		{Key: OptServerUsers, Kind: client.OptFilePath, Secret: true, Help: "path to a file of username:secret lines, for more than one user; the secret may be a bcrypt verifier"},
 		{Key: OptServerPool, Kind: client.OptCIDR, Default: "10.60.0.0/24", Help: "internal address pool handed to clients (default 10.60.0.0/24)"},
 		{Key: OptServerDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers offered to clients"},
 		{Key: OptServerDomain, Kind: client.OptStr, Help: "default search domain offered to clients"},
@@ -53,6 +55,7 @@ const (
 	OptServerGroupPSK     = "group-psk"     // that group's pre-shared key (required)
 	OptServerUser         = "user"          // XAuth username to accept (required)
 	OptServerPass         = "pass"          // that user's password (required)
+	OptServerUsers        = "users-file"    // path to a file of username:secret lines (more than one user)
 	OptServerPool         = "pool"          // client address pool CIDR
 	OptServerDNS          = "dns"           // comma-separated DNS servers offered to clients
 	OptServerDomain       = "domain"        // default search domain offered to clients
@@ -251,10 +254,17 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 	cfg.Groups = map[string][]byte{group: []byte(psk)}
 
 	user, pass := opts[OptServerUser], opts[OptServerPass]
-	if user == "" || pass == "" {
-		return nil, errors.New("cisco: user and pass are required")
+	if user != "" && pass == "" {
+		return nil, errors.New("cisco: a named user needs a pass")
 	}
-	cfg.Users = map[string]string{user: pass}
+	users, uerr := userdb.Resolve(userdb.Verifiable, opts[OptServerUsers], user, pass)
+	if uerr != nil {
+		return nil, fmt.Errorf("cisco: %w", uerr)
+	}
+	if len(users) == 0 {
+		return nil, errors.New("cisco: user and pass, or users-file, are required")
+	}
+	cfg.Users = users
 
 	if v := opts[OptServerPort]; v != "" {
 		p, err := strconv.Atoi(v)

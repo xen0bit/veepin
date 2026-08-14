@@ -617,6 +617,9 @@ func (s *Server) Peers() []client.PeerInfo {
 				info.LastHandshake = t.established.UTC().Format(time.RFC3339)
 			}
 			t.mu.RUnlock()
+			if st, ok := s.pump.TunnelStats(t); ok {
+				info = info.WithTraffic(st.RxPackets, st.RxBytes, st.TxPackets, st.TxBytes, st.LastSeen, true)
+			}
 		}
 		out = append(out, info)
 	}

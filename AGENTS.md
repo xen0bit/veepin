@@ -71,11 +71,11 @@ round trip:
 | `docs_test.go` — `TestREADMECountsProtocolsCorrectly` | **every** occurrence of "*N* production protocols" and "*Nth* registered protocol" in the README agrees with the registry — spelled out ("sixteen", "seventeenth") |
 | `fuzztargets_test.go` — `TestFuzzTargetsAreAllListed` | every `Fuzz*` in the tree is in the `TARGETS` heredoc in `.github/workflows/ci.yml`, and `expected=N` matches the count |
 | `cmd/veepin/main_test.go` | every registered protocol has a `connect` case |
-| `cmd/veepin/flags_test.go` | every registered server protocol has a `serve` case; every bound flag reaches the option map (it perturbs each one and requires the map to change); every emitted key has a matching `Opt*` const |
-| `cmd/veepin/flags_test.go` — `TestClientOptSpecsMatchTheKeysTheProtocolReads` | every registered client protocol declares `RegisterClientOpts`, and its spec keys and `connect` flags are the same set |
+| `cmd/veepin/flags_test.go` — `TestTheFlagSetIsTheSpecTable` | every registered protocol declares `RegisterClientOpts`/`RegisterServerOpts` for each role it claims, and every spec in them produces a flag that reaches its own key. Two specs cannot claim one flag spelling |
+| `cmd/veepin/flags_test.go` | every bound flag reaches the option map (it perturbs each one and requires the map to change); every emitted key has a matching `Opt*` const |
 | `cmd/veepin/flags_test.go` — `TestRequiredClientOptsAreTheOnesTheParseRejects` | an option whose absence the parse rejects with "is required" is marked `Required: true` — **and** that the full option map built from the specs parses at all, without which the check is vacuous for that protocol |
 | `cmd/veepin/flags_test.go` — `TestSecretFlagsAgreeAcrossBothTables` | a key in both a protocol's client and server tables carries the same `Secret` flag in each |
-| `docs_test.go` — `TestEveryOptConstIsDescribedByAnOptSpec` | every `Opt*` const a facade declares is named as a `Key` in one of its two OptSpec tables — this is what catches an option the parse reads that no flag emits, which both flag-driven guards above are blind to |
+| `docs_test.go` — `TestEveryOptConstIsDescribedByAnOptSpec` | every `Opt*` const a facade declares is named as a `Key` in one of its two OptSpec tables |
 | `internal/livingreadme/interop_test.go` | every test named in the matrix exists, and every `TestInterop*` is in the matrix — **a test absent from the matrix runs in no CI shard and therefore never runs** |
 | `nm/cmd/.../TestAllSupportedProtocolsRegistered` | `nmconfig.SupportedProtocols` and the service's blank imports agree |
 | `tests/e2e/harness/registry_test.go` | the Playwright harness blank-imports every facade, so the panel it serves has the same registry the real binary does |
@@ -106,15 +106,23 @@ Roughly the order that works. One commit per phase.
    key material *or a path to it*, and `Required` on anything the parse rejects
    the absence of.
 
-   Four guards in the table above cover this, and none of them can check a
-   `Secret` flag on a key that appears in only one of the two tables — whether a
-   lone option is key material is a judgement, and `doc/security.md` is where
-   the rule it is judged against is written down. What is mechanical: if a key
-   is in **both** tables it must be flagged the same way in each, and the option
-   map built from the specs must actually parse. Both are asserted; the second
-   is the precondition the `Required` guard needs, and for seven of seventeen
-   protocols it silently did not hold.
-4. **CLI cases** in `cmd/veepin/connect.go` and `serve.go`, plus direct imports.
+   **The OptSpec table IS the command-line flag set.** `cmd/veepin/optflags.go`
+   generates one flag per spec — name from `Key` (or `Flag`, for the handful
+   whose command-line spelling has never matched: ikev2's key is `gateway` and
+   its flag is `-server`), type from `Kind`, default and help from `Default` and
+   `Help`. `Secret` additionally produces a `-<flag>-file` companion, so the
+   value need never appear in `ps`. There is no per-protocol `case` to write.
+
+   Two things follow that are easy to get wrong. `Default` is what the
+   *protocol* does when the option is unset, not a value the CLI injects: an
+   unset flag contributes nothing to the option map, which is what stops
+   `-cipher`'s documented default from silently overriding a `.ovpn` file. And
+   whether a lone option is key material is a judgement `doc/security.md` is
+   the record of — no guard can make it, though a key in **both** tables must be
+   flagged the same way in each, and that is asserted.
+4. **Register the facade** with a blank import in `cmd/veepin/main.go`. That is
+   the whole of making a protocol reachable from the command: the registry
+   carries the parse *and* the specs the flags come from.
 5. **Docs**: `doc.go`, the README protocol table + usage-runbook table + the
    spelled-out counts, `doc/usage/<proto>.md`, `internal/<proto>/README.md`, and
    a `doc/security.md` section if the protocol has a weakness worth naming.

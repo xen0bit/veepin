@@ -33,6 +33,33 @@ parallel interface:
 | `rm <name>`                  | `DELETE /api/listeners/<name>`             | stop listener + remove its file (prompts at a terminal; `-y` skips) |
 | `audit`                      | `GET /api/audit`                           | recent management-plane activity, newest first     |
 | `client-config <name>`       | `POST /api/listeners/<name>/client-config` | generate a client profile for a listener           |
+| —                            | `GET /api/metrics`                         | traffic counters in Prometheus text format         |
+
+`/api/metrics` has no subcommand: nothing about it is easier through a CLI
+than through `curl`, and its consumer is a scraper rather than a person. It
+serves the same numbers `/api/listeners/<name>/peers` does, in the shape a
+time-series database ingests — per peer, bytes and packets each way as
+counters, plus a per-listener up gauge and peer count:
+
+```sh
+$ curl -sH "Authorization: Bearer $TOKEN" http://127.0.0.1:8443/api/metrics
+# HELP veepin_listener_up Whether a configured listener is running (1) or not (0).
+# TYPE veepin_listener_up gauge
+veepin_listener_up{listener="site-a",protocol="wireguard"} 1
+# HELP veepin_peer_rx_bytes_total Inner bytes received from a peer.
+# TYPE veepin_peer_rx_bytes_total counter
+veepin_peer_rx_bytes_total{listener="site-a",protocol="wireguard",peer="8Zk2…"} 41231872
+```
+
+A listener that is stopped, or whose protocol cannot report peers, is absent
+from the peer metrics rather than exported as zero. Zero is a claim ("no
+peers"); absence is the truth ("we cannot say"), and an alert on peers dropping
+to zero should not fire because a protocol never had the capability.
+
+Byte counts are **inner** bytes — the user's traffic, before encapsulation — so
+they are comparable across protocols and against what an application thinks it
+sent. Encapsulation overhead is a per-packet constant of the protocol, so the
+on-the-wire figure can be computed from these; the reverse is not true.
 
 ## Examples
 

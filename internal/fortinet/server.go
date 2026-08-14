@@ -24,11 +24,11 @@ import (
 	"time"
 
 	"github.com/xen0bit/veepin/dataplane"
-	"github.com/xen0bit/veepin/internal/cryptoutil"
 	"github.com/xen0bit/veepin/internal/mschap"
 	"github.com/xen0bit/veepin/internal/otp"
 	"github.com/xen0bit/veepin/internal/ppp"
 	"github.com/xen0bit/veepin/internal/udpmux"
+	"github.com/xen0bit/veepin/internal/userdb"
 )
 
 // ServerConfig configures a Fortinet SSL VPN server.
@@ -187,7 +187,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pass, ok := s.cfg.Users[req.Username]
-	if !ok || !cryptoutil.SecretEqual([]byte(pass), []byte(req.Password)) {
+	if !ok || !userdb.Verify(pass, req.Password) {
 		s.log.Printf("fortinet: login failed for %q", req.Username)
 		// FortiOS answers a bad login with ret=1 on a permit-all portal or an
 		// error page otherwise; a plain 403 is unambiguous and is what a client

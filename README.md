@@ -8,7 +8,11 @@ WireGuard, OpenVPN, SSTP, SSH, L2TP/IPsec, L2TPv3 Ethernet pseudowire,
 AnyConnect, Nebula, MASQUE (CONNECT-IP and CONNECT-UDP over HTTP/3), Fortinet,
 GlobalProtect, Cisco IPsec, Ivanti Connect Secure, SoftEther VPN (SE-VPN) and
 AmneziaWG — each verified in Docker against a real third-party implementation
-and against itself.
+and against itself. Two rows carry an exception the
+[matrix](#interoperability-matrix) names and this sentence should not hide:
+**SoftEther is verified against itself but has no cross-implementation cell
+yet**, and **L2TPv3's kernel cells need an `l2tp_eth` module GitHub's runners
+lack**, so they are a local-only check.
 
 Every layer is covered by tests, including full VPN integration tests:
 `TestFullVPNFlow` drives a client through the handshake and verifies a real IP
@@ -59,7 +63,7 @@ wire detail, caveats and API surface.
 | **GlobalProtect** | password | RFC 4303 ESP over UDP, keyed by the config document, with a framed layer-3 TLS tunnel as fallback | openconnect | [gp](internal/gp/README.md) |
 | **Cisco IPsec** | group PSK + XAuth password | IKEv1 Aggressive Mode, Mode-Config, tunnel-mode ESP-in-UDP | strongSwan | [cisco](internal/cisco/README.md) |
 | **Ivanti Connect Secure** | password (EAP over IF-T/TLS) | RFC 4303 ESP over UDP, with the IF-T/TLS connection as fallback | openconnect | [pulse](internal/pulse/README.md) |
-| **SoftEther VPN** | password | Ethernet frames over TLS (PACK control), layer-2 TAP | not yet — see `‡` below | [softether](internal/softether/README.md) |
+| **SoftEther VPN** | password | Ethernet frames over TLS (PACK control), layer-2 TAP | itself — see `‡` below | [softether](internal/softether/README.md) |
 | **AmneziaWG** | Noise_IKpsk2 static keys | WireGuard's ChaCha20-Poly1305 unchanged; obfuscated headers, padding and junk packets | `amneziawg-go` | [amneziawg](wireguard/obfuscate.go) |
 
 Both roles share one registry API (`client.Register`/`client.RegisterServer`),
@@ -104,7 +108,7 @@ hand-rolling a QUIC stack or vendoring a third-party one — is avoided the same
 way `x/crypto` avoids hand-rolling ChaCha20. (`x/net/http3` is *not* used: its
 public surface exports nothing and it has no CONNECT/datagram/capsule support,
 so the HTTP/3 layer MASQUE needs is built from scratch on the `quic` package —
-see `internal/masque/http3`.) Only MASQUE imports it; the other nine protocols
+see `internal/masque/http3`.) Only MASQUE imports it; the other fifteen protocols
 still reach no further than `x/crypto`.
 
 The alternative was hand-rolling both. That was rejected: `x/crypto` is the Go
@@ -238,7 +242,9 @@ echo "deb [signed-by=/usr/share/keyrings/veepin-archive-keyring.gpg] https://xen
 sudo apt update && sudo apt install veepin veepin-nm
 ```
 
-`veepin` is the CLI (server + client, no runtime dependencies); `veepin-nm`
+`veepin` is the CLI (server + client; no *library* dependencies — it does shell
+out to `ip`/`iptables`/`sysctl` on Linux and `ifconfig`/`route`/`networksetup` on
+macOS, all of which are part of the base system); `veepin-nm`
 adds the NetworkManager desktop integration (built for the same architectures;
 the amd64/arm64 builds load on Ubuntu 22.04+, the cross-built rest on
 Debian 12+ / Ubuntu 24.04+). The repository signing
@@ -308,6 +314,30 @@ formats, and what it interoperates with — has its own page:
 | AmneziaWG | [doc/usage/amneziawg.md](doc/usage/amneziawg.md) |
 | L2TPv3 Ethernet pseudowire | [doc/usage/l2tpv3.md](doc/usage/l2tpv3.md) |
 
+### More than one user
+
+Every protocol that authenticates a person by password — AnyConnect, Cisco
+IPsec, Fortinet, GlobalProtect, Ivanti, L2TP/IPsec, SSH and SSTP — takes
+`-users-file`, a file of `username:secret` lines:
+
+```
+# /etc/veepin/users, mode 0600
+alice:$2a$12$K3sQ8xVn0zL7pR2fT9mYue1Wj4hC6bD5aE8gN0oS2uX7vZ1qM3rGy
+bob:hunter2
+```
+
+`-user`/`-pass` remain the one-user shorthand, and where a name is in both the
+command line wins. `veepin passwd` prints a verifier for the first form,
+reading the password from stdin so it never enters the process table; the
+format is bcrypt's own, so `htpasswd -B` works too.
+
+Whether the secret may be a verifier is a property of the protocol rather than
+a setting. SSTP and L2TP/IPsec are MS-CHAPv2: both ends derive their response
+*from* the password, so those files hold plaintext passwords and veepin refuses
+a hash at startup rather than accepting one and failing every login. See
+[doc/security.md](doc/security.md#half-the-password-protocols-must-store-the-password-itself)
+for the table and what it costs.
+
 To run **a fleet of servers** in one process with a localhost management API
 and embedded web panel, the supervisor mode is additive to the bare
 single-protocol command: see [Running the supervisor](doc/usage/supervisor.md)
@@ -325,7 +355,7 @@ Android, strongSwan) can also connect to the veepin IKEv2 server directly — se
 
 **TOY provides no security** — its "encryption" is a repeating XOR pad and its
 "authentication" is a hash-table hash, so anyone who can see the traffic can read
-and forge it. It is not one of the ten real protocols; it is the *shape* of a
+and forge it. It is not one of the sixteen real protocols; it is the *shape* of a
 veepin protocol with the cryptography replaced by placeholders simple enough to
 read in one sitting — a handshake producing a `client.Result`, a `dataplane.Pump`
 data path, and both roles on the client registry. Its interop cells talk to an
@@ -351,19 +381,100 @@ sudo ./veepin connect ikev2 -server vpn.example.com -psk 'a-strong-preshared-key
 
 By default it installs a full-tunnel default route (all traffic through the VPN)
 plus a host route to the server via the existing gateway, so the encapsulated
-ESP packets don't recurse into the tunnel. On disconnect (Ctrl-C) the routes are
-reverted. Useful flags:
+ESP packets don't recurse into the tunnel. It also installs the resolvers the
+server handed out, for the tunnel's lifetime — a full tunnel that keeps the
+host's old resolver leaks every query it was meant to hide, in plaintext, from
+the host's real address. On disconnect (Ctrl-C) both are reverted. Useful flags:
 
 - `-user` / `-pass` — authenticate with EAP-MSCHAPv2 username/password instead of
   the client PSK (the server PSK still authenticates the server).
-- `-full-tunnel=false` — only bring up the interface/address; add your own routes.
-- `-no-route` — connect and establish the data path but make no routing changes
-  (useful for testing, or when another process manages routes).
+- `-full-tunnel=false` — only bring up the interface/address.
+- `-route <cidr>` — send this prefix through the tunnel (repeatable). Implies
+  `-full-tunnel=false`, since naming what to route means not routing everything.
+- `-exclude <cidr>` — keep this prefix off the tunnel (repeatable), by routing it
+  via the physical gateway — the same mechanism that keeps the tunnel's own
+  packets from recursing into it. A bare address is read as a host route.
+- `-no-route` — connect and establish the data path but make no routing or DNS
+  changes (useful for testing, or when another process manages both).
+- `-no-dns` — keep the routes but leave the host's resolvers alone, for the
+  operator who manages their own.
+- `-retry=false` / `-retry-max <n>` — see below.
+- `-kill-switch` — fail closed if the tunnel drops, rather than letting traffic
+  resume in plaintext. See below.
 - `-server-id` — verify the server presents this identity in its IDr.
+- `-log-level` / `-log-format` — see [Logging](#logging).
+
+A dropped tunnel is re-dialled by default, with jittered exponential backoff
+from one second to a minute, resetting after a session that stayed up for a
+minute. A laptop changing Wi-Fi networks or a tether that drops for four
+seconds reconnects on its own; the host's routes, addresses and resolvers come
+all the way down between attempts, so a failed re-dial leaves nothing behind.
+**A rejected credential is never retried** — that is a lockout on any server
+that counts failures, and `client.ErrAuth` is what distinguishes it. `-retry=false`
+returns to the shell on the first drop, and `-retry-max <n>` bounds the
+attempts, for scripts and CI that need a failure to be a failure.
+
+`-kill-switch` makes an *unintended* teardown fail closed. It installs the same
+two `/1` halves the full tunnel uses, as blackholes at a worse metric, while the
+tunnel is healthy — so they are inert until the kernel drops the TUN's routes
+with its device, and the handover has no window. A host route to the server is
+held alongside them, or the re-dial could not reach the server it is trying to
+reach. It is off by default, because a kill switch nobody asked for strands a
+machine you may only be able to reach over the network it just blackholed; when
+it engages it logs the command to reopen the host by hand, since the moment you
+need that is the moment you cannot look it up. It needs a full tunnel and a
+protocol with one outer server address, and refuses rather than half-delivering
+for a split tunnel or a mesh. **Both address families are closed whichever the
+tunnel carries** — a family the tunnel does not carry is exactly a family that
+escapes it — so a v4-only tunnel blackholes IPv6 for its lifetime, which the log
+says out loud.
+
+Which mechanism installs the resolvers depends on the host, and the connect log
+line names the one that ran. Where systemd-resolved is running the servers are
+set on the tunnel link with `resolvectl`, and a full tunnel additionally claims
+the `~.` routing domain — without which resolved keeps answering from the other
+link's servers no matter what `/etc/resolv.conf` says. Everywhere else
+`/etc/resolv.conf` is rewritten, with the original copied to
+`/etc/resolv.conf.veepin.bak` and restored on teardown; a `resolv.conf` that is
+a symlink into `/run` belongs to another daemon and veepin refuses it rather
+than clobbering its state.
 
 The client speaks the same PSK and EAP-MSCHAPv2 flows the server accepts, so
 `veepin connect` ↔ `veepin serve` interoperate directly, and the client also works
 against other RFC 7296 responders that accept these authentication methods.
+
+### Platform support
+
+The **client** runs on Linux and macOS. Linux is what CI and the interop matrix
+exercise; macOS is `dataplane/tun_darwin.go` (a `utun` control socket via
+`x/sys/unix` — no cgo, no new dependency) plus `ifconfig`/`route`/`networksetup`
+for host networking. It compiles in CI for `darwin/amd64` and `darwin/arm64`,
+which proves it type-checks and nothing more: **no one has run it yet**, and
+[doc/verifying-macos.md](doc/verifying-macos.md) is the procedure for the person
+who does. Three things are knowingly absent there — the kill switch (the BSD
+routing table has no per-route metrics to arm one safely), the layer-2 protocols
+(macOS has no in-kernel TAP), and GSO (a Linux offload).
+
+The **server** is Linux only: `internal/hostnet` speaks `iptables` and `sysctl`.
+
+Windows is out of scope. wintun is a DLL, which costs both the "no runtime
+dependencies" and the pure-Go claims; it is a trade worth making only for
+someone who wants it enough to argue it.
+
+### Logging
+
+`connect` and `serve` take `-log-format text|json` and `-log-level
+debug|info|warn|error`. `text` is the default and is exactly the timestamped
+line the command has always printed; `json` emits one `log/slog` record per
+line, for a log shipper. `debug` turns on protocol-level detail — one switch,
+replacing the `VEEPIN_SSTP_DEBUG`-shaped environment variables that had started
+to accumulate one per protocol (the old spellings still work, and `VEEPIN_DEBUG`
+is the general one, for a Go program embedding a protocol package directly).
+
+Above `info` the informational stream is suppressed. That is the whole of what
+the level can mean while the tree logs through `*log.Logger`, which has no
+per-call level — and it is useful rather than half-implemented because a fatal
+error returns to `main` and reaches stderr directly, never through the logger.
 
 ### Embedding the client
 
@@ -622,10 +733,11 @@ each a localized extension point, not a structural rework:
   [USENIX Security '24](https://www.usenix.org/conference/usenixsecurity24/presentation/xue-fingerprinting),
   which byte-level obfuscation does not address. `veepin serve <protocol> -shape
   <bytes>` pads the first N bytes of each inner flow out to the tunnel MTU on
-  seven of the nine protocols — RFC 4303 §2.7 TFC padding for ESP, trailing
-  octets for WireGuard, the RFC 1661 §5.1 PPP Information field for SSTP,
-  Fortinet and L2TP/IPsec, and the length-delimited data payload for AnyConnect
-  and OpenVPN. All are inert to a conforming receiver, which delimits the real
+  twelve of the sixteen protocols — RFC 4303 §2.7 TFC padding for ESP (IKEv2,
+  Cisco IPsec, GlobalProtect, Ivanti), trailing octets for WireGuard and
+  AmneziaWG, the RFC 1661 §5.1 PPP Information field for SSTP, Fortinet and
+  L2TP/IPsec, the length-delimited data payload for AnyConnect and OpenVPN, and
+  trailing filler on the IP-bearing frames of an L2TPv3 pseudowire. All are inert to a conforming receiver, which delimits the real
   packet by the inner IP header, so **stock clients benefit unmodified**; and
   because the attack targets handshakes, the cost is per-flow rather than
   per-byte, leaving bulk throughput untouched. It does not shape packet counts

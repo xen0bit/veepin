@@ -32,7 +32,7 @@ func init() {
 		{Key: OptServerPool, Kind: client.OptCIDR, Default: "10.9.0.0/24", Help: "client address pool CIDR"},
 		{Key: OptServerDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers offered to clients"},
 		{Key: OptServerUser, Kind: client.OptStr, Required: true, Help: "the one username to accept"},
-		{Key: OptServerSecret, Kind: client.OptStr, Required: true, Secret: true, Help: "that user's secret; provides no real protection"},
+		{Key: OptServerSecret, Flag: "insecure-shared-secret", Kind: client.OptStr, Required: true, Secret: true, Help: "that user's secret; provides no real protection"},
 		{Key: OptServerMTU, Kind: client.OptInt, Help: "inner MTU offered to clients"},
 		client.TUNOpt(OptServerTUN),
 	})

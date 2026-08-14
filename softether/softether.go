@@ -18,6 +18,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"sync"
 
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
@@ -63,7 +64,70 @@ type Config struct {
 type Session struct {
 	cs  *softether.ClientSession
 	tap *dataplane.TUN
+
+	// done is closed by Close, so the two pump goroutines stop rather than
+	// logging a read error against a device that is going away on purpose.
+	done      chan struct{}
+	closeOnce sync.Once
 }
+
+// pump moves Ethernet frames between the TAP and the TLS session, in both
+// directions, for the tunnel's lifetime.
+//
+// This did not exist. Dial opened a TAP, returned it in the Result, and started
+// nothing -- so every SoftEther tunnel came up, authenticated, reported an
+// interface, and carried no traffic at all. It is why every cell in the interop
+// matrix's SoftEther row is a dash, and reading that row as "the cells have not
+// been built yet" is what kept it hidden.
+//
+// Two goroutines rather than one, because both directions block: a TAP read
+// waits for the host to send something and a frame read waits for the peer, and
+// neither can be polled from the other's loop without one starving the other.
+//
+// This is deliberately not dataplane.Pump. The pump routes layer-3 packets to a
+// tunnel by inner destination address, and there is nothing to route here: every
+// frame goes to the one session, and the switching happens at the far end. A
+// pump with one route and no demux would be more machinery describing less.
+func (s *Session) pump() {
+	// TAP -> tunnel.
+	go func() {
+		buf := make([]byte, softether.MaxFrameSize)
+		for {
+			n, err := s.tap.Read(buf)
+			if err != nil {
+				s.stop()
+				return
+			}
+			if n == 0 {
+				continue
+			}
+			if err := s.cs.WriteFrame(buf[:n]); err != nil {
+				s.stop()
+				return
+			}
+		}
+	}()
+	// Tunnel -> TAP.
+	go func() {
+		for {
+			frame, err := s.cs.ReadFrame()
+			if err != nil {
+				s.stop()
+				return
+			}
+			if len(frame) == 0 {
+				continue
+			}
+			if _, err := s.tap.Write(frame); err != nil {
+				s.stop()
+				return
+			}
+		}
+	}()
+}
+
+// stop closes done exactly once, whichever direction notices first.
+func (s *Session) stop() { s.closeOnce.Do(func() { close(s.done) }) }
 
 // Dial connects to a SoftEther VPN server.
 func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
@@ -99,21 +163,32 @@ func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
 		return nil, client.Result{}, err
 	}
 
-	return &Session{cs: cs, tap: tap}, client.Result{
+	sess := &Session{cs: cs, tap: tap, done: make(chan struct{})}
+	sess.pump()
+	return sess, client.Result{
 		TUNName: tap.Name(),
 		Layer2:  true,
 		MTU:     1500,
 	}, nil
 }
 
-// Wait blocks until the session is done.
+// Wait blocks until the tunnel ends: either the caller cancels, or a pump
+// direction fails, which is how a dropped TLS connection now surfaces. Before
+// the pump existed nothing here could ever notice a dead peer, so Wait only
+// returned when the caller gave up -- and the reconnection loop had nothing to
+// react to.
 func (s *Session) Wait(ctx context.Context) error {
-	<-ctx.Done()
-	return ctx.Err()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.done:
+		return fmt.Errorf("softether: the tunnel data path stopped")
+	}
 }
 
 // Close tears down the session.
 func (s *Session) Close() error {
+	s.stop()
 	csErr := s.cs.Close()
 	tapErr := s.tap.Close()
 	if csErr != nil {
@@ -160,6 +235,36 @@ type Server struct {
 	listenPort int
 	log        *log.Logger
 	closed     chan struct{}
+}
+
+// pumpTAP puts the server's own interface on the switch and feeds it.
+//
+// Like the client's pump, this did not exist: the TAP was opened, named and
+// closed, and no frame ever crossed it. AttachLocal makes it an ordinary bridge
+// port -- learned, flooded to and excluded as a source exactly like a client's
+// -- so a host on the server's segment and a connected client can reach each
+// other, which is what a layer-2 VPN is for.
+//
+// The read loop runs until the TAP is closed, which Close does.
+func (s *Server) pumpTAP() {
+	s.server.AttachLocal(func(frame []byte) error {
+		_, err := s.tap.Write(frame)
+		return err
+	})
+	go func() {
+		defer s.server.DetachLocal()
+		buf := make([]byte, softether.MaxFrameSize)
+		for {
+			n, err := s.tap.Read(buf)
+			if err != nil {
+				return
+			}
+			if n == 0 {
+				continue
+			}
+			s.server.InjectLocal(buf[:n])
+		}
+	}()
 }
 
 // ServerConfig configures the SoftEther VPN server.
@@ -240,6 +345,7 @@ func (s *Server) ListenAndServe() error {
 	s.ln = ln
 	defer ln.Close()
 
+	s.pumpTAP()
 	s.log.Printf("softether: listening on %s", ln.Addr())
 	err = s.server.Serve(ln)
 	close(s.closed)

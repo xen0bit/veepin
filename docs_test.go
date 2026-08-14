@@ -152,6 +152,65 @@ func TestREADMECountsProtocolsCorrectly(t *testing.T) {
 	}
 	assertEveryCount(t, readme, "registered protocol", toyWord,
 		"TOY is registered alongside the production protocols")
+
+	assertBareProtocolCounts(t, readme, production)
+}
+
+// bareProtocolCount matches a spelled-out number immediately before the word
+// "protocols", wherever it sits and whatever follows.
+//
+// This is the wider anchor. assertEveryCount above keys on the exact phrases
+// "production protocols" and "registered protocol", so three counts in the
+// prose were invisible to it and all three had gone stale: "the other nine
+// protocols" (fifteen), "one of the ten real protocols" (sixteen), and "seven
+// of the nine protocols" (twelve of sixteen). The failure was not that the
+// numbers were wrong when written. It was that nothing was watching them.
+var bareProtocolCount = regexp.MustCompile(`(\w+) (?:real |production |registered )?protocols`)
+
+// spelledOutNumbers is every word bareProtocolCount should treat as a count.
+// Anything else before "protocols" is ordinary English ("transport protocols",
+// "SSL-based protocols") and is not this guard's business -- which is why the
+// check keys on this set rather than on a list of words to ignore. An
+// ignore-list would have to grow with the prose; this one grows only if someone
+// writes a bigger number.
+var spelledOutNumbers = map[string]bool{
+	"one": true, "two": true, "three": true, "four": true, "five": true,
+	"six": true, "seven": true, "eight": true, "nine": true, "ten": true,
+	"eleven": true, "twelve": true, "thirteen": true, "fourteen": true,
+	"fifteen": true, "sixteen": true, "seventeen": true, "eighteen": true,
+	"nineteen": true, "twenty": true,
+}
+
+// subsetProtocolCounts are the spelled-out counts that legitimately differ from
+// the registry's, because they count a subset. Each entry names the subset, so
+// that an exemption is a claim someone has to write down and can be checked by
+// reading -- rather than a number that was quietly allowed through.
+//
+// Every one of these was stale when this guard was written, which is the point:
+// the numbers were right when typed and nothing was watching them afterwards.
+var subsetProtocolCounts = map[string]string{
+	"fifteen": "the protocols that reach no further than x/crypto (all but MASQUE)",
+	"twelve":  "the protocols that register a shaping option",
+}
+
+// assertBareProtocolCounts requires a spelled-out number before "protocols" to
+// be either the registry count or a subset subsetProtocolCounts names.
+func assertBareProtocolCounts(t *testing.T, readme string, production int) {
+	t.Helper()
+	want := numberWords[production]
+	for _, m := range bareProtocolCount.FindAllStringSubmatch(readme, -1) {
+		word := strings.ToLower(m[1])
+		if !spelledOutNumbers[word] || word == want {
+			continue
+		}
+		if subset, ok := subsetProtocolCounts[word]; ok {
+			t.Logf("%q counts %s, not the registry", m[0], subset)
+			continue
+		}
+		t.Errorf("README.md says %q, and %q is neither the registry count (%q) nor a "+
+			"subset subsetProtocolCounts names. Either the number is stale, or add it "+
+			"there saying what subset it counts.", m[0], word, want)
+	}
 }
 
 // TestEveryOptConstIsDescribedByAnOptSpec closes the hole the flag-driven

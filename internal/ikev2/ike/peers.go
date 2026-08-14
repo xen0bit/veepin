@@ -9,14 +9,33 @@ import (
 	"net"
 	"time"
 
+	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/ikev2/payload"
 )
 
-// Peer is one live client's identity and assigned address.
+// Peer is one live client's identity, assigned address and traffic.
 type Peer struct {
 	ID         string
 	Address    string
 	LastActive time.Time
+	// Traffic is what this Child SA has actually carried. Zero when the data
+	// path cannot report it -- which is a real distinction from "carried
+	// nothing", and the facade preserves it.
+	Traffic dataplane.TunnelStats
+	// HasTraffic is false when the counters are unavailable rather than zero.
+	HasTraffic bool
+}
+
+// ChildTraffic is an optional DataPath capability: the traffic counters for one
+// Child SA, by its inbound SPI.
+//
+// Optional because DataPath's whole contract is AddChild/RemoveChild, and a
+// test double or an alternative data plane satisfies that without a pump behind
+// it. Type-asserted rather than added to DataPath so those keep compiling, and
+// so a data path that cannot count says so by not implementing it -- which
+// Peers reports as "unknown" rather than as zero.
+type ChildTraffic interface {
+	ChildTraffic(inboundSPI uint32) (dataplane.TunnelStats, bool)
 }
 
 // Peers returns one entry per established Child SA, so a panel can show who is
@@ -40,15 +59,21 @@ func (s *Server) Peers() []Peer {
 	}
 	s.mu.RUnlock()
 
+	traffic, _ := s.cfg.DataPath.(ChildTraffic)
+
 	var out []Peer
 	for _, sa := range sas {
 		sa.mu.Lock()
 		for _, child := range sa.Children {
-			out = append(out, Peer{
+			p := Peer{
 				ID:         peerIDString(sa.PeerID),
 				Address:    peerAddress(child),
 				LastActive: sa.lastSeen,
-			})
+			}
+			if traffic != nil {
+				p.Traffic, p.HasTraffic = traffic.ChildTraffic(child.InboundSPI)
+			}
+			out = append(out, p)
 		}
 		sa.mu.Unlock()
 	}

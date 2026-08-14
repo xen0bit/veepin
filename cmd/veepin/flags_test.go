@@ -26,6 +26,7 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"flag"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -36,6 +37,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -62,6 +65,14 @@ const flagSentinel = "veepin-flag-reaches-options"
 // than skipped — an unknown type here means the check has quietly stopped
 // covering that flag.
 func perturbed(f *flag.Flag) (string, bool) {
+	// A -<flag>-file companion takes a PATH and reads the secret out of it, so
+	// the sentinel string below would fail to open and the guard would report
+	// the flag as untestable rather than testing it. Handing it a real file
+	// keeps the companions inside the same guard as every other flag: they must
+	// reach the option map, and the file is how they do it.
+	if _, ok := f.Value.(*secretFileFlag); ok {
+		return secretFile(), true
+	}
 	getter, ok := f.Value.(flag.Getter)
 	if !ok {
 		return "", false
@@ -84,6 +95,42 @@ func perturbed(f *flag.Flag) (string, bool) {
 		return flagSentinel, true
 	}
 	return "", false
+}
+
+// secretFile writes a file holding a secret no other call returns, and gives
+// back its path. Distinct contents per call, because perturbed's contract is to
+// return a value that differs from the one the flag currently holds -- two
+// files with the same secret would leave the option map unchanged and the guard
+// would report a working flag as dead.
+func secretFile() string {
+	n := secretFileSeq.Add(1)
+	dir := secretFileDir()
+	path := filepath.Join(dir, fmt.Sprintf("secret-%d", n))
+	if err := os.WriteFile(path, []byte(fmt.Sprintf("%s-%d\n", flagSentinel, n)), 0o600); err != nil {
+		panic("writing a secret fixture: " + err.Error())
+	}
+	return path
+}
+
+var (
+	secretFileSeq  atomic.Int64
+	secretFileOnce sync.Once
+	secretFileRoot string
+)
+
+// secretFileDir is a process-wide temp dir rather than a t.TempDir, because
+// perturbed has no *testing.T and threading one through every call site to
+// carry a directory would be a worse trade than one directory the test binary
+// leaves behind.
+func secretFileDir() string {
+	secretFileOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "veepin-secrets")
+		if err != nil {
+			panic("creating a secret fixture dir: " + err.Error())
+		}
+		secretFileRoot = dir
+	})
+	return secretFileRoot
 }
 
 // assertFlagsReachOptions requires every flag a protocol binds to influence the
@@ -269,111 +316,83 @@ func TestConnectEmittedKeysAreDeclared(t *testing.T) {
 	assertEmittedKeysAreDeclared(t, "connect", client.Protocols(), connectFlags)
 }
 
-// TestServerOptSpecsMatchTheKeysTheProtocolReads is the same guard one layer
-// further out, for the metadata the management panel renders forms from.
+// TestTheFlagSetIsTheSpecTable replaces the two guards that used to hold
+// serveFlags/connectFlags against RegisterServerOpts/RegisterClientOpts.
 //
-// client.RegisterServerOpts is a third hand-written list of option keys, after
-// the facade's Opt* constants and serveFlags' option map. Nothing tied it to the
-// other two. A spec keyed by a string the protocol never reads renders a form
-// field an operator fills in and the server ignores — the same silent-drop shape
-// the tests above exist for, arriving by a different route. A key the protocol
-// does read but the metadata omits is worse in a quieter way: the panel offers
-// no field for it, so the option is unreachable from the panel and, if it is a
-// secret, GET /api/listeners/{name} does not know to redact it.
+// Those existed because the option keys were written down twice -- once as a
+// spec and once as a `case` binding a flag -- and they compared the two key
+// sets. There is now one list: the flag set is generated from the spec table
+// (optflags.go), so a spec with no flag and a flag with no spec are both
+// unrepresentable.
 //
-// serveFlags' emitted key set is the reference, because that is by construction
-// what `veepin serve <protocol>` can set and therefore what the protocol reads.
-func TestServerOptSpecsMatchTheKeysTheProtocolReads(t *testing.T) {
-	for _, protocol := range client.ServerProtocols() {
-		specs, ok := client.ServerOptsFor(protocol)
-		if !ok {
-			t.Errorf("%s: registered as a server but declared no OptSpec metadata", protocol)
-			continue
-		}
-
+// What is left worth asserting is the bridge itself: every registered protocol
+// has a spec table for both roles it claims, and every spec in it produces a
+// flag that reaches its own key. The second half is the part that could still
+// break -- a Flag override colliding with another option's key would bind one
+// flag and silently drop the other.
+func TestTheFlagSetIsTheSpecTable(t *testing.T) {
+	check := func(t *testing.T, command, protocol string,
+		specs []client.OptSpec, bind func(string, *flag.FlagSet) (func() map[string]string, error)) {
 		fs := newTestFlagSet()
-		options, err := serveFlags(protocol, fs)
+		options, err := bind(protocol, fs)
 		if err != nil {
-			t.Errorf("%s: binding serve flags: %v", protocol, err)
-			continue
+			t.Fatalf("%s %s: binding flags: %v", command, protocol, err)
 		}
-		fs.VisitAll(func(f *flag.Flag) {
-			if value, ok := perturbed(f); ok {
-				_ = fs.Set(f.Name, value)
+		seen := map[string]string{} // flag name -> the key that claimed it
+		for _, sp := range specs {
+			name := flagName(sp)
+			if prev, dup := seen[name]; dup {
+				t.Errorf("%s %s: keys %q and %q both bind -%s; one of them is silently unreachable",
+					command, protocol, prev, sp.Key, name)
+				continue
 			}
-		})
-		emitted := options()
-
-		declared := make(map[string]bool, len(specs))
-		for _, s := range specs {
-			declared[s.Key] = true
-			if _, reads := emitted[s.Key]; !reads {
-				t.Errorf("%s: OptSpec declares key %q, which `veepin serve %s` never emits — "+
-					"the panel renders a field the protocol does not read",
-					protocol, s.Key, protocol)
+			seen[name] = sp.Key
+			f := fs.Lookup(name)
+			if f == nil {
+				t.Errorf("%s %s: spec %q binds no -%s", command, protocol, sp.Key, name)
+				continue
+			}
+			value, ok := perturbed(f)
+			if !ok {
+				t.Errorf("%s %s: -%s has a type this test cannot vary; teach perturbed() about it",
+					command, protocol, name)
+				continue
+			}
+			// A fresh set per spec, so one perturbation cannot mask another
+			// (and so a secret and its -file companion never collide).
+			probe := newTestFlagSet()
+			opts, err := bind(protocol, probe)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := probe.Set(name, value); err != nil {
+				t.Errorf("%s %s: setting -%s=%s: %v", command, protocol, name, value, err)
+				continue
+			}
+			if _, reaches := opts()[sp.Key]; !reaches {
+				t.Errorf("%s %s: -%s does not reach key %q", command, protocol, name, sp.Key)
 			}
 		}
-
-		var missing []string
-		for key := range emitted {
-			if !declared[key] {
-				missing = append(missing, key)
-			}
-		}
-		sort.Strings(missing)
-		for _, key := range missing {
-			t.Errorf("%s: option %q has no OptSpec — it cannot be set from the panel, and if "+
-				"it is a secret the management API does not know to redact it", protocol, key)
-		}
+		_ = options
 	}
-}
 
-// TestClientOptSpecsMatchTheKeysTheProtocolReads is the client-side mirror of
-// TestServerOptSpecsMatchTheKeysTheProtocolReads: the metadata the profile
-// forms and `veepin profile add` render Dial options from must agree with what
-// connectFlags actually emits (which is, by construction, what the protocol
-// reads). A spec keyed by a string the parse never sees renders a field the
-// operator fills in and the dial ignores.
-func TestClientOptSpecsMatchTheKeysTheProtocolReads(t *testing.T) {
 	for _, protocol := range client.Protocols() {
 		specs, ok := client.ClientOptsFor(protocol)
 		if !ok {
-			t.Errorf("%s: registered as a client but declared no client OptSpec metadata", protocol)
+			t.Errorf("%s: registered as a client but declared no client OptSpec metadata — "+
+				"it therefore has no flags at all", protocol)
 			continue
 		}
-
-		fs := newTestFlagSet()
-		options, err := connectFlags(protocol, fs)
-		if err != nil {
-			t.Errorf("%s: binding connect flags: %v", protocol, err)
+		check(t, "connect", protocol, specs, connectFlags)
+	}
+	for _, protocol := range client.ServerProtocols() {
+		specs, ok := client.ServerOptsFor(protocol)
+		if !ok {
+			t.Errorf("%s: registered as a server but declared no server OptSpec metadata — "+
+				"it therefore has no flags at all", protocol)
 			continue
 		}
-		fs.VisitAll(func(f *flag.Flag) {
-			if value, ok := perturbed(f); ok {
-				_ = fs.Set(f.Name, value)
-			}
-		})
-		emitted := options()
-
-		declared := make(map[string]bool, len(specs))
-		for _, s := range specs {
-			declared[s.Key] = true
-			if _, reads := emitted[s.Key]; !reads {
-				t.Errorf("%s: client OptSpec declares key %q, which `veepin connect %s` never emits",
-					protocol, s.Key, protocol)
-			}
-		}
-
-		var missing []string
-		for key := range emitted {
-			if !declared[key] {
-				missing = append(missing, key)
-			}
-		}
-		sort.Strings(missing)
-		for _, key := range missing {
-			t.Errorf("%s: option %q has no client OptSpec — it cannot be set from a profile form", protocol, key)
-		}
+		check(t, "serve", protocol, specs, serveFlags)
 	}
 }
 

@@ -21,7 +21,7 @@ exchanges CALL_CONNECT with the server's crypto-binding nonce, authenticates the
 inner PPP link with MS-CHAPv2 (deriving the HLAK and sending the CALL_CONNECTED
 compound MAC over the server's certificate), and negotiates IPCP for its address
 and DNS. Only SHA-256 crypto binding is implemented. The client-vs-SoftEther path
-is covered end to end by the Docker interop tests. Set `VEEPIN_SSTP_DEBUG=1` to
+is covered end to end by the Docker interop tests. Pass `-log-level=debug` (or set `VEEPIN_DEBUG=1`; `VEEPIN_SSTP_DEBUG` still works) to
 trace the control and PPP exchange.
 
 ## Running an SSTP server

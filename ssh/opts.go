@@ -14,7 +14,7 @@ func init() {
 		// nebula's key, ikev2's key) -- what it points at is key material, and
 		// the redaction paths key off this flag.
 		{Key: OptIdentity, Kind: client.OptFilePath, Secret: true, Help: "path to a private key (alternative to a password)"},
-		{Key: OptPassword, Kind: client.OptStr, Secret: true, Help: "password (if not using a key)"},
+		{Key: OptPassword, Flag: "pass", Kind: client.OptStr, Secret: true, Help: "password (if not using a key)"},
 		{Key: OptKnownHosts, Kind: client.OptFilePath, Help: "known_hosts file for host-key verification"},
 		{Key: OptInsecure, Kind: client.OptBool, Help: "skip host-key verification"},
 		{Key: OptAddress, Kind: client.OptCIDR, Required: true, Help: "our tunnel address in CIDR form, e.g. 10.200.0.2/30"},

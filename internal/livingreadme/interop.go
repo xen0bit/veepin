@@ -176,18 +176,34 @@ var interopMatrix = []interopRow{
 		}, Label: "openconnect (IF-T/TLS, ESP, padded)"},
 		Self: interopCell{Tests: []string{"TestInteropPulseSelf"}, Label: "(over ESP)"},
 	},
-	// SoftEther and AmneziaWG are implemented but not yet proven against a peer.
-	// They carry "‡", not "†": the dagger means *no open-source peer exists*,
-	// which is true of FortiOS and false of both of these — SoftEther VPN Server
-	// is Apache-2.0 and amneziawg-go is a Go implementation. Marking them "†"
-	// would state in the README that no peer was available, when the truth is
-	// that the cells have not been built yet. The Self column especially: a
-	// veepin↔veepin test is always possible, so a dash there is never earned.
+	// SoftEther's two cross-implementation cells are not yet built. They carry
+	// "‡", not "†": the dagger means *no open-source peer exists*, which is true
+	// of FortiOS and false here — SoftEther VPN Server is Apache-2.0. Marking it
+	// "†" would state in the README that no peer was available, when the truth
+	// is that the cells have not been built yet, and what they wait on is
+	// internal/softether's own caveats: the server switches frames between
+	// connected clients rather than bridging them to the host's network, and
+	// every client is assigned the same 10.70.0.2.
+	//
+	// SoftEther's two cross-implementation cells are not built. They carry "‡",
+	// not "†": the dagger means *no open-source peer exists*, which is true of
+	// FortiOS and false here — SoftEther VPN Server is Apache-2.0.
+	//
+	// The Self column is no longer a dash, and getting it there is what found
+	// the reason the others are. Neither end pumped frames: softether.Dial
+	// opened a TAP and started nothing, and the server's switch forwarded
+	// between sessions only, with the host's own interface not on the switch.
+	// The sentence this comment used to carry — "a veepin↔veepin test is always
+	// possible, so a dash there is never earned" — was right, and the dash was
+	// hiding a missing data path rather than a missing afternoon.
+	//
+	// TestNoRowCarriesADashInTheSelfColumn is now the check, because a comment
+	// is not one.
 	{
 		Protocol: "SoftEther VPN",
 		Client:   interopCell{Label: "—‡"},
 		Server:   interopCell{Label: "—‡"},
-		Self:     interopCell{Label: "—‡"},
+		Self:     interopCell{Tests: []string{"TestInteropSoftEtherSelf"}, Label: "(layer 2, switched)"},
 	},
 	{
 		Protocol: "AmneziaWG",

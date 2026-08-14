@@ -1016,6 +1016,26 @@ func TestInteropPulseSelf(t *testing.T) {
 	measureThroughput(t, "compose.pulse-self.yml", "veepin-pulse-server", "veepin-pulse-client", "10.70.0.1")
 }
 
+// TestInteropSoftEtherSelf is the cell internal/livingreadme/interop.go said was
+// owed for as long as the SoftEther row existed -- and building it is what found
+// why it could not be built.
+//
+// Neither end pumped frames. softether.Dial opened a TAP, returned its name in
+// the Result and started nothing; the server's switch forwarded between
+// *sessions* only, with the host's own interface not on the switch at all. So
+// every SoftEther tunnel came up, authenticated, reported an interface and
+// carried nothing, and the row's three dashes read as "not built yet" rather
+// than "there is no data path".
+//
+// The ping is therefore the whole point: it leaves the client's TAP, crosses
+// TLS, is switched onto the server's local bridge port, and arrives on an
+// interface the server's kernel answers for. A handshake that completes and
+// moves no frame fails here, which is the state this protocol was in until now.
+func TestInteropSoftEtherSelf(t *testing.T) {
+	runInteropBench(t, "compose.softether-self.yml",
+		"veepin-softether-client", "veepin-softether-server", "10.70.0.1")
+}
+
 // TOY is the example protocol (internal/toy) and provides no security; these
 // cells prove the *specification*, not the cryptography. The peer they talk to
 // is an independent Python implementation written from internal/toy/SPEC.md

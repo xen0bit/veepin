@@ -262,9 +262,10 @@ func (s *Server) Close() error {
 
 // Peers implements client.PeerDescriber so the management panel shows who is
 // connected. One entry per established Child SA: the client's IKE identity, the
-// tunnel address Config Mode assigned it, and the time of its last protected
+// tunnel address Config Mode assigned it, the time of its last protected
 // exchange -- not the time the SA was established, which would make a peer idle
-// for an hour indistinguishable from one that just connected.
+// for an hour indistinguishable from one that just connected -- and what the SA
+// has actually carried.
 func (s *Server) Peers() []client.PeerInfo {
 	peers := s.ike.Peers()
 	out := make([]client.PeerInfo, 0, len(peers))
@@ -277,6 +278,8 @@ func (s *Server) Peers() []client.PeerInfo {
 		if !p.LastActive.IsZero() {
 			info.LastHandshake = p.LastActive.UTC().Format(time.RFC3339)
 		}
+		info = info.WithTraffic(p.Traffic.RxPackets, p.Traffic.RxBytes,
+			p.Traffic.TxPackets, p.Traffic.TxBytes, p.Traffic.LastSeen, p.HasTraffic)
 		out = append(out, info)
 	}
 	return out

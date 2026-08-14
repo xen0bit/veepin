@@ -85,15 +85,22 @@ func (p *Pump) handleInboundBatchGRO(pkts [][]byte, froms []*net.UDPAddr) bool {
 		if froms != nil {
 			from = froms[i]
 		}
-		inner, ok := p.decapInbound(pkt, from)
+		inner, c, ok := p.decapInbound(pkt, from)
 		if !ok {
 			continue
 		}
+		// Counted here rather than at the TUN write, because coalescing means
+		// one write can carry several packets: counting writes would report a
+		// GRO-enabled server as moving a fraction of the traffic it moved.
+		c.countRx(len(inner))
 		if !t.add(p, inner) {
 			// Not coalescible (or its checksum did not verify): deliver as-is,
 			// in arrival order.
-			if _, err := p.writeTUN(inner); err != nil && p.log != nil {
-				p.log.Printf("dataplane: TUN write failed: %v", err)
+			if _, err := p.writeTUN(inner); err != nil {
+				p.drops[DropTUNWrite].Add(1)
+				if p.log != nil {
+					p.log.Printf("dataplane: TUN write failed: %v", err)
+				}
 			}
 		}
 	}

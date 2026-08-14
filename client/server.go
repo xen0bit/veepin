@@ -5,6 +5,7 @@ import (
 	"net"
 	"sort"
 	"sync"
+	"time"
 )
 
 // Server is the protocol-agnostic view of a VPN server the veepin command drives.
@@ -62,6 +63,16 @@ type OptSpec struct {
 	Secret   bool    `json:"secret,omitempty"`
 	Default  string  `json:"default,omitempty"`
 	Generate string  `json:"generate,omitempty"`
+
+	// Flag is the command-line spelling when it differs from Key. ikev2's key
+	// is "gateway" and its flag has always been -server; renaming either would
+	// break every runbook or every profile on disk, so the mapping is declared
+	// here rather than inferred.
+	//
+	// Empty means the two are the same, which is the overwhelming majority.
+	// It is deliberately not serialised: it is a fact about the command line,
+	// and the management API and panel speak in keys.
+	Flag string `json:"-"`
 }
 
 // OptKind is the panel-side type of an option value. It is loose -- the server
@@ -120,6 +131,49 @@ type PeerInfo struct {
 	Address       string `json:"address"`                  // assigned tunnel address
 	State         string `json:"state"`                    // "connected" or "disconnected"
 	LastHandshake string `json:"last_handshake,omitempty"` // RFC 3339 time of last handshake, or empty
+
+	// RxBytes and TxBytes are the inner bytes this peer has carried in and out
+	// since its tunnel was established, and RxPackets/TxPackets the same in
+	// packets. They answer the one question a handshake time cannot: is this
+	// peer actually moving traffic, or merely connected?
+	//
+	// Inner bytes rather than on-the-wire, so the figure is comparable with
+	// what an application thinks it sent and does not silently change meaning
+	// between protocols with different encapsulation overheads.
+	RxBytes   uint64 `json:"rx_bytes"`
+	TxBytes   uint64 `json:"tx_bytes"`
+	RxPackets uint64 `json:"rx_packets"`
+	TxPackets uint64 `json:"tx_packets"`
+
+	// LastSeen is the RFC 3339 time an authenticated packet last arrived from
+	// this peer, or empty if none has. It is distinct from LastHandshake in the
+	// way that matters operationally: a peer that handshook an hour ago and has
+	// been silent since looks identical to a healthy one by handshake time
+	// alone, and different by this.
+	LastSeen string `json:"last_seen,omitempty"`
+}
+
+// WithTraffic fills in a PeerInfo's counters from a dataplane.Pump snapshot.
+//
+// It takes the four numbers and a time rather than the dataplane type, so that
+// this package keeps depending only on the standard library -- which is what
+// lets the separate nm/ module import it. The parameter list is the price of
+// that, and it is paid once per protocol rather than by every caller.
+//
+// ok is the "the data path could not tell us" case, which is not the same as
+// zero: a protocol whose peer list is assembled without a pump behind it should
+// leave the fields at their zero value and let the panel render them as unknown,
+// rather than assert that nothing has crossed.
+func (p PeerInfo) WithTraffic(rxPackets, rxBytes, txPackets, txBytes uint64, lastSeen time.Time, ok bool) PeerInfo {
+	if !ok {
+		return p
+	}
+	p.RxPackets, p.RxBytes = rxPackets, rxBytes
+	p.TxPackets, p.TxBytes = txPackets, txBytes
+	if !lastSeen.IsZero() {
+		p.LastSeen = lastSeen.UTC().Format(time.RFC3339)
+	}
+	return p
 }
 
 // PeerDescriber is an optional interface a Server may implement to expose its

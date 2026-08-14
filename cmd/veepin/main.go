@@ -8,7 +8,10 @@
 //	                                             management API and HTML panel
 //	veepin profile   <subcmd>                    manage client connection profiles
 //	veepin mgmt      <subcmd> [flags]            talk to a running supervisor's API
-//	veepin probe     <protocol> [flags]          diagnostic: handshake + one packet
+//	veepin probe     <protocol> [flags]          diagnostic: handshake, no routing
+//	                                             changes; works for every protocol
+//	veepin passwd                                print a bcrypt verifier for a
+//	                                             server's users-file
 //	veepin udp-proxy [flags]                     forward a local UDP socket over
 //	                                             MASQUE CONNECT-UDP
 //
@@ -33,11 +36,30 @@ import (
 
 	"github.com/xen0bit/veepin/client"
 
-	// Registers the protocols with the client registry. Adding a protocol here
-	// is what makes it dialable by name.
+	// Registers the protocols with the client registry, and with it their
+	// OptSpec tables -- which, since the flag set is generated from those
+	// tables, is now also what gives a protocol its command-line flags. Adding
+	// a protocol here is the whole of making it reachable from this command.
+	//
+	// docs_test.go reaches the registry through these same imports: forget one
+	// and the protocol-count check passes against a registry that has not heard
+	// of your protocol, so add the import first.
+	_ "github.com/xen0bit/veepin/amneziawg"
+	_ "github.com/xen0bit/veepin/anyconnect"
+	_ "github.com/xen0bit/veepin/cisco"
+	_ "github.com/xen0bit/veepin/fortinet"
+	_ "github.com/xen0bit/veepin/gp"
 	_ "github.com/xen0bit/veepin/ikev2"
+	_ "github.com/xen0bit/veepin/l2tp"
+	_ "github.com/xen0bit/veepin/l2tpv3"
+	_ "github.com/xen0bit/veepin/masque"
+	_ "github.com/xen0bit/veepin/nebula"
 	_ "github.com/xen0bit/veepin/openvpn"
+	_ "github.com/xen0bit/veepin/pulse"
+	_ "github.com/xen0bit/veepin/softether"
+	_ "github.com/xen0bit/veepin/ssh"
 	_ "github.com/xen0bit/veepin/sstp"
+	_ "github.com/xen0bit/veepin/toy"
 	_ "github.com/xen0bit/veepin/wireguard"
 )
 
@@ -66,6 +88,8 @@ func main() {
 		run(runMgmt(os.Args[2:]))
 	case "probe":
 		run(runProbe(os.Args[2:]))
+	case "passwd":
+		run(runPasswd(os.Args[2:]))
 	case "udp-proxy":
 		run(runUDPProxy(os.Args[2:]))
 	case "-version", "--version", "version":
@@ -95,7 +119,8 @@ Usage:
   veepin serve     -config <dir>                run a fleet of servers
   veepin profile   <subcmd>                     manage client connection profiles
   veepin mgmt      <subcmd> [flags]             talk to a running supervisor's API
-  veepin probe     <protocol> [flags]           diagnostic: handshake + one data packet
+  veepin probe     <protocol> [flags]           diagnostic: handshake only, no routing changes
+  veepin passwd                                 print a bcrypt verifier for a users-file
   veepin udp-proxy [flags]                      forward a local UDP socket via MASQUE CONNECT-UDP
   veepin version                                print build information
 

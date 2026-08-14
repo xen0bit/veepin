@@ -1,3 +1,9 @@
+// The PacketConn internals these exercise (the local-address cache, the GC
+// clock) are in pktconn_linux.go; pktconn_other.go is a portable stub with
+// none of them. Without this tag the whole package failed to typecheck off
+// Linux, which the platform work made visible.
+//go:build linux
+
 package dataplane
 
 import (

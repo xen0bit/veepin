@@ -5,7 +5,9 @@ PACK serialisation. This is one of veepin's two **layer-2** protocols — the ot
 is [`internal/l2tpv3`](../l2tpv3) — where every other protocol here tunnels IP
 packets over a TUN device. SoftEther switches Ethernet frames between connected
 clients rather than bridging them to a host TAP, which is the gap the caveats
-below name: L2TPv3 is the one with a working TAP data path.
+below name: SoftEther switches frames between the clients and the server's own
+interface, and does not bridge that segment onto the host's wider network the way
+a `brctl`-style deployment would.
 
 ```mermaid
 sequenceDiagram
@@ -41,12 +43,16 @@ bound to it, so a captured login cannot be replayed against a later session.
 
 State these plainly rather than discovering them later.
 
-- **No TAP data path.** The server switches frames between connected *clients*,
-  and `internal/softether` is tested for exactly that. Nothing yet connects the
-  bridge to the host TAP device, so traffic cannot reach or leave the host, and
-  `Gateway()`/`Network()` return fixed values rather than anything the data path
-  honours. This is the largest gap and it is why the interop matrix carries `—‡`
-  rather than a result.
+- **`Gateway()` and `Network()` are fixed values**, not anything the data path
+  derives. They report `10.70.0.1` and `10.70.0.0/24` because that is what the
+  server assumes, not because it was configured or negotiated.
+
+  *(The larger gap this entry used to describe — "nothing connects the bridge to
+  the host TAP device" — is closed. `local.go` puts the server's own interface on
+  the switch as an ordinary bridge port, and the client relays frames between its
+  TAP and the TLS session; neither had existed, so every SoftEther tunnel came
+  up, authenticated and carried nothing. `TestInteropSoftEtherSelf` is the cell
+  that would now catch it.)*
 - **Address assignment is a constant.** Every client is told `10.70.0.2`. There
   is no pool, no lease, and two clients are given the same address.
 - **Authentication is password-only, and the digest is SHA-1.** That is what the
@@ -72,4 +78,7 @@ State these plainly rather than discovering them later.
   two clients, and the four ways a login must be refused (wrong password,
   unknown user, no credentials configured, and a challenge that is never
   reused).
+- `local_test.go` — the server's own interface as a switch port: a client's
+  frame reaching it, its own frames not being echoed back, its MAC being
+  learned, and detaching taking it off the switch.
 - `fuzz_test.go` — the PACK decoder.

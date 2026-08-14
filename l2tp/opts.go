@@ -10,7 +10,7 @@ func init() {
 		{Key: OptPort, Kind: client.OptInt, Default: "500", Help: "server IKE/ESP port (default 500)"},
 		{Key: OptPSK, Kind: client.OptStr, Secret: true, Required: true, Help: "IPsec pre-shared key"},
 		{Key: OptUser, Kind: client.OptStr, Required: true, Help: "MS-CHAPv2 username"},
-		{Key: OptPassword, Kind: client.OptStr, Secret: true, Required: true, Help: "MS-CHAPv2 password"},
+		{Key: OptPassword, Flag: "pass", Kind: client.OptStr, Secret: true, Required: true, Help: "MS-CHAPv2 password"},
 		{Key: OptDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers (fallback if PPP assigns none)"},
 		client.TUNOpt(OptTUNName),
 	})

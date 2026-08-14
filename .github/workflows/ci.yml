@@ -21,7 +21,13 @@ jobs:
     name: test (go ${{ matrix.go }})
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false
+      # Stop both legs on the first failure. The two differ only by toolchain,
+      # so a failure in one is nearly always a failure in both, and reading the
+      # same output twice is not worth the runner minutes. The trade is that a
+      # genuine toolchain-specific break shows up as one leg failing and the
+      # other cancelled, which needs a re-run to attribute -- rare enough to be
+      # the better side of the deal.
+      fail-fast: true
       matrix:
         go: ["1.25", "1.x"] # pinned + latest, so we catch upcoming-toolchain breakage
     steps:
@@ -41,6 +47,17 @@ jobs:
 
       - name: Build
         run: go build -v ./...
+
+      # The macOS client (dataplane/tun_darwin.go and friends) cannot be run
+      # here -- Docker on a Mac is a Linux VM, so every interop cell runs a
+      # Linux veepin whatever laptop starts it. Cross-compiling is the most this
+      # can prove: that the syscalls, constants and build tags hold together.
+      # doc/verifying-macos.md is the procedure for the person with the hardware.
+      - name: Cross-build (macOS, both architectures)
+        run: |
+          GOOS=darwin GOARCH=amd64 go build ./...
+          GOOS=darwin GOARCH=arm64 go build ./...
+          GOOS=darwin GOARCH=arm64 go vet ./...
 
       - name: Test (race)
         run: go test -race ./...
@@ -91,10 +108,26 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          # Latest stable: govulncheck reports standard-library vulnerabilities
-          # against the toolchain it runs under, so scanning on the newest Go
-          # picks up stdlib patches (e.g. the net fix for GO-2026-4971).
-          go-version: "1.x"
+          # govulncheck reports standard-library vulnerabilities against the
+          # toolchain it runs under, so this job is only as current as its Go.
+          #
+          # It is PINNED rather than "1.x", and the reason is worth writing down
+          # because "1.x" looks like the safer choice and is not. setup-go
+          # resolves "1.x" against actions/go-versions, a manifest that lags
+          # go.dev by days — so with go1.26.6 published and fixing seven stdlib
+          # advisories, "1.x" plus check-latest still resolved to go1.26.5 and
+          # this job reported all seven against call paths nobody had touched.
+          # A vulnerability scanner that fails without a code change is usually
+          # reporting on itself.
+          #
+          # The cost of pinning is that this needs bumping when the next stdlib
+          # advisory lands. That is a visible, one-line chore; the alternative is
+          # a job that goes red on somebody else's schedule and teaches everyone
+          # to ignore it.
+          go-version: "1.26.6"
+          # Fetches from go.dev when the version is not in the manifest, which
+          # is exactly the case this pin exists for.
+          check-latest: true
           cache: true
 
       - name: Run govulncheck
