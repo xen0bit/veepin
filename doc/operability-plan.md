@@ -46,17 +46,17 @@ which is where the plan and the tree are reconciled when they disagree.
 | # | Item | Value | Risk | Verdict | Status |
 |---|------|-------|------|---------|--------|
 | 9 | 1,200 lines of flag switch restating the OptSpec tables | High | Medium | **Do** | ✅ landed |
-| 10 | Sixteen protocols, one operating system | **Very high** | Medium | Do (macOS); don't (Windows) | ⬜ |
+| 10 | Sixteen protocols, one operating system | **Very high** | Medium | Do (macOS); don't (Windows) | ✅ landed (unverified on hardware) |
 | 11 | Logging has no level and no shape | Low | Low | Fold into 9 | ✅ landed |
-| 12 | `client_route.go` has no build tag and shells out to `ip` | Low | Low | Fold into 10 | ⬜ |
+| 12 | `client_route.go` has no build tag and shells out to `ip` | Low | Low | Fold into 10 | ✅ landed |
 
 ### Part 4 — claims that have drifted
 
 | # | Item | Value | Risk | Verdict | Status |
 |---|------|-------|------|---------|--------|
-| 13 | Two protocols do not meet the sentence at the top of the README | High | Low | **Do** | ⬜ |
-| 14 | Three protocol counts the docs guard cannot see | Low | None | Do (trivial) | ⬜ |
-| 15 | Two comments describing a tree that no longer exists | Low | None | Do (trivial) | ⬜ |
+| 13 | Two protocols do not meet the sentence at the top of the README | High | Low | **Do** | ⚠️ partly — see below |
+| 14 | Three protocol counts the docs guard cannot see | Low | None | Do (trivial) | ✅ landed |
+| 15 | Two comments describing a tree that no longer exists | Low | None | Do (trivial) | ✅ landed |
 
 The ordering within each part is by value. Across parts, items 1, 2, 6 and 8 are
 the ones that change whether the software can be used; everything else is
@@ -703,6 +703,37 @@ is Docker, so a macOS data path is verified by a person with a Mac, in the shape
 `doc/verifying-shaping.md` already describes for vendor clients. Write that
 procedure alongside the code.
 
+### ✅ Landed — and **unverified on hardware**, which is the important half
+
+`dataplane/tun_darwin.go` (utun over `AF_SYSTEM`/`SYSPROTO_CONTROL`),
+`client_route_darwin.go` (`ifconfig`/`route`) and `client_dns_darwin.go`
+(`networksetup`). No cgo, no new dependency: everything came from `x/sys/unix`
+except `SYSPROTO_CONTROL` and `UTUN_OPT_IFNAME`, which it does not export and
+which are spelled out as constants naming the header they come from.
+
+`GOOS=darwin go build ./...` and `go vet` pass. **That proves it type-checks and
+nothing more — no one has run it.** `doc/verifying-macos.md` is the procedure
+for the person who does, written in four steps ordered so that a failure names
+which of the four independent things is wrong, and the README says "written, not
+proven" rather than claiming macOS support.
+
+Three things are refused rather than half-delivered, each naming why:
+
+- **The kill switch.** The Linux one is armed while the tunnel is *healthy*,
+  which depends on blackhole routes carrying a metric so two routes for one
+  prefix can coexist and be ordered. The BSD table has no per-route metrics, so
+  it could only be armed on teardown — which leaves the window the flag exists
+  to close. The honest macOS answer is a `pf` anchor, which is the firewall
+  ownership the Linux file already declines.
+- **The layer-2 protocols.** No in-kernel TAP on macOS; the kexts that provide
+  one cost the same claim wintun does.
+- **GSO.** A Linux offload with no utun equivalent, and the pump already handles
+  a device reporting none.
+
+BSD is left as the next step and the file says what it would take: the same
+`ifconfig`/`route` commands, the same 4-octet AF header, a different device open
+(`/dev/tunN`) and `/etc/resolv.conf` — a backend that already exists.
+
 ## 11. Logging has no level and no shape
 
 ```sh
@@ -780,6 +811,24 @@ dependencies" while this file shells out to `ip` and `internal/hostnet` to
 is already a dependency and speaks it. Qualifying is the cheaper honest answer;
 netlink is the better one and is not urgent.
 
+### ✅ Landed
+
+`client_route.go` is now `_linux`, `_darwin` and `_other`, with the shared
+`ClientNetConfig` in an untagged `client_net.go` so every platform describes the
+same thing and only the installing differs. The `_other` stub returns "not
+supported on %s (Linux and macOS only)", which is the answer `tun_other.go` one
+file over was already giving.
+
+The claim is qualified rather than chased: the README now says "no *library*
+dependencies", naming `ip`/`iptables`/`sysctl` and
+`ifconfig`/`route`/`networksetup` as base-system tools it shells out to. Netlink
+remains the better answer and remains not urgent.
+
+One thing found on the way: `dataplane/pktconn_test.go` had no build tag and
+reached into `pktconn_linux.go`'s internals, so the package failed to typecheck
+off Linux. Nothing noticed because nothing had ever built the tree for another
+platform.
+
 ---
 
 # Part 4: claims that have drifted
@@ -816,6 +865,51 @@ name the exceptions the matrix already names; and consider a guard —
 dash in the Self column, since the comment already says that is never legitimate
 and a comment is not a check.
 
+### ⚠️ Partly landed, and the plan was wrong about the interesting part
+
+The headline sentence is qualified and now names both exceptions plainly. The
+stale comment is corrected (item 15). **The self cell was built, run, and backed
+out**, and what it found is worth more than the cell would have been.
+
+> **"SoftEther's self cell is a day's work and is unambiguously owed" is
+> false.** It is blocked on exactly the same work the client and server columns
+> are.
+
+The cell was written — compose file, two entrypoints, the test — and run against
+Docker. Two veepin clients connected to a veepin server, both authenticated,
+both addressed their TAPs, and no frame ever crossed. The cause is one line
+long:
+
+```go
+// softether/softether.go, Dial
+tap, err := dataplane.OpenTAP(cfg.TUNName)
+…
+return &Session{cs: cs, tap: tap}, client.Result{TUNName: tap.Name(), Layer2: true, MTU: 1500}, nil
+```
+
+**The client opens a TAP and starts nothing that moves frames between it and the
+TLS session.** There is no pump, no goroutine, no data path at all. The first
+attempt at the cell pinged the server's own TAP and got a clean handshake and
+"Destination Host Unreachable", which looked like the known "the server does not
+bridge to its host TAP" caveat; moving to two clients pinging each other —
+testing precisely what the bridge does — failed the same way, which is what
+narrowed it to the client.
+
+So all three SoftEther columns wait on one piece of work, and the Self column is
+not the cheap one. The matrix row keeps its three dashes and its comment now
+says why, with the reason rather than "not yet built".
+
+**The Self-column guard is therefore not landed either**, and deliberately: a
+guard asserting "no row carries a dash in the Self column" would have to fail
+today or carry an exemption for the one row it was written for, and an exemption
+is how the next one gets through. It goes in with the SoftEther data path, in
+the same change, where it will be a check that has always been true rather than
+one that starts out excused.
+
+The one thing worth taking from the plan's framing: a dash in the Self column
+still is not something effort alone earns. It is a claim that the protocol
+cannot talk to itself, and for SoftEther that claim is currently correct.
+
 ## 14. Three protocol counts the docs guard cannot see
 
 ```sh
@@ -835,6 +929,22 @@ Fix the numbers, and widen the guard's anchors to catch a bare spelled-out
 number followed by "protocols" — the failure mode here is not that the number
 was wrong when written, it is that nothing was watching it.
 
+### ✅ Landed
+
+All three fixed, and `assertBareProtocolCounts` is the wider anchor.
+
+The shape of the check matters more than the numbers. The obvious version — a
+list of words to ignore before "protocols" — starts with "transport", "SSL-based"
+and "selecting" and grows with the prose, which means it grows with every
+sentence anyone writes and eventually stops catching anything. The version that
+landed keys on a set of *spelled-out numbers* instead: a word that is not a
+number is not this guard's business, and the set only grows if someone writes a
+bigger number.
+
+The two legitimate subset counts are declared with what they count
+(`subsetProtocolCounts`), so an exemption is a claim someone wrote down and a
+reader can check, rather than a number quietly allowed through.
+
 ## 15. Two comments describing a tree that no longer exists
 
 - `doc/protocol-roadmap.md:64-68` states that `internal/softether/switch.go` "is
@@ -848,6 +958,18 @@ was wrong when written, it is that nothing was watching it.
 Both are in files whose entire purpose is to be the truthful record. Landed
 plans are kept here deliberately (`protocol-roadmap.md` says so), so the fix is
 a *(landed)* marker and a corrected sentence, not a deletion.
+
+### ✅ Landed
+
+Both carry a *(landed)* block naming what changed, with the original text kept
+above it — `protocol-roadmap.md`'s reasoning for why L2TPv3 went first does not
+stop being the right decision because its premise was later fixed, and deleting
+it would lose why the tree looks the way it does.
+
+`interop.go`'s comment got more than a correction: writing item 13's cell
+replaced "not yet proven against a peer" with the actual reason, which is that
+SoftEther's client has no data path. That is the difference between a comment
+that ages and one that explains.
 
 ---
 

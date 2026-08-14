@@ -63,9 +63,19 @@ overstate what veepin actually does.
 
 `doc/softether-plan.md` says it plainly: *"veepin has no layer 2."* SoftEther was
 supposed to close that and landed partial — the learning bridge that plan
-specifies as `internal/softether/switch.go` is still unwritten, and
-`dataplane/tun_linux.go:86` has a working `OpenTAP` (`cIFF_TAP | cIFF_NO_PI` at
-:96) that nothing in the tree calls.
+specifies as `internal/softether/switch.go` was still unwritten, and
+`dataplane/tun_linux.go`'s working `OpenTAP` (`cIFF_TAP | cIFF_NO_PI`) was called
+by nothing in the tree.
+
+> **(landed)** Both sentences were true when written and are now false.
+> `internal/softether/switch.go` exists with its own tests, `internal/l2tpv3`
+> calls `OpenTAP`, and SoftEther has a veepin↔veepin interop cell. The reasoning
+> below is kept because it is why L2TPv3 went first, and that decision does not
+> stop being the right one because its premise was subsequently fixed — but the
+> premise is no longer a description of the tree. What SoftEther still lacks is
+> narrower and is named in `internal/softether/README.md`: the server switches
+> frames between connected clients rather than bridging them to the host's own
+> network, and every client is assigned the constant `10.70.0.2`.
 
 L2TPv3 closes the gap on better terms, for one reason: **the peer is the Linux
 kernel.** `ip l2tp add tunnel` / `ip l2tp add session` configures a static

@@ -8,7 +8,12 @@ WireGuard, OpenVPN, SSTP, SSH, L2TP/IPsec, L2TPv3 Ethernet pseudowire,
 AnyConnect, Nebula, MASQUE (CONNECT-IP and CONNECT-UDP over HTTP/3), Fortinet,
 GlobalProtect, Cisco IPsec, Ivanti Connect Secure, SoftEther VPN (SE-VPN) and
 AmneziaWG — each verified in Docker against a real third-party implementation
-and against itself.
+and against itself. Two rows carry an exception the
+[matrix](#interoperability-matrix) names and this sentence should not hide:
+**SoftEther has no interop cell in any direction** — its client opens a TAP and
+starts nothing that moves frames across it, so it is implemented and unproven —
+and **L2TPv3's kernel cells need an `l2tp_eth` module GitHub's runners lack**,
+so they are a local-only check.
 
 Every layer is covered by tests, including full VPN integration tests:
 `TestFullVPNFlow` drives a client through the handshake and verifies a real IP
@@ -104,7 +109,7 @@ hand-rolling a QUIC stack or vendoring a third-party one — is avoided the same
 way `x/crypto` avoids hand-rolling ChaCha20. (`x/net/http3` is *not* used: its
 public surface exports nothing and it has no CONNECT/datagram/capsule support,
 so the HTTP/3 layer MASQUE needs is built from scratch on the `quic` package —
-see `internal/masque/http3`.) Only MASQUE imports it; the other nine protocols
+see `internal/masque/http3`.) Only MASQUE imports it; the other fifteen protocols
 still reach no further than `x/crypto`.
 
 The alternative was hand-rolling both. That was rejected: `x/crypto` is the Go
@@ -238,7 +243,9 @@ echo "deb [signed-by=/usr/share/keyrings/veepin-archive-keyring.gpg] https://xen
 sudo apt update && sudo apt install veepin veepin-nm
 ```
 
-`veepin` is the CLI (server + client, no runtime dependencies); `veepin-nm`
+`veepin` is the CLI (server + client; no *library* dependencies — it does shell
+out to `ip`/`iptables`/`sysctl` on Linux and `ifconfig`/`route`/`networksetup` on
+macOS, all of which are part of the base system); `veepin-nm`
 adds the NetworkManager desktop integration (built for the same architectures;
 the amd64/arm64 builds load on Ubuntu 22.04+, the cross-built rest on
 Debian 12+ / Ubuntu 24.04+). The repository signing
@@ -349,7 +356,7 @@ Android, strongSwan) can also connect to the veepin IKEv2 server directly — se
 
 **TOY provides no security** — its "encryption" is a repeating XOR pad and its
 "authentication" is a hash-table hash, so anyone who can see the traffic can read
-and forge it. It is not one of the ten real protocols; it is the *shape* of a
+and forge it. It is not one of the sixteen real protocols; it is the *shape* of a
 veepin protocol with the cryptography replaced by placeholders simple enough to
 read in one sitting — a handshake producing a `client.Result`, a `dataplane.Pump`
 data path, and both roles on the client registry. Its interop cells talk to an
@@ -434,6 +441,24 @@ than clobbering its state.
 The client speaks the same PSK and EAP-MSCHAPv2 flows the server accepts, so
 `veepin connect` ↔ `veepin serve` interoperate directly, and the client also works
 against other RFC 7296 responders that accept these authentication methods.
+
+### Platform support
+
+The **client** runs on Linux and macOS. Linux is what CI and the interop matrix
+exercise; macOS is `dataplane/tun_darwin.go` (a `utun` control socket via
+`x/sys/unix` — no cgo, no new dependency) plus `ifconfig`/`route`/`networksetup`
+for host networking. It compiles in CI for `darwin/amd64` and `darwin/arm64`,
+which proves it type-checks and nothing more: **no one has run it yet**, and
+[doc/verifying-macos.md](doc/verifying-macos.md) is the procedure for the person
+who does. Three things are knowingly absent there — the kill switch (the BSD
+routing table has no per-route metrics to arm one safely), the layer-2 protocols
+(macOS has no in-kernel TAP), and GSO (a Linux offload).
+
+The **server** is Linux only: `internal/hostnet` speaks `iptables` and `sysctl`.
+
+Windows is out of scope. wintun is a DLL, which costs both the "no runtime
+dependencies" and the pure-Go claims; it is a trade worth making only for
+someone who wants it enough to argue it.
 
 ### Logging
 
@@ -707,10 +732,11 @@ each a localized extension point, not a structural rework:
   [USENIX Security '24](https://www.usenix.org/conference/usenixsecurity24/presentation/xue-fingerprinting),
   which byte-level obfuscation does not address. `veepin serve <protocol> -shape
   <bytes>` pads the first N bytes of each inner flow out to the tunnel MTU on
-  seven of the nine protocols — RFC 4303 §2.7 TFC padding for ESP, trailing
-  octets for WireGuard, the RFC 1661 §5.1 PPP Information field for SSTP,
-  Fortinet and L2TP/IPsec, and the length-delimited data payload for AnyConnect
-  and OpenVPN. All are inert to a conforming receiver, which delimits the real
+  twelve of the sixteen protocols — RFC 4303 §2.7 TFC padding for ESP (IKEv2,
+  Cisco IPsec, GlobalProtect, Ivanti), trailing octets for WireGuard and
+  AmneziaWG, the RFC 1661 §5.1 PPP Information field for SSTP, Fortinet and
+  L2TP/IPsec, the length-delimited data payload for AnyConnect and OpenVPN, and
+  trailing filler on the IP-bearing frames of an L2TPv3 pseudowire. All are inert to a conforming receiver, which delimits the real
   packet by the inner IP header, so **stock clients benefit unmodified**; and
   because the attack targets handshakes, the cost is per-flow rather than
   per-byte, leaving bulk throughput untouched. It does not shape packet counts
