@@ -171,11 +171,17 @@ jobs:
           # reason both L2TPv3 kernel cells had never once run in CI. The package
           # is version-locked to the running kernel, so it is installed by
           # `uname -r` and not by a name that could resolve to a different one.
+          #
+          # Nothing here is fatal on its own -- an apt mirror having a bad
+          # morning is not the error worth printing. The assertion below is,
+          # because it names the module rather than the command that failed to
+          # fetch it, and the step runs under bash -e where an unguarded
+          # apt-get would abort before reaching it.
           if [ -n "${missing}" ]; then
             echo "not loaded:${missing} — installing linux-modules-extra-$(uname -r)"
-            sudo apt-get update -qq
-            sudo apt-get install -y "linux-modules-extra-$(uname -r)"
-            for m in ${missing}; do sudo modprobe "$m"; done
+            sudo apt-get update -qq || true
+            sudo apt-get install -y "linux-modules-extra-$(uname -r)" || true
+            for m in ${missing}; do sudo modprobe "$m" || true; done
           fi
 
           # Asserted, not hoped for. A missing module makes the cells t.Skip,
