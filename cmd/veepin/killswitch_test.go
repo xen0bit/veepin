@@ -88,3 +88,45 @@ func TestKillSwitchIsOffByDefault(t *testing.T) {
 		t.Error("-kill-switch defaults to on; an unasked-for kill switch can strand a remote host")
 	}
 }
+
+// The one refusal that was missing, and the only one that used to be silent.
+//
+// dialConnect arms the switch inside the same `if !noRoute` block that installs
+// the routes, so -no-route -kill-switch brought the tunnel up, said nothing, and
+// failed open while the operator had explicitly asked to fail closed. A flag
+// that is accepted and does nothing is the shape of bug this tree calls the
+// worst kind, and it is worse again when the flag is the safety one.
+func TestKillSwitchAndNoRouteAreRefusedTogether(t *testing.T) {
+	fs := newTestFlagSet()
+	n := bindNetFlags(fs)
+	if err := fs.Parse([]string{"-no-route", "-kill-switch"}); err != nil {
+		t.Fatal(err)
+	}
+	err := n.resolve(fs)
+	if err == nil {
+		t.Fatal("-no-route -kill-switch was accepted; the switch never arms and nothing says so")
+	}
+	// Both flags named, because the operator has to know which one to drop.
+	for _, want := range []string{"-kill-switch", "-no-route"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not name %s: %v", want, err)
+		}
+	}
+}
+
+// The refusal above must not catch the ordinary case. -kill-switch on its own is
+// the configuration the flag exists for, and a check that rejects it too would
+// be found only by someone trying to use the feature.
+func TestKillSwitchAloneIsAccepted(t *testing.T) {
+	fs := newTestFlagSet()
+	n := bindNetFlags(fs)
+	if err := fs.Parse([]string{"-kill-switch"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.resolve(fs); err != nil {
+		t.Fatalf("-kill-switch alone was refused: %v", err)
+	}
+	if !n.killSwitch {
+		t.Error("-kill-switch did not survive resolve")
+	}
+}

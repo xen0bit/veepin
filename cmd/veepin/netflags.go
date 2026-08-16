@@ -110,6 +110,20 @@ func bindNetFlags(fs *flag.FlagSet) *netFlags {
 // An explicit -full-tunnel alongside -route is a contradiction the operator
 // typed, so it is reported rather than resolved.
 func (n *netFlags) resolve(fs *flag.FlagSet) error {
+	// -no-route and -kill-switch cannot both be honoured: the switch IS host
+	// routing -- blackhole routes at a worse metric than the tunnel's own -- and
+	// -no-route says to install none.
+	//
+	// Reported rather than resolved, because the way this read before was the
+	// silent one. dialConnect arms the switch inside the same `if !noRoute` block
+	// that installs the routes, so `-no-route -kill-switch` brought the tunnel up,
+	// printed nothing, and failed OPEN -- with the operator having explicitly
+	// asked to fail closed. Every other way of refusing this flag says so out
+	// loud (see armKillSwitch); this one has to as well.
+	if n.killSwitch && n.noRoute {
+		return fmt.Errorf("connect: -kill-switch installs blackhole routes and -no-route " +
+			"installs none; pick one (there is nothing to fail closed with routing left alone)")
+	}
 	if len(n.routes) == 0 {
 		return nil
 	}

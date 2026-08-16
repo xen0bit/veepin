@@ -424,7 +424,9 @@ machine you may only be able to reach over the network it just blackholed; when
 it engages it logs the command to reopen the host by hand, since the moment you
 need that is the moment you cannot look it up. It needs a full tunnel and a
 protocol with one outer server address, and refuses rather than half-delivering
-for a split tunnel or a mesh. **Both address families are closed whichever the
+for a split tunnel or a mesh — and it cannot be combined with `-no-route`, since
+the switch *is* routing and there is nothing to fail closed with the routing
+table left alone. **Both address families are closed whichever the
 tunnel carries** — a family the tunnel does not carry is exactly a family that
 escapes it — so a v4-only tunnel blackholes IPv6 for its lifetime, which the log
 says out loud.
