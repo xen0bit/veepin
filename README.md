@@ -8,11 +8,10 @@ WireGuard, OpenVPN, SSTP, SSH, L2TP/IPsec, L2TPv3 Ethernet pseudowire,
 AnyConnect, Nebula, MASQUE (CONNECT-IP and CONNECT-UDP over HTTP/3), Fortinet,
 GlobalProtect, Cisco IPsec, Ivanti Connect Secure, SoftEther VPN (SE-VPN) and
 AmneziaWG — each verified in Docker against a real third-party implementation
-and against itself. Two rows carry an exception the
+and against itself. One row carries an exception the
 [matrix](#interoperability-matrix) names and this sentence should not hide:
 **SoftEther is verified against itself but has no cross-implementation cell
-yet**, and **L2TPv3's kernel cells need an `l2tp_eth` module GitHub's runners
-lack**, so they are a local-only check.
+yet**.
 
 Every layer is covered by tests, including full VPN integration tests:
 `TestFullVPNFlow` drives a client through the handshake and verifies a real IP

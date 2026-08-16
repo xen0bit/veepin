@@ -263,6 +263,17 @@ interop claim only on a host with the modules; the veepin↔veepin cell needs
 none and runs everywhere. The lesson generalises: **check the peer on the
 machine CI actually uses, not the one you are sitting at.**
 
+> **(landed)** Skipping was the right call and was the wrong stopping point: a
+> skip is reported as not-passed, so the published matrix carried a `✗` against
+> both kernel cells for months — a mark that says veepin does not interoperate,
+> about a peer that never started. The modules were installable on the runners
+> the whole time, in `linux-modules-extra-$(uname -r)`. The workflow now installs
+> and loads them from a `Modules` list the interop manifest carries beside the
+> tests, fails the shard if they are still absent, and `cmd/livingreadme` refuses
+> to publish a matrix from a run that skipped a cell at all. The generalised
+> lesson gains a second half: **a cell that cannot run must not be reported as a
+> cell that ran and failed.**
+
 Cells: `compose.l2tpv3.yml` (veepin client ↔ kernel),
 `compose.l2tpv3-server.yml` (kernel client ↔ veepin server),
 `compose.l2tpv3-self.yml`, `compose.l2tpv3-cookie.yml` (asymmetric 8-octet

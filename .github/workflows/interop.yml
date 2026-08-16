@@ -146,6 +146,51 @@ jobs:
           sudo modprobe esp4 xfrm_user af_key || true
           ls -l /dev/net/tun
 
+      # Whatever this shard's peer needs from the HOST kernel, declared in the
+      # interop manifest beside the tests that need it -- no protocol is named
+      # here, for the same reason the shard split is derived rather than written
+      # out. Only L2TPv3 has any, because its peer IS the kernel.
+      - name: Provide the kernel modules this shard's peer needs
+        env:
+          MODULES: ${{ join(matrix.shard.modules, ' ') }}
+        run: |
+          set -u
+          if [ -z "${MODULES}" ]; then
+            echo "this shard's peer needs no host modules"
+            exit 0
+          fi
+
+          # Try first: on a host that already has them this costs nothing.
+          missing=""
+          for m in ${MODULES}; do
+            sudo modprobe "$m" 2>/dev/null || missing="${missing} $m"
+          done
+
+          # GitHub's runners boot an Azure kernel that ships the l2tp modules in
+          # linux-modules-extra rather than in the base image, which is the whole
+          # reason both L2TPv3 kernel cells had never once run in CI. The package
+          # is version-locked to the running kernel, so it is installed by
+          # `uname -r` and not by a name that could resolve to a different one.
+          if [ -n "${missing}" ]; then
+            echo "not loaded:${missing} — installing linux-modules-extra-$(uname -r)"
+            sudo apt-get update -qq
+            sudo apt-get install -y "linux-modules-extra-$(uname -r)"
+            for m in ${missing}; do sudo modprobe "$m"; done
+          fi
+
+          # Asserted, not hoped for. A missing module makes the cells t.Skip,
+          # and a skipped cell is reported as not-passed -- so failing here names
+          # the real cause instead of leaving a ✗ that reads as "veepin is
+          # broken" against a peer that never started.
+          #
+          # /sys/module rather than lsmod, because a module compiled INTO the
+          # kernel is present and usable and lsmod does not list it. It is also
+          # the check requireL2TPModules makes, so the gate and the skip agree.
+          for m in ${MODULES}; do
+            [ -d "/sys/module/${m}" ] || { echo "::error::${m} is not available; this shard's peer cannot run"; exit 1; }
+          done
+          echo "available: ${MODULES}"
+
       - name: Run interop tests (vs real peers, over Docker)
         run: |
           # -json so the living-README tool can read the per-cell pass/fail; tee
