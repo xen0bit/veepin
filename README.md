@@ -328,8 +328,9 @@ bob:hunter2
 
 `-user`/`-pass` remain the one-user shorthand, and where a name is in both the
 command line wins. `veepin passwd` prints a verifier for the first form,
-reading the password from stdin so it never enters the process table; the
-format is bcrypt's own, so `htpasswd -B` works too.
+reading the password from stdin so it never enters the process table; at a
+terminal it turns echo off and asks twice, and a piped password is read once and
+unchanged. The format is bcrypt's own, so `htpasswd -B` works too.
 
 Whether the secret may be a verifier is a property of the protocol rather than
 a setting. SSTP and L2TP/IPsec are MS-CHAPv2: both ends derive their response
