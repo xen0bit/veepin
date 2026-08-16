@@ -425,10 +425,17 @@ func InteropShards() []InteropShard {
 		if len(tests) == 0 {
 			continue
 		}
+		// Empty rather than nil, so the JSON carries [] and never null. The
+		// workflow reads this through GitHub's join(), whose behaviour on null is
+		// not something to find out from a failing run.
+		modules := row.Modules
+		if modules == nil {
+			modules = []string{}
+		}
 		shards = append(shards, InteropShard{
 			Name:    shardName(row.Protocol),
 			Run:     "^(" + strings.Join(tests, "|") + ")$",
-			Modules: row.Modules,
+			Modules: modules,
 		})
 	}
 	return shards

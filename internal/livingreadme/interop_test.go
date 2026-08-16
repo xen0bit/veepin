@@ -217,6 +217,12 @@ func TestSkippedMatrixTestsTakesTheFinalAction(t *testing.T) {
 func TestShardsCarryTheModulesTheirRowDeclares(t *testing.T) {
 	byName := map[string][]string{}
 	for _, s := range InteropShards() {
+		// Never nil, because a nil slice marshals to null and the workflow reads
+		// this through GitHub's join(), whose behaviour on null is not something
+		// to discover from a failing run.
+		if s.Modules == nil {
+			t.Errorf("shard %q has nil Modules; it would serialise as null, not []", s.Name)
+		}
 		byName[s.Name] = s.Modules
 	}
 	declared := 0
