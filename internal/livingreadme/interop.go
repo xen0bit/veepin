@@ -176,18 +176,19 @@ var interopMatrix = []interopRow{
 		}, Label: "openconnect (IF-T/TLS, ESP, padded)"},
 		Self: interopCell{Tests: []string{"TestInteropPulseSelf"}, Label: "(over ESP)"},
 	},
-	// SoftEther's two cross-implementation cells are not yet built. They carry
-	// "‡", not "†": the dagger means *no open-source peer exists*, which is true
-	// of FortiOS and false here — SoftEther VPN Server is Apache-2.0. Marking it
-	// "†" would state in the README that no peer was available, when the truth
-	// is that the cells have not been built yet, and what they wait on is
-	// internal/softether's own caveats: the server switches frames between
-	// connected clients rather than bridging them to the host's network, and
-	// every client is assigned the same 10.70.0.2.
-	//
 	// SoftEther's two cross-implementation cells are not built. They carry "‡",
 	// not "†": the dagger means *no open-source peer exists*, which is true of
-	// FortiOS and false here — SoftEther VPN Server is Apache-2.0.
+	// FortiOS and false here — SoftEther VPN Server is Apache-2.0. Marking it
+	// "†" would state in the README that no peer was available, when the truth
+	// is that nobody has built the cells.
+	//
+	// They no longer wait on anything structural. This comment used to say the
+	// blocker was internal/softether's own caveat — "the server switches frames
+	// between connected clients rather than bridging them to the host's network"
+	// — and that stopped being true when local.go put the server's interface on
+	// its own switch, which the Self cell now proves. The remaining caveats are
+	// real (every client is told the same 10.70.0.2, so a two-client cell is not
+	// possible) but neither blocks a single-client cell in either direction.
 	//
 	// The Self column is no longer a dash, and getting it there is what found
 	// the reason the others are. Neither end pumped frames: softether.Dial
