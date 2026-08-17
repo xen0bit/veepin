@@ -81,14 +81,19 @@ func TestPendingQl2tpdKeepalive(t *testing.T) {
 //
 // The peer for these cells IS the kernel: `ip l2tp` needs l2tp_core, l2tp_eth
 // and l2tp_netlink, and the containers use the HOST's kernel, so the modules
-// have to be present there. GitHub's runners ship a kernel with them absent --
-// the peer container reports "the kernel has no L2TP support" and nothing can
-// be tested.
+// have to be present there. Absent them the peer container reports "the kernel
+// has no L2TP support" and nothing can be tested.
 //
-// Skipping is the honest outcome: it says the environment cannot host the peer,
-// where failing would claim veepin is broken. The cells do pass on any host with
-// the modules, which is where the kernel interop claim comes from -- see
-// internal/l2tpv3/README.md.
+// Skipping is the honest outcome on a developer's machine: it says the
+// environment cannot host the peer, where failing would claim veepin is broken.
+//
+// It is no longer the outcome in CI, and that is the point of the change that
+// wrote this paragraph. The runners boot an Azure kernel whose l2tp modules are
+// packaged separately, so for as long as nobody installed them these two cells
+// skipped on every run -- and a skip is reported as not-passed, which put a ✗
+// against a peer that had never started. The interop workflow now installs and
+// loads them from the manifest's own Modules list, and FAILS the shard if they
+// are still missing, so the skip below can no longer be reached there.
 func requireL2TPModules(t *testing.T) {
 	t.Helper()
 	requireDocker(t)
@@ -111,7 +116,8 @@ func requireL2TPModules(t *testing.T) {
 		}
 	}
 	t.Skip("no l2tp_eth kernel module on this host: the peer for this cell is the " +
-		"Linux kernel itself, so there is nothing to test against (GitHub runners are like this)")
+		"Linux kernel itself, so there is nothing to test against. On Debian and " +
+		"Ubuntu it is in linux-modules-extra-$(uname -r), which is what CI installs")
 }
 
 // requireARPInsideTunnel asserts the peer's MAC was learned through the tunnel.

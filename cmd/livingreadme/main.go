@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/xen0bit/veepin/internal/livingreadme"
@@ -76,6 +77,17 @@ func run() error {
 	case livingreadme.RegionBenchmark:
 		body = livingreadme.RenderBenchmarks(livingreadme.ParseBenchmarks(input), meta)
 	case livingreadme.RegionInterop:
+		// A skipped cell renders identically to a failed one, so a run that
+		// could not test something would publish "✗" — "veepin does not
+		// interoperate" — for a peer that never started. Refused rather than
+		// rendered: the table is a claim about what was tested, and the fix is
+		// to give the run what it needed and run it again, not to publish a
+		// mark that means the opposite of the truth.
+		if skipped := livingreadme.SkippedMatrixTests(input); len(skipped) > 0 {
+			return fmt.Errorf("%s: this run skipped %d matrix cell(s), which would be published as ✗:\n  %s\n"+
+				"fix the environment (a peer's kernel modules, Docker) and re-run; see the shard's own logs for why each skipped",
+				livingreadme.RegionInterop, len(skipped), strings.Join(skipped, "\n  "))
+		}
 		body = livingreadme.RenderInterop(livingreadme.ParseTestResults(input), meta)
 	case livingreadme.RegionInteropBench:
 		body = livingreadme.RenderInteropBench(livingreadme.ParseThroughput(input), meta)

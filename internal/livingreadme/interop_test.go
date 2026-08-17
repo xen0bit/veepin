@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -164,6 +165,86 @@ func TestInteropShards(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// A skip is not a failure, and the table cannot tell them apart.
+//
+// renderCell maps both to "✗", which reads as "veepin does not interoperate"
+// — so a run that could not start a peer would publish the opposite of what
+// happened. SkippedMatrixTests is what lets the generator refuse instead, and
+// this pins the three distinctions it has to draw: skip is reported, fail and
+// pass are not, and a test outside the manifest is nobody's business.
+func TestSkippedMatrixTestsSeparatesSkipsFromFailures(t *testing.T) {
+	in := strings.Join([]string{
+		`{"Action":"skip","Test":"TestInteropVeepinClientKernelL2TPv3Server"}`,
+		`{"Action":"fail","Test":"TestInteropL2TPv3Self"}`,
+		`{"Action":"pass","Test":"TestInteropWireguardSelf"}`,
+		`{"Action":"skip","Test":"TestSomethingNotInTheMatrix"}`,
+		`{"Action":"skip","Test":"TestInteropWireguardSelf/subcase"}`,
+	}, "\n")
+
+	got := SkippedMatrixTests(in)
+	want := []string{"TestInteropVeepinClientKernelL2TPv3Server"}
+	if !slices.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// A test whose final action is a pass did not skip, whatever happened inside
+// it. Subtests skip routinely -- a cell that probes for a capability and then
+// tests what it found -- and reporting the parent as skipped would refuse a run
+// that tested everything it claims to.
+func TestSkippedMatrixTestsTakesTheFinalAction(t *testing.T) {
+	in := strings.Join([]string{
+		`{"Action":"skip","Test":"TestInteropWireguardSelf"}`,
+		`{"Action":"pass","Test":"TestInteropWireguardSelf"}`,
+	}, "\n")
+
+	if got := SkippedMatrixTests(in); len(got) != 0 {
+		t.Errorf("a test that ended in a pass was reported as skipped: %v", got)
+	}
+}
+
+// A row's Modules must survive into its shard, because that is the only thing
+// the workflow reads.
+//
+// This is the same failure the shard derivation exists to prevent, one field
+// along: a host requirement declared in the manifest and dropped on the way out
+// means the workflow's modprobe step no-ops, the peer never starts, the cells
+// t.Skip, and a skip is reported as not-passed. Every one of those steps is
+// quiet, which is why the check is here and not left to somebody noticing a ✗.
+func TestShardsCarryTheModulesTheirRowDeclares(t *testing.T) {
+	byName := map[string][]string{}
+	for _, s := range InteropShards() {
+		// Never nil, because a nil slice marshals to null and the workflow reads
+		// this through GitHub's join(), whose behaviour on null is not something
+		// to discover from a failing run.
+		if s.Modules == nil {
+			t.Errorf("shard %q has nil Modules; it would serialise as null, not []", s.Name)
+		}
+		byName[s.Name] = s.Modules
+	}
+	declared := 0
+	for _, row := range interopMatrix {
+		if len(row.Modules) == 0 {
+			continue
+		}
+		declared++
+		got, ok := byName[shardName(row.Protocol)]
+		if !ok {
+			t.Errorf("%s declares modules %v but yields no shard", row.Protocol, row.Modules)
+			continue
+		}
+		if !slices.Equal(got, row.Modules) {
+			t.Errorf("%s: shard carries %v, row declares %v", row.Protocol, got, row.Modules)
+		}
+	}
+	// If nothing declares any, the field is dead and so is the workflow step
+	// that reads it -- which is worth knowing, because the step is silent when
+	// the list is empty and would stay silent after a row lost its modules.
+	if declared == 0 {
+		t.Error("no row declares Modules; the workflow's module step now does nothing on every shard")
 	}
 }
 

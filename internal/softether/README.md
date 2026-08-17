@@ -3,11 +3,10 @@
 Ethernet frames over TLS, with the control exchange carried in SoftEther's own
 PACK serialisation. This is one of veepin's two **layer-2** protocols — the other
 is [`internal/l2tpv3`](../l2tpv3) — where every other protocol here tunnels IP
-packets over a TUN device. SoftEther switches Ethernet frames between connected
-clients rather than bridging them to a host TAP, which is the gap the caveats
-below name: SoftEther switches frames between the clients and the server's own
-interface, and does not bridge that segment onto the host's wider network the way
-a `brctl`-style deployment would.
+packets over a TUN device. The switch carries the connected clients *and* the
+server's own TAP, which is an ordinary bridge port on it. What it does not do is
+bridge that segment onto the host's wider network the way a `brctl`-style
+deployment would: the segment ends at the server.
 
 ```mermaid
 sequenceDiagram

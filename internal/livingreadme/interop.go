@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -19,12 +20,26 @@ type interopCell struct {
 	Label string // peer implementation, or the whole cell for an untested one
 }
 
-// interopRow is one protocol's row: the three directional cells.
+// interopRow is one protocol's row: the three directional cells, plus whatever
+// the host has to provide before the row's peer can run at all.
 type interopRow struct {
 	Protocol string
 	Client   interopCell // veepin client ↔ real server
 	Server   interopCell // real client ↔ veepin server
 	Self     interopCell // veepin ↔ veepin
+
+	// Modules are kernel modules the HOST must have loaded for this row's peer,
+	// beyond the tun/XFRM set every shard gets. They are declared here, beside
+	// the tests that need them, for the same reason the shard split is derived
+	// from this manifest rather than written in YAML: a requirement recorded
+	// only in a workflow drifts from the tests silently, and a cell that skips
+	// for want of a module is indistinguishable in a CI table from one nobody
+	// wrote.
+	//
+	// Only L2TPv3 has any, and the reason is unusual enough to be worth stating:
+	// its peer IS the Linux kernel, so the peer container configures `ip l2tp`
+	// against the host's own modules rather than shipping an implementation.
+	Modules []string
 }
 
 // interopMatrix is the manifest that maps every protocol/direction cell to the
@@ -176,18 +191,19 @@ var interopMatrix = []interopRow{
 		}, Label: "openconnect (IF-T/TLS, ESP, padded)"},
 		Self: interopCell{Tests: []string{"TestInteropPulseSelf"}, Label: "(over ESP)"},
 	},
-	// SoftEther's two cross-implementation cells are not yet built. They carry
-	// "‡", not "†": the dagger means *no open-source peer exists*, which is true
-	// of FortiOS and false here — SoftEther VPN Server is Apache-2.0. Marking it
-	// "†" would state in the README that no peer was available, when the truth
-	// is that the cells have not been built yet, and what they wait on is
-	// internal/softether's own caveats: the server switches frames between
-	// connected clients rather than bridging them to the host's network, and
-	// every client is assigned the same 10.70.0.2.
-	//
 	// SoftEther's two cross-implementation cells are not built. They carry "‡",
 	// not "†": the dagger means *no open-source peer exists*, which is true of
-	// FortiOS and false here — SoftEther VPN Server is Apache-2.0.
+	// FortiOS and false here — SoftEther VPN Server is Apache-2.0. Marking it
+	// "†" would state in the README that no peer was available, when the truth
+	// is that nobody has built the cells.
+	//
+	// They no longer wait on anything structural. This comment used to say the
+	// blocker was internal/softether's own caveat — "the server switches frames
+	// between connected clients rather than bridging them to the host's network"
+	// — and that stopped being true when local.go put the server's interface on
+	// its own switch, which the Self cell now proves. The remaining caveats are
+	// real (every client is told the same 10.70.0.2, so a two-client cell is not
+	// possible) but neither blocks a single-client cell in either direction.
 	//
 	// The Self column is no longer a dash, and getting it there is what found
 	// the reason the others are. Neither end pumped frames: softether.Dial
@@ -214,14 +230,16 @@ var interopMatrix = []interopRow{
 	{
 		Protocol: "L2TPv3",
 		// The peer for both kernel cells IS the Linux kernel, so they need
-		// l2tp_eth on the HOST. GitHub runners ship a kernel without it and the
-		// cells skip there, which reads as not-passed in a CI-generated table --
-		// hence the caveat in the label rather than a bare peer name.
+		// l2tp_eth and l2tp_netlink on the HOST -- see Modules below, which is
+		// what now gets them there. GitHub's runners boot an Azure kernel whose
+		// l2tp modules live in a separate package, so for as long as nobody
+		// installed it the cells skipped, and a skip renders as ✗.
 		Client: interopCell{Tests: []string{"TestInteropVeepinClientKernelL2TPv3Server"},
-			Label: "Linux kernel (`ip l2tp`, 8-octet asymmetric cookies) — needs `l2tp_eth` on the host"},
+			Label: "Linux kernel (`ip l2tp`, 8-octet asymmetric cookies)"},
 		Server: interopCell{Tests: []string{"TestInteropKernelL2TPv3ClientVeepinServer"},
-			Label: "Linux kernel (`ip l2tp`) — needs `l2tp_eth` on the host"},
-		Self: interopCell{Tests: []string{"TestInteropL2TPv3Self"}, Label: "(shaped)"},
+			Label: "Linux kernel (`ip l2tp`)"},
+		Self:    interopCell{Tests: []string{"TestInteropL2TPv3Self"}, Label: "(shaped)"},
+		Modules: []string{"l2tp_eth", "l2tp_netlink"},
 	},
 	{
 		Protocol: "TOY*",
@@ -268,6 +286,67 @@ func ParseTestResults(jsonOut string) TestResults {
 		}
 	}
 	return results
+}
+
+// SkippedMatrixTests returns, sorted, the matrix-backing tests that the run
+// skipped rather than passing or failing.
+//
+// It exists because a skip and a failure are the same value in TestResults, and
+// therefore the same "✗" in the rendered table — a mark that says "veepin does
+// not interoperate" for a cell whose peer never started. That is precisely the
+// false ✗ the Fortinet "—†" precedent exists to avoid, and it sat on the front
+// page for both L2TPv3 kernel cells for as long as the runners lacked the l2tp
+// modules.
+//
+// The caller's job is to refuse to publish such a run, not to invent a third
+// mark for it. A table is a claim about what was tested; a run that did not test
+// a cell has nothing to say about it, and the honest response is to fix the
+// environment and run again. Only tests the manifest names are considered, so a
+// skip in an unrelated helper is not the README's business.
+func SkippedMatrixTests(jsonOut string) []string {
+	inMatrix := map[string]bool{}
+	for _, row := range interopMatrix {
+		for _, c := range []interopCell{row.Client, row.Server, row.Self} {
+			for _, name := range c.Tests {
+				inMatrix[name] = true
+			}
+		}
+	}
+
+	// Final action wins, exactly as in ParseTestResults: a test that skipped a
+	// subtest and then passed is a pass.
+	final := map[string]string{}
+	sc := bufio.NewScanner(strings.NewReader(jsonOut))
+	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if !strings.HasPrefix(line, "{") {
+			continue
+		}
+		var ev struct {
+			Action string `json:"Action"`
+			Test   string `json:"Test"`
+		}
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			continue
+		}
+		if ev.Test == "" || strings.Contains(ev.Test, "/") || !inMatrix[ev.Test] {
+			continue
+		}
+		switch ev.Action {
+		case "pass", "fail", "skip":
+			final[ev.Test] = ev.Action
+		}
+	}
+
+	var skipped []string
+	for name, action := range final {
+		if action == "skip" {
+			skipped = append(skipped, name)
+		}
+	}
+	slices.Sort(skipped)
+	return skipped
 }
 
 // renderCell renders one matrix cell against the results. An untested cell (no
@@ -319,6 +398,9 @@ func RenderInterop(results TestResults, meta Meta) string {
 type InteropShard struct {
 	Name string `json:"name"`
 	Run  string `json:"run"`
+	// Modules is the row's Modules, carried through so the workflow can load
+	// them before the cells run without naming any protocol itself.
+	Modules []string `json:"modules"`
 }
 
 // InteropShards derives the suite's parallel split from the manifest above, one
@@ -343,9 +425,17 @@ func InteropShards() []InteropShard {
 		if len(tests) == 0 {
 			continue
 		}
+		// Empty rather than nil, so the JSON carries [] and never null. The
+		// workflow reads this through GitHub's join(), whose behaviour on null is
+		// not something to find out from a failing run.
+		modules := row.Modules
+		if modules == nil {
+			modules = []string{}
+		}
 		shards = append(shards, InteropShard{
-			Name: shardName(row.Protocol),
-			Run:  "^(" + strings.Join(tests, "|") + ")$",
+			Name:    shardName(row.Protocol),
+			Run:     "^(" + strings.Join(tests, "|") + ")$",
+			Modules: modules,
 		})
 	}
 	return shards

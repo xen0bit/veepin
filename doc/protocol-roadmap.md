@@ -73,9 +73,10 @@ by nothing in the tree.
 > below is kept because it is why L2TPv3 went first, and that decision does not
 > stop being the right one because its premise was subsequently fixed — but the
 > premise is no longer a description of the tree. What SoftEther still lacks is
-> narrower and is named in `internal/softether/README.md`: the server switches
-> frames between connected clients rather than bridging them to the host's own
-> network, and every client is assigned the constant `10.70.0.2`.
+> narrower and is named in `internal/softether/README.md`: the segment ends at
+> the server rather than being bridged onto the host's wider network, every
+> client is assigned the constant `10.70.0.2`, and the two cross-implementation
+> cells against SoftEther VPN Server are unbuilt.
 
 L2TPv3 closes the gap on better terms, for one reason: **the peer is the Linux
 kernel.** `ip l2tp add tunnel` / `ip l2tp add session` configures a static
@@ -261,6 +262,17 @@ peer and that is not a veepin fault. The kernel cells therefore prove the
 interop claim only on a host with the modules; the veepin↔veepin cell needs
 none and runs everywhere. The lesson generalises: **check the peer on the
 machine CI actually uses, not the one you are sitting at.**
+
+> **(landed)** Skipping was the right call and was the wrong stopping point: a
+> skip is reported as not-passed, so the published matrix carried a `✗` against
+> both kernel cells for months — a mark that says veepin does not interoperate,
+> about a peer that never started. The modules were installable on the runners
+> the whole time, in `linux-modules-extra-$(uname -r)`. The workflow now installs
+> and loads them from a `Modules` list the interop manifest carries beside the
+> tests, fails the shard if they are still absent, and `cmd/livingreadme` refuses
+> to publish a matrix from a run that skipped a cell at all. The generalised
+> lesson gains a second half: **a cell that cannot run must not be reported as a
+> cell that ran and failed.**
 
 Cells: `compose.l2tpv3.yml` (veepin client ↔ kernel),
 `compose.l2tpv3-server.yml` (kernel client ↔ veepin server),

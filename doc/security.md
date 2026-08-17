@@ -331,7 +331,13 @@ Two smaller notes on the same file:
 - `veepin passwd` prints a verifier, reading the password from stdin rather
   than taking it as an argument. The format is bcrypt's own, so `htpasswd -B`
   output works equally well; a tool whose purpose is keeping a password out of
-  the process table should not be the thing that puts it there.
+  the process table should not be the thing that puts it there. For the same
+  reason it turns the terminal's echo off while the password is typed — a
+  secret kept out of `ps` and out of the shell history, then printed into the
+  scrollback of a shared screen, has moved rather than closed the leak — and
+  asks for it twice, since with nothing on screen to check against, a typo is
+  not a visible error but a login that never succeeds. A password arriving on
+  a pipe is read once and is not echoed by anything.
 
 ## The management plane binds to localhost; do not bind it to a routable interface
 

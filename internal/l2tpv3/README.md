@@ -104,11 +104,20 @@ because a symmetric one cannot catch the bug.
 `TestInteropVeepinClientKernelL2TPv3Server` and
 `TestInteropKernelL2TPv3ClientVeepinServer` use the Linux kernel itself as the
 peer, so `l2tp_core`, `l2tp_eth` and `l2tp_netlink` must exist on the **host** —
-the containers share its kernel. **GitHub runners do not have them**, so those
-two cells skip in CI and the interop table shows them as not-passed.
+the containers share its kernel.
 
-They do pass on any host with the modules; that is where the kernel-interop
-claim comes from, and it is how the cookie-direction and sublayer behaviour were
+GitHub's runners boot an Azure kernel that ships those modules in a separate
+`linux-modules-extra` package, so for as long as nobody installed it both cells
+skipped on every CI run — and a skip is reported as not-passed, which put a `✗`
+in the published table against a peer that had never started. The interop
+workflow now installs and loads them, from the `Modules` list the interop
+manifest carries beside the tests themselves, and **fails the shard** if they
+are still missing. `cmd/livingreadme` additionally refuses to publish a matrix
+from any run that skipped a cell, so this class of false `✗` cannot return
+quietly.
+
+They pass on any host with the modules; that is where the kernel-interop claim
+comes from, and it is how the cookie-direction and sublayer behaviour were
 actually verified. Run them yourself with:
 
 ```sh
