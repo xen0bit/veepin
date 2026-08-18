@@ -40,6 +40,23 @@ type interopRow struct {
 	// its peer IS the Linux kernel, so the peer container configures `ip l2tp`
 	// against the host's own modules rather than shipping an implementation.
 	Modules []string
+
+	// Images are third-party images this row's cells pull from a registry,
+	// declared so the workflow can fetch them with retries before the tests
+	// run rather than inside one cell's timeout.
+	//
+	// The reason is Docker Hub, not veepin. An anonymous pull from a
+	// GitHub-hosted runner shares an IP pool with every other such runner, and
+	// when that pool is throttled a pull stalls rather than failing: the
+	// SoftEther and SSTP shards both died with `compose up: signal: killed`
+	// having moved 32 kB of a 2.8 MB layer in fifteen minutes, while the same
+	// image pulled in seconds from a developer's machine. Charging that to a
+	// cell's timeout reports it as a veepin failure, which is the wrong
+	// diagnosis on the wrong component.
+	//
+	// Only images pulled from a registry belong here. An image built from
+	// tests/interop/<peer>/ has no pull to retry.
+	Images []string
 }
 
 // interopMatrix is the manifest that maps every protocol/direction cell to the
@@ -101,6 +118,9 @@ var interopMatrix = []interopRow{
 	{
 		Protocol: "SSTP",
 		Client:   interopCell{Tests: []string{"TestInteropVeepinClientSSTPServer"}, Label: "SoftEther"},
+		// The SSTP client cell's peer is SoftEther VPN Server, pulled rather
+		// than built. See Images on interopRow for why that is declared.
+		Images: []string{"siomiz/softethervpn:latest"},
 		Server: interopCell{Tests: []string{
 			"TestInteropSSTPClientVeepinServer",
 			"TestInteropSSTPClientVeepinServerShaped",
@@ -229,6 +249,8 @@ var interopMatrix = []interopRow{
 			Tests: []string{"TestInteropSoftEtherSelf", "TestInteropSoftEtherShaped"},
 			Label: "(layer 2, switched; shaped)",
 		},
+		// The same image the SSTP row pulls, for the same reason.
+		Images: []string{"siomiz/softethervpn:latest"},
 	},
 	{
 		Protocol: "AmneziaWG",
@@ -410,6 +432,9 @@ type InteropShard struct {
 	// Modules is the row's Modules, carried through so the workflow can load
 	// them before the cells run without naming any protocol itself.
 	Modules []string `json:"modules"`
+	// Images is the row's Images, carried through for the same reason: the
+	// workflow pre-pulls them with retries and names no protocol itself.
+	Images []string `json:"images"`
 }
 
 // InteropShards derives the suite's parallel split from the manifest above, one
@@ -441,10 +466,15 @@ func InteropShards() []InteropShard {
 		if modules == nil {
 			modules = []string{}
 		}
+		images := row.Images
+		if images == nil {
+			images = []string{}
+		}
 		shards = append(shards, InteropShard{
 			Name:    shardName(row.Protocol),
 			Run:     "^(" + strings.Join(tests, "|") + ")$",
 			Modules: modules,
+			Images:  images,
 		})
 	}
 	return shards

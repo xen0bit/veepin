@@ -333,3 +333,82 @@ func TestNoRowCarriesADashInTheSelfColumn(t *testing.T) {
 			row.Protocol, row.Self.Label)
 	}
 }
+
+// A row's Images must survive into its shard, for the same reason its Modules
+// must: the workflow reads only the shard.
+//
+// And a second check the Modules guard has no equivalent of: every image a
+// compose file pulls has to be declared by the row whose cells use that file.
+// An undeclared one is not pre-pulled, so it is fetched inside a cell's
+// timeout, and a throttled registry then reports as `compose up: signal:
+// killed` -- a veepin failure, on the wrong component, for something veepin
+// does not control.
+func TestShardsCarryTheImagesTheirRowDeclares(t *testing.T) {
+	byName := map[string][]string{}
+	for _, s := range InteropShards() {
+		if s.Images == nil {
+			t.Errorf("shard %q has nil Images; it would serialise as null, not []", s.Name)
+		}
+		byName[s.Name] = s.Images
+	}
+	declared := 0
+	for _, row := range interopMatrix {
+		if len(row.Images) == 0 {
+			continue
+		}
+		declared++
+		got, ok := byName[shardName(row.Protocol)]
+		if !ok {
+			t.Errorf("%s declares images %v but yields no shard", row.Protocol, row.Images)
+			continue
+		}
+		if !slices.Equal(got, row.Images) {
+			t.Errorf("%s: shard carries %v, row declares %v", row.Protocol, got, row.Images)
+		}
+	}
+	if declared == 0 {
+		t.Error("no row declares Images; the workflow's pre-pull step now does nothing on every shard")
+	}
+}
+
+// TestEveryPulledImageIsDeclared reads the compose files themselves and
+// requires every `image:` that is not built locally to appear in some row's
+// Images. It is the half that keeps the manifest honest as cells are added:
+// declaring an image is easy to forget, and forgetting is silent until a
+// registry is slow.
+func TestEveryPulledImageIsDeclared(t *testing.T) {
+	declared := map[string]bool{}
+	for _, row := range interopMatrix {
+		for _, img := range row.Images {
+			declared[img] = true
+		}
+	}
+
+	const interopDir = "../../tests/interop"
+	entries, err := os.ReadDir(interopDir)
+	if err != nil {
+		t.Skipf("interop directory not readable: %v", err)
+	}
+	// `image:` lines naming a local build are skipped: veepin:interop is built
+	// from the repository root and interop-* from tests/interop/<peer>/, and
+	// neither has a pull to retry.
+	imageLine := regexp.MustCompile(`(?m)^\s*image:\s*(\S+)`)
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), "compose.") || !strings.HasSuffix(e.Name(), ".yml") {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(interopDir, e.Name()))
+		if err != nil {
+			t.Fatalf("%s: %v", e.Name(), err)
+		}
+		for _, m := range imageLine.FindAllStringSubmatch(string(body), -1) {
+			img := strings.Trim(m[1], `"'`)
+			if strings.HasPrefix(img, "veepin:") || strings.HasPrefix(img, "interop-") {
+				continue
+			}
+			if !declared[img] {
+				t.Errorf("%s pulls %q, which no row declares in Images; it will be fetched inside a cell's timeout", e.Name(), img)
+			}
+		}
+	}
+}

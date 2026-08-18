@@ -197,6 +197,44 @@ jobs:
           done
           echo "available: ${MODULES}"
 
+      # Third-party images this shard's cells pull, declared in the interop
+      # manifest beside the tests that use them -- again, no protocol is named
+      # here.
+      #
+      # This exists because an anonymous Docker Hub pull from a GitHub-hosted
+      # runner shares an IP pool with every other such runner, and a throttled
+      # pool stalls rather than refusing: the softether-vpn and sstp shards both
+      # died with `compose up: signal: killed` having moved 32 kB of a 2.8 MB
+      # layer in fifteen minutes, while the same image pulled in seconds
+      # elsewhere. Pulling here retries across the window and, when it still
+      # cannot, fails with a message naming the image rather than charging the
+      # stall to a cell and blaming veepin for it.
+      - name: Pre-pull this shard's third-party images
+        env:
+          IMAGES: ${{ join(matrix.shard.images, ' ') }}
+        run: |
+          set -u
+          if [ -z "${IMAGES}" ]; then
+            echo "this shard pulls no third-party images"
+            exit 0
+          fi
+          for image in ${IMAGES}; do
+            ok=""
+            for attempt in 1 2 3 4 5; do
+              echo "pulling ${image} (attempt ${attempt})"
+              if timeout 240 docker pull "${image}"; then
+                ok=yes
+                break
+              fi
+              sleep $((attempt * 20))
+            done
+            if [ -z "${ok}" ]; then
+              echo "::error::could not pull ${image} after 5 attempts;" \
+                   "this is a registry problem, not a veepin one" >&2
+              exit 1
+            fi
+          done
+
       - name: Run interop tests (vs real peers, over Docker)
         run: |
           # -json so the living-README tool can read the per-cell pass/fail; tee

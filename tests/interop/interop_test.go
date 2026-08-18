@@ -1413,19 +1413,19 @@ func runInteropUDPEcho(t *testing.T, composeFile, probeSvc, listen string) {
 
 // composeTimeout bounds one `docker compose` invocation.
 //
-// It covers work that is not veepin's and whose duration veepin does not
-// control: pulling a vendor image from Docker Hub, and building the veepin
-// image from a cold layer cache on a fresh runner. A stalled pull that trips
-// this cap reports as `compose up: signal: killed`, which reads as a veepin
-// failure and is not one -- the SoftEther shard failed exactly that way on a
-// pull still sitting at 32 kB of 2.8 MB after eight minutes, in a run where
-// every other shard passed and one of them pulled the same image.
+// Eight minutes is comfortably more than any cell needs once its images are
+// present: the slowest shard builds veepin from a cold cache and still comes
+// in under three.
 //
-// Fifteen minutes rather than eight because eight was arbitrary against the
-// 30-minute job budget and the 25-minute `go test -timeout` inside it. Both of
-// those still bound a genuine hang; this one only has to be longer than a slow
-// registry.
-const composeTimeout = 15 * time.Minute
+// It was briefly raised to fifteen, to absorb a Docker Hub pull that stalled at
+// 32 kB of a 2.8 MB layer. That did not work -- the pull was still stuck at
+// fifteen -- and it was the wrong place to fix it anyway: a registry veepin
+// does not control should not be spending a cell's budget at all, and a stall
+// there reports as `compose up: signal: killed`, which reads as a veepin
+// failure. The images a shard pulls are now declared in the interop manifest
+// and fetched by a workflow step that retries and says whose fault it is. This
+// cap is back to bounding what it can actually diagnose: a cell that hangs.
+const composeTimeout = 8 * time.Minute
 
 // compose runs `docker compose -f <file> <args...>` in the test's directory
 // (which holds the compose files and their relative build contexts).
