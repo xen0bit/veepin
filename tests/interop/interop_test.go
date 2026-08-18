@@ -1038,6 +1038,36 @@ func TestInteropPulseSelf(t *testing.T) {
 // TLS, is switched onto the server's local bridge port, and arrives on an
 // interface the server's kernel answers for. A handshake that completes and
 // moves no frame fails here, which is the state this protocol was in until now.
+// TestInteropVeepinClientSoftEtherServer is the cross-implementation cell the
+// README's `‡` footnote has owed since the SoftEther row landed: veepin's
+// client against SoftEther VPN Server speaking its own native protocol.
+//
+// Building it is what found that the row had never been interoperable. The
+// PACK codec was little-endian where the reference is big-endian, element
+// names were written as C strings where the reference writes a length that
+// counts a NUL it omits, passwords were hashed with SHA-1 where the reference
+// uses SHA-0 over a different concatenation, the control plane had no HTTP
+// layer at all, and the data path wrote one little-endian length per frame
+// where the reference writes a big-endian block count. Five layers, five
+// mistakes, and a veepin-to-veepin cell that passed through every one of them
+// because both ends made the same choice each time.
+//
+// The ping target is SecureNAT's virtual gateway. Reaching it means an ARP
+// request left veepin's TAP, crossed a real SoftEther's switch, and was
+// answered -- which is the claim the row makes and could not previously back.
+func TestInteropVeepinClientSoftEtherServer(t *testing.T) {
+	// runInterop, not runInteropBench. The ping target is SecureNAT's virtual
+	// gateway, which is synthesised by the SoftEther daemon rather than being
+	// an address on any interface -- there is nothing to run `iperf3 -s` on,
+	// and the image does not carry iperf3 at all. That is the case the
+	// throughput table's legend already describes as a dash: "a peer with no
+	// bindable tunnel address (SoftEther's SecureNAT gateway)". Measuring
+	// anyway would publish a ✗, which that table defines as a measurement
+	// that is broken rather than absent, and would be a false accusation
+	// against a cell that passes.
+	runInterop(t, "compose.softether.yml", "veepin-softether-client", "192.168.30.1")
+}
+
 func TestInteropSoftEtherSelf(t *testing.T) {
 	runInteropBench(t, "compose.softether-self.yml",
 		"veepin-softether-client", "veepin-softether-server", "10.70.0.1")

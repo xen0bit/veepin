@@ -13,27 +13,50 @@ sequenceDiagram
     participant C as client
     participant S as server
     Note over C,S: TLS handshake — every byte below travels inside it
-    C->>S: PACK{method=hello}
-    S->>C: PACK{method=hello, random=20 octets}
-    C->>S: PACK{method=login, username, hubname,<br/>secure_password=SHA1(SHA1(username+password) XOR random)}
+    C->>S: POST /vpnsvc/connect.cgi<br/>Content-Type: image/jpeg, body "VPNCONNECT"
+    S->>C: 200 OK, PACK{hello, version, build,<br/>random=20 octets}
+    C->>S: POST /vpnsvc/vpn.cgi<br/>PACK{method=login, hubname, username, authtype,<br/>secure_password=SHA0(SHA0(password+UPPER(username)) ‖ random),<br/>max_connection, use_encrypt, ...}
     alt digest matches
-        S->>C: PACK{method=login, error=0, hubname, assigned_ip}
-        Note over C,S: data path, both directions:<br/>4-octet little-endian length, then one Ethernet frame
-        C-->>S: Ethernet frame
-        S-->>C: Ethernet frame
+        S->>C: 200 OK, PACK{session_name, connection_name,<br/>session_key, timeout, ...}
+        Note over C,S: data path, both directions:<br/>uint32 block count, then count × (uint32 size, frame)<br/>count 0xffffffff = keepalive
+        C-->>S: Ethernet frames
+        S-->>C: Ethernet frames
     else digest does not match
-        S->>C: PACK{method=login, error=1}
+        S->>C: 200 OK, PACK{error=9}
     end
 ```
 
+Three things in that diagram are easy to get wrong and each was, until a cell
+against the real server said otherwise:
+
+- **The client sends no hello.** Its signature POST is the opening move, and
+  the server answers it with the hello unprompted. A server that waits for a
+  `PACK{method=hello}` waits forever.
+- **Every control message is an HTTP body**, on two different paths — the
+  signature goes to `connect.cgi` and everything after it to `vpn.cgi`.
+- **`max_connection` in the login is load-bearing.** Omit it and the server
+  answers with a perfectly good welcome and then closes the connection before a
+  frame moves, which presents as a data-path bug a long way from its cause.
+
 The 20-octet server random is a per-session challenge: the password digest is
 bound to it, so a captured login cannot be replayed against a later session.
-`hubname` selects the virtual hub and is echoed back on success.
+`hubname` selects the virtual hub. `assigned_ip` is not in this diagram because
+a real SoftEther does not send one — the segment is layer 2, and addressing
+inside it is DHCP's or the operator's job.
 
 ## Shape of the code
 
 - `pack.go` — the PACK codec. A PACK is a set of named, typed, indexed values;
-  the encoder and decoder are the only things that touch the wire format.
+  the encoder and decoder are the only things that touch the wire format. Big-
+  endian throughout, with three mutually inconsistent string encodings that are
+  each correct — see the package comment.
+- `http.go` — the HTTP layer the control PACKs ride on. A connection opens with
+  a POST to `/vpnsvc/connect.cgi` and each control message after it is the body
+  of an HTTP message on `/vpnsvc/vpn.cgi`.
+- `frame.go` — the data path's block framing: a count, then that many
+  length-and-body pairs, with `0xffffffff` reserved for keepalives.
+- `sha0.go` / `auth.go` — the password construction, and the legacy digest it
+  is built on.
 - `session.go` — both roles' control exchange and the frame loop.
 - `switch.go` — the learning bridge: a MAC-to-port table with ageing, plus the
   flood/forward decision.
@@ -46,19 +69,30 @@ State these plainly rather than discovering them later.
   derives. They report `10.70.0.1` and `10.70.0.0/24` because that is what the
   server assumes, not because it was configured or negotiated.
 
+  *(The entry that used to sit beside this one — "every client is told
+  `10.70.0.2`", with no pool and two clients handed the same address — is
+  closed. `Server.assignAddress` allocates sequentially over the gateway's /24
+  and releases on teardown. Note that a real SoftEther assigns no address at
+  all: the segment is layer 2 and addressing inside it comes from DHCP or
+  static configuration, so `assigned_ip` is veepin's own extension for veepin's
+  own client and a real server does not send it.)*
+
   *(The larger gap this entry used to describe — "nothing connects the bridge to
   the host TAP device" — is closed. `local.go` puts the server's own interface on
   the switch as an ordinary bridge port, and the client relays frames between its
   TAP and the TLS session; neither had existed, so every SoftEther tunnel came
   up, authenticated and carried nothing. `TestInteropSoftEtherSelf` is the cell
   that would now catch it.)*
-- **Address assignment is a constant.** Every client is told `10.70.0.2`. There
-  is no pool, no lease, and two clients are given the same address.
-- **Authentication is password-only, and the digest is SHA-1.** That is what the
-  protocol specifies; it is not a choice this implementation gets to make. The
-  server stores the plaintext password because the challenge response is
-  computed from `SHA1(username+password)` — there is no verifier form that would
-  let it store less.
+- **Authentication is password-only, and the digest is SHA-0** — the withdrawn
+  1993 predecessor of SHA-1, which differs from it by the single missing rotate
+  in the message schedule that got SHA-0 withdrawn. That is what the protocol
+  specifies and not a choice this implementation gets to make; `sha0.go` carries
+  the derivation and the reference's own compiled code as the check. The server
+  stores the plaintext password because the challenge response is computed from
+  `SHA0(password + UPPER(username))` — there is no verifier form that would let
+  it store less. Nothing in the tunnel's confidentiality rests on SHA-0: it
+  authenticates a login inside TLS, and a collision against it buys an attacker
+  no more than knowing the password would.
 - **No UDP acceleration.** SoftEther's data path can move to UDP once the TLS
   session is up. Only the TLS path is implemented, so throughput carries TCP's
   head-of-line blocking.
@@ -66,6 +100,13 @@ State these plainly rather than discovering them later.
   multi-hub.** One hub, one local account list.
 - **No shaping.** Every other protocol here honours `dataplane.Shaper`; this one
   does not yet.
+- **The server has no cross-implementation cell.** The client direction has one
+  (`compose.softether.yml`, against SoftEther VPN Server itself). The reverse —
+  SoftEther's own `vpnclient` against veepin's server — needs two things this
+  server does not do yet: `PackWelcome` carries a policy structure that the
+  reference client's `ParseWelcomeFromPack` requires and veepin's welcome omits,
+  and the reference client opens additional connections against one session,
+  which this accepts one of.
 
 ## Tests
 
@@ -77,6 +118,14 @@ State these plainly rather than discovering them later.
   two clients, and the four ways a login must be refused (wrong password,
   unknown user, no credentials configured, and a challenge that is never
   reused).
+- `sha0_test.go` — the published SHA-0 vectors, and a guard that the digest is
+  not SHA-1. Swapping in `crypto/sha1` compiles, passes every self-test, and is
+  rejected by every real server.
+- `auth_test.go` — the password construction: the case fold, the concatenation
+  order, and that the challenge is concatenated rather than XORed. All three
+  are self-consistent when wrong.
+- `frame_test.go` — the block framing, including that a keepalive is not
+  surfaced as a frame and a zero count is a tick rather than an empty one.
 - `local_test.go` — the server's own interface as a switch port: a client's
   frame reaching it, its own frames not being echoed back, its MAC being
   learned, and detaching taking it off the switch.

@@ -178,18 +178,32 @@ the port that owns the destination MAC, but it floods anything it has not
 learned, and nothing stops a client claiming another's MAC to attract its
 traffic. There is no port isolation and no MAC pinning.
 
-The login digest is SHA-1 over `username+password`, bound to a 20-byte
-per-session server challenge. The challenge binding is what stops replay; SHA-1
-is what the protocol specifies, and the server must hold the plaintext password
-because the response is computed from it rather than from a verifier.
+The login digest is **SHA-0** — the 1993 algorithm withdrawn a year later,
+which differs from SHA-1 by one missing rotate in its message schedule — over
+`password + UPPER(username)`, hashed again against a 20-octet per-session
+server challenge. That is what the protocol specifies, verified against the
+reference implementation's own compiled code rather than assumed; veepin
+computed SHA-1 over a different construction until a cell against a real
+SoftEther server said otherwise.
+
+What rests on it is worth stating precisely, because "SHA-0" reads worse than
+the situation is. The digest authenticates a login **inside TLS**, and it is
+not used to key anything: no session key, no traffic protection, no integrity
+on the data path derives from it. SHA-0's weakness is collision resistance, and
+a login exchange needs preimage resistance, against which SHA-0 has no
+published break. The real exposures here are elsewhere and are structural: the
+server must hold the **plaintext password**, because the response is computed
+from it rather than from a verifier, and the challenge binding is the only
+thing between a recorded login and a replayed one.
 
 The data path is TLS-only — SoftEther's UDP acceleration is not implemented — so
 inner traffic inherits TCP head-of-line blocking, and the gateway sees every
 frame in the clear between the TLS termination and the bridge.
 
-`internal/softether/README.md` lists what is not implemented, including the
-missing TAP data path that keeps this protocol from carrying host traffic at
-all.
+`internal/softether/README.md` lists what is not implemented. The client
+direction is verified against SoftEther VPN Server; the server direction has no
+cross-implementation cell yet, so what a real SoftEther client makes of veepin's
+server is stated there as unknown rather than claimed as working.
 
 ## AmneziaWG changes what packets look like, not what they protect
 

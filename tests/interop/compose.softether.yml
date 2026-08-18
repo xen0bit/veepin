@@ -1,0 +1,64 @@
+# veepin SoftEther client -> real SoftEther VPN Server, native SE-VPN protocol.
+#
+# The cell the README's `‡` footnote has owed since the SoftEther row landed,
+# and the one that footnote said could not be built until the TAP data path
+# existed. It exists now, so this is buildable -- and building it immediately
+# found that the data path being absent had been hiding four separate wire
+# incompatibilities underneath it. See the commit that added this file.
+#
+# The peer is siomiz/softethervpn, the same image the SSTP cell already pins.
+# That is a happy accident worth naming: SoftEther VPN Server speaks SSTP,
+# OpenVPN, L2TP and its own native protocol from one daemon, so the image was
+# already in the tree as an SSTP peer while the row that most needed it -- the
+# native one -- had no cell at all.
+#
+# What this proves that compose.softether-self.yml cannot: PACK's big-endian
+# integers, the three disagreeing string encodings, SHA-0 password hashing, the
+# HTTP layer in front of the control PACKs, and the block framing of the data
+# path. Two veepin endpoints agree about all five whether or not any is right,
+# which is how all five were wrong at once for as long as the row existed.
+#
+# Layer 2, so the harness assigns the address: SecureNAT supplies a virtual
+# gateway at 192.168.30.1 that answers ARP and ICMP, and the client pings it.
+name: veepin-interop-softether
+
+services:
+  server:
+    image: siomiz/softethervpn:latest
+    cap_add: [NET_ADMIN]
+    environment:
+      SPW: "seadmin" # server management password, for vpncmd
+
+  init:
+    image: siomiz/softethervpn:latest
+    depends_on: [server]
+    environment:
+      SERVER: "server"
+      SPW: "seadmin"
+      SE_USER: "alice"
+      SE_PASS: "s3cret"
+    volumes:
+      - ./softether/native-init.sh:/native-init.sh:ro
+    entrypoint: ["/bin/sh", "/native-init.sh"]
+    restart: "no"
+
+  veepin-softether-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    environment:
+      SERVER: "server"
+      USER: "alice"
+      PASSWORD: "s3cret"
+      HUB: "DEFAULT"
+      TUN_IP: "192.168.30.5"
+      PEER_IP: "192.168.30.1"
+    volumes:
+      - ./veepin/softether-real-client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
