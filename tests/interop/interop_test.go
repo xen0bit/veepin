@@ -128,8 +128,15 @@ func TestInteropVeepinClientAmneziaWGServer(t *testing.T) {
 // responder must recognise obfuscated datagrams from amneziawg-go and shape its
 // own replies so amneziawg-go accepts them — including the response's mac1,
 // which that implementation does check.
+//
+// It measures, like the other two AmneziaWG cells. It did not, and the published
+// throughput table rendered the hole as "—" — which that table's own legend
+// defines as "iperf3 does not apply to this cell". It applies here: both ends
+// hold a routable tunnel address and both images carry iperf3. An unmeasured
+// cell that reads as a deliberate omission is the same class of quiet wrong as
+// a skipped test that reads as a pass.
 func TestInteropAmneziaWGClientVeepinServer(t *testing.T) {
-	runInterop(t, "compose.amneziawg-server.yml", "awg-client", "10.61.0.1")
+	runInteropBench(t, "compose.amneziawg-server.yml", "awg-client", "veepin-awg-server", "10.61.0.1")
 }
 
 // TestInteropAmneziaWGSelf runs the veepin AmneziaWG client against the veepin
