@@ -37,17 +37,27 @@ func TestInteropVeepinClientKernelL2TPv3Server(t *testing.T) {
 
 // TestInteropKernelL2TPv3ClientVeepinServer is the other direction: the kernel
 // configures the pseudowire and veepin answers it.
+//
+// It measures, and that is a correction rather than an addition. The throughput
+// table renders an unmeasured cell and an inapplicable one identically, and the
+// README defines the em dash it renders as "iperf3 does not apply to that cell"
+// -- which was never true here: both ends hold a tunnel-internal address and
+// both images carry iperf3. Two working directions were published as though
+// they could not be measured. Same distinction the harness already had to draw
+// once between a broken measurement and an absent one.
 func TestInteropKernelL2TPv3ClientVeepinServer(t *testing.T) {
 	requireL2TPModules(t)
-	runInterop(t, "compose.l2tpv3-server.yml", "l2tpv3-peer", "10.63.0.1")
+	runInteropBench(t, "compose.l2tpv3-server.yml", "l2tpv3-peer", "veepin-l2tpv3-server", "10.63.0.1")
 	requireARPInsideTunnel(t, "compose.l2tpv3-server.yml", "l2tpv3-peer", "l2tpeth0", "10.63.0.1")
 }
 
 // TestInteropL2TPv3Self proves both roles exist and that layer-2 shaping does
 // not break the pseudowire. It proves nothing about correctness against a real
-// peer -- the kernel cells above do that.
+// peer -- the kernel cells above do that. Its number is the shaped one: SHAPE is
+// set in the compose file, so the rate it reports is layer-2 shaping's cost and
+// not a like-for-like against the unshaped kernel cells.
 func TestInteropL2TPv3Self(t *testing.T) {
-	runInterop(t, "compose.l2tpv3-self.yml", "veepin-l2tpv3-client", "10.64.0.1")
+	runInteropBench(t, "compose.l2tpv3-self.yml", "veepin-l2tpv3-client", "veepin-l2tpv3-server", "10.64.0.1")
 	requireARPInsideTunnel(t, "compose.l2tpv3-self.yml", "veepin-l2tpv3-client", "tap0", "10.64.0.1")
 }
 
