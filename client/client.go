@@ -42,7 +42,42 @@ import (
 // ErrAuth wraps a handshake failure caused by rejected credentials (a wrong PSK
 // or EAP password). A Dial error satisfies errors.Is(err, ErrAuth), letting
 // callers distinguish a bad password from a transport failure.
+//
+// Two callers act on it, and both do the wrong thing without it. `veepin
+// connect -retry` treats an auth failure as permanent and stops; anything else
+// it retries with backoff, so a protocol that reports a rejected password as an
+// ordinary error hammers the server until the account locks out. And the
+// NetworkManager plugin maps it to NM's LoginFailed, which is what makes NM
+// re-prompt for the password rather than report a broken network.
+//
+// A protocol that authenticates a credential is therefore expected to produce
+// it; autherr_test.go is the guard that says so by name.
 var ErrAuth = errors.New("authentication failed")
+
+// WrapAuth reports err as a rejected credential when it carries the protocol's
+// own auth sentinel, and returns it untouched otherwise. It exists so the
+// dozen facades that each have their own ErrAuth spell the mapping one way.
+//
+// Both errors are wrapped, not one: a caller that knows the protocol can still
+// match its package's sentinel to find out *how* the credential was refused,
+// while a caller that only knows the registry sees ErrAuth. The alternative --
+// formatting the inner error with %v, as the first three facades to do this
+// did -- silently severs that chain, and nothing fails when it does.
+// Several sentinels may be given, for the protocols that authenticate twice in
+// sequence -- l2tp's IPsec PSK and then its MS-CHAPv2 password, cisco's group
+// key and then its XAuth password. Either being wrong is the caller's to fix,
+// so both map, and wrapping happens once however many match.
+func WrapAuth(err error, sentinels ...error) error {
+	if err == nil {
+		return err
+	}
+	for _, s := range sentinels {
+		if errors.Is(err, s) {
+			return fmt.Errorf("%w: %w", ErrAuth, err)
+		}
+	}
+	return err
+}
 
 // ErrUnknownProtocol is returned by Dial when no protocol is registered under
 // the requested name — usually a missing blank import of the protocol package.

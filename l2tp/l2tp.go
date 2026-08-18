@@ -27,7 +27,9 @@ import (
 
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/veepin/internal/ikev1"
 	engine "github.com/xen0bit/veepin/internal/l2tp"
+	"github.com/xen0bit/veepin/internal/ppp"
 )
 
 func init() { client.Register("l2tp", parseOptions) }
@@ -157,7 +159,13 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	nc, err := c.Handshake(hctx)
 	if err != nil {
 		tun.Close()
-		return nil, client.Result{}, fmt.Errorf("l2tp: %w", err)
+		// Two credentials in sequence, and either can be the wrong one: the
+		// IPsec PSK authenticates phase 1, and MS-CHAPv2 authenticates the user
+		// inside the tunnel it builds. Both are the caller's to fix, so both
+		// map onto client.ErrAuth rather than only the one that happens to be
+		// checked first.
+		err = client.WrapAuth(fmt.Errorf("l2tp: %w", err), ikev1.ErrAuth, ppp.ErrAuth)
+		return nil, client.Result{}, err
 	}
 	logger.Printf("l2tp: tunnel up on %s, address %s", tun.Name(), nc.AssignedIP)
 

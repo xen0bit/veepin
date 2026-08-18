@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"crypto/tls"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -16,6 +17,17 @@ import (
 
 // SoftEther VPN native protocol session: TLS connection, PACK-based control
 // exchange, and Ethernet frame forwarding.
+
+// ErrAuth reports a login the server refused. It covers the "error" element the
+// reference sets on a rejected login and a welcome that never arrived: both
+// mean the credentials did not get a session, and neither is a transport fault
+// the caller should sit and retry.
+//
+// The distinction is not cosmetic here. SoftEther's server counts failed logins
+// per account and locks out, so `veepin connect -retry` reconnecting through a
+// wrong password is the one case where retrying makes the outcome worse rather
+// than merely wasting time.
+var ErrAuth = errors.New("softether: authentication failed")
 
 // Protocol constants matching SoftEther's definitions.
 const (
@@ -616,10 +628,10 @@ func (cs *ClientSession) login(username, password string) error {
 	// would accept any PACK at all, including one from a peer that answered
 	// something else entirely.
 	if code := resp.GetInt("error"); code != 0 {
-		return fmt.Errorf("softether: server rejected the login: error %d", code)
+		return fmt.Errorf("%w: server returned error %d", ErrAuth, code)
 	}
 	if resp.GetStr("session_name") == "" {
-		return fmt.Errorf("softether: login answered without a welcome")
+		return fmt.Errorf("%w: login answered without a welcome", ErrAuth)
 	}
 
 	cs.sessionName = resp.GetStr("session_name")

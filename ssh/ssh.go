@@ -19,12 +19,14 @@ package ssh
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -163,7 +165,8 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 
 	conn, err := dialContext(ctx, addr, clientCfg)
 	if err != nil {
-		return nil, client.Result{}, fmt.Errorf("ssh: dial %s: %w", addr, err)
+		err = fmt.Errorf("ssh: dial %s: %w", addr, authError(err))
+		return nil, client.Result{}, client.WrapAuth(err, errUnauthenticated)
 	}
 
 	unit := uint32(sshtun.TunIDAny)
@@ -203,6 +206,30 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 		MTU:     client.DefaultTunnelMTU,
 	}
 	return s, res, nil
+}
+
+// errUnauthenticated is the sentinel this package hangs on x/crypto/ssh's
+// refusal, so the facade can hand the caller a client.ErrAuth.
+var errUnauthenticated = errors.New("ssh: the server accepted none of the offered credentials")
+
+// authError maps x/crypto/ssh's rejected-credentials failure onto
+// client.ErrAuth, which is what stops `veepin connect -retry` from replaying a
+// wrong password until sshd's MaxAuthTries bans the source address.
+//
+// It matches on the message, which is not something this tree does lightly.
+// x/crypto/ssh exports no sentinel for it: clientAuthenticate ends with a bare
+// fmt.Errorf("ssh: unable to authenticate, attempted methods %v, no supported
+// methods remain"). Matching the stable leading clause is what x/crypto's own
+// client_auth_test.go does to recognise the same condition, so this is the
+// available check rather than a shortcut past a better one --
+// TestServerRefusingEveryMethodIsClientErrAuth drives a real x/crypto server to
+// produce it, so a rewording upstream fails here instead of silently turning
+// every rejected password back into a retryable outage.
+func authError(err error) error {
+	if err != nil && strings.Contains(err.Error(), "ssh: unable to authenticate") {
+		return fmt.Errorf("%w: %w", errUnauthenticated, err)
+	}
+	return err
 }
 
 // dialContext dials the SSH server, honoring ctx for the connection setup.

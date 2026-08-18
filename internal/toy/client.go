@@ -171,6 +171,9 @@ func exchange(ctx context.Context, conn *net.UDPConn, server *net.UDPAddr, req [
 					reason = "(unreadable)"
 				}
 				_ = conn.SetReadDeadline(time.Time{})
+				if RejectIsCredential(reason) {
+					return nil, Header{}, fmt.Errorf("%w: %s", ErrAuth, reason)
+				}
 				return nil, Header{}, fmt.Errorf("toy: server rejected the session: %s", reason)
 			default:
 				// A stale retransmission of an earlier step, most likely.

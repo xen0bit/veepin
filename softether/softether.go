@@ -170,7 +170,12 @@ func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
 
 	cs, err := softether.Connect(addr, tlsCfg, cfg.User, cfg.Password, hub)
 	if err != nil {
-		return nil, client.Result{}, fmt.Errorf("softether: connect: %w", err)
+		// A refused login has to reach the caller as client.ErrAuth. SoftEther
+		// VPN Server locks an account out after a run of failures, so a retry
+		// loop through a wrong password is the one case where waiting and
+		// trying again makes the situation worse rather than merely slower.
+		return nil, client.Result{}, client.WrapAuth(
+			fmt.Errorf("softether: connect: %w", err), softether.ErrAuth)
 	}
 
 	if cfg.Shape > 0 {

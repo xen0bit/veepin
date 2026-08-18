@@ -25,6 +25,18 @@ type tunIO interface {
 	Write([]byte) (int, error)
 }
 
+// ErrAuth reports credentials the gateway rejected, so a caller can tell a
+// wrong password from an unreachable server. The facade maps it onto
+// client.ErrAuth, and two callers act on that: `veepin connect -retry` stops
+// rather than retrying a password into a lockout, and the NetworkManager plugin
+// reports LoginFailed so NM re-prompts instead of reporting a dead network.
+//
+// Exhausting maxAuthRounds counts as a rejection. A server that keeps
+// re-presenting the same form is refusing the credential; it just refuses by
+// asking again rather than by saying no, and treating that as a transport fault
+// is what makes a retry loop hammer it.
+var ErrAuth = errors.New("anyconnect: authentication failed")
+
 // maxAuthRounds bounds the credential exchange. Servers differ in how many forms
 // they present — one asking for username and password together, or two in
 // sequence — so the client loops, and this stops a server that keeps re-asking
@@ -198,7 +210,7 @@ func (c *Client) authenticate() (string, error) {
 			return "", errors.New("anyconnect: server completed authentication without a session cookie")
 		case "auth-request":
 			if reply.Auth.Error != "" {
-				return "", fmt.Errorf("anyconnect: authentication rejected: %s", reply.Auth.Error)
+				return "", fmt.Errorf("%w: %s", ErrAuth, reply.Auth.Error)
 			}
 			if reply.Auth.Form == nil || len(reply.Auth.Form.Inputs) == 0 {
 				return "", errors.New("anyconnect: server asked for credentials but presented no form")
@@ -208,7 +220,7 @@ func (c *Client) authenticate() (string, error) {
 			return "", fmt.Errorf("anyconnect: unexpected auth message type %q", reply.Type)
 		}
 	}
-	return "", fmt.Errorf("anyconnect: authentication did not complete in %d rounds", maxAuthRounds)
+	return "", fmt.Errorf("%w: did not complete in %d rounds", ErrAuth, maxAuthRounds)
 }
 
 // sessionCookieFrom finds the session token, which servers deliver either as a
@@ -248,6 +260,13 @@ func (c *Client) postXML(path string, msg configAuth) (*http.Response, []byte, e
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, nil, fmt.Errorf("anyconnect: read %s body: %w", msg.Type, err)
+	}
+	// 401/403 on the credential exchange is the server refusing the login, not a
+	// transport fault; the server role answers a bad password with exactly that
+	// (server.go's writeStatus(StatusUnauthorized)). Every other status is a
+	// server problem the caller should retry.
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return nil, nil, fmt.Errorf("%w: %s returned %s", ErrAuth, msg.Type, resp.Status)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, nil, fmt.Errorf("anyconnect: %s returned %s", msg.Type, resp.Status)

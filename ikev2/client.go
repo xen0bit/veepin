@@ -22,7 +22,6 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -280,10 +279,8 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	c := ike.NewClient(ikeCfg)
 	res, err := connect(ctx, c)
 	if err != nil {
-		if errors.Is(err, ike.ErrAuthFailed) {
-			return nil, client.Result{}, fmt.Errorf("ikev2: %w: %v", client.ErrAuth, err)
-		}
-		return nil, client.Result{}, fmt.Errorf("ikev2: connect: %w", err)
+		return nil, client.Result{}, client.WrapAuth(
+			fmt.Errorf("ikev2: connect: %w", err), ike.ErrAuthFailed)
 	}
 	// From here on, any failure must close the IKE client.
 	fail := func(err error) (client.Session, client.Result, error) {

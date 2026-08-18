@@ -116,3 +116,57 @@ func contains(s, sub string) bool {
 	}
 	return false
 }
+
+// TestWrapAuthKeepsTheProtocolsOwnSentinelReachable is the claim that makes
+// WrapAuth worth having over a hand-written fmt.Errorf at each call site.
+//
+// The three facades that mapped ErrAuth before this existed all formatted the
+// inner error with %v, which severs it: errors.Is stops finding the protocol's
+// own sentinel the moment the registry's one is attached. Nothing failed when
+// that happened, because nothing looked. A caller that knows which protocol it
+// dialled should still be able to ask how the credential was refused.
+func TestWrapAuthKeepsTheProtocolsOwnSentinelReachable(t *testing.T) {
+	sentinel := errors.New("proto: authentication failed")
+	inner := fmt.Errorf("%w: the server said no", sentinel)
+
+	got := WrapAuth(fmt.Errorf("proto: connect: %w", inner), sentinel)
+
+	if !errors.Is(got, ErrAuth) {
+		t.Errorf("errors.Is(%v, ErrAuth) = false, want true", got)
+	}
+	if !errors.Is(got, sentinel) {
+		t.Errorf("errors.Is(%v, sentinel) = false, want true — the chain was severed", got)
+	}
+}
+
+// TestWrapAuthLeavesEveryOtherFailureAlone. A transport error that reached
+// ErrAuth would be worse than one that did not: -retry would stop waiting out an
+// outage it should wait out, and NetworkManager would prompt for a password that
+// was never wrong.
+func TestWrapAuthLeavesEveryOtherFailureAlone(t *testing.T) {
+	sentinel := errors.New("proto: authentication failed")
+	timeout := errors.New("proto: i/o timeout")
+
+	if got := WrapAuth(timeout, sentinel); !errors.Is(got, timeout) || errors.Is(got, ErrAuth) {
+		t.Errorf("WrapAuth(timeout) = %v, want the timeout unchanged and not ErrAuth", got)
+	}
+	if got := WrapAuth(nil, sentinel); got != nil {
+		t.Errorf("WrapAuth(nil) = %v, want nil", got)
+	}
+}
+
+// TestWrapAuthMatchesAnyOfSeveralSentinels covers the protocols that
+// authenticate twice in sequence: l2tp's IPsec PSK then its MS-CHAPv2 password,
+// cisco's group key then its XAuth password. Either being wrong is the caller's
+// to fix, and a version that only checked the first would report the second as
+// an outage.
+func TestWrapAuthMatchesAnyOfSeveralSentinels(t *testing.T) {
+	first := errors.New("phase 1 rejected")
+	second := errors.New("phase 2 rejected")
+
+	for _, s := range []error{first, second} {
+		if got := WrapAuth(fmt.Errorf("wrapped: %w", s), first, second); !errors.Is(got, ErrAuth) {
+			t.Errorf("WrapAuth(%v) did not report ErrAuth", s)
+		}
+	}
+}

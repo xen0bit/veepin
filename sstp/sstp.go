@@ -151,7 +151,11 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 		return nil, client.Result{}, ctx.Err()
 	case <-s.done:
 		s.Close()
-		return nil, client.Result{}, fmt.Errorf("sstp: %w", s.closeErr)
+		// closeErr carries whatever ended the session before IPCP came up. An
+		// MS-CHAPv2 refusal is in there, and it is the one the caller must be
+		// able to tell apart -- SSTP servers are Windows RRAS and SoftEther,
+		// both of which count failed logins.
+		return nil, client.Result{}, client.WrapAuth(fmt.Errorf("sstp: %w", s.closeErr), ppp.ErrAuth)
 	}
 
 	tun, err := dataplane.OpenTUN(cfg.TUNName)

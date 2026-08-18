@@ -214,10 +214,18 @@ func TestBadPasswordIsRejected(t *testing.T) {
 	})
 	defer c.Close()
 
-	if _, err := c.Handshake(); err == nil {
+	_, err = c.Handshake()
+	if err == nil {
 		t.Fatal("handshake succeeded with the wrong password")
-	} else {
-		t.Logf("rejected as expected: %v", err)
+	}
+	// Logging the error and passing was the previous shape of this check, and
+	// it would have passed just as happily on a transport failure. What the
+	// facade needs from it is the classification: ocserv counts failed logins
+	// and bans the source address, so a rejected password has to reach the
+	// caller as client.ErrAuth and stop `veepin connect -retry` rather than be
+	// replayed every sixty seconds.
+	if !errors.Is(err, ErrAuth) {
+		t.Errorf("Handshake error = %v, want one satisfying errors.Is(err, ErrAuth)", err)
 	}
 }
 

@@ -1,6 +1,7 @@
 package ppp
 
 import (
+	"errors"
 	"net"
 	"testing"
 
@@ -174,6 +175,15 @@ func TestAuthFailure(t *testing.T) {
 
 	if h.err == nil {
 		t.Fatal("expected Closed error on auth failure")
+	}
+	// It must be ErrAuth and not just an error. Four protocols carry PPP --
+	// SSTP, L2TP, Fortinet, and the server halves of both -- and each of them
+	// relies on this to hand the caller client.ErrAuth, which is what stops
+	// `veepin connect -retry` replaying a wrong password until the account is
+	// locked and what makes NetworkManager re-prompt instead of reporting a
+	// dead network.
+	if !errors.Is(h.err, ErrAuth) {
+		t.Errorf("Closed error = %v, want one satisfying errors.Is(err, ErrAuth)", h.err)
 	}
 	if h.up {
 		t.Error("NetworkUp should not fire on auth failure")
