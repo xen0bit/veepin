@@ -76,9 +76,9 @@ by nothing in the tree.
 > stop being the right one because its premise was subsequently fixed — but the
 > premise is no longer a description of the tree. What SoftEther still lacks is
 > narrower and is named in `internal/softether/README.md`: the segment ends at
-> the server rather than being bridged onto the host's wider network, every
-> client is assigned the constant `10.70.0.2`, and the two cross-implementation
-> cells against SoftEther VPN Server are unbuilt.
+> the server rather than being bridged onto the host's wider network, and every
+> client is assigned the constant `10.70.0.2`. The two cross-implementation
+> cells this paragraph called unbuilt are both built.
 
 L2TPv3 closes the gap on better terms, for one reason: **the peer is the Linux
 kernel.** `ip l2tp add tunnel` / `ip l2tp add session` configures a static

@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 )
@@ -42,6 +43,16 @@ import (
 // it is a documented branch of the peer's own acceptance test rather than a
 // shortcut around it, and it keeps a kilobyte of somebody else's image data
 // out of the tree.
+//
+// **The signature is not necessarily the first request on the connection.**
+// The diagram above is what veepin's own client sends, and it is not what
+// SoftEther's client sends: `vpnclient` opens with `GET /` before it posts the
+// signature. ServerDownloadSignature is a *loop* -- up to nineteen requests,
+// the same count its own Keep-Alive header advertises -- answering anything
+// that is not the signature the way a web server would and reading the next
+// request. A server that treats the first request as the signature refuses
+// every real client on its opening move, which is exactly what this one did
+// until a cell was pointed at `vpnclient`.
 
 // The HTTP constants, from SoftEtherVPN/src/Mayaqua/HTTP.h. Named exactly as
 // the reference names them so the two can be diffed.
@@ -51,6 +62,7 @@ const (
 	httpVPNTargetPostData = "VPNCONNECT"          // HTTP_VPN_TARGET_POSTDATA
 	httpContentTypePack   = "application/octet-stream"
 	httpContentTypeJPEG   = "image/jpeg" // what the signature POST claims to be
+	httpContentTypeHTML   = "text/html"  // HTTP_CONTENT_TYPE, the 403 page's
 	httpKeepAlive         = "timeout=15; max=19"
 
 	// HTTP_PACK_MAX_SIZE. A control PACK larger than this is refused before
@@ -86,33 +98,89 @@ func writeSignature(w io.Writer, host string) error {
 	return err
 }
 
-// readSignature is the server's side of that POST. It returns nil only for a
-// request that ServerDownloadSignature would have accepted.
-func readSignature(br *bufio.Reader) error {
-	req, err := http.ReadRequest(br)
-	if err != nil {
-		return fmt.Errorf("softether: reading the signature request: %w", err)
-	}
-	defer func() { _ = req.Body.Close() }()
+// readSignature is the server's side of that POST: it reads requests until one
+// of them is the signature, answering the others the way ServerDownloadSignature
+// does. It returns nil only for a request the reference would have accepted.
+//
+// The loop is the part that matters and the part that was missing. SoftEther's
+// own client opens the connection with `GET /` -- a probe, not a mistake -- and
+// only then posts the signature. Reading one request and judging it refused
+// every real client on its first move, while veepin's own client, which posts
+// the signature immediately, sailed through. That is the mutually-consistent
+// shape this tree keeps finding: both ends agreed, and the agreement was with
+// nobody else.
+func readSignature(br *bufio.Reader, w io.Writer) error {
+	for range maxRequestsBeforeSignature {
+		req, err := http.ReadRequest(br)
+		if err != nil {
+			return fmt.Errorf("softether: reading the signature request: %w", err)
+		}
+		// Bounded by the largest thing the reference will accept here: the
+		// watermark plus its random tail (MAX_WATERMARK_SIZE).
+		body, berr := io.ReadAll(io.LimitReader(req.Body, maxHTTPPackSize))
+		_ = req.Body.Close()
+		if berr != nil {
+			return fmt.Errorf("softether: reading the signature body: %w", berr)
+		}
 
-	if req.Method != http.MethodPost || req.URL.Path != httpVPNTarget2 {
-		return fmt.Errorf("%w: %s %s", errNotVPNServer, req.Method, req.URL.Path)
+		if req.Method == http.MethodPost && req.URL.Path == httpVPNTarget2 {
+			// The short form, or anything watermark-shaped. The reference
+			// compares the full image; accepting any sufficiently long body in
+			// its place is deliberate -- the watermark is not a secret, it is
+			// not an authenticator, and refusing a real client because its
+			// build ships a different image would be a compatibility bug
+			// wearing a security hat.
+			if !bytes.Equal(body, []byte(httpVPNTargetPostData)) && len(body) < 64 {
+				return fmt.Errorf("%w: %d-octet body", errNotVPNServer, len(body))
+			}
+			return nil
+		}
+
+		// Not the signature. A method the reference does not serve ends the
+		// connection; a browser-shaped request gets a browser-shaped answer and
+		// the loop reads the next one.
+		switch req.Method {
+		case http.MethodGet, http.MethodHead, http.MethodPost:
+			if err := writeForbidden(w, req.URL.Path); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("%w: %s %s", errNotVPNServer, req.Method, req.URL.Path)
+		}
 	}
-	// Bounded by the largest thing the reference will accept here: the
-	// watermark plus its random tail (MAX_WATERMARK_SIZE).
-	body, err := io.ReadAll(io.LimitReader(req.Body, maxHTTPPackSize))
-	if err != nil {
-		return fmt.Errorf("softether: reading the signature body: %w", err)
-	}
-	// The short form, or anything watermark-shaped. The reference compares the
-	// full image; accepting any sufficiently long body in its place is
-	// deliberate -- the watermark is not a secret, it is not an
-	// authenticator, and refusing a real client because its build ships a
-	// different image would be a compatibility bug wearing a security hat.
-	if !bytes.Equal(body, []byte(httpVPNTargetPostData)) && len(body) < 64 {
-		return fmt.Errorf("%w: %d-octet body", errNotVPNServer, len(body))
-	}
-	return nil
+	return fmt.Errorf("%w: no signature in %d requests", errNotVPNServer, maxRequestsBeforeSignature)
+}
+
+// maxRequestsBeforeSignature bounds how many non-signature requests a peer may
+// send first. Nineteen is the reference's own `max`, and not a coincidence: it
+// is the same number its Keep-Alive header advertises, so a client honouring
+// the header cannot exceed it. Without a bound, anything that speaks HTTP holds
+// a goroutine and a TLS connection open for as long as it keeps asking.
+const maxRequestsBeforeSignature = 19
+
+// writeForbidden answers a non-VPN request the way the reference's
+// HttpSendForbidden does -- a 403 with a body, and Connection: Keep-Alive so the
+// client sends its next request on the same connection rather than reconnecting.
+//
+// Written by hand rather than through net/http for the reason writeSignature is:
+// this connection is about to stop being HTTP, and net/http's server owns the
+// connection it serves.
+func writeForbidden(w io.Writer, target string) error {
+	body := forbiddenBody(target)
+	_, err := fmt.Fprintf(w, "HTTP/1.1 403 Forbidden\r\nKeep-Alive: %s\r\nConnection: Keep-Alive\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n%s",
+		httpKeepAlive, httpContentTypeHTML, len(body), body)
+	return err
+}
+
+// forbiddenBody is the reference's http_403_str with its $TARGET$ substituted.
+// The wording is copied so a person tcpdumping both servers sees the same page,
+// and the target is escaped because it is peer-supplied and lands in HTML.
+func forbiddenBody(target string) string {
+	return "<!DOCTYPE HTML PUBLIC \"-//IETF//DTD HTML 2.0//EN\">\r\n" +
+		"<HTML><HEAD>\r\n<TITLE>403 Forbidden</TITLE>\r\n</HEAD><BODY>\r\n" +
+		"<H1>Forbidden</H1>\r\nYou don't have permission to access " +
+		html.EscapeString(target) +
+		"\r\non this server.<P>\r\n<HR>\r\n<ADDRESS>HTTPS Server</ADDRESS>\r\n</BODY></HTML>\r\n"
 }
 
 // sendPackHTTP writes one PACK as an HTTP message body. isServer selects a 200

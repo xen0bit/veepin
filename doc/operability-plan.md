@@ -1155,10 +1155,10 @@ same shape as a ping that passes on a silent fallback.
 1. **Run `doc/verifying-macos.md` on a Mac.** The client is written and
    compiles; nobody has run it. Until someone does, macOS is "written, not
    proven" and the README says so.
-2. **A SoftEther cell against SoftEther VPN Server.** The data path is written
-   and the self cell passes; the two cross-implementation columns now wait on a
-   peer image and the address assignment, since every client is still handed
-   the constant `10.70.0.2`.
+2. ~~**A SoftEther cell against SoftEther VPN Server.**~~ Both directions are
+   built. The client direction landed first and found five wire bugs; the server
+   direction found a sixth, in the HTTP layer, and disproved the two blockers
+   this tree had confidently written down for it.
 3. **A pf-based kill switch for macOS.** The route-based one cannot work there
    (no per-route metrics), so `-kill-switch` refuses. A pf anchor is the honest
    answer and means owning firewall state on the user's host — the same trade

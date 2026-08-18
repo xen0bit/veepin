@@ -298,7 +298,7 @@ func (ss *ServerSession) exchange() error {
 	// POST, not with a PACK -- see http.go. Anything that reaches this
 	// listener without it is a web client, a scanner, or a veepin from before
 	// this layer existed.
-	if err := readSignature(ss.br); err != nil {
+	if err := readSignature(ss.br, ss.conn); err != nil {
 		return err
 	}
 
@@ -398,6 +398,10 @@ func (ss *ServerSession) authenticate() (bool, error) {
 	resp.Add("qos", TypeInt, IntValue(0))
 	resp.Add("session_key", TypeData, DataValue(ss.sessionKey[:]))
 	resp.Add("session_key_32", TypeInt, IntValue(ss.sessionKey32))
+	// The session policy, as PackAddPolicy writes it. See policy.go for why it
+	// is sent even though a welcome without it parses: an omitted flag gives
+	// the peer the value we wanted by accident rather than by statement.
+	addPolicy(resp, defaultPolicy(1))
 	resp.Add("vlan_id", TypeInt, IntValue(0))
 
 	if err := ss.writePack(resp); err != nil {
@@ -497,9 +501,17 @@ type ClientSession struct {
 	assignedIP   net.IP
 	hubName      string
 	sessionName  string
+	// policy is what the server said this session may do, when it said
+	// anything. It is reported by Policy and not enforced; see policy.go.
+	policy Policy
 
 	logf func(format string, args ...interface{})
 }
+
+// Policy reports the session policy the server stated in its welcome. The zero
+// value is what a server that stated none leaves behind, which is why Access
+// being false is not on its own a reason to conclude anything.
+func (cs *ClientSession) Policy() Policy { return cs.policy }
 
 // Connect dials a SoftEther VPN server and performs the control exchange.
 func Connect(serverAddr string, tlsCfg *tls.Config, username, password, hubName string) (*ClientSession, error) {
@@ -635,6 +647,17 @@ func (cs *ClientSession) login(username, password string) error {
 	}
 
 	cs.sessionName = resp.GetStr("session_name")
+	// The server's policy, if it sent one. It is recorded rather than enforced:
+	// see getPolicy for why Access cannot be acted on, and note that the
+	// reference client does not act on it either. Logging a session the server
+	// says has no access is still worth doing -- it turns "the tunnel is up and
+	// carries nothing" into a line that names the reason.
+	if policy, ok := getPolicy(resp); ok {
+		cs.policy = policy
+		if !policy.Access {
+			cs.logf("softether: the server's policy grants this session no access")
+		}
+	}
 	// assigned_ip is this implementation's own extension: SoftEther assigns no
 	// address in the protocol, because the segment is layer 2 and addressing
 	// comes from DHCP or static configuration inside it. A real server does

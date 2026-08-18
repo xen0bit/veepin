@@ -1145,6 +1145,39 @@ func TestInteropSoftEtherSelf(t *testing.T) {
 		"veepin-softether-client", "veepin-softether-server", "10.70.0.1")
 }
 
+// TestInteropSoftEtherClientVeepinServer is the direction the README's `‡`
+// footnote has owed since the SoftEther row landed: SoftEther's own vpnclient
+// against veepin's server, which closes the last cell in the matrix that was
+// work outstanding rather than a limitation.
+//
+// Building it found one incompatibility, and in the same layer the client
+// direction found four of its five: vpnclient opens the connection with `GET /`
+// and posts the signature second. ServerDownloadSignature is a loop that
+// answers up to nineteen requests before the signature arrives; veepin's server
+// read exactly one request and judged it, so every real client was refused on
+// its opening move. Nothing in the tree noticed, because veepin's own client
+// posts the signature first and the self cell therefore never exercised the
+// case.
+//
+// It also settled two things internal/softether/README.md had named as blockers
+// and neither was. The welcome carries no policy structure: PackGetPolicy
+// zero-fills, so a welcome without one parses, and the client enforces none of
+// the fields locally. And the client opens no additional connections, because
+// max_connection=1 is what the welcome advertises and ClientAdditionalConnectChance
+// compares the live count against exactly that. Both had been reasoned about
+// for months; the cell answered them in an afternoon, which is the argument for
+// cells over reasoning in one sentence.
+//
+// The ARP assertion is the layer-2 claim and nothing else here makes it: a ping
+// between two statically-addressed endpoints succeeds identically over an L3
+// tunnel, so the neighbour entry -- learned on the virtual NIC specifically --
+// is what proves Ethernet frames crossed.
+func TestInteropSoftEtherClientVeepinServer(t *testing.T) {
+	runInteropBench(t, "compose.softether-server.yml",
+		"se-client", "veepin-softether-server", "10.71.0.1")
+	requireARPInsideTunnel(t, "compose.softether-server.yml", "se-client", "vpn_se", "10.71.0.1")
+}
+
 // TOY is the example protocol (internal/toy) and provides no security; these
 // cells prove the *specification*, not the cryptography. The peer they talk to
 // is an independent Python implementation written from internal/toy/SPEC.md
