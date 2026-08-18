@@ -330,6 +330,25 @@ func TestInteropVeepinClientWireguardServer(t *testing.T) {
 // wireguard`) and pings its tunnel gateway. It proves the responder — mac1
 // verification, static-key lookup, the response message, and multi-peer
 // cryptokey routing — against a client veepin shares no code with.
+// TestInteropWireguardClientVeepinServerV6 carries IPv6 inside the tunnel, over
+// an IPv4 underlay, against the reference wireguard-go.
+//
+// It exists because `AllowedIPs` accepted a v6 prefix and the inbound half of
+// cryptokey routing then dropped every v6 packet -- an option accepted and
+// ignored, with no log line, because a drop there looks exactly like a packet
+// that never arrived.
+//
+// **The server direction is the only one that tests it.** verifySource is set
+// on the server (wireguard/server.go) and not on the client
+// (wireguard/wireguard.go), so sourceAllowed runs in one role only. A
+// client-direction version of this cell was written first, and it passed with
+// the old v4-only check deliberately restored -- a green cell asserting nothing,
+// which is the exact failure mode the matrix exists to avoid and which only
+// re-breaking the code on purpose revealed.
+func TestInteropWireguardClientVeepinServerV6(t *testing.T) {
+	runInterop(t, "compose.wireguard-v6.yml", "wg-client", "fd00:10:10::1")
+}
+
 func TestInteropWireguardClientVeepinServer(t *testing.T) {
 	runInteropBench(t, "compose.wireguard-server.yml", "wg-client", "veepin-wg-server", "10.10.10.1")
 }

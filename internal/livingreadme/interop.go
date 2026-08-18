@@ -78,7 +78,8 @@ var interopMatrix = []interopRow{
 		Server: interopCell{Tests: []string{
 			"TestInteropWireguardClientVeepinServer",
 			"TestInteropWireguardClientVeepinServerShaped",
-		}, Label: "wireguard-go (+ padded)"},
+			"TestInteropWireguardClientVeepinServerV6",
+		}, Label: "wireguard-go (+ padded, IPv6 inner)"},
 		Self: interopCell{Tests: []string{"TestInteropWireguardSelf", "TestInteropWireguardRekey"}},
 	},
 	{

@@ -150,3 +150,83 @@ func TestTunnelSourceVerification(t *testing.T) {
 		t.Errorf("spoofed source: %v, want errSourceNotAllowed", err)
 	}
 }
+
+// TestSourceAllowedCoversBothFamilies. AllowedIPs parses IPv6 prefixes, stores
+// them, and installs routes from them, so a v6-only check that returned false
+// made every inbound v6 packet look like a cryptokey-routing violation. The
+// symptom is a tunnel that comes up, carries IPv4, and silently drops IPv6 --
+// with nothing logged, because a drop here is indistinguishable from a packet
+// that never arrived.
+func TestSourceAllowedCoversBothFamilies(t *testing.T) {
+	tun := &wgTunnel{
+		verifySource: true,
+		routes: []netip.Prefix{
+			netip.MustParsePrefix("10.0.0.0/24"),
+			netip.MustParsePrefix("fd00::/64"),
+		},
+	}
+
+	for _, tc := range []struct {
+		name string
+		pkt  []byte
+		want bool
+	}{
+		{"v4 inside a v4 route", v4PacketFrom("10.0.0.7"), true},
+		{"v4 outside every route", v4PacketFrom("192.0.2.1"), false},
+		{"v6 inside a v6 route", v6PacketFrom("fd00::7"), true},
+		{"v6 outside every route", v6PacketFrom("2001:db8::1"), false},
+	} {
+		if got := tun.sourceAllowed(tc.pkt); got != tc.want {
+			t.Errorf("%s: sourceAllowed = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestSourceAllowedDoesNotCrossFamilies. A v4 route must not admit a v6 source
+// that happens to embed the same octets, and the reverse. netip.Prefix.Contains
+// is family-aware, but only if the address is built in its own family rather
+// than widened to 16 octets first -- which is why innerSource does not.
+func TestSourceAllowedDoesNotCrossFamilies(t *testing.T) {
+	v4Only := &wgTunnel{verifySource: true, routes: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")}}
+	if v4Only.sourceAllowed(v6PacketFrom("::ffff:10.0.0.7")) {
+		t.Error("a v4 route admitted an IPv4-mapped IPv6 source")
+	}
+
+	v6Only := &wgTunnel{verifySource: true, routes: []netip.Prefix{netip.MustParsePrefix("fd00::/64")}}
+	if v6Only.sourceAllowed(v4PacketFrom("10.0.0.7")) {
+		t.Error("a v6 route admitted an IPv4 source")
+	}
+}
+
+// TestInnerSourceRejectsTruncation: a short packet must not be read past its
+// end, and must not be admitted by accident.
+func TestInnerSourceRejectsTruncation(t *testing.T) {
+	for _, pkt := range [][]byte{
+		{},
+		{0x45},
+		make([]byte, 19), // v4 header one octet short
+		append([]byte{0x60}, make([]byte, 38)...), // v6 header one octet short
+	} {
+		if _, ok := innerSource(pkt); ok {
+			t.Errorf("innerSource accepted a %d-octet packet", len(pkt))
+		}
+	}
+	if _, ok := innerSource([]byte{0x35, 0, 0, 0}); ok {
+		t.Error("innerSource accepted a packet whose version nibble is neither 4 nor 6")
+	}
+}
+
+func v4PacketFrom(src string) []byte {
+	pkt := make([]byte, 20)
+	pkt[0] = 0x45
+	copy(pkt[12:16], netip.MustParseAddr(src).AsSlice())
+	return pkt
+}
+
+func v6PacketFrom(src string) []byte {
+	pkt := make([]byte, 40)
+	pkt[0] = 0x60
+	a := netip.MustParseAddr(src).As16()
+	copy(pkt[8:24], a[:])
+	return pkt
+}
