@@ -128,8 +128,15 @@ func TestInteropVeepinClientAmneziaWGServer(t *testing.T) {
 // responder must recognise obfuscated datagrams from amneziawg-go and shape its
 // own replies so amneziawg-go accepts them — including the response's mac1,
 // which that implementation does check.
+//
+// It measures, like the other two AmneziaWG cells. It did not, and the published
+// throughput table rendered the hole as "—" — which that table's own legend
+// defines as "iperf3 does not apply to this cell". It applies here: both ends
+// hold a routable tunnel address and both images carry iperf3. An unmeasured
+// cell that reads as a deliberate omission is the same class of quiet wrong as
+// a skipped test that reads as a pass.
 func TestInteropAmneziaWGClientVeepinServer(t *testing.T) {
-	runInterop(t, "compose.amneziawg-server.yml", "awg-client", "10.61.0.1")
+	runInteropBench(t, "compose.amneziawg-server.yml", "awg-client", "veepin-awg-server", "10.61.0.1")
 }
 
 // TestInteropAmneziaWGSelf runs the veepin AmneziaWG client against the veepin
@@ -323,6 +330,25 @@ func TestInteropVeepinClientWireguardServer(t *testing.T) {
 // wireguard`) and pings its tunnel gateway. It proves the responder — mac1
 // verification, static-key lookup, the response message, and multi-peer
 // cryptokey routing — against a client veepin shares no code with.
+// TestInteropWireguardClientVeepinServerV6 carries IPv6 inside the tunnel, over
+// an IPv4 underlay, against the reference wireguard-go.
+//
+// It exists because `AllowedIPs` accepted a v6 prefix and the inbound half of
+// cryptokey routing then dropped every v6 packet -- an option accepted and
+// ignored, with no log line, because a drop there looks exactly like a packet
+// that never arrived.
+//
+// **The server direction is the only one that tests it.** verifySource is set
+// on the server (wireguard/server.go) and not on the client
+// (wireguard/wireguard.go), so sourceAllowed runs in one role only. A
+// client-direction version of this cell was written first, and it passed with
+// the old v4-only check deliberately restored -- a green cell asserting nothing,
+// which is the exact failure mode the matrix exists to avoid and which only
+// re-breaking the code on purpose revealed.
+func TestInteropWireguardClientVeepinServerV6(t *testing.T) {
+	runInterop(t, "compose.wireguard-v6.yml", "wg-client", "fd00:10:10::1")
+}
+
 func TestInteropWireguardClientVeepinServer(t *testing.T) {
 	runInteropBench(t, "compose.wireguard-server.yml", "wg-client", "veepin-wg-server", "10.10.10.1")
 }
@@ -798,6 +824,26 @@ func TestInteropNebulaHostVeepinLighthouse(t *testing.T) {
 // for each other, so the ping to 10.42.0.3 can only cross if one queries the
 // lighthouse, the lighthouse answers and nudges the other to punch, and the two
 // then handshake directly. It isolates a veepin break from an interop break.
+// TestInteropNebulaRelay proves the relay fallback: two hosts whose direct UDP
+// path is dropped by iptables, reaching each other through the lighthouse.
+//
+// It uses runInteropRequiringLog rather than a bare ping, and that is the point
+// of the cell rather than a detail of it. A ping across a working direct path
+// and a ping across a working relay are indistinguishable from outside, so a
+// cell that only pinged would pass just as happily if the iptables rules had
+// not taken effect and the relay code had never run. The log lines require both
+// halves of the negotiation to have actually happened: the middle host agreeing
+// to forward, and the end host recording the relay as established.
+//
+// This is the same discipline that caught the Pulse ESP keying bug, where a
+// silent fallback to the TLS tunnel was passing a bare ping while the ESP path
+// -- the thing under test -- was broken at both ends.
+func TestInteropNebulaRelay(t *testing.T) {
+	runInteropRequiringLogFrom(t, "compose.nebula-relay.yml",
+		"veepin-host-b", "veepin-lighthouse", "10.42.0.3",
+		"relaying for 10.42.0.2 to 10.42.0.3")
+}
+
 func TestInteropNebulaSelf(t *testing.T) {
 	runInteropBench(t, "compose.nebula-self.yml", "veepin-host-b", "veepin-host-c", "10.42.0.3")
 }
@@ -1031,6 +1077,49 @@ func TestInteropPulseSelf(t *testing.T) {
 // TLS, is switched onto the server's local bridge port, and arrives on an
 // interface the server's kernel answers for. A handshake that completes and
 // moves no frame fails here, which is the state this protocol was in until now.
+// TestInteropVeepinClientSoftEtherServer is the cross-implementation cell the
+// README's `‡` footnote has owed since the SoftEther row landed: veepin's
+// client against SoftEther VPN Server speaking its own native protocol.
+//
+// Building it is what found that the row had never been interoperable. The
+// PACK codec was little-endian where the reference is big-endian, element
+// names were written as C strings where the reference writes a length that
+// counts a NUL it omits, passwords were hashed with SHA-1 where the reference
+// uses SHA-0 over a different concatenation, the control plane had no HTTP
+// layer at all, and the data path wrote one little-endian length per frame
+// where the reference writes a big-endian block count. Five layers, five
+// mistakes, and a veepin-to-veepin cell that passed through every one of them
+// because both ends made the same choice each time.
+//
+// The ping target is SecureNAT's virtual gateway. Reaching it means an ARP
+// request left veepin's TAP, crossed a real SoftEther's switch, and was
+// answered -- which is the claim the row makes and could not previously back.
+func TestInteropVeepinClientSoftEtherServer(t *testing.T) {
+	// runInterop, not runInteropBench. The ping target is SecureNAT's virtual
+	// gateway, which is synthesised by the SoftEther daemon rather than being
+	// an address on any interface -- there is nothing to run `iperf3 -s` on,
+	// and the image does not carry iperf3 at all. That is the case the
+	// throughput table's legend already describes as a dash: "a peer with no
+	// bindable tunnel address (SoftEther's SecureNAT gateway)". Measuring
+	// anyway would publish a ✗, which that table defines as a measurement
+	// that is broken rather than absent, and would be a false accusation
+	// against a cell that passes.
+	runInterop(t, "compose.softether.yml", "veepin-softether-client", "192.168.30.1")
+}
+
+// TestInteropSoftEtherShaped runs the same veepin<->veepin cell with the server
+// padding the first 4 KiB of each inner flow out towards the frame MTU.
+//
+// The claim is that the padding is inert, and layer 2 is where that claim is
+// most easily broken: ARP has no length field to trim by, so an implementation
+// that padded every frame rather than only the IP-bearing ones would corrupt
+// the first exchange across the segment and the tunnel would never carry
+// anything. A ping that crosses proves both halves -- the padding was applied
+// and the receiver trimmed it.
+func TestInteropSoftEtherShaped(t *testing.T) {
+	runInterop(t, "compose.softether-shaped.yml", "veepin-softether-client", "10.70.0.1")
+}
+
 func TestInteropSoftEtherSelf(t *testing.T) {
 	runInteropBench(t, "compose.softether-self.yml",
 		"veepin-softether-client", "veepin-softether-server", "10.70.0.1")
@@ -1322,11 +1411,27 @@ func runInteropUDPEcho(t *testing.T, composeFile, probeSvc, listen string) {
 	t.Fatalf("CONNECT-UDP echo never returned within %s:\n%s", pingDeadline, last)
 }
 
+// composeTimeout bounds one `docker compose` invocation.
+//
+// Eight minutes is comfortably more than any cell needs once its images are
+// present: the slowest shard builds veepin from a cold cache and still comes
+// in under three.
+//
+// It was briefly raised to fifteen, to absorb a Docker Hub pull that stalled at
+// 32 kB of a 2.8 MB layer. That did not work -- the pull was still stuck at
+// fifteen -- and it was the wrong place to fix it anyway: a registry veepin
+// does not control should not be spending a cell's budget at all, and a stall
+// there reports as `compose up: signal: killed`, which reads as a veepin
+// failure. The images a shard pulls are now declared in the interop manifest
+// and fetched by a workflow step that retries and says whose fault it is. This
+// cap is back to bounding what it can actually diagnose: a cell that hangs.
+const composeTimeout = 8 * time.Minute
+
 // compose runs `docker compose -f <file> <args...>` in the test's directory
 // (which holds the compose files and their relative build contexts).
 func compose(t *testing.T, file string, args ...string) (string, error) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), composeTimeout)
 	defer cancel()
 	full := append([]string{"compose", "-f", file}, args...)
 	out, err := exec.CommandContext(ctx, "docker", full...).CombinedOutput()

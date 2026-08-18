@@ -60,3 +60,26 @@ flowchart TD
   `decrypt` not at all (in place, with a per-tunnel receive-nonce scratch that is
   safe because decrypt runs only on the Host's single `readUDP` goroutine).
   `TestDataPathAllocations` pins both; the root `README.md` has the numbers.
+- **Relays forward without decrypting, and the hop to them is authenticated but
+  not encrypted.** The relay has to read the inner header to know where to send,
+  and holds none of the end-to-end keys, so a relay learns **who is talking to
+  whom and how much** while learning nothing about the traffic. That is nebula's
+  design rather than a choice made here (`SendVia` calls `EncryptDanger` with a
+  nil plaintext), and it is the reason `-relay-for` is off by default: agreeing
+  to relay is a decision about what this host's operator is willing to see.
+- **A relay is a fallback, never a preference.** The direct path is attempted on
+  every send and every handshake, and a relay is used only when it fails. Both
+  run in parallel rather than the relay waiting on a timeout, so a merely slow
+  direct path still wins.
+- **The handshake is relayed too, not just the traffic.** It has to be: the
+  payload a relay forwards is encrypted under keys the two ends agree with each
+  other, so if the exchange that agrees them cannot cross, nothing can. Relaying
+  only data deadlocks — the relay is never used because the tunnel it would
+  carry never comes up.
+- **A relay's address is never recorded as a peer's own.** A handshake that
+  crossed a relay arrives from the relay's socket, and treating that as the
+  peer's direct address makes every later packet a plain datagram to the relay,
+  which the socket accepts and the relay drops. The tunnel reports itself up,
+  the sends succeed, and nothing arrives — see `isRelayUnderlay`.
+- **Not implemented: multi-lighthouse consensus.** Two lighthouses that disagree
+  about where a host is are not reconciled; the last answer wins.

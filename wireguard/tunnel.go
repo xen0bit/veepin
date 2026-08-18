@@ -167,18 +167,50 @@ func (t *wgTunnel) Decapsulate(p []byte) ([]byte, error) {
 
 // sourceAllowed reports whether an inbound inner packet's source address falls
 // within this peer's routes — the inbound direction of cryptokey routing.
+//
+// Both families, because AllowedIPs accepts both. It used to read the IPv4
+// header only and return false for anything else, which is the
+// accepted-and-ignored shape: `AllowedIPs = fd00::/8` parses, is stored, is
+// used to install routes, and then every inbound IPv6 packet is dropped by
+// this function as though the peer had sent something it was not allowed to.
+// Nothing logs it — a dropped packet on this path is indistinguishable from
+// one that never arrived.
 func (t *wgTunnel) sourceAllowed(inner []byte) bool {
-	if len(inner) < 20 || inner[0]>>4 != 4 {
-		return false // IPv4 only in this build
-	}
-	src, ok := netip.AddrFromSlice(inner[12:16])
+	src, ok := innerSource(inner)
 	if !ok {
 		return false
 	}
 	for _, r := range t.routes {
+		// Contains is family-aware and returns false across families, so a v4
+		// route never admits a v6 source or the reverse. An IPv4-mapped v6
+		// address would slip past that, which is why innerSource returns the
+		// address in its own family rather than a 16-octet form.
 		if r.Contains(src) {
 			return true
 		}
 	}
 	return false
+}
+
+// innerSource extracts the source address of an inner IP packet, for either
+// family. It is the counterpart of dataplane.innerDest, which the outbound half
+// of cryptokey routing has always used and which has always handled both.
+func innerSource(pkt []byte) (netip.Addr, bool) {
+	if len(pkt) < 1 {
+		return netip.Addr{}, false
+	}
+	switch pkt[0] >> 4 {
+	case 4:
+		if len(pkt) < 20 {
+			return netip.Addr{}, false
+		}
+		return netip.AddrFrom4([4]byte(pkt[12:16])), true
+	case 6:
+		// Fixed 40-octet header; the source is octets 8..24.
+		if len(pkt) < 40 {
+			return netip.Addr{}, false
+		}
+		return netip.AddrFrom16([16]byte(pkt[8:24])), true
+	}
+	return netip.Addr{}, false
 }

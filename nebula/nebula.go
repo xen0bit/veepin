@@ -95,6 +95,8 @@ const (
 	OptStaticHosts  = "static-hosts"  // "overlay=underlay[,underlay...];..." pairs
 	OptLighthouses  = "lighthouses"   // comma-separated overlay addresses
 	OptAmLighthouse = "am-lighthouse" // "true" to answer lighthouse queries
+	OptRelays       = "relays"        // comma-separated overlay addresses of hosts that may relay for us
+	OptRelayFor     = "relay-for"     // "true" to forward traffic for other hosts
 	OptCipher       = "cipher"        // "aes" (default) or "chachapoly"
 	OptTUN          = "tun"           // TUN interface name
 	OptMTU          = "mtu"           // inner MTU
@@ -122,6 +124,15 @@ type Config struct {
 
 	// AmLighthouse makes this host answer queries about where others are.
 	AmLighthouse bool
+
+	// Relays are overlay addresses of hosts willing to carry this host's
+	// traffic when a direct path cannot be built. They are advertised to
+	// lighthouses; a direct path is always tried first.
+	Relays []netip.Addr
+	// RelayFor makes this host forward for others. Off by default: it spends
+	// this host's bandwidth, and a relay learns which pairs of hosts are
+	// talking and how much.
+	RelayFor bool
 
 	// Cipher is "aes" (default) or "chachapoly". It must match the mesh.
 	Cipher string
@@ -189,6 +200,8 @@ func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
 		StaticHosts:  cfg.StaticHosts,
 		Lighthouses:  cfg.Lighthouses,
 		AmLighthouse: cfg.AmLighthouse,
+		Relays:       cfg.Relays,
+		RelayFor:     cfg.RelayFor,
 		Logger:       loggerOrDiscard(cfg.Logger),
 	}, dataplane.NewPacketConn(conn), tun)
 	if err != nil {
@@ -319,6 +332,7 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 		Cipher:       opts[OptCipher],
 		TUNName:      opts[OptTUN],
 		AmLighthouse: opts[OptAmLighthouse] == "true",
+		RelayFor:     opts[OptRelayFor] == "true",
 		// A mesh host reports tunnels coming up, peers being rejected and
 		// packets being dropped. None of that is visible any other way -- there
 		// is no connect/disconnect moment to infer it from -- so a host dialed
@@ -345,6 +359,20 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 				return nil, fmt.Errorf("nebula: invalid lighthouse address %q: %w", s, err)
 			}
 			cfg.Lighthouses = append(cfg.Lighthouses, addr)
+		}
+	}
+
+	if v := opts[OptRelays]; v != "" {
+		for s := range strings.SplitSeq(v, ",") {
+			s = strings.TrimSpace(s)
+			if s == "" {
+				continue
+			}
+			addr, err := netip.ParseAddr(s)
+			if err != nil {
+				return nil, fmt.Errorf("nebula: invalid relay address %q: %w", s, err)
+			}
+			cfg.Relays = append(cfg.Relays, addr)
 		}
 	}
 

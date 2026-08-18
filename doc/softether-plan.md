@@ -44,12 +44,27 @@ ones:
 None of that was reusable from the then-existing thirteen. That is the argument for
 doing it, and equally the argument for its cost.
 
-## Wire details — status: **not yet verified**
+## Wire details — corrected, after a real peer disagreed
 
-## Wire details — verified from the source
+> **This section was wrong, and the code written from it was wrong with it.**
+> It claimed to be "verified from the source" and said the integers are
+> little-endian; they are big-endian. It described the connection as opening
+> with a PACK; it opens with an HTTP POST. It described the data path as one
+> length-prefixed frame at a time; frames are written in counted blocks. Those
+> errors survived from the day this file was written until a cell against
+> SoftEther VPN Server was finally built, because the only thing testing them
+> was a veepin talking to another veepin that had read the same wrong page.
+>
+> The corrected format is below, and the authority for it is named per field.
+> The lesson is the one `AGENTS.md` already states and this is now the best
+> example of: reading the reference implementation means reading the functions
+> that touch the wire — `WritePack`, `WriteElement`, `WriteValue`,
+> `WriteBufStr`, `WriteBufInt` — not a paragraph summarising them.
 
-The byte-level wire format has been read from `SoftEtherVPN/src/Mayaqua/Pack.c`
-and `src/Mayaqua/Pack.h`. All integers are **little-endian**.
+The byte-level wire format, from `SoftEtherVPN/src/Mayaqua/Pack.c` and
+`src/Mayaqua/Memory.c`. All integers are **big-endian**: every one goes through
+`WriteBufInt`/`ReadBufInt`, which call `Endian32`, which byte-swaps on a
+little-endian host.
 
 ### PACK serialisation
 
@@ -81,24 +96,61 @@ Maximum sizes: per-VALUE data 384 MB, serialised PACK 512 MB, element name 63 ch
 
 ### Connection flow
 
-The SoftEther native protocol operates over TLS (TCP/443). The exchange is:
+The SoftEther native protocol operates over TLS (TCP/443), and **every control
+message is an HTTP body**. From `ClientUploadSignature`, `ServerDownloadSignature`,
+`ServerUploadHello`, `ClientUploadAuth` and `HttpClientSend`/`HttpServerSend`:
 
-1. **TCP connect** to port 443 (default).
-2. **TLS handshake**, presenting the SNI for the virtual hub.
-3. **Client sends a PACK** containing `method="hello"`, client version, build info.
-4. **Server responds** with a PACK containing server version, build info, and a `random` field (20 bytes, used for password hashing).
-5. **Client sends a PACK** containing authentication method (`"login"`), username, hub name, and password proof (SHA1 of SHA1 of password XOR'd with random).
-6. **Server responds** with a PACK containing auth result, assigned IP, and session parameters.
-7. **Ethernet frames** are exchanged raw over the TLS connection, with a 4-byte length prefix before each frame.
+1. **TCP connect** to port 443 (default), then the **TLS handshake**.
+2. **Client POSTs `/vpnsvc/connect.cgi`** with `Content-Type: image/jpeg` and a
+   body that is either the watermark blob or the exact string `VPNCONNECT`
+   (`HTTP_VPN_TARGET_POSTDATA`). The server accepts either.
+3. **Server responds `200 OK`** with a PACK: `hello` (its version string),
+   `version`, `build`, and `random` (20 octets). The client sends no hello of
+   its own — this response is unprompted.
+4. **Client POSTs `/vpnsvc/vpn.cgi`** with the login PACK: `method="login"`,
+   `hubname`, `username`, `authtype`, `secure_password`, **and the session
+   parameters** — `max_connection`, `use_encrypt`, `use_compress`,
+   `half_connection`. The session parameters are not optional: a login without
+   `max_connection` is answered with a welcome and then disconnected.
+5. **Server responds `200 OK`** with the welcome PACK (`session_name`,
+   `connection_name`, `session_key`, policy, timeouts) or with an `error`
+   element — 9 is `ERR_AUTH_FAILED`.
+6. **The connection shifts to tunnelling mode** (`StartTunnelingMode`) and
+   carries blocks from then on.
+
+Every PACK crossing HTTP also carries a `pencore` element of random length
+(`CreateDummyValue`), whose purpose is to keep the control exchange from being
+a sequence of fixed-size TLS records.
+
+### Password hashing
+
+From `Account.c` (`HashPassword`) and `Sam.c` (`SecurePassword`), and **not**
+SHA-1:
+
+```
+stored  = SHA0(password ‖ UPPER(username))
+on-wire = SHA0(stored ‖ server_random)
+```
+
+SHA-0, the withdrawn predecessor of SHA-1. `Mayaqua/Encrypt.c`'s
+`MY_SHA0_Transform` omits SHA-1's `ROTL1` in the message schedule via a C comma
+expression — `W[t] = (1, W[t-3] ^ ...)` — which discards the `1`. Compiling
+that function verbatim reproduces the published SHA-0 vectors, which is how
+that reading was settled rather than argued.
 
 ### Data path
 
-After authentication, the client and server exchange raw Ethernet frames. Each
-frame is prefixed with a 4-byte little-endian length (the frame's length
-excluding the prefix). There is no type/length/value wrapping beyond this
-4-byte length header — the bytes between length prefixes are a complete Ethernet
-frame (14-byte header + payload, with FCS usually absent as the encapsulating
-link is assumed reliable).
+After the welcome, both directions write **counted blocks**, from
+`Connection.c`'s send path and its mode-0/1/3 receive machine:
+
+```
+uint32be  block count
+  count × { uint32be size, size octets of Ethernet frame }
+```
+
+Two counts are not counts: `0` means no frames follow (a tick), and
+`0xffffffff` (`KEEP_ALIVE_MAGIC`) introduces one length and that many octets of
+random padding, discarded. Per-block size is bounded by `MAX_PACKET_SIZE * 2`.
 
 ### UDP acceleration
 

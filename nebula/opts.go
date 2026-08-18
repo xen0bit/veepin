@@ -15,6 +15,8 @@ func init() {
 		{Key: OptStaticHosts, Kind: client.OptCommaList, Help: "peer locations: 10.42.0.1=192.0.2.10:4242[,...];..."},
 		{Key: OptLighthouses, Kind: client.OptCommaList, Help: "comma-separated lighthouse overlay addresses"},
 		{Key: OptAmLighthouse, Kind: client.OptBool, Help: "answer lighthouse queries from other hosts"},
+		{Key: OptRelays, Kind: client.OptCommaList, Help: "overlay addresses of hosts that may relay for us when a direct path fails"},
+		{Key: OptRelayFor, Kind: client.OptBool, Help: "forward traffic for other hosts (a relay sees who talks to whom)"},
 		{Key: OptCipher, Kind: client.OptStr, Default: "aes", Help: "aes (default) or chachapoly; must match the mesh"},
 		{Key: OptMTU, Kind: client.OptInt, Default: "1300", Help: "inner MTU (default 1300)"},
 		client.TUNOpt(OptTUN),

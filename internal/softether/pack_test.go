@@ -271,10 +271,16 @@ func BenchmarkDecodeSmall(b *testing.B) {
 	}
 }
 
-// TestKnownVector tests a known PACK encoding to ensure wire compatibility.
+// TestKnownVector pins one element against the reference serialiser's rules,
+// octet by octet. Every field here is a place this package was previously
+// wrong: the integers were little-endian, and the name was written as a
+// NUL-terminated string rather than a length that counts a NUL it omits.
+//
+// The vector that had been here asserted the old format. It was hand-written
+// from the same misreading as the encoder, so it agreed with the bug and
+// called that agreement "wire compatibility" -- which is what a self-test buys
+// you when there is no real peer on the other side of it.
 func TestKnownVector(t *testing.T) {
-	// A pack with one INT element named "port" with value 443.
-	// Wire: [count=1] [name="port\0"] [type=0] [count=1] [value=443]
 	p := NewPack()
 	p.Add("port", TypeInt, IntValue(443))
 	data, err := p.Encode()
@@ -282,13 +288,50 @@ func TestKnownVector(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []byte{
-		1, 0, 0, 0, // element count = 1
-		'p', 'o', 'r', 't', 0, // name + NUL
-		0, 0, 0, 0, // type = INT (0)
-		1, 0, 0, 0, // value count = 1
-		187, 1, 0, 0, // value = 443 (0x1BB)
+		0, 0, 0, 1, // element count = 1, big-endian
+		0, 0, 0, 5, // name length = len("port") + 1, for a NUL never sent
+		'p', 'o', 'r', 't', // name body, no terminator
+		0, 0, 0, 0, // type = INT
+		0, 0, 0, 1, // value count = 1
+		0, 0, 1, 187, // value = 443 (0x1BB), big-endian
 	}
 	if !bytes.Equal(data, want) {
 		t.Errorf("wire mismatch:\ngot  %x\nwant %x", data, want)
+	}
+}
+
+// TestStringEncodingsDifferFromEachOther pins the three-way disagreement
+// between an element name, a STR and a UNISTR, because it looks like an
+// inconsistency somebody should tidy up and is in fact the wire format.
+func TestStringEncodingsDifferFromEachOther(t *testing.T) {
+	p := NewPack()
+	p.Add("n", TypeStr, StrValue("ab"))
+	p.Add("u", TypeUniStr, UniStrValue("ab"))
+	data, err := p.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []byte{
+		0, 0, 0, 2, // two elements
+		0, 0, 0, 2, 'n', // name: counts a NUL, sends none
+		0, 0, 0, 2, // type = STR
+		0, 0, 0, 1, // one value
+		0, 0, 0, 2, 'a', 'b', // STR: counts no NUL, sends none
+		0, 0, 0, 2, 'u', // second element's name
+		0, 0, 0, 3, // type = UNISTR
+		0, 0, 0, 1, // one value
+		0, 0, 0, 3, 'a', 'b', 0, // UNISTR: counts a NUL and sends it
+	}
+	if !bytes.Equal(data, want) {
+		t.Errorf("wire mismatch:\ngot  %x\nwant %x", data, want)
+	}
+
+	// And the NUL must not survive into the decoded string.
+	back, err := Decode(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := back.GetUniStr("u"); got != "ab" {
+		t.Errorf("UNISTR round-trip = %q, want %q -- the terminator was kept", got, "ab")
 	}
 }

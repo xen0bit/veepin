@@ -18,8 +18,8 @@ least interesting.
 |---|---|---|---|---|---|
 | 1 | **L2TPv3 Ethernet pseudowire** (RFC 3931 + 4719) *(landed — static)* | **New row** | **Layer 2**, actually delivered — the gap SoftEther left open | Medium-high | **Yes** — the Linux kernel, both directions |
 | 2 | **IP-TFS / AGGFRAG** (RFC 9347) *(partly landed)* | IKEv2 option | **Constant-rate traffic-flow confidentiality** — shapes packet *counts and timing*, which `dataplane/shape.go` explicitly does not | Medium | Partly — strongSwan 6.0.2+ does aggregation; **nobody open-source does the constant-rate half** |
-| 3 | **Nebula relays** | Nebula option | Relay fallback when hole punching fails | Low | Yes — `nebula`, already pinned and green |
-| 4 | **RFC 9329** (TCP encapsulation of IKE and IPsec) | IKEv2 option | IPsec through a UDP-hostile network; brings **libreswan** in as a new peer | Low | Yes — libreswan 4.0+, both roles |
+| 3 | **Nebula relays** *(landed)* | Nebula option | Relay fallback when hole punching fails | Low | Yes — `nebula`, already pinned and green |
+| 4 | **RFC 9329** (TCP encapsulation of IKE and IPsec) | IKEv2 option | IPsec through a UDP-hostile network; brings **libreswan** in as a new peer | ~~Low~~ **Medium-high** — see the re-survey | Yes — libreswan 4.0+, both roles |
 | 5 | **Rosenpass** | WireGuard option | PQ handshake feeding WireGuard's PSK | Medium | Yes — Rust reference implementation |
 | 6 | Juniper NC / Array / F5 | New rows | Nothing structural | Low | Client only |
 | — | **Tailscale** (ts2021 / DISCO / DERP) | — | Coordinated mesh with relay fallback | Very high | **No — fails the "both roles" rule** |
@@ -28,8 +28,10 @@ least interesting.
 adding a sibling beside it, and its interop peer is the Linux kernel — no daemon,
 no vendor binary, no version to pin, nothing that can rot.
 
-**Best return on effort: Nebula relays.** ~600–800 LOC to close a gap the tree
-already admits in writing, against a peer already in the harness.
+**Best return on effort: Nebula relays** *(landed)*. ~600–800 LOC to close a gap
+the tree already admits in writing, against a peer already in the harness. The
+estimate was right; what it did not predict is that three of the four bugs
+would be invisible to everything except a cell with the direct path blocked.
 
 **Most interesting: IP-TFS.** It is the only candidate where veepin can implement
 *more* than the reference implementation does and still have a peer for the
@@ -417,7 +419,13 @@ and deliberately** — no mechanical guard will remind you.
 
 ---
 
-# 3. Nebula relays — a Nebula option
+# 3. Nebula relays — a Nebula option *(landed)*
+
+> **Landed.** `-relays` names hosts that may carry for us, `-relay-for` agrees
+> to carry for others, and `compose.nebula-relay.yml` proves it with the direct
+> UDP path between two hosts dropped by iptables. The estimate below was
+> roughly right on size and wrong about the shape — see
+> [What it actually cost](#nebula-relays-what-it-cost).
 
 ## The cheapest useful thing on this page
 
@@ -450,6 +458,41 @@ note, `internal/nebula/README.md`'s caveats section loses the relay sentence,
 and `lighthouse.go:20` is **amended rather than deleted** — multi-lighthouse
 consensus stays unimplemented and should keep saying so.
 
+<a id="nebula-relays-what-it-cost"></a>
+
+## What it actually cost
+
+The size estimate held: ~700 lines across `relay.go`, `relay_host.go`, the
+tunnel's relay seal/open, and the lighthouse's advertisement field. The shape
+was wrong in three ways, each found by the interop cell and none visible to a
+unit test.
+
+- **"Forwarding on the relay's own data path" understates it: the handshake has
+  to be relayed too.** The payload a relay forwards is encrypted end to end, so
+  the exchange that agrees those keys must itself cross the relay. The first
+  version relayed only data and deadlocked — the relay was never used, because
+  the tunnel it would carry never came up.
+- **The middle host propagates the request; it does not merely agree.** When A
+  asks R to relay to B, R sends its own `CreateRelayRequest` to B on A's
+  behalf, and only B's answer completes the pair. The first version created a
+  half-entry and waited for B to ask independently, which B has no reason to do
+  — so the negotiation completed on A's side, R agreed, and every packet was
+  then dropped at R. Both visible ends looked healthy.
+- **A relay's address must never be recorded as the peer's own.** A relayed
+  handshake arrives from the relay's socket; recording it as where the peer
+  lives makes every later packet a plain datagram to the relay, which the
+  socket accepts and the relay drops. Fixing that introduced a self-deadlock —
+  the check locked the peer it was called under, which for a host handshaking
+  with its own relay is the same lock — whose symptom was no error at all, just
+  a tunnel that never came up and a log line that never printed.
+
+The cell earned its keep exactly as [the interop
+section](../AGENTS.md#the-interop-matrix-earns-its-keep) says it should, and
+the assertion that made it useful was the log line rather than the ping: a ping
+over a working direct path and a ping over a working relay are
+indistinguishable, so `runInteropRequiringLog` is what makes the cell mean
+anything.
+
 ---
 
 # 4. RFC 9329 — TCP encapsulation, an IKEv2 option
@@ -473,13 +516,57 @@ UDP" is a real deployment need with a standards-track answer.
   implements for UDP 4500, inside a length-delimited stream instead of a
   datagram.
 
+## The cost estimate below is wrong, and this is what it missed
+
+> **Re-surveyed before starting, and not started.** The "~500 LOC" figure comes
+> from looking at the *responder's* `transport` struct and concluding that RFC
+> 9329 is a second implementation of it. That much is true. What it misses is
+> that the initiator and the ESP data path are typed on UDP end to end, and
+> RFC 9329 carries **ESP on the same TCP stream** — so a version that moved
+> only the control plane would be useless, because the whole point is a network
+> that blocks UDP.
+>
+> ```sh
+> grep -c "net.UDPConn\|net.UDPAddr" internal/ikev2/ike/client.go ikev2/client.go dataplane/pump.go
+> # internal/ikev2/ike/client.go:11
+> # ikev2/client.go:5
+> # dataplane/pump.go:11
+>
+> grep -n "type Sender" dataplane/pump.go
+> # 76:type Sender func(pkt []byte, to *net.UDPAddr)
+> ```
+>
+> Three things follow, none of them in the estimate:
+>
+> - **`Client.DataConn() *net.UDPConn`** (`internal/ikev2/ike/client.go:339`) is
+>   how the facade hands the IKE socket to the data path, and it is a concrete
+>   type in a signature two callers depend on.
+> - **`dataplane.Pump` is UDP-shaped**: `Sender` and the batch sender both take
+>   `*net.UDPAddr`. ESP over a stream needs either a stream-shaped pump or a
+>   second data path beside it.
+> - **The batching and GSO work would not carry over.** `PacketConn.ReadBatch`,
+>   `SetBatchSender` and the GRO path are datagram machinery; a TCP data path
+>   starts again from a length-prefixed reassembler.
+>
+> That is a change to the most performance-tuned and most-tested code in the
+> tree, for the candidate this page already calls "the one that teaches least".
+> It is not obviously wrong to do — but it should be chosen knowing it is a
+> `dataplane` change and not an `internal/ikev2` one, which is the opposite of
+> what the section below says.
+>
+> One piece of good news the estimate also missed, in the other direction:
+> **libreswan needs no source build.** `apk add libreswan` on Alpine 3.20 gives
+> Libreswan 5.0, so the peer image is a three-line Dockerfile rather than the
+> cached source build this plan budgets for.
+
 ## Shape of the work
 
-The reason this is cheap is visible in `internal/ikev2/ike/transport.go`: the
-`transport` struct (:26) already abstracts "two sockets, IKE here, ESP there",
-with `sendIKE` (:35), `sendESP` (:50) and `serve` (:60) as the entire surface
-the rest of the package uses. RFC 9329 is a **third implementation of that
-surface**.
+The reason this *looks* cheap is visible in `internal/ikev2/ike/transport.go`:
+the `transport` struct (:26) already abstracts "two sockets, IKE here, ESP
+there", with `sendIKE` (:35), `sendESP` (:50) and `serve` (:60) as the entire
+surface the rest of the package uses. RFC 9329 is a **third implementation of
+that surface** — on the responder. The initiator has no such seam, which is the
+half the paragraph above is about.
 
 - Make `transport` an interface, the existing type `udpTransport`, and add
   `tcpTransport`. That is the whole design; everything else follows.
@@ -497,7 +584,9 @@ surface**.
 
 ## Interop
 
-New peer image `tests/interop/libreswan/`. Cells: `compose.ikev2-tcp.yml`,
+New peer image `tests/interop/libreswan/` — `FROM alpine:3.20` plus
+`apk add libreswan`, verified to give Libreswan 5.0. Cells:
+`compose.ikev2-tcp.yml`,
 `compose.ikev2-tcp-server.yml`, `compose.ikev2-tcp-self.yml`, and
 `compose.ikev2-tcp-fallback.yml` with UDP blocked by an iptables rule in the
 peer container. The fallback cell **must** use `runInteropRequiringLog` — a
@@ -509,7 +598,9 @@ once is how a day disappears.
 
 ## Cost
 
-~500 LOC including tests, plus the peer image. No count change.
+~500 LOC including tests, plus the peer image — **for the responder alone**.
+Add the initiator's transport seam and a stream data path for ESP and it is a
+`dataplane` change of unbounded-until-surveyed size. No count change either way.
 
 ---
 
