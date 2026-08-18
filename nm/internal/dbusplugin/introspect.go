@@ -9,6 +9,12 @@ import (
 
 var errAlreadyConnected = errors.New("a VPN connection is already active")
 
+// errNoSecretsPending refuses a NewSecrets that answers no question. NM only
+// calls it after SecretsRequired, so an unsolicited one is either a bug or
+// another client on the bus trying to start a tunnel through a method that
+// looks like it only updates one.
+var errNoSecretsPending = errors.New("no secrets were requested")
+
 type nameTakenError struct{ name string }
 
 func (e *nameTakenError) Error() string {
@@ -31,6 +37,9 @@ func pluginIntrospect() introspect.Interface {
 			{Name: "NeedSecrets", Args: []introspect.Arg{
 				{Name: "settings", Type: "a{sa{sv}}", Direction: "in"},
 				{Name: "setting_name", Type: "s", Direction: "out"},
+			}},
+			{Name: "NewSecrets", Args: []introspect.Arg{
+				{Name: "connection", Type: "a{sa{sv}}", Direction: "in"},
 			}},
 			{Name: "Disconnect"},
 		},

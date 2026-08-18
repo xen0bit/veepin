@@ -621,9 +621,33 @@ NM `LoginFailed` so NM re-prompts, everything else to `ConnectFailed`), carried
 by `ike.ErrAuthFailed` → `client.ErrAuth`; and an optional per-connection `mtu`
 override in `vpn.data`.
 
-Remaining: interactive secrets (`ConnectInteractive`/`SecretsRequired`/
-`NewSecrets`) — currently secrets must be present at Connect (NM's
-`NeedSecrets` → agent → Connect flow covers the common case).
+Also done: **interactive secrets** (`ConnectInteractive`/`SecretsRequired`/
+`NewSecrets`). `ConnectInteractive` was previously an alias for `Connect`, which
+is worse than it sounds: NM calls it *first* and falls back to `Connect` only if
+the plugin refuses, so it is the path a desktop actually takes. A connection
+whose secrets are flagged `NOT_SAVED` and whose auth-dialog was dismissed
+therefore reached the gateway with an empty password — the gateway refused it,
+the user was shown a login failure for a credential they were never asked for,
+and on a gateway that counts failures the attempt was charged against them.
+
+It now asks. `nmconfig.MissingSecretHints` names the individual keys still
+needed and they go out as `SecretsRequired`'s hint list, which is strictly more
+than `NeedSecrets` can say: `NeedSecrets` answers with a *setting* name, so
+`"vpn"` is the most precise thing it is allowed to return and an agent receiving
+it has to guess which field to prompt for. The keys are the protocol's own
+option names, which the editor and auth-dialog already key their widgets on, so
+nothing translates between the hint and the box a person sees.
+
+`NewSecrets` completes the exchange, re-checking rather than trusting: if the
+answer still misses something it asks again, bounded at `maxSecretsRounds` (3 —
+enough for the two-secret protocols, cisco and l2tp, to be asked once per secret
+with one to spare), and then fails with `LoginFailed`. Not `ConnectFailed`:
+nothing was wrong with the network, the credential never arrived, and
+`LoginFailed` is what makes NM offer the prompt again next time rather than
+remember the connection as broken. A `NewSecrets` with nothing pending is
+refused — NM never sends one, and treating an unsolicited dict as a `Connect`
+would give any client on the bus a way to start a tunnel through a method that
+looks like it only updates one.
 
 ### Phase 2 progress
 
