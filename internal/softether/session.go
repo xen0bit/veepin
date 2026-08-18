@@ -1,13 +1,12 @@
 package softether
 
 import (
+	"bufio"
 	"crypto/rand"
-	"crypto/sha1"
 	"crypto/subtle"
 	"crypto/tls"
 	"encoding/binary"
 	"fmt"
-	"io"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -20,16 +19,36 @@ import (
 const (
 	DefaultPort = 443
 
-	// Frame length prefix: 4 bytes little-endian.
-	framePrefixLen = 4
+	// CLIENT_AUTHTYPE_PASSWORD, Cedar.h. The server switches on this to decide
+	// which credential it is being offered.
+	clientAuthTypePassword = 1
 
-	// Max receive size for a single PACK message.
-	maxPackSize = 512 * 1024
+	// CONNECTION_TCP, Cedar.h. The only transport this implements; the UDP
+	// acceleration path is not offered.
+	connectionTCP = 0
+
+	// The version and build this implementation reports, and the version and
+	// build a SoftEther peer must find acceptable. Real builds report their
+	// own; these are the smallest values the reference accepts without
+	// treating the peer as an ancient client needing compatibility shims.
+	protocolVersion = 400
+	protocolBuild   = 9799
+
+	// The identification strings each role sends. Named after the reference's
+	// ServerStr/ClientStr, and deliberately honest about what is on the other
+	// end rather than impersonating a SoftEther build -- a server operator
+	// reading a session list should see what actually connected.
+	serverStr = "veepin SoftEther-compatible Server"
+	clientStr = "veepin SoftEther-compatible Client"
+
+	// SESSION timeout advertised in the welcome PACK, in milliseconds.
+	sessionTimeoutMillis = 30000
 )
 
 // ServerSession holds state for one connected SoftEther client.
 type ServerSession struct {
 	conn   *tls.Conn
+	br     *bufio.Reader
 	srv    *Server
 	bridge *Bridge
 	port   PortID
@@ -43,7 +62,16 @@ type ServerSession struct {
 	assignedIP    net.IP
 
 	// Random challenge sent in the hello response.
-	random [20]byte
+	random [sha0Size]byte
+
+	// Session key, handed to the client in the welcome PACK. SoftEther uses
+	// it to bind additional connections to an existing session; this
+	// implementation accepts one connection per session, so it is generated,
+	// sent, and never consulted again. It is still random per session rather
+	// than a constant: a client that reconnects and is handed the same key
+	// would let a passive observer tie two sessions together.
+	sessionKey   [sha0Size]byte
+	sessionKey32 uint32
 
 	logf func(format string, args ...interface{})
 }
@@ -69,6 +97,16 @@ type Server struct {
 	sessionsMu sync.RWMutex
 	sessions   map[PortID]*ServerSession
 
+	// assigned tracks which addresses are out, so two clients are not handed
+	// the same one. SoftEther itself assigns no address -- the segment is
+	// layer 2 and addressing inside it comes from DHCP or static
+	// configuration -- so this exists only for veepin's own client, which asks
+	// for one. It is a sequential allocator over the gateway's /24 rather than
+	// anything cleverer because the alternative it replaces was the constant
+	// 10.70.0.2 for every client on the switch.
+	assignedMu sync.Mutex
+	assigned   map[PortID]net.IP
+
 	// local is the server's own interface as a switch port (local.go), or nil
 	// when nothing is attached. Guarded separately from sessions because
 	// deliver consults both, and one lock over two unrelated maps is how a
@@ -87,6 +125,7 @@ func NewServer(tlsCfg *tls.Config, bridge *Bridge, gatewayMAC MACAddr, gatewayIP
 		gatewayIP:   gatewayIP,
 		credentials: creds,
 		sessions:    make(map[PortID]*ServerSession),
+		assigned:    make(map[PortID]net.IP),
 		logf:        func(string, ...interface{}) {},
 	}
 }
@@ -108,6 +147,47 @@ func (s *Server) sessionFor(p PortID) *ServerSession {
 	s.sessionsMu.RLock()
 	defer s.sessionsMu.RUnlock()
 	return s.sessions[p]
+}
+
+// assignAddress hands out the next free address in the gateway's /24,
+// skipping the gateway itself. It returns nil when the pool is exhausted,
+// which the caller reports rather than papering over -- an address collision
+// between two clients on one layer-2 segment is worse than a refused login,
+// because it presents as intermittent packet loss for both of them.
+func (s *Server) assignAddress(port PortID) net.IP {
+	s.assignedMu.Lock()
+	defer s.assignedMu.Unlock()
+
+	if ip, ok := s.assigned[port]; ok {
+		return ip
+	}
+
+	base := s.gatewayIP.To4()
+	if base == nil {
+		return nil
+	}
+	taken := make(map[string]bool, len(s.assigned))
+	for _, ip := range s.assigned {
+		taken[ip.String()] = true
+	}
+
+	// .1 is conventionally the gateway and .255 is broadcast; start at .2.
+	for host := byte(2); host < 255; host++ {
+		candidate := net.IPv4(base[0], base[1], base[2], host)
+		if candidate.Equal(s.gatewayIP) || taken[candidate.String()] {
+			continue
+		}
+		s.assigned[port] = candidate
+		return candidate
+	}
+	return nil
+}
+
+// releaseAddress returns a port's address to the pool.
+func (s *Server) releaseAddress(port PortID) {
+	s.assignedMu.Lock()
+	delete(s.assigned, port)
+	s.assignedMu.Unlock()
 }
 
 // SingleUser is a CredentialLookup for the one-account case the CLI exposes.
@@ -159,6 +239,7 @@ func (s *Server) handleConn(raw net.Conn) {
 	port := s.bridge.NewPort()
 	ss := &ServerSession{
 		conn:   tlsConn,
+		br:     bufio.NewReader(tlsConn),
 		srv:    s,
 		bridge: s.bridge,
 		port:   port,
@@ -171,6 +252,12 @@ func (s *Server) handleConn(raw net.Conn) {
 		tlsConn.Close()
 		return
 	}
+	if _, err := rand.Read(ss.sessionKey[:]); err != nil {
+		s.logf("softether: session key generation failed: %v", err)
+		tlsConn.Close()
+		return
+	}
+	ss.sessionKey32 = binary.BigEndian.Uint32(ss.sessionKey[:4])
 
 	s.logf("softether: new connection from %s (port %d)", tlsConn.RemoteAddr(), port)
 
@@ -180,12 +267,21 @@ func (s *Server) handleConn(raw net.Conn) {
 	}
 
 	s.removeSession(port)
+	s.releaseAddress(port)
 	s.bridge.RemovePort(port)
 	tlsConn.Close()
 }
 
 // exchange runs the full control exchange and then forwards frames.
 func (ss *ServerSession) exchange() error {
+	// Phase 0: the HTTP signature. A SoftEther connection opens with an HTTP
+	// POST, not with a PACK -- see http.go. Anything that reaches this
+	// listener without it is a web client, a scanner, or a veepin from before
+	// this layer existed.
+	if err := readSignature(ss.br); err != nil {
+		return err
+	}
+
 	// Phase 1: Hello exchange.
 	if err := ss.helloExchange(); err != nil {
 		return err
@@ -207,23 +303,20 @@ func (ss *ServerSession) exchange() error {
 	return ss.frameLoop()
 }
 
+// helloExchange sends the server hello. There is no client hello to read: the
+// signature POST is the client's opening move, and ServerUploadHello answers
+// it directly. This package used to wait for a PACK{method=hello} that no
+// SoftEther client has ever sent, which is a deadlock against a real peer and
+// invisible against another veepin that dutifully sent one.
+//
+// The field names are GetHello's: "hello" carries the server's version string,
+// and the challenge is "random". Not "method", and not "ver".
 func (ss *ServerSession) helloExchange() error {
-	// Receive client hello.
-	req, err := ss.readPack()
-	if err != nil {
-		return fmt.Errorf("hello read: %w", err)
-	}
-	method := req.GetStr("method")
-	if method != "hello" {
-		return fmt.Errorf("expected hello method, got %q", method)
-	}
-
-	// Build hello response.
 	resp := NewPack()
-	resp.Add("method", TypeStr, StrValue("hello"))
+	resp.Add("hello", TypeStr, StrValue(serverStr))
+	resp.Add("version", TypeInt, IntValue(protocolVersion))
+	resp.Add("build", TypeInt, IntValue(protocolBuild))
 	resp.Add("random", TypeData, DataValue(ss.random[:]))
-	resp.Add("ver", TypeInt, IntValue(2))
-	resp.Add("build", TypeInt, IntValue(1))
 
 	return ss.writePack(resp)
 }
@@ -248,9 +341,11 @@ func (ss *ServerSession) authenticate() (bool, error) {
 	}
 
 	// Verify the challenge response: the client sent
-	// SHA1(SHA1(username+password) XOR random), and only someone who knows the
-	// password can produce it for our random. Comparing in constant time keeps
-	// the reply from leaking how much of the digest matched.
+	// SHA0(SHA0(password+UPPER(username)) || random), and only someone who
+	// knows the password can produce it for our random. See auth.go for why
+	// each of those three things is not what it looks like. Comparing in
+	// constant time keeps the reply from leaking how much of the digest
+	// matched.
 	if !ss.verifySecurePassword(securePassword) {
 		ss.logf("softether: login rejected for %q", ss.username)
 		resp := NewPack()
@@ -259,15 +354,31 @@ func (ss *ServerSession) authenticate() (bool, error) {
 		_ = ss.writePack(resp)
 		return false, nil
 	}
-	ss.assignedIP = net.ParseIP("10.70.0.2")
+	ss.assignedIP = ss.srv.assignAddress(ss.port)
 
-	// Send auth response.
+	// The welcome PACK. PackWelcome in the reference carries a great deal more
+	// than this -- UDP acceleration keys, R-UDP bulk keys, an Azure relay
+	// address -- all of it for features this implementation does not offer.
+	// What is here is the subset a client needs to bring a session up: its
+	// name, the session key, and the connection parameters it will not
+	// negotiate again.
+	//
+	// use_encrypt is 1 because the session is inside TLS. use_compress is 0
+	// and should stay 0: SoftEther's compression is zlib over
+	// attacker-influenced plaintext inside TLS, which is the CRIME/BREACH
+	// shape, and doc/security.md says so.
 	resp := NewPack()
-	resp.Add("method", TypeStr, StrValue("login"))
-	resp.Add("error", TypeInt, IntValue(0))
-	resp.Add("assigned_ip", TypeStr, StrValue(ss.assignedIP.String()))
-	resp.Add("hubname", TypeStr, StrValue(ss.hubName))
-	resp.Add("port", TypeInt, IntValue(uint32(ss.port)))
+	resp.Add("session_name", TypeStr, StrValue(fmt.Sprintf("SID-%s-%d", asciiUpper(ss.username), ss.port)))
+	resp.Add("connection_name", TypeStr, StrValue("CID-"+serverStr))
+	resp.Add("max_connection", TypeInt, IntValue(1))
+	resp.Add("use_encrypt", TypeInt, IntValue(1))
+	resp.Add("use_compress", TypeInt, IntValue(0))
+	resp.Add("half_connection", TypeInt, IntValue(0))
+	resp.Add("timeout", TypeInt, IntValue(sessionTimeoutMillis))
+	resp.Add("qos", TypeInt, IntValue(0))
+	resp.Add("session_key", TypeData, DataValue(ss.sessionKey[:]))
+	resp.Add("session_key_32", TypeInt, IntValue(ss.sessionKey32))
+	resp.Add("vlan_id", TypeInt, IntValue(0))
 
 	if err := ss.writePack(resp); err != nil {
 		return false, err
@@ -287,35 +398,19 @@ func (ss *ServerSession) verifySecurePassword(got []byte) bool {
 		// same time; otherwise the server enumerates its own accounts.
 		password = ""
 	}
-	hash := sha1.Sum([]byte(ss.username + password))
-	var xored [20]byte
-	for i := range hash {
-		xored[i] = hash[i] ^ ss.random[i]
-	}
-	want := sha1.Sum(xored[:])
+	want := securePassword(hashPassword(ss.username, password), ss.random)
 	return ok && subtle.ConstantTimeCompare(want[:], got) == 1
 }
 
 func (ss *ServerSession) frameLoop() error {
-	buf := make([]byte, MaxFrameSize+framePrefixLen)
+	r := newBlockReader(ss.br)
 	for {
-		// Read the 4-byte length prefix.
-		_, err := io.ReadFull(ss.conn, buf[:framePrefixLen])
+		raw, err := r.next()
 		if err != nil {
-			return fmt.Errorf("frame prefix: %w", err)
-		}
-		n := int(binary.LittleEndian.Uint32(buf[:framePrefixLen]))
-		if n < 0 || n > MaxFrameSize {
-			return fmt.Errorf("bad frame length %d", n)
+			return fmt.Errorf("frame read: %w", err)
 		}
 
-		// Read the Ethernet frame.
-		_, err = io.ReadFull(ss.conn, buf[:n])
-		if err != nil {
-			return fmt.Errorf("frame body: %w", err)
-		}
-
-		frame, ok := ParseFrame(buf[:n])
+		frame, ok := ParseFrame(raw)
 		if !ok {
 			continue
 		}
@@ -327,7 +422,7 @@ func (ss *ServerSession) frameLoop() error {
 		if dests == nil {
 			dests = ss.bridge.FloodPorts(ss.port)
 		}
-		ss.forwardTo(dests, buf[:n])
+		ss.forwardTo(dests, raw)
 	}
 }
 
@@ -341,66 +436,40 @@ func (ss *ServerSession) forwardTo(dests []PortID, frame []byte) {
 	ss.srv.deliver(dests, frame, ss.port)
 }
 
-// writeFrame sends an Ethernet frame with the 4-byte length prefix.
+// writeFrame sends one Ethernet frame as a single-block burst.
 func (ss *ServerSession) writeFrame(frame []byte) error {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
-
-	hdr := make([]byte, framePrefixLen)
-	binary.LittleEndian.PutUint32(hdr, uint32(len(frame)))
-	if _, err := ss.conn.Write(hdr); err != nil {
-		return err
-	}
-	_, err := ss.conn.Write(frame)
-	return err
+	return writeBlocks(ss.conn, [][]byte{frame})
 }
 
-// readPack reads a PACK message from the TLS connection.
+// readPack reads one PACK from the connection's next HTTP request.
 func (ss *ServerSession) readPack() (*Pack, error) {
-	// Read 4-byte length prefix.
-	var lenBuf [4]byte
-	if _, err := io.ReadFull(ss.conn, lenBuf[:]); err != nil {
-		return nil, err
-	}
-	n := binary.LittleEndian.Uint32(lenBuf[:])
-	if n > maxPackSize {
-		return nil, fmt.Errorf("PACK too large: %d", n)
-	}
-	buf := make([]byte, n)
-	if _, err := io.ReadFull(ss.conn, buf); err != nil {
-		return nil, err
-	}
-	return Decode(buf)
+	return recvPackHTTP(ss.br, true)
 }
 
-// writePack sends a PACK message with the 4-byte length prefix.
+// writePack sends a PACK as an HTTP response body.
 func (ss *ServerSession) writePack(p *Pack) error {
-	data, err := p.Encode()
-	if err != nil {
-		return err
-	}
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
-
-	hdr := make([]byte, framePrefixLen)
-	binary.LittleEndian.PutUint32(hdr, uint32(len(data)))
-	if _, err := ss.conn.Write(hdr); err != nil {
-		return err
-	}
-	_, err = ss.conn.Write(data)
-	return err
+	return sendPackHTTP(ss.conn, p, true, "")
 }
 
 // ClientSession is the SoftEther VPN client side.
 type ClientSession struct {
 	conn   *tls.Conn
+	br     *bufio.Reader
+	blocks *blockReader
+	host   string // Host: header value, as the reference sends the peer's IP
 	bridge *Bridge
 	port   PortID
 	mu     sync.Mutex
 
-	serverRandom [20]byte
+	serverRandom [sha0Size]byte
+	uniqueID     [sha0Size]byte
 	assignedIP   net.IP
 	hubName      string
+	sessionName  string
 
 	logf func(format string, args ...interface{})
 }
@@ -415,12 +484,34 @@ func Connect(serverAddr string, tlsCfg *tls.Config, username, password, hubName 
 	bridge := NewBridge(DefaultAgeTime)
 	port := bridge.NewPort()
 
+	host, _, err := net.SplitHostPort(serverAddr)
+	if err != nil {
+		host = serverAddr
+	}
+
 	cs := &ClientSession{
 		conn:    conn,
+		br:      bufio.NewReader(conn),
+		host:    host,
 		bridge:  bridge,
 		port:    port,
 		hubName: hubName,
 		logf:    func(string, ...interface{}) {},
+	}
+
+	// A per-connection unique_id. The reference derives one from the machine
+	// so a server can recognise a returning client; a random one per
+	// connection is deliberate here, because that recognition is a
+	// linkability property a VPN client should not volunteer.
+	if _, err := rand.Read(cs.uniqueID[:]); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("softether: unique id: %w", err)
+	}
+
+	// Phase 0: the signature POST that identifies this as a VPN connection.
+	if err := writeSignature(conn, host); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("softether: signature: %w", err)
 	}
 
 	// Phase 1: Hello.
@@ -438,46 +529,64 @@ func Connect(serverAddr string, tlsCfg *tls.Config, username, password, hubName 
 	return cs, nil
 }
 
+// hello reads the server's hello, which arrives unprompted as the response to
+// the signature POST. The client sends no hello of its own -- ClientUploadAuth2
+// goes straight from ClientDownloadHello to the login PACK.
 func (cs *ClientSession) hello() error {
-	req := NewPack()
-	req.Add("method", TypeStr, StrValue("hello"))
-	req.Add("ver", TypeInt, IntValue(2))
-	req.Add("build", TypeInt, IntValue(1))
-
-	if err := cs.writePack(req); err != nil {
-		return err
-	}
-
 	resp, err := cs.readPack()
 	if err != nil {
 		return fmt.Errorf("hello response: %w", err)
 	}
-	method := resp.GetStr("method")
-	if method != "hello" {
-		return fmt.Errorf("expected hello response, got %q", method)
+	if resp.GetStr("hello") == "" {
+		return fmt.Errorf("softether: no hello in the server's first PACK")
 	}
 
 	random := resp.GetData("random")
-	if len(random) == 20 {
-		copy(cs.serverRandom[:], random)
+	if len(random) != sha0Size {
+		return fmt.Errorf("softether: server challenge is %d octets, want %d", len(random), sha0Size)
 	}
+	copy(cs.serverRandom[:], random)
 	return nil
 }
 
 func (cs *ClientSession) login(username, password string) error {
-	// Compute secure password: SHA1(SHA1(username+password) XOR random)
-	hash := sha1.Sum([]byte(username + password))
-	var xored [20]byte
-	for i := range hash {
-		xored[i] = hash[i] ^ cs.serverRandom[i]
-	}
-	securePass := sha1.Sum(xored[:])
+	securePass := securePassword(hashPassword(username, password), cs.serverRandom)
 
+	// PackLoginWithPassword's field set, in its order. authtype is not
+	// optional: the server switches on it to decide which credential to look
+	// for, and a login without it is read as anonymous.
 	req := NewPack()
 	req.Add("method", TypeStr, StrValue("login"))
-	req.Add("username", TypeStr, StrValue(username))
 	req.Add("hubname", TypeStr, StrValue(cs.hubName))
+	req.Add("username", TypeStr, StrValue(username))
+	req.Add("authtype", TypeInt, IntValue(clientAuthTypePassword))
 	req.Add("secure_password", TypeData, DataValue(securePass[:]))
+	// The client identification the server logs and rate-limits on.
+	// PackAddClientVersion's three fields, and then the same three again under
+	// the names the hello half uses -- the reference sends both sets and the
+	// server reads from both, so sending one is sending half a login.
+	req.Add("client_str", TypeStr, StrValue(clientStr))
+	req.Add("client_ver", TypeInt, IntValue(protocolVersion))
+	req.Add("client_build", TypeInt, IntValue(protocolBuild))
+	req.Add("hello", TypeStr, StrValue(clientStr))
+	req.Add("version", TypeInt, IntValue(protocolVersion))
+	req.Add("build", TypeInt, IntValue(protocolBuild))
+	req.Add("client_id", TypeInt, IntValue(0))
+	req.Add("protocol", TypeInt, IntValue(connectionTCP))
+
+	// The session parameters. These are not decoration: the server builds the
+	// session from them, and a login that omits max_connection asks for a
+	// session with no connections in it -- which is granted, answered with a
+	// welcome, and then torn down before a single frame moves. That failure
+	// looks exactly like a data-path bug and is a login one.
+	req.Add("max_connection", TypeInt, IntValue(1))
+	req.Add("use_encrypt", TypeInt, IntValue(1))
+	req.Add("use_compress", TypeInt, IntValue(0))
+	req.Add("half_connection", TypeInt, IntValue(0))
+	req.Add("qos", TypeInt, IntValue(0))
+	req.Add("require_bridge_routing_mode", TypeInt, IntValue(0))
+	req.Add("require_monitor_mode", TypeInt, IntValue(0))
+	req.Add("unique_id", TypeData, DataValue(cs.uniqueID[:]))
 
 	if err := cs.writePack(req); err != nil {
 		return err
@@ -487,45 +596,53 @@ func (cs *ClientSession) login(username, password string) error {
 	if err != nil {
 		return fmt.Errorf("auth response: %w", err)
 	}
-	errorCode := resp.GetInt("error")
-	if errorCode != 0 {
-		return fmt.Errorf("server rejected auth: error %d", errorCode)
+	// The reference signals failure with an "error" element and success with a
+	// welcome PACK that has no such element. Checking only for error == 0
+	// would accept any PACK at all, including one from a peer that answered
+	// something else entirely.
+	if code := resp.GetInt("error"); code != 0 {
+		return fmt.Errorf("softether: server rejected the login: error %d", code)
+	}
+	if resp.GetStr("session_name") == "" {
+		return fmt.Errorf("softether: login answered without a welcome")
 	}
 
-	assignedStr := resp.GetStr("assigned_ip")
-	if assignedStr != "" {
-		cs.assignedIP = net.ParseIP(assignedStr)
+	cs.sessionName = resp.GetStr("session_name")
+	// assigned_ip is this implementation's own extension: SoftEther assigns no
+	// address in the protocol, because the segment is layer 2 and addressing
+	// comes from DHCP or static configuration inside it. A real server does
+	// not send this and the field stays nil, which is correct -- see
+	// softether.Dial, which does not depend on it.
+	if s := resp.GetStr("assigned_ip"); s != "" {
+		cs.assignedIP = net.ParseIP(s)
 	}
 	return nil
 }
 
-// WriteFrame sends an Ethernet frame to the server.
+// WriteFrame sends an Ethernet frame to the server as a single-block burst.
 func (cs *ClientSession) WriteFrame(frame []byte) error {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
-
-	hdr := make([]byte, framePrefixLen)
-	binary.LittleEndian.PutUint32(hdr, uint32(len(frame)))
-	if _, err := cs.conn.Write(hdr); err != nil {
-		return err
-	}
-	_, err := cs.conn.Write(frame)
-	return err
+	return writeBlocks(cs.conn, [][]byte{frame})
 }
 
-// ReadFrame reads an Ethernet frame from the server.
+// ReadFrame reads the next Ethernet frame from the server.
+//
+// The returned slice aliases the session's read buffer and is only valid until
+// the next call, matching every other inbound parser in the tree.
 func (cs *ClientSession) ReadFrame() ([]byte, error) {
-	var lenBuf [4]byte
-	if _, err := io.ReadFull(cs.conn, lenBuf[:]); err != nil {
-		return nil, err
+	if cs.blocks == nil {
+		cs.blocks = newBlockReader(cs.br)
 	}
-	n := binary.LittleEndian.Uint32(lenBuf[:])
-	if n > MaxFrameSize {
-		return nil, fmt.Errorf("frame too large: %d", n)
-	}
-	buf := make([]byte, n)
-	_, err := io.ReadFull(cs.conn, buf)
-	return buf, err
+	return cs.blocks.next()
+}
+
+// WriteKeepAlive sends a keepalive block. The data path is otherwise silent
+// when nothing is flowing, and a SoftEther server times a session out.
+func (cs *ClientSession) WriteKeepAlive() error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return writeKeepAlive(cs.conn)
 }
 
 // Close closes the client session.
@@ -533,36 +650,14 @@ func (cs *ClientSession) Close() error {
 	return cs.conn.Close()
 }
 
-// readPack reads a PACK from the connection.
+// readPack reads one PACK from the connection's next HTTP response.
 func (cs *ClientSession) readPack() (*Pack, error) {
-	var lenBuf [4]byte
-	if _, err := io.ReadFull(cs.conn, lenBuf[:]); err != nil {
-		return nil, err
-	}
-	n := binary.LittleEndian.Uint32(lenBuf[:])
-	if n > maxPackSize {
-		return nil, fmt.Errorf("PACK too large: %d", n)
-	}
-	buf := make([]byte, n)
-	if _, err := io.ReadFull(cs.conn, buf); err != nil {
-		return nil, err
-	}
-	return Decode(buf)
+	return recvPackHTTP(cs.br, false)
 }
 
-// writePack sends a PACK.
+// writePack sends a PACK as the body of an HTTP POST.
 func (cs *ClientSession) writePack(p *Pack) error {
-	data, err := p.Encode()
-	if err != nil {
-		return err
-	}
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
-	hdr := make([]byte, framePrefixLen)
-	binary.LittleEndian.PutUint32(hdr, uint32(len(data)))
-	if _, err := cs.conn.Write(hdr); err != nil {
-		return err
-	}
-	_, err = cs.conn.Write(data)
-	return err
+	return sendPackHTTP(cs.conn, p, false, cs.host)
 }

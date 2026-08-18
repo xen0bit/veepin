@@ -3,11 +3,17 @@
 // serialisation called "PACK" for control messages, and raw Ethernet frames for
 // data.
 //
-// PACK format (SoftEtherVPN/src/Mayaqua/Pack.c):
-//   - Little-endian integers throughout.
+// PACK format, from SoftEtherVPN/src/Mayaqua/Pack.c (WritePack, WriteElement,
+// WriteValue) and src/Mayaqua/Memory.c (WriteBufInt, WriteBufStr):
+//
+//   - **Big-endian integers throughout.** Every integer goes through
+//     WriteBufInt/ReadBufInt, which call Endian32, which byte-swaps on a
+//     little-endian host -- so the wire is network order. This package had it
+//     little-endian in both directions for as long as it existed, which two
+//     veepin endpoints agree on perfectly and no SoftEther server does.
 //   - Header: element-count uint32, then that many ELEMENTs.
 //   - ELEMENT:
-//     name:   NUL-terminated ASCII (max 63 chars + NUL).
+//     name:   uint32 length-PLUS-ONE, then length bytes of ASCII, no NUL.
 //     type:   uint32 (0=INT, 1=DATA, 2=STR, 3=UNISTR, 4=INT64).
 //     count:  uint32 (number of values).
 //     values: count × VALUE, each depending on type.
@@ -15,14 +21,22 @@
 //     INT:    uint32 (4 bytes).
 //     INT64:  uint64 (8 bytes).
 //     DATA:   length uint32, then length bytes of raw data.
-//     STR:    length uint32, then length bytes of ASCII.
-//     UNISTR: length uint32, then length bytes of UTF-8.
+//     STR:    length uint32, then length bytes of ASCII, no NUL.
+//     UNISTR: length uint32 counting a NUL, then that many bytes of UTF-8
+//     with the NUL included.
 //
-// Data frames are raw Ethernet frames (no PACK wrapping), read from / written
-// to a TAP device.
+// The three string encodings disagree with each other and each one is right:
+// a name counts a terminator it does not send, a STR neither counts nor sends
+// one, and a UNISTR does both. That is not a summary anyone would arrive at
+// without reading WriteBufStr and WriteValue side by side.
+//
+// Control PACKs do not sit on the connection directly -- each one is the body
+// of an HTTP message (see http.go), and the data path that follows them has
+// its own framing (see frame.go). A PACK is only ever the payload.
 package softether
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -117,6 +131,20 @@ func (p *Pack) GetStr(name string) string {
 	return ""
 }
 
+// GetUniStr returns the Unicode-string value of a named element, or "".
+//
+// Separate from GetStr because the two are distinct types on the wire and a
+// peer picks one per field: SoftEther sends the hub and user names as STR and
+// the human-facing text (a server's own description, a disconnect reason) as
+// UNISTR. Asking for the wrong one returns "" rather than converting, so a
+// caller that guesses gets an empty string instead of silently working.
+func (p *Pack) GetUniStr(name string) string {
+	if e := p.Get(name); e != nil && e.Type == TypeUniStr && len(e.Values) > 0 {
+		return e.Values[0].UniStr
+	}
+	return ""
+}
+
 // GetData returns the data value of a named element, or nil.
 func (p *Pack) GetData(name string) []byte {
 	if e := p.Get(name); e != nil && e.Type == TypeData && len(e.Values) > 0 {
@@ -134,7 +162,7 @@ func (p *Pack) Encode() ([]byte, error) {
 	// Each element: name (up to 65), type(4), count(4) + values.
 	size := 4
 	for _, e := range p.elems {
-		size += len(e.Name) + 1 + 4 + 4 // name+NUL + type + count
+		size += 4 + len(e.Name) + 4 + 4 // name length+body + type + count
 		for _, v := range e.Values {
 			size += valueWireSize(e.Type, v)
 		}
@@ -143,15 +171,14 @@ func (p *Pack) Encode() ([]byte, error) {
 		return nil, ErrValueTooLarge
 	}
 	b := make([]byte, 0, size)
-	b = binary.LittleEndian.AppendUint32(b, uint32(len(p.elems)))
+	b = binary.BigEndian.AppendUint32(b, uint32(len(p.elems)))
 	for _, e := range p.elems {
 		if len(e.Name) > MaxElementNameLen {
 			return nil, ErrNameTooLong
 		}
-		b = append(b, e.Name...)
-		b = append(b, 0) // NUL terminator
-		b = binary.LittleEndian.AppendUint32(b, uint32(e.Type))
-		b = binary.LittleEndian.AppendUint32(b, uint32(len(e.Values)))
+		b = appendName(b, e.Name)
+		b = binary.BigEndian.AppendUint32(b, uint32(e.Type))
+		b = binary.BigEndian.AppendUint32(b, uint32(len(e.Values)))
 		for _, v := range e.Values {
 			var err error
 			b, err = appendValue(b, e.Type, v)
@@ -171,7 +198,7 @@ func Decode(buf []byte) (*Pack, error) {
 	if len(buf) < 4 {
 		return nil, ErrTruncated
 	}
-	count := binary.LittleEndian.Uint32(buf)
+	count := binary.BigEndian.Uint32(buf)
 	buf = buf[4:]
 	if count > MaxElementNum {
 		return nil, ErrTooManyElements
@@ -189,17 +216,17 @@ func Decode(buf []byte) (*Pack, error) {
 }
 
 func decodeElement(buf *[]byte) (Element, error) {
-	// Name: NUL-terminated ASCII.
-	name, err := readCString(buf)
+	// Name: a length that counts a NUL which is never sent. See readName.
+	name, err := readName(buf)
 	if err != nil {
 		return Element{}, err
 	}
 	if len(*buf) < 8 {
 		return Element{}, ErrTruncated
 	}
-	typ := binary.LittleEndian.Uint32((*buf)[:4])
+	typ := binary.BigEndian.Uint32((*buf)[:4])
 	*buf = (*buf)[4:]
-	nv := binary.LittleEndian.Uint32((*buf)[:4])
+	nv := binary.BigEndian.Uint32((*buf)[:4])
 	*buf = (*buf)[4:]
 
 	if nv > MaxValueNum {
@@ -223,7 +250,7 @@ func decodeValue(buf *[]byte, typ int) (Value, error) {
 		if len(*buf) < 4 {
 			return Value{}, ErrTruncated
 		}
-		v := binary.LittleEndian.Uint32((*buf)[:4])
+		v := binary.BigEndian.Uint32((*buf)[:4])
 		*buf = (*buf)[4:]
 		return Value{Int: v}, nil
 
@@ -231,7 +258,7 @@ func decodeValue(buf *[]byte, typ int) (Value, error) {
 		if len(*buf) < 8 {
 			return Value{}, ErrTruncated
 		}
-		v := binary.LittleEndian.Uint64((*buf)[:8])
+		v := binary.BigEndian.Uint64((*buf)[:8])
 		*buf = (*buf)[8:]
 		return Value{Int64: v}, nil
 
@@ -239,7 +266,7 @@ func decodeValue(buf *[]byte, typ int) (Value, error) {
 		if len(*buf) < 4 {
 			return Value{}, ErrTruncated
 		}
-		sz := binary.LittleEndian.Uint32((*buf)[:4])
+		sz := binary.BigEndian.Uint32((*buf)[:4])
 		*buf = (*buf)[4:]
 		if sz > MaxValueSize {
 			return Value{}, ErrValueTooLarge
@@ -256,7 +283,7 @@ func decodeValue(buf *[]byte, typ int) (Value, error) {
 		if len(*buf) < 4 {
 			return Value{}, ErrTruncated
 		}
-		sz := binary.LittleEndian.Uint32((*buf)[:4])
+		sz := binary.BigEndian.Uint32((*buf)[:4])
 		*buf = (*buf)[4:]
 		if sz > MaxValueSize {
 			return Value{}, ErrValueTooLarge
@@ -272,7 +299,7 @@ func decodeValue(buf *[]byte, typ int) (Value, error) {
 		if len(*buf) < 4 {
 			return Value{}, ErrTruncated
 		}
-		sz := binary.LittleEndian.Uint32((*buf)[:4])
+		sz := binary.BigEndian.Uint32((*buf)[:4])
 		*buf = (*buf)[4:]
 		if sz > MaxValueSize {
 			return Value{}, ErrValueTooLarge
@@ -280,9 +307,13 @@ func decodeValue(buf *[]byte, typ int) (Value, error) {
 		if uint32(len(*buf)) < sz {
 			return Value{}, ErrTruncated
 		}
-		s := string((*buf)[:sz])
+		body := (*buf)[:sz]
 		*buf = (*buf)[sz:]
-		return Value{UniStr: s}, nil
+		// Trim the terminator the encoder counted and sent. A peer that sends
+		// a bare length with no NUL still parses; keeping it would put a stray
+		// 0x00 inside every string this side compares.
+		body = bytes.TrimSuffix(body, []byte{0})
+		return Value{UniStr: string(body)}, nil
 
 	default:
 		return Value{}, fmt.Errorf("%w: %d", ErrUnknownType, typ)
@@ -300,7 +331,7 @@ func valueWireSize(typ int, v Value) int {
 	case TypeStr:
 		return 4 + len(v.Str)
 	case TypeUniStr:
-		return 4 + len(v.UniStr)
+		return 4 + len(v.UniStr) + 1 // + the NUL this one carries
 	default:
 		return 0
 	}
@@ -309,46 +340,70 @@ func valueWireSize(typ int, v Value) int {
 func appendValue(b []byte, typ int, v Value) ([]byte, error) {
 	switch typ {
 	case TypeInt:
-		return binary.LittleEndian.AppendUint32(b, v.Int), nil
+		return binary.BigEndian.AppendUint32(b, v.Int), nil
 	case TypeInt64:
-		return binary.LittleEndian.AppendUint64(b, v.Int64), nil
+		return binary.BigEndian.AppendUint64(b, v.Int64), nil
 	case TypeData:
 		if uint32(len(v.Data)) > MaxValueSize {
 			return nil, ErrValueTooLarge
 		}
-		b = binary.LittleEndian.AppendUint32(b, uint32(len(v.Data)))
+		b = binary.BigEndian.AppendUint32(b, uint32(len(v.Data)))
 		return append(b, v.Data...), nil
 	case TypeStr:
 		if len(v.Str) > MaxValueSize {
 			return nil, ErrValueTooLarge
 		}
-		b = binary.LittleEndian.AppendUint32(b, uint32(len(v.Str)))
+		b = binary.BigEndian.AppendUint32(b, uint32(len(v.Str)))
 		return append(b, v.Str...), nil
 	case TypeUniStr:
-		// Unicode strings are stored as UTF-8 on wire.
+		// UTF-8 on the wire, and the one string here that DOES carry its NUL:
+		// WriteValue writes CalcUniToUtf8()+1 octets and the terminator with
+		// them, where VALUE_STR just above writes the length and no NUL. Three
+		// string encodings in one format, all different -- element names count
+		// a NUL they omit, STR omits both, UNISTR counts and sends one.
 		utf8 := v.UniStr
-		if uint32(len(utf8)) > MaxValueSize {
+		if uint32(len(utf8))+1 > MaxValueSize {
 			return nil, ErrValueTooLarge
 		}
-		b = binary.LittleEndian.AppendUint32(b, uint32(len(utf8)))
-		return append(b, utf8...), nil
+		b = binary.BigEndian.AppendUint32(b, uint32(len(utf8))+1)
+		b = append(b, utf8...)
+		return append(b, 0), nil
 	default:
 		return nil, fmt.Errorf("%w: %d", ErrUnknownType, typ)
 	}
 }
 
-func readCString(buf *[]byte) (string, error) {
-	for i := range *buf {
-		if (*buf)[i] == 0 {
-			s := string((*buf)[:i])
-			*buf = (*buf)[i+1:]
-			if len(s) > MaxElementNameLen {
-				return "", ErrNameTooLong
-			}
-			return s, nil
-		}
+// appendName writes an element name the way WriteBufStr does: a uint32 length
+// that is the string length PLUS ONE, then the string body WITHOUT the NUL the
+// extra octet accounts for. The count and the bytes that follow it disagree by
+// one, deliberately, and both ends have to make the same allowance.
+func appendName(b []byte, name string) []byte {
+	b = binary.BigEndian.AppendUint32(b, uint32(len(name))+1)
+	return append(b, name...)
+}
+
+// readName is appendName's inverse. A zero length is refused rather than
+// wrapping to 0xffffffff on the decrement -- ReadBufStr rejects it too, and it
+// is the first thing a fuzzer finds.
+func readName(buf *[]byte) (string, error) {
+	if len(*buf) < 4 {
+		return "", ErrTruncated
 	}
-	return "", ErrTruncated
+	n := binary.BigEndian.Uint32((*buf)[:4])
+	*buf = (*buf)[4:]
+	if n == 0 {
+		return "", ErrTruncated
+	}
+	n-- // the NUL that is counted and not sent
+	if n > MaxElementNameLen {
+		return "", ErrNameTooLong
+	}
+	if uint32(len(*buf)) < n {
+		return "", ErrTruncated
+	}
+	s := string((*buf)[:n])
+	*buf = (*buf)[n:]
+	return s, nil
 }
 
 // IntValue returns a Value containing a uint32.
