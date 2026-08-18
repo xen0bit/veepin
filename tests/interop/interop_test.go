@@ -805,6 +805,26 @@ func TestInteropNebulaHostVeepinLighthouse(t *testing.T) {
 // for each other, so the ping to 10.42.0.3 can only cross if one queries the
 // lighthouse, the lighthouse answers and nudges the other to punch, and the two
 // then handshake directly. It isolates a veepin break from an interop break.
+// TestInteropNebulaRelay proves the relay fallback: two hosts whose direct UDP
+// path is dropped by iptables, reaching each other through the lighthouse.
+//
+// It uses runInteropRequiringLog rather than a bare ping, and that is the point
+// of the cell rather than a detail of it. A ping across a working direct path
+// and a ping across a working relay are indistinguishable from outside, so a
+// cell that only pinged would pass just as happily if the iptables rules had
+// not taken effect and the relay code had never run. The log lines require both
+// halves of the negotiation to have actually happened: the middle host agreeing
+// to forward, and the end host recording the relay as established.
+//
+// This is the same discipline that caught the Pulse ESP keying bug, where a
+// silent fallback to the TLS tunnel was passing a bare ping while the ESP path
+// -- the thing under test -- was broken at both ends.
+func TestInteropNebulaRelay(t *testing.T) {
+	runInteropRequiringLogFrom(t, "compose.nebula-relay.yml",
+		"veepin-host-b", "veepin-lighthouse", "10.42.0.3",
+		"relaying for 10.42.0.2 to 10.42.0.3")
+}
+
 func TestInteropNebulaSelf(t *testing.T) {
 	runInteropBench(t, "compose.nebula-self.yml", "veepin-host-b", "veepin-host-c", "10.42.0.3")
 }

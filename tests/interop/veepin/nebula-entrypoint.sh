@@ -32,6 +32,30 @@ static_flag=""
 if [ -n "${STATIC_HOSTS:-}" ]; then
     static_flag="-static-hosts ${STATIC_HOSTS}"
 fi
+relays_flag=""
+if [ -n "${RELAYS:-}" ]; then
+    relays_flag="-relays ${RELAYS}"
+fi
+relay_for_flag=""
+if [ "${RELAY_FOR:-false}" = "true" ]; then
+    relay_for_flag="-relay-for"
+fi
+
+# Block the direct path to a named peer, so a relay is the only way through.
+#
+# Dropping rather than rejecting is deliberate: an ICMP unreachable would tell
+# the sender at once, and what a real symmetric NAT does is swallow the packet.
+# The cell is meant to reproduce the situation relays exist for, not a
+# convenient version of it.
+if [ -n "${BLOCK_DIRECT:-}" ]; then
+    for host in ${BLOCK_DIRECT}; do
+        for ip in $(getent ahostsv4 "$host" | awk '{print $1}' | sort -u); do
+            iptables -A INPUT -s "$ip" -p udp -j DROP
+            iptables -A OUTPUT -d "$ip" -p udp -j DROP
+            echo "veepin-nebula: blocked direct UDP with $host ($ip)"
+        done
+    done
+fi
 
 echo "veepin-nebula: starting ${NAME} (lighthouse=${AM_LIGHTHOUSE:-false})"
 
@@ -46,6 +70,8 @@ while [ "$i" -le 30 ]; do
         $static_flag \
         $lighthouse_flag \
         $am_lighthouse_flag \
+        $relays_flag \
+        $relay_for_flag \
         -tun nebula1 \
         -full-tunnel=false
     echo "veepin-nebula: attempt $i ended; retrying in 2s"

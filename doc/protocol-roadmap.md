@@ -18,7 +18,7 @@ least interesting.
 |---|---|---|---|---|---|
 | 1 | **L2TPv3 Ethernet pseudowire** (RFC 3931 + 4719) *(landed — static)* | **New row** | **Layer 2**, actually delivered — the gap SoftEther left open | Medium-high | **Yes** — the Linux kernel, both directions |
 | 2 | **IP-TFS / AGGFRAG** (RFC 9347) *(partly landed)* | IKEv2 option | **Constant-rate traffic-flow confidentiality** — shapes packet *counts and timing*, which `dataplane/shape.go` explicitly does not | Medium | Partly — strongSwan 6.0.2+ does aggregation; **nobody open-source does the constant-rate half** |
-| 3 | **Nebula relays** | Nebula option | Relay fallback when hole punching fails | Low | Yes — `nebula`, already pinned and green |
+| 3 | **Nebula relays** *(landed)* | Nebula option | Relay fallback when hole punching fails | Low | Yes — `nebula`, already pinned and green |
 | 4 | **RFC 9329** (TCP encapsulation of IKE and IPsec) | IKEv2 option | IPsec through a UDP-hostile network; brings **libreswan** in as a new peer | Low | Yes — libreswan 4.0+, both roles |
 | 5 | **Rosenpass** | WireGuard option | PQ handshake feeding WireGuard's PSK | Medium | Yes — Rust reference implementation |
 | 6 | Juniper NC / Array / F5 | New rows | Nothing structural | Low | Client only |
@@ -28,8 +28,10 @@ least interesting.
 adding a sibling beside it, and its interop peer is the Linux kernel — no daemon,
 no vendor binary, no version to pin, nothing that can rot.
 
-**Best return on effort: Nebula relays.** ~600–800 LOC to close a gap the tree
-already admits in writing, against a peer already in the harness.
+**Best return on effort: Nebula relays** *(landed)*. ~600–800 LOC to close a gap
+the tree already admits in writing, against a peer already in the harness. The
+estimate was right; what it did not predict is that three of the four bugs
+would be invisible to everything except a cell with the direct path blocked.
 
 **Most interesting: IP-TFS.** It is the only candidate where veepin can implement
 *more* than the reference implementation does and still have a peer for the
@@ -417,7 +419,13 @@ and deliberately** — no mechanical guard will remind you.
 
 ---
 
-# 3. Nebula relays — a Nebula option
+# 3. Nebula relays — a Nebula option *(landed)*
+
+> **Landed.** `-relays` names hosts that may carry for us, `-relay-for` agrees
+> to carry for others, and `compose.nebula-relay.yml` proves it with the direct
+> UDP path between two hosts dropped by iptables. The estimate below was
+> roughly right on size and wrong about the shape — see
+> [What it actually cost](#nebula-relays-what-it-cost).
 
 ## The cheapest useful thing on this page
 
@@ -449,6 +457,41 @@ No count change, so again the docs move by hand: the README's Nebula row gains a
 note, `internal/nebula/README.md`'s caveats section loses the relay sentence,
 and `lighthouse.go:20` is **amended rather than deleted** — multi-lighthouse
 consensus stays unimplemented and should keep saying so.
+
+<a id="nebula-relays-what-it-cost"></a>
+
+## What it actually cost
+
+The size estimate held: ~700 lines across `relay.go`, `relay_host.go`, the
+tunnel's relay seal/open, and the lighthouse's advertisement field. The shape
+was wrong in three ways, each found by the interop cell and none visible to a
+unit test.
+
+- **"Forwarding on the relay's own data path" understates it: the handshake has
+  to be relayed too.** The payload a relay forwards is encrypted end to end, so
+  the exchange that agrees those keys must itself cross the relay. The first
+  version relayed only data and deadlocked — the relay was never used, because
+  the tunnel it would carry never came up.
+- **The middle host propagates the request; it does not merely agree.** When A
+  asks R to relay to B, R sends its own `CreateRelayRequest` to B on A's
+  behalf, and only B's answer completes the pair. The first version created a
+  half-entry and waited for B to ask independently, which B has no reason to do
+  — so the negotiation completed on A's side, R agreed, and every packet was
+  then dropped at R. Both visible ends looked healthy.
+- **A relay's address must never be recorded as the peer's own.** A relayed
+  handshake arrives from the relay's socket; recording it as where the peer
+  lives makes every later packet a plain datagram to the relay, which the
+  socket accepts and the relay drops. Fixing that introduced a self-deadlock —
+  the check locked the peer it was called under, which for a host handshaking
+  with its own relay is the same lock — whose symptom was no error at all, just
+  a tunnel that never came up and a log line that never printed.
+
+The cell earned its keep exactly as [the interop
+section](../AGENTS.md#the-interop-matrix-earns-its-keep) says it should, and
+the assertion that made it useful was the log line rather than the ping: a ping
+over a working direct path and a ping over a working relay are
+indistinguishable, so `runInteropRequiringLog` is what makes the cell mean
+anything.
 
 ---
 

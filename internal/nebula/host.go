@@ -23,6 +23,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"slices"
 	"sync"
 	"time"
 
@@ -95,6 +96,19 @@ type Config struct {
 	Lighthouses []netip.Addr
 	// AmLighthouse makes this host answer such queries.
 	AmLighthouse bool
+	// Relays are the overlay addresses of hosts this one is willing to be
+	// reached through when a direct path cannot be built. They are advertised
+	// to lighthouses so a peer that cannot reach us directly knows what to
+	// ask. Naming a relay does not make traffic go through it -- a direct path
+	// is always tried first, and a relay is only used once the direct one has
+	// demonstrably failed.
+	Relays []netip.Addr
+	// RelayFor makes this host willing to forward for others. It is off by
+	// default and deliberately separate from Relays: agreeing to carry other
+	// people's traffic is a decision about this host's bandwidth and about
+	// what its operator is willing to see (a relay learns who talks to whom),
+	// not something to be inferred from wanting a relay oneself.
+	RelayFor bool
 	// Logger receives operational messages.
 	Logger Logger
 	// Gate bounds how much unauthenticated work this host accepts. Nil installs
@@ -125,6 +139,10 @@ type peer struct {
 	// underlay are the addresses this peer is reachable at, most recently
 	// confirmed first.
 	underlay []netip.AddrPort
+	// relayVia are overlay addresses this peer says will relay for it, as
+	// reported to or by a lighthouse. Claimed, never observed -- see
+	// recordUpdate.
+	relayVia []netip.Addr
 	// tun is the established tunnel, nil until a handshake completes.
 	tun *tunnel
 	// pending is an in-flight handshake this host initiated.
@@ -149,6 +167,10 @@ type Host struct {
 	byAddr  map[netip.Addr]*peer
 	byIndex map[uint32]*tunnel
 	closed  bool
+
+	// relays carries the relay entries this host holds, in any of the three
+	// roles a host can play in one. See relay.go.
+	relays *relayTable
 
 	// lighthouses are resolved at start from the configured overlay addresses.
 	lighthouses []netip.Addr
@@ -189,6 +211,7 @@ func NewHost(cfg *Config, conn packetConn, tun io.ReadWriteCloser) (*Host, error
 		gate:        gate,
 		byAddr:      map[netip.Addr]*peer{},
 		byIndex:     map[uint32]*tunnel{},
+		relays:      newRelayTable(),
 		lighthouses: append([]netip.Addr(nil), cfg.Lighthouses...),
 		done:        make(chan struct{}),
 	}
@@ -200,6 +223,14 @@ func NewHost(cfg *Config, conn packetConn, tun io.ReadWriteCloser) (*Host, error
 		p.mu.Unlock()
 	}
 	return h, nil
+}
+
+// tunnelFor resolves an established tunnel by the index we chose for it.
+func (h *Host) tunnelFor(localIndex uint32) (*tunnel, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	t, ok := h.byIndex[localIndex]
+	return t, ok
 }
 
 // Addr returns this host's overlay address.
@@ -305,6 +336,11 @@ func (h *Host) expireTunnels() {
 			}
 			p.mu.Unlock()
 		}
+		// Any relay this host was part of goes with it. A relay entry outlives
+		// the tunnel that authenticates its hop, so keeping one means offering
+		// the data path a path that cannot carry anything, and holding an
+		// index the peer will have forgotten by the time it comes back.
+		h.relays.forget(t.PeerAddr())
 		h.log.Printf("nebula: tunnel with %v idle for %v; dropped", t.PeerAddr(), tunnelIdleTimeout)
 	}
 }
@@ -411,7 +447,35 @@ func (h *Host) sendPacket(pkt []byte) error {
 	}
 
 	out := t.encrypt(typeMessage, subTypeNone, pkt)
-	return h.sendToPeer(p, out)
+
+	// The direct path first, always. A relay is a fallback and never a
+	// preference: it costs a hop, it costs the relay's bandwidth, and it tells
+	// the relay who is talking to whom.
+	//
+	// Any failure is enough to reach for the relay, not only "no route". A
+	// blocked path -- which is the case relays exist for -- surfaces as
+	// EPERM or EHOSTUNREACH from the socket rather than as an empty address
+	// list, so keying the fallback on ErrNoRoute alone would leave the relay
+	// unused in exactly the situation it was built for.
+	directErr := h.sendToPeer(p, out)
+	if directErr == nil {
+		return nil
+	}
+
+	if r, ok := h.relays.terminalFor(dst); ok {
+		return h.sendRelayed(r, out)
+	}
+	h.tryRelays(dst)
+	return fmt.Errorf("nebula: %v unreachable directly (%w) and no relay is up yet", dst, directErr)
+}
+
+// tryRelays asks each configured relay to carry traffic for dst.
+func (h *Host) tryRelays(dst netip.Addr) {
+	for _, via := range h.cfg.Relays {
+		if err := h.requestRelay(via, dst); err != nil {
+			h.log.Printf("nebula: relay %v for %v: %v", via, dst, err)
+		}
+	}
 }
 
 // sendToPeer writes a datagram to the peer's best known underlay address.
@@ -465,14 +529,63 @@ func (h *Host) beginHandshake(p *peer) {
 
 	if len(addrs) == 0 {
 		h.queryLighthouses(p.addr)
-		return
 	}
 	// Probe every candidate: with hole punching, only one may work, and which
 	// one is not knowable in advance.
+	direct := false
 	for _, a := range addrs {
 		if _, err := h.conn.WriteToUDPAddrPort(msg, a); err != nil {
 			h.log.Printf("nebula: sending handshake to %v: %v", a, err)
+			continue
 		}
+		direct = true
+	}
+
+	// And through any relay, in parallel rather than after a timeout.
+	//
+	// The handshake itself has to be relayable, not just the traffic that
+	// follows it: the payload a relay forwards is encrypted end to end under
+	// keys the two ends agree with each other, so if the exchange that agrees
+	// them cannot cross, neither can anything else. Relaying only data was the
+	// first shape this took and it deadlocks -- the relay is never used
+	// because the tunnel it would carry never comes up.
+	//
+	// Both paths run every attempt. A direct path that is merely slow should
+	// still win, and it does: whichever handshake response arrives first
+	// completes the tunnel, and Host.install resolves the collision if both do.
+	h.relayHandshake(p.addr, msg, direct)
+}
+
+// relayHandshake drives the relay half of a handshake attempt: ask each
+// configured relay to carry for this peer, and send the pending stage-0
+// message through any relay that has already agreed.
+func (h *Host) relayHandshake(target netip.Addr, msg []byte, haveDirect bool) {
+	if len(h.cfg.Relays) == 0 {
+		return
+	}
+	for _, via := range h.cfg.Relays {
+		if via == target || via == h.addr {
+			continue
+		}
+		r, ok := h.relays.lookup(via, target)
+		if !ok {
+			if err := h.requestRelay(via, target); err != nil && !haveDirect {
+				h.log.Printf("nebula: relay %v for %v: %v", via, target, err)
+			}
+			continue
+		}
+		if r.state != relayEstablished {
+			// The request is outstanding. Re-send it rather than waiting: a
+			// control message is not retransmitted by anything else, and the
+			// relay has no way to know we are still interested.
+			h.resendRelayRequest(via, r)
+			continue
+		}
+		if err := h.sendRelayed(r, msg); err != nil {
+			h.log.Printf("nebula: relaying handshake to %v via %v: %v", target, via, err)
+			continue
+		}
+		h.log.Printf("nebula: sent handshake to %v via relay %v", target, via)
 	}
 }
 
@@ -544,6 +657,13 @@ func (h *Host) handleDatagram(pkt []byte, from netip.AddrPort) {
 	}
 
 	if hdr.Type == typeMessage {
+		if hdr.Subtype == subTypeRelay {
+			// Demultiplexed against the relay table rather than the tunnel
+			// table, on an index from a different namespace. Kept on the
+			// allocation-free path with the ordinary messages it is carrying.
+			h.handleRelayMessage(pkt, hdr, from)
+			return
+		}
 		h.handleMessage(pkt, hdr, from)
 		return
 	}
@@ -555,6 +675,8 @@ func (h *Host) handleDatagram(pkt []byte, from netip.AddrPort) {
 		h.handleLighthouse(pkt, hdr, from)
 	case typeTest:
 		h.handleTest(pkt, hdr, from)
+	case typeControl:
+		h.handleControl(pkt, hdr, from)
 	case typeCloseTunnel:
 		h.handleClose(pkt, hdr)
 	default:
@@ -583,7 +705,18 @@ func (h *Host) handleHandshake(pkt []byte, hdr header, from netip.AddrPort) {
 			h.log.Printf("nebula: handshake from %v rejected: %v", from, err)
 			return
 		}
-		if _, err := h.conn.WriteToUDPAddrPort(reply, from); err != nil {
+		// The reply retraces the path the request took. A handshake that
+		// arrived through a relay must be answered through it: `from` is the
+		// relay's own underlay address, and a datagram sent there plainly
+		// reaches the relay as ordinary traffic addressed to nothing it holds,
+		// so it is dropped and the exchange stalls with the initiator
+		// retrying forever.
+		if r, ok := h.relays.terminalFor(t.PeerAddr()); ok {
+			if err := h.sendRelayed(r, reply); err != nil {
+				h.log.Printf("nebula: relaying handshake reply to %v: %v", t.PeerAddr(), err)
+				return
+			}
+		} else if _, err := h.conn.WriteToUDPAddrPort(reply, from); err != nil {
 			h.log.Printf("nebula: replying to handshake from %v: %v", from, err)
 			return
 		}
@@ -648,6 +781,14 @@ func (h *Host) peerAwaiting(localIndex uint32) (*peer, bool) {
 func (h *Host) install(t *tunnel, from netip.AddrPort) {
 	p := h.peerFor(t.PeerAddr())
 
+	// Computed before p.mu is taken. isRelayUnderlay locks the relay peers it
+	// consults, and when the peer being installed IS a relay -- the ordinary
+	// case, since a host handshakes with its relay first -- that is the same
+	// lock, and taking it twice deadlocks the goroutine that owns the
+	// handshake. The symptom is not a crash: the tunnel simply never comes up
+	// and nothing is logged, because the log line is on the far side of it.
+	viaRelay := h.isRelayUnderlay(t.PeerAddr(), from)
+
 	p.mu.Lock()
 	old := p.tun
 	keep := t
@@ -657,7 +798,17 @@ func (h *Host) install(t *tunnel, from netip.AddrPort) {
 	p.tun = keep
 	// The address the handshake actually arrived from is authoritative: it is
 	// where the peer can be reached right now, whatever configuration said.
-	p.underlay = append([]netip.AddrPort{from}, filterOut(p.underlay, from)...)
+	//
+	// Unless it is a relay's address, which is not the peer's at all. A
+	// handshake that crossed a relay arrives from the relay's socket, and
+	// recording that as the peer's direct address makes every later packet a
+	// plain datagram addressed to the relay -- which the socket accepts, the
+	// relay receives, and the relay drops, because it holds no tunnel index
+	// matching it. The tunnel reports itself up, the send succeeds, and
+	// nothing arrives.
+	if !viaRelay {
+		p.underlay = append([]netip.AddrPort{from}, filterOut(p.underlay, from)...)
+	}
 	p.mu.Unlock()
 
 	loser := t
@@ -752,6 +903,12 @@ func (h *Host) noteRoam(t *tunnel, from netip.AddrPort) {
 	if !ok {
 		return
 	}
+	// Same exclusion as install, and computed before the lock for the same
+	// reason.
+	if h.isRelayUnderlay(t.PeerAddr(), from) {
+		return
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if len(p.underlay) > 0 && p.underlay[0] == from {
@@ -760,6 +917,42 @@ func (h *Host) noteRoam(t *tunnel, from netip.AddrPort) {
 	// This only runs after the packet authenticated, so the new address is
 	// attested by the tunnel's keys rather than merely claimed.
 	p.underlay = append([]netip.AddrPort{from}, filterOut(p.underlay, from)...)
+}
+
+// isRelayUnderlay reports whether `from` is one of this host's relays' own
+// addresses, and therefore not somewhere `peer` can be reached directly.
+//
+// Comparing addresses rather than threading a "this arrived via a relay" flag
+// through every call site is deliberate: the flag would have to survive
+// handleMessage, handleHandshake, install and noteRoam, and a path that forgot
+// to carry it would reintroduce this bug somewhere with no test on it.
+//
+// `peer` is excluded from its own answer. A host handshakes with its relay
+// like any other peer, and the relay's address is exactly where that peer is
+// reachable -- refusing to record it would leave the one tunnel every other
+// tunnel depends on with no address at all.
+//
+// **Callers must not hold any peer's lock**: this takes them.
+func (h *Host) isRelayUnderlay(peer netip.Addr, from netip.AddrPort) bool {
+	if len(h.cfg.Relays) == 0 || !from.IsValid() {
+		return false
+	}
+	for _, via := range h.cfg.Relays {
+		if via == peer {
+			continue
+		}
+		p, ok := h.lookupPeer(via)
+		if !ok {
+			continue
+		}
+		p.mu.Lock()
+		match := slices.Contains(p.underlay, from)
+		p.mu.Unlock()
+		if match {
+			return true
+		}
+	}
+	return false
 }
 
 // handleTest answers nebula's reachability probe.

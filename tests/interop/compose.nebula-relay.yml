@@ -1,0 +1,102 @@
+# veepin nebula relay: two hosts that cannot reach each other directly.
+#
+# The direct path between host-b and host-c is dropped with iptables, in both
+# directions, before either starts. Hole punching cannot help -- there is no
+# path to punch -- so the only way the ping crosses is through the lighthouse,
+# which is also configured as a relay.
+#
+# Dropping rather than rejecting matters: an ICMP unreachable would tell the
+# sender immediately, where a symmetric NAT or CGNAT simply swallows the
+# packet. This reproduces the situation relays exist for rather than a
+# convenient version of it.
+#
+# **The ping alone does not prove anything here**, which is the whole reason
+# this cell is separate from compose.nebula-self.yml. A ping over a working
+# direct path and a ping over a working relay look identical from the outside,
+# so the test asserts a log line naming the relay as well -- the same discipline
+# runInteropRequiringLog exists for, and the one that caught the Pulse ESP
+# keying bug when a silent fallback was passing a bare ping.
+name: veepin-interop-nebula-relay
+
+services:
+  nebula-pki:
+    build:
+      context: nebula
+    image: interop-nebula
+    environment:
+      HOSTS: "lighthouse=10.42.0.1/24 host-b=10.42.0.2/24 host-c=10.42.0.3/24"
+    volumes:
+      - pki:/pki
+      - ./nebula/pki-entrypoint.sh:/pki-entrypoint.sh:ro
+    command: ["/bin/sh", "/pki-entrypoint.sh"]
+
+  # The lighthouse doubles as the relay. That is the ordinary deployment: it is
+  # the one host everybody can already reach, which is exactly the property a
+  # relay needs.
+  veepin-lighthouse:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on:
+      nebula-pki:
+        condition: service_completed_successfully
+    environment:
+      NAME: "lighthouse"
+      AM_LIGHTHOUSE: "true"
+      RELAY_FOR: "true"
+    volumes:
+      - pki:/pki
+      - ./veepin/nebula-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-host-b:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on:
+      nebula-pki:
+        condition: service_completed_successfully
+      veepin-lighthouse:
+        condition: service_started
+    environment:
+      NAME: "host-b"
+      STATIC_HOSTS: "10.42.0.1=veepin-lighthouse:4242"
+      LIGHTHOUSES: "10.42.0.1"
+      RELAYS: "10.42.0.1"
+      BLOCK_DIRECT: "veepin-interop-nebula-relay-veepin-host-c-1"
+    volumes:
+      - pki:/pki
+      - ./veepin/nebula-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-host-c:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on:
+      nebula-pki:
+        condition: service_completed_successfully
+      veepin-lighthouse:
+        condition: service_started
+    environment:
+      NAME: "host-c"
+      STATIC_HOSTS: "10.42.0.1=veepin-lighthouse:4242"
+      LIGHTHOUSES: "10.42.0.1"
+      RELAYS: "10.42.0.1"
+      BLOCK_DIRECT: "veepin-interop-nebula-relay-veepin-host-b-1"
+    volumes:
+      - pki:/pki
+      - ./veepin/nebula-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+volumes:
+  pki:

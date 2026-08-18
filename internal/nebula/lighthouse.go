@@ -17,8 +17,13 @@ package nebula
 // packet needs to arrive for a tunnel to form — their purpose is to open the
 // NAT bindings so the real handshake can cross.
 //
-// Not implemented: relays (forwarding traffic through a third host when hole
-// punching fails), and multi-lighthouse consensus. Both are additive.
+// Relays -- forwarding through a third host when hole punching fails -- are in
+// relay.go, and the lighthouse's part in them is here: a host advertises which
+// relays will carry for it (RelayVpnAddrs), and a query reply hands that list
+// back alongside the underlay addresses.
+//
+// Not implemented: multi-lighthouse consensus. Two lighthouses that disagree
+// about where a host is are not reconciled; the last answer wins. Additive.
 
 import (
 	"encoding/binary"
@@ -38,6 +43,11 @@ const (
 	fieldDetailsV4AddrPorts = 2
 	fieldDetailsCounter     = 3
 	fieldDetailsVpnAddr     = 6
+	// fieldDetailsRelayVpnAddrs is the list of hosts a peer is willing to be
+	// reached through. A lighthouse stores it beside the underlay addresses
+	// and hands it back on a query, so a host that cannot reach a peer
+	// directly learns who to ask to relay. See relay.go.
+	fieldDetailsRelayVpnAddrs = 7
 )
 
 // Field numbers for Addr and V4AddrPort.
@@ -73,8 +83,15 @@ type metaMessage struct {
 	VpnAddr netip.Addr
 	// AddrPorts are underlay addresses for that host.
 	AddrPorts []netip.AddrPort
-	Counter   uint32
+	// RelayVpnAddrs are overlay addresses of hosts that will relay for it.
+	RelayVpnAddrs []netip.Addr
+	Counter       uint32
 }
+
+// maxAdvertisedRelays bounds how many relays one host may claim. The reference
+// has no explicit limit; this one exists because the list is parsed from a
+// peer's message before anything about the peer has been acted on.
+const maxAdvertisedRelays = 16
 
 func (m metaMessage) marshal() []byte {
 	var details []byte
@@ -92,13 +109,10 @@ func (m metaMessage) marshal() []byte {
 		details = appendUvarintField(details, fieldDetailsCounter, uint64(m.Counter))
 	}
 	if m.VpnAddr.IsValid() {
-		// Addresses are carried as a 128-bit value so the format is the same
-		// for IPv4 and IPv6; an IPv4 address travels in its mapped form.
-		b := m.VpnAddr.As16()
-		var addr []byte
-		addr = appendUvarintField(addr, fieldAddrHi, binary.BigEndian.Uint64(b[:8]))
-		addr = appendUvarintField(addr, fieldAddrLo, binary.BigEndian.Uint64(b[8:]))
-		details = appendBytes(details, fieldDetailsVpnAddr, addr)
+		details = appendBytes(details, fieldDetailsVpnAddr, marshalProtoAddr(m.VpnAddr))
+	}
+	for _, r := range m.RelayVpnAddrs {
+		details = appendBytes(details, fieldDetailsRelayVpnAddrs, marshalProtoAddr(r))
 	}
 
 	var out []byte
@@ -173,6 +187,21 @@ func (m *metaMessage) parseDetails(b []byte) error {
 				return err
 			}
 			m.VpnAddr = addr
+		case fieldDetailsRelayVpnAddrs:
+			body, rest, err := bytesField(wire, b)
+			if err != nil {
+				return errProto
+			}
+			b = rest
+			addr, err := parseProtoAddr(body)
+			if err != nil {
+				return err
+			}
+			// Bounded: a peer that advertised thousands of relays would make
+			// every host that queried it allocate a list of them.
+			if len(m.RelayVpnAddrs) < maxAdvertisedRelays {
+				m.RelayVpnAddrs = append(m.RelayVpnAddrs, addr)
+			}
 		case fieldDetailsCounter:
 			if wire != wireVarint {
 				return errProto
@@ -220,6 +249,20 @@ func parseV4AddrPort(b []byte) (netip.AddrPort, error) {
 	var raw [4]byte
 	binary.BigEndian.PutUint32(raw[:], uint32(addr))
 	return netip.AddrPortFrom(netip.AddrFrom4(raw), uint16(port)), nil
+}
+
+// marshalProtoAddr encodes an overlay address as the reference's Addr message.
+//
+// Addresses are carried as a 128-bit value so the format is the same for IPv4
+// and IPv6; an IPv4 address travels in its mapped form. parseProtoAddr unmaps
+// on the way back, so a v4 address survives the round trip comparing equal to
+// the same address parsed from dotted-quad form -- which is what the host map
+// and the relay table key everything on.
+func marshalProtoAddr(a netip.Addr) []byte {
+	b := a.As16()
+	var out []byte
+	out = appendUvarintField(out, fieldAddrHi, binary.BigEndian.Uint64(b[:8]))
+	return appendUvarintField(out, fieldAddrLo, binary.BigEndian.Uint64(b[8:]))
 }
 
 func parseProtoAddr(b []byte) (netip.Addr, error) {
@@ -337,16 +380,18 @@ func (h *Host) answerHostQuery(t *tunnel, m metaMessage, asker netip.AddrPort) {
 	}
 	target.mu.Lock()
 	addrs := append([]netip.AddrPort(nil), target.underlay...)
+	relays := append([]netip.Addr(nil), target.relayVia...)
 	target.mu.Unlock()
-	if len(addrs) == 0 {
+	if len(addrs) == 0 && len(relays) == 0 {
 		return
 	}
 
 	if asking, ok := h.lookupPeer(t.PeerAddr()); ok {
 		h.sendMeta(asking, metaMessage{
-			Type:      metaHostQueryReply,
-			VpnAddr:   m.VpnAddr,
-			AddrPorts: addrs,
+			Type:          metaHostQueryReply,
+			VpnAddr:       m.VpnAddr,
+			AddrPorts:     addrs,
+			RelayVpnAddrs: relays,
 		})
 	}
 
@@ -363,17 +408,36 @@ func (h *Host) answerHostQuery(t *tunnel, m metaMessage, asker netip.AddrPort) {
 // learnAddresses records where a lighthouse says a host can be found, and
 // starts a handshake now that there is somewhere to send it.
 func (h *Host) learnAddresses(m metaMessage) {
-	if !m.VpnAddr.IsValid() || len(m.AddrPorts) == 0 {
+	if !m.VpnAddr.IsValid() {
+		return
+	}
+	if len(m.AddrPorts) == 0 && len(m.RelayVpnAddrs) == 0 {
 		return
 	}
 	p := h.peerFor(m.VpnAddr)
 	p.mu.Lock()
 	p.underlay = mergeAddrs(p.underlay, m.AddrPorts)
+	p.relayVia = append([]netip.Addr(nil), m.RelayVpnAddrs...)
 	up := p.tun != nil
+	direct := len(p.underlay) > 0
+	relays := append([]netip.Addr(nil), p.relayVia...)
 	p.mu.Unlock()
 
-	if !up {
+	if up {
+		return
+	}
+	if direct {
 		h.beginHandshake(p)
+		return
+	}
+	// The lighthouse knows of this host but has no address for it -- which is
+	// what a peer behind a NAT that never reported one looks like. Its relays
+	// are the only way to reach it, so ask them rather than handshaking into
+	// nowhere.
+	for _, via := range relays {
+		if err := h.requestRelay(via, m.VpnAddr); err != nil {
+			h.log.Printf("nebula: relay %v for %v: %v", via, m.VpnAddr, err)
+		}
 	}
 }
 
@@ -395,6 +459,12 @@ func (h *Host) recordUpdate(t *tunnel, m metaMessage, from netip.AddrPort) {
 	// it: it is observed rather than claimed, and it is what a NATed host looks
 	// like from here.
 	p.underlay = mergeAddrs([]netip.AddrPort{from}, m.AddrPorts)
+	// The relay list, unlike the addresses, can only be claimed -- a
+	// lighthouse has no way to observe who will relay for whom. It is stored
+	// as given and handed back on a query; what stops it being a redirection
+	// primitive is that a host asked to relay decides for itself (RelayFor),
+	// and a relay that has not agreed simply never answers.
+	p.relayVia = append([]netip.Addr(nil), m.RelayVpnAddrs...)
 	p.mu.Unlock()
 }
 
@@ -442,9 +512,10 @@ func (h *Host) reportToLighthouses() {
 			continue
 		}
 		h.sendMeta(p, metaMessage{
-			Type:      metaHostUpdateNotification,
-			VpnAddr:   h.addr,
-			AddrPorts: h.localAddrPorts(),
+			Type:          metaHostUpdateNotification,
+			RelayVpnAddrs: h.relayVia(),
+			VpnAddr:       h.addr,
+			AddrPorts:     h.localAddrPorts(),
 		})
 	}
 }

@@ -426,6 +426,9 @@ var specificValues = map[string]func(dir string) string{
 	"dns": func(string) string { return "10.0.0.53" },
 	// Overlay addresses, not prefixes.
 	"nebula.lighthouses": func(string) string { return "10.42.0.1" },
+	// Same reason as lighthouses: a relay is named by its bare overlay
+	// address, and the generic comma-list value is a prefix.
+	"nebula.relays": func(string) string { return "10.42.0.1" },
 	"nebula.static-hosts": func(string) string {
 		return "10.42.0.1=192.0.2.10:4242"
 	},

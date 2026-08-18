@@ -56,7 +56,7 @@ wire detail, caveats and API surface.
 | **L2TP/IPsec** | IKEv1 PSK + MS-CHAPv2 | L2TP/PPP inside an ESP transport SA (NAT-T) | strongSwan + xl2tpd | [l2tp](internal/l2tp/README.md) |
 | **L2TPv3** | none — static config, cookie is a check value | Ethernet frames over UDP/1701 on a TAP device (RFC 3931 + 4719), **layer 2** | Linux kernel (`ip l2tp`) | [l2tpv3](internal/l2tpv3/README.md) |
 | **AnyConnect** | password | CSTP over TLS, with DTLS 1.2 PSK fallback | ocserv, openconnect | [anyconnect](internal/anyconnect/README.md) |
-| **Nebula** | certificate PKI, per host | Noise IX mesh, AES-GCM / ChaCha20 | slackhq/nebula | [nebula](internal/nebula/README.md) |
+| **Nebula** | certificate PKI, per host | Noise IX mesh, AES-GCM / ChaCha20; relay fallback when hole punching fails | slackhq/nebula | [nebula](internal/nebula/README.md) |
 | **MASQUE** | proxy TLS | IP (CONNECT-IP) and UDP (CONNECT-UDP) over HTTP/3, capsule mode | aioquic | [masque](internal/masque/README.md) |
 | **Fortinet** | password, optional 2FA (TOTP) | PPP over TLS, with cert-based DTLS 1.2 fallback | openconnect | [fortinet](internal/fortinet/README.md) |
 | **GlobalProtect** | password | RFC 4303 ESP over UDP, keyed by the config document, with a framed layer-3 TLS tunnel as fallback | openconnect | [gp](internal/gp/README.md) |

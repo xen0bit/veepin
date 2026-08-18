@@ -139,6 +139,75 @@ func (t *tunnel) encrypt(typ messageType, sub messageSubType, payload []byte) []
 // before its counter touches the replay window. Admitting an unauthenticated
 // counter would let anyone who can send a datagram advance the window and lock
 // the tunnel out of its own peer's traffic.
+// sealRelay builds a relayed packet: the outer header, the payload in the
+// clear, and an AEAD tag over both.
+//
+// The payload is NOT encrypted here, and that is the protocol rather than an
+// oversight. A relay has to read the inner nebula header to know where to
+// forward, and it holds none of the end-to-end keys -- so the hop to the relay
+// authenticates the bytes without hiding them. The reference does exactly this
+// in SendVia: EncryptDanger with a nil plaintext and the whole buffer as
+// additional data.
+//
+// What the payload contains is already encrypted: it is a complete nebula
+// packet for the far end, keyed under a tunnel this host and the far end share
+// and the relay does not. See relay.go for what a relay can therefore learn.
+// The index it stamps is the *relay* index, not the tunnel's own remote index:
+// a relayed packet is demultiplexed against the receiver's relay table rather
+// than its tunnel table, and the two namespaces are separate.
+func (t *tunnel) sealRelayTo(relayIndex uint32, payload []byte) []byte {
+	counter := t.counter.Add(1)
+	h := header{
+		Version:        headerVersion,
+		Type:           typeMessage,
+		Subtype:        subTypeRelay,
+		RemoteIndex:    relayIndex,
+		MessageCounter: counter,
+	}
+
+	sealedLen := headerLen + len(payload) + tagSize
+	out := h.encode(make([]byte, 0, sealedLen+nonceLen))
+	out = append(out, payload...)
+
+	nonce := out[sealedLen : sealedLen+nonceLen]
+	t.cipher.putNonce(nonce, counter)
+	// Nil plaintext, everything so far as additional data: the tag lands after
+	// the payload and covers the header and the payload together.
+	return t.send.Seal(out, nonce, nil, out)
+}
+
+// openRelay verifies a relayed packet and returns the payload it carries,
+// which is a whole nebula packet addressed to somewhere else.
+//
+// The returned slice aliases pkt.
+func (t *tunnel) openRelay(pkt []byte) (header, []byte, error) {
+	h, err := parseHeader(pkt)
+	if err != nil {
+		return header{}, nil, err
+	}
+	if len(pkt) < headerLen+tagSize {
+		return header{}, nil, errShortPacket
+	}
+
+	signed := pkt[:len(pkt)-tagSize]
+	tag := pkt[len(pkt)-tagSize:]
+
+	t.cipher.putNonce(t.recvNonce[:], h.MessageCounter)
+	if _, err := t.recv.Open(nil, t.recvNonce[:], tag, signed); err != nil {
+		return header{}, nil, fmt.Errorf("%w: %w", errNotForUs, err)
+	}
+
+	t.mu.Lock()
+	ok := t.window.Accept(h.MessageCounter)
+	t.mu.Unlock()
+	if !ok {
+		return header{}, nil, errReplayed
+	}
+
+	t.lastSeen.Store(time.Now().UnixNano())
+	return h, signed[headerLen:], nil
+}
+
 func (t *tunnel) decrypt(pkt []byte) (header, []byte, error) {
 	h, err := parseHeader(pkt)
 	if err != nil {

@@ -194,6 +194,7 @@ jobs:
           ./internal/nebula FuzzParseHeader
           ./internal/nebula FuzzParseHandshakePayload
           ./internal/nebula FuzzParseMetaMessage
+          ./internal/nebula FuzzParseControl
           ./internal/nebula FuzzProtoPrimitives
           ./internal/dtls FuzzParseRecord
           ./internal/dtls FuzzClientHelloSessionID
@@ -264,7 +265,7 @@ jobs:
 
           # Guard against the truncation described above, and against a target
           # being added to the list without the loop reaching it.
-          expected=71
+          expected=72
           if [ "$ran" -ne "$expected" ]; then
             echo "::error::ran $ran fuzz targets, expected $expected -- the target list was truncated"
             exit 1

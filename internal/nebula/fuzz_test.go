@@ -127,6 +127,41 @@ func FuzzParseMetaMessage(f *testing.F) {
 	})
 }
 
+// FuzzParseControl covers the relay negotiation's parser. It is reachable by
+// any host holding a mesh certificate, and what it builds is routing state on
+// the middle host -- so a fault here is a fault in a component that forwards
+// other people's traffic.
+func FuzzParseControl(f *testing.F) {
+	f.Add(controlMessage{
+		Type:                controlCreateRelayRequest,
+		InitiatorRelayIndex: 0xdeadbeef,
+		RelayToAddr:         netip.MustParseAddr("10.42.0.9"),
+		RelayFromAddr:       netip.MustParseAddr("10.42.0.3"),
+	}.marshal())
+	f.Add(controlMessage{
+		Type:                controlCreateRelayResponse,
+		InitiatorRelayIndex: 1,
+		ResponderRelayIndex: 2,
+		RelayToAddr:         netip.MustParseAddr("::1"),
+		RelayFromAddr:       netip.MustParseAddr("10.42.0.3"),
+	}.marshal())
+	f.Add([]byte{})
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		m, err := parseControl(data)
+		if err != nil {
+			return
+		}
+		// A message that parsed must carry both addresses: the relay table
+		// keys on them, and an entry filed under an invalid address is one
+		// that can never be looked up again or removed.
+		if !m.RelayFromAddr.IsValid() || !m.RelayToAddr.IsValid() {
+			t.Fatalf("parsed a control message with an invalid address: %+v", m)
+		}
+		_ = m.marshal()
+	})
+}
+
 // The protobuf primitives are fuzzed directly as well: they are the shared
 // foundation under every message above, so a fault here would surface as three
 // different-looking bugs.
