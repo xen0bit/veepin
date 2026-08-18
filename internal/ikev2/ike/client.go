@@ -107,6 +107,12 @@ type ClientResult struct {
 	// is Don't Fragment: a peer that set it cannot reassemble, so every inner
 	// packet must go in a single data block.
 	AggFragFlags aggfrag.Flags
+	// IPTFSRate, when positive, transmits at that many bytes per second
+	// regardless of offered load. Copied from the config rather than
+	// negotiated: RFC 9347 has no field for it, and there is nothing to
+	// negotiate -- a constant-rate sender is indistinguishable to the receiver
+	// from one that happens to be busy.
+	IPTFSRate int
 }
 
 // Client is an IKEv2 initiator. It performs the handshake and exposes the
@@ -913,6 +919,7 @@ func (c *Client) applyAuthResult(inners []payload.RawPayload, childOutSPI uint32
 	// expecting plain inner IP, and every packet would be dropped as malformed.
 	if c.cfg.IPTFS {
 		res.AggFrag, res.AggFragFlags = c.acceptAggFrag(inners)
+		res.IPTFSRate = c.cfg.IPTFSRate
 		if res.AggFrag {
 			c.log.Printf("ike: AGGFRAG (RFC 9347) negotiated; ESP next header %d, peer flags 0x%02x",
 				aggfrag.ESPNextHeader, byte(res.AggFragFlags))
@@ -1228,10 +1235,14 @@ func (r *ClientResult) BuildTunnel() (dataplane.Tunnel, error) {
 		routes: append(defaultRoute(), defaultRoute6()...),
 	}
 	t.peer.Store(r.ServerAddr)
-	if r.AggFrag {
-		return newAggfragTunnel(t), nil
+	if !r.AggFrag {
+		return t, nil
 	}
-	return t, nil
+	af := newAggfragTunnel(t)
+	if r.IPTFSRate > 0 {
+		return newPacedTunnel(af, r.IPTFSRate, iptfsPayloadSize), nil
+	}
+	return af, nil
 }
 
 func mustNonce(n int) []byte {

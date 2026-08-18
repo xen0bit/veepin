@@ -263,23 +263,50 @@ Being layer 2, it also inherits everything the SoftEther section above says abou
 sharing a broadcast domain: ARP, DHCP and every broadcast frame cross the tunnel,
 and a host on the segment can ARP-spoof any other.
 
-## IP-TFS is implemented as framing, not yet as traffic-flow confidentiality
+## IP-TFS costs its rate continuously, and its timing is bounded by a Go timer
 
 `-iptfs` negotiates RFC 9347 AGGFRAG and moves the data path onto ESP next-header
-144, with aggregation handled on receive and fragmentation in both directions.
-What it does **not** yet do is the part the RFC is named for: **constant-rate
-transmission**. `-iptfs-rate` is accepted and does nothing.
+144. On its own that is framing: aggregation and fragmentation, with packet
+counts and timing still tracking the traffic inside, exactly as the README's
+"Scope and limitations" says of the byte shaper.
 
-Without constant-rate transmission the packet counts and inter-packet timing
-still track the traffic inside, exactly as the README's "Scope and limitations"
-says of every other protocol here. Enabling `-iptfs` therefore buys efficiency
-and a standards-track framing — it does not buy the traffic-analysis resistance
-the name suggests. Do not rely on it for that until the sender lands.
+`-iptfs-rate` is the part the RFC is named for. It transmits a fixed-size payload
+at a fixed interval **whether or not there is anything to carry**, so the
+datagram stream a passive observer sees is the same idle as saturated; only the
+proportion of each payload that is padding changes. That is the one mechanism in
+this tree that defends against the traffic-analysis class
+[`doc/traffic-shaping.md`](traffic-shaping.md) names (Xue et al., USENIX Security
+2024), because it is the only one that removes the *schedule* rather than the
+sizes.
 
-The negotiation and the framing **are** now interop-tested, against strongSwan
-6.0.7 in both directions. That closes the "unproven wire format" half of this
-section and does not touch the half above it: what is proven is that veepin's
-AGGFRAG framing interoperates, not that it confers traffic-flow confidentiality.
+Two costs, and neither is small.
+
+**It spends the rate continuously.** At 10 Mbit/s an idle tunnel moves 10 Mbit/s
+of padding, forever, and in both directions if both ends enable it. This is why
+the option is a number rather than a flag and why it is off by default: the
+operator has to decide what they are willing to spend, and on a metered link the
+answer is usually nothing.
+
+**Above roughly 100 Mbit/s the timing is quantised rather than constant.** The
+interval is payload/rate — 1.12 ms at 10 Mbit/s, 112 µs at 100 Mbit/s, 11 µs at
+1 Gbit/s — and a Go timer will not deliver the last of those. Above the threshold
+the sender emits the backlog as a burst on the next tick. The stream is still
+independent of the offered load, which is the security claim, but an observer
+sees burst boundaries rather than a smooth stream. `burstsFor` in
+`internal/ikev2/ike/aggfrag_pacer.go` computes where the boundary is and
+`TestTheRateAboveWhichTimingIsQuantised` pins it, so this paragraph cannot drift
+from the code.
+
+**It is IKEv2 only.** Every other protocol here still has load-dependent packet
+counts and timing.
+
+Interop-tested in both directions against strongSwan 6.0.7, and the constant-rate
+half against it too: strongSwan does not *send* a constant rate, but its kernel
+receives one perfectly — pad blocks are ordinary AGGFRAG — so
+`compose.iptfs-constant.yml` measures the claim from the peer's own XFRM byte
+counters, idle versus saturated. That cell is the only one in the harness that
+measures a property rather than proving a path, because a ping is equally true of
+a sender that pauses when idle.
 
 Building those cells is also the reason to distrust a self-test here in
 particular. Two bugs survived every unit test and both veepin roles agreeing

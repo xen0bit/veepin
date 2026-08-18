@@ -766,8 +766,12 @@ each a localized extension point, not a structural rework:
   packet by the inner IP header, so **stock clients benefit unmodified**; and
   because the attack targets handshakes, the cost is per-flow rather than
   per-byte, leaving bulk throughput untouched. It does not shape packet counts
-  or timing (that would need constant-rate padding), does not cover the upstream
-  direction unless the client is also veepin, and is not probe resistance.
+  or timing, does not cover the upstream direction unless the client is also
+  veepin, and is not probe resistance. Packet counts and timing are a different
+  mechanism and IKEv2 now has one: `-iptfs -iptfs-rate` transmits at a fixed
+  rate regardless of load (RFC 9347), so the datagram stream stops depending on
+  the traffic inside it. It is IKEv2 only, costs its rate continuously, and is
+  off by default — see [`doc/security.md`](doc/security.md).
   Interop cells prove strongSwan, wireguard-go, `openvpn`, pppd and openconnect
   all accept the padding *and* trim it correctly; it stays off by default
   because the vendor OS stacks it is meant to protect are untested —

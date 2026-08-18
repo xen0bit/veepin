@@ -1,0 +1,56 @@
+# veepin client -> strongSwan responder, with CONSTANT-RATE IP-TFS.
+#
+# The half of RFC 9347 the name is about, and the half nothing else implements:
+# strongSwan and the Linux kernel do AGGFRAG's aggregation and fragmentation and
+# transmit when there is traffic. veepin does ESP in userspace and sends on a
+# fixed schedule whether or not there is anything to carry.
+#
+# So this cell is asymmetric on purpose, and it still has a real peer. veepin
+# sends constant-rate; strongSwan's kernel receives it perfectly, because pad
+# blocks are ordinary AGGFRAG and a receiver does not need to know the sender is
+# pacing. That makes the peer a genuine observer of the claim rather than a
+# mirror of it -- and the assertion this cell makes is read from the PEER'S OWN
+# XFRM byte counters, idle versus saturated.
+#
+# A ping cannot test this feature. Neither can a throughput run. The claim is
+# that the datagram stream does not depend on the traffic inside it, so the only
+# test of it is to vary the traffic and watch the stream not change.
+name: veepin-interop-iptfs-constant
+
+services:
+  strongswan-server:
+    build:
+      context: strongswan-pq
+    image: interop-strongswan-pq
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+      net.ipv4.ip_forward: "1"
+    volumes:
+      - ./strongswan/swanctl-server-iptfs.conf:/etc/swanctl/swanctl.conf:ro
+      - ./strongswan-pq/99-stdout-log.conf:/etc/strongswan.d/99-stdout-log.conf:ro
+      - ./strongswan-pq/server-entrypoint.sh:/entrypoint.sh:ro
+    command: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [strongswan-server]
+    environment:
+      SERVER: "strongswan-server"
+      PSK: "interop-test-psk"
+      CLIENT_ID: "client.example.com"
+      SERVER_ID: "vpn.example.com"
+      IPTFS: "true"
+      # 1 250 000 B/s = 10 Mbit/s. Low enough that one payload per tick is
+      # inside a Go timer's reach (see pacing()), so what the peer counts is a
+      # smooth stream rather than the quantised one a higher rate produces.
+      IPTFS_RATE: "1250000"
+    volumes:
+      - ./veepin/client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

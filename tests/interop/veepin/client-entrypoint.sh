@@ -22,6 +22,7 @@ while [ "$i" -le 30 ]; do
         -ike-rekey "${IKE_REKEY:-0}" \
         -post-quantum="${POST_QUANTUM:-false}" \
         -iptfs="${IPTFS:-false}" \
+        -iptfs-rate "${IPTFS_RATE:-0}" \
         -full-tunnel=false
     echo "veepin-client: attempt $i failed; retrying in 2s"
     i=$((i + 1))

@@ -1227,6 +1227,115 @@ func TestInteropIPTFSSelf(t *testing.T) {
 		"AGGFRAG (RFC 9347) negotiated")
 }
 
+// TestInteropIPTFSConstantRate is the only cell in the harness that measures a
+// claim rather than proving a path, because the claim cannot be proved by a
+// path: constant-rate transmission says the datagram stream does not depend on
+// the traffic inside it, and a ping, a throughput run and an AGGFRAG log line
+// are all equally true of a sender that pauses when idle.
+//
+// So the traffic is varied and the stream is watched for NOT changing, and the
+// observer is the peer: strongSwan's own XFRM byte counters on the SA receiving
+// from veepin. That is as independent as this harness gets -- veepin is not
+// consulted about how much it sent.
+//
+// The peer receives a constant-rate stream perfectly without producing one. Pad
+// blocks are ordinary AGGFRAG and a receiver needs no knowledge that the sender
+// is pacing, which is what lets the half nothing else implements still have a
+// real cross-implementation cell.
+func TestInteropIPTFSConstantRate(t *testing.T) {
+	const file = "compose.iptfs-constant.yml"
+	// 1 250 000 B/s, matching IPTFS_RATE in the compose file.
+	const wantBytesPerSec = 1250000
+
+	runInteropRequiringLog(t, file, "veepin-client", "10.20.30.254",
+		"AGGFRAG (RFC 9347) negotiated")
+
+	idle := measureESPRate(t, file, 4*time.Second, nil)
+	busy := measureESPRate(t, file, 4*time.Second, func() {
+		// Saturate the tunnel for the whole window. -f floods, -w1 bounds it.
+		_, _ = compose(t, file, "exec", "-T", "veepin-client",
+			"ping", "-f", "-w", "4", "10.20.30.254")
+	})
+
+	t.Logf("ESP arriving at the peer: idle %.0f B/s, saturated %.0f B/s (configured %d)",
+		idle, busy, wantBytesPerSec)
+
+	if idle == 0 {
+		t.Fatal("the peer received nothing while the tunnel was idle: the sender stops " +
+			"when there is no traffic, which is the schedule constant-rate removes")
+	}
+	// Within 15% of the configured rate in both states. The tolerance is for
+	// timer jitter and the four-second window, not for load: a stream that
+	// tracked the traffic would differ by far more than this.
+	for _, m := range []struct {
+		name string
+		rate float64
+	}{{"idle", idle}, {"saturated", busy}} {
+		if ratio := m.rate / wantBytesPerSec; ratio < 0.85 || ratio > 1.15 {
+			t.Errorf("%s rate %.0f B/s is %.2f× the configured %d",
+				m.name, m.rate, ratio, wantBytesPerSec)
+		}
+	}
+	// And the two must agree with EACH OTHER, which is the claim itself.
+	if ratio := busy / idle; ratio < 0.85 || ratio > 1.15 {
+		t.Errorf("saturated/idle = %.2f: the datagram stream follows the offered load, "+
+			"so it still carries the signal constant-rate transmission exists to remove",
+			ratio)
+	}
+}
+
+// measureESPRate reads the peer's XFRM byte counter for the SA receiving from
+// veepin, before and after a window, and returns bytes per second. load, if
+// given, runs for the duration of the window.
+//
+// The counter is the peer's, deliberately. Asking veepin how much it sent would
+// test the sender against its own bookkeeping; asking the kernel that received
+// it tests what actually crossed the wire.
+func measureESPRate(t *testing.T, composeFile string, window time.Duration, load func()) float64 {
+	t.Helper()
+	before := espInBytes(t, composeFile)
+	start := time.Now()
+	if load != nil {
+		load()
+	}
+	if elapsed := time.Since(start); elapsed < window {
+		time.Sleep(window - elapsed)
+	}
+	elapsed := time.Since(start)
+	after := espInBytes(t, composeFile)
+	if after < before {
+		t.Fatalf("the peer's ESP byte counter went backwards (%d -> %d): the SA was "+
+			"rekeyed mid-measurement", before, after)
+	}
+	return float64(after-before) / elapsed.Seconds()
+}
+
+// espInBytes reads the inbound SA's lifetime byte count out of `ip -s xfrm
+// state`.
+//
+// The awk is fussier than it looks and has to be. "dir in" precedes its own
+// lifetime blocks, but there are two of them and the FIRST is `lifetime
+// config`, whose "limit: soft (INF)(bytes)" line matches a naive search for
+// "(bytes)" and parses as nothing. The counter wanted is under `lifetime
+// current`.
+func espInBytes(t *testing.T, composeFile string) uint64 {
+	t.Helper()
+	out, err := compose(t, composeFile, "exec", "-T", "strongswan-server",
+		"sh", "-c", `ip -s xfrm state | awk '/dir in/{d=1} d && /lifetime current/{c=1; next} c && /\(bytes\)/{print $1; exit}'`)
+	if err != nil {
+		t.Fatalf("reading the peer's XFRM counters: %v\n%s", err, out)
+	}
+	field := strings.TrimSpace(out)
+	if i := strings.IndexByte(field, '('); i >= 0 {
+		field = field[:i]
+	}
+	n, err := strconv.ParseUint(strings.TrimSpace(field), 10, 64)
+	if err != nil {
+		t.Fatalf("the peer's XFRM byte counter did not parse: %q (%v)", out, err)
+	}
+	return n
+}
+
 // TOY is the example protocol (internal/toy) and provides no security; these
 // cells prove the *specification*, not the cryptography. The peer they talk to
 // is an independent Python implementation written from internal/toy/SPEC.md

@@ -361,6 +361,7 @@ func (s *Server) finishIKEAuth(sa *IKESA, hdr payload.Header, inners []payload.R
 			if flags, ok := s.acceptAggFrag(inners); ok {
 				respChild.AggFrag = true
 				respChild.AggFragFlags = flags
+				respChild.IPTFSRate = s.cfg.IPTFSRate
 				b.Add(payload.TypeNotify, false, payload.MarshalNotify(payload.NotifyPayload{
 					Protocol: payload.ProtoNone, Type: payload.UseAggFrag,
 					Data: aggfrag.OurFlags.NotifyData(),

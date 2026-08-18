@@ -75,7 +75,8 @@ var interopMatrix = []interopRow{
 			"TestInteropVeepinClientStrongswanServerV6Underlay",
 			"TestInteropVeepinClientStrongswanServerPQ",
 			"TestInteropVeepinClientStrongswanIPTFS",
-		}, Label: "strongSwan (PSK + pubkey, AES-GCM + ChaCha20, dual-stack, v6 underlay, ML-KEM-768, IP-TFS)"},
+			"TestInteropIPTFSConstantRate",
+		}, Label: "strongSwan (PSK + pubkey, AES-GCM + ChaCha20, dual-stack, v6 underlay, ML-KEM-768, IP-TFS incl. constant-rate)"},
 		Server: interopCell{Tests: []string{
 			"TestInteropStrongswanClientVeepinServer",
 			"TestInteropStrongswanClientVeepinServerEAP",

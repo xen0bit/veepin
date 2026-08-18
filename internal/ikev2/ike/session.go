@@ -76,6 +76,11 @@ type ChildSA struct {
 	// AggFragFlags is what the initiator required of us in its USE_AGGFRAG
 	// notify. Only Don't Fragment affects what this end sends.
 	AggFragFlags aggfrag.Flags
+	// IPTFSRate, when positive, transmits on this SA at a constant rate of that
+	// many bytes per second regardless of offered load -- the traffic-flow
+	// confidentiality half of RFC 9347. Zero leaves the schedule following the
+	// traffic, which is aggregation without the confidentiality.
+	IPTFSRate int
 }
 
 // IKESA holds all state for one IKE Security Association.

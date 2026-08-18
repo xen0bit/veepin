@@ -56,17 +56,26 @@ the end of the payload. It looks like an accident;
 
 ## Caveats
 
-- **One packet per payload on send.** `aggfragTunnel.Encapsulate` wraps a single
-  inner packet, which is well-formed — a payload is a run of blocks and one block
-  is a run of one — but it means veepin does not yet get aggregation's efficiency
-  benefit on egress. Aggregating several packets needs an outbound queue and a
-  timer, which `dataplane.Tunnel`'s one-in-one-out shape has nowhere to put.
-- **No constant-rate transmission**, which is the half of IP-TFS that actually
-  delivers traffic-flow confidentiality. `-iptfs-rate` is parsed and threaded
-  through but does nothing yet. Without it, packet counts and timing still track
-  the traffic inside, exactly as the README's "Scope and limitations" says of
-  every other protocol here. **Do not describe veepin as providing IP-TFS
-  traffic-flow confidentiality until this lands.**
+- **One packet per payload on send, unless `-iptfs-rate` is set.**
+  `aggfragTunnel.Encapsulate` wraps a single inner packet, which is well-formed
+  — a payload is a run of blocks and one block is a run of one — but it gets
+  none of aggregation's efficiency on egress. The constant-rate sender below
+  does aggregate, because it has the outbound queue and the timer that
+  `dataplane.Tunnel`'s one-in-one-out shape has nowhere to put; without a rate,
+  the one-in-one-out path is still what runs.
+- ~~**No constant-rate transmission.**~~ Landed: `-iptfs-rate` transmits a
+  fixed-size payload at a fixed interval whether or not there is anything to
+  carry, through `dataplane.PacedTunnel` and
+  `internal/ikev2/ike/aggfrag_pacer.go`. It is the half of IP-TFS that delivers
+  traffic-flow confidentiality, and the half strongSwan and the Linux kernel do
+  not implement — veepin does ESP in userspace and is not bound by the kernel
+  data path.
+
+  Two limits are real and are stated in `doc/security.md` rather than hidden
+  here: it spends its rate continuously, idle or not, and above roughly
+  100 Mbit/s a Go timer cannot deliver the interval, so the sender emits bursts
+  rather than a smooth stream. The stream stays independent of the offered load
+  either way, which is the security claim.
 - **No sub-type 1 (congestion-controlled).** Its header is 24 octets with RTT and
   loss-rate fields, and parsing it as sub-type 0 would misread every field, so it
   is rejected outright rather than guessed at.
@@ -85,8 +94,15 @@ the end of the payload. It looks like an accident;
   `TestPackDoesNotBorrowAPacketItReportedAsConsumed` is the guard, and it needs
   no race detector.
 - ~~**Not yet interop-tested.**~~ Closed: `compose.iptfs.yml`,
-  `compose.iptfs-server.yml` and `compose.iptfs-self.yml` run against strongSwan
-  6.0.7 in both directions.
+  `compose.iptfs-server.yml`, `compose.iptfs-self.yml` and
+  `compose.iptfs-constant.yml` run against strongSwan 6.0.7.
+
+  The constant-rate cell is the interesting one, and it has a real peer despite
+  strongSwan not implementing the feature: pad blocks are ordinary AGGFRAG, so
+  its kernel receives a constant-rate stream perfectly without producing one.
+  That makes it an independent observer rather than a mirror, and the cell reads
+  its claim straight off the peer's XFRM byte counters — idle versus saturated,
+  measured 1.28 MB/s against 1.30 MB/s at a configured 1.25 MB/s.
 
   This caveat used to say that a self-test shows the two halves agree rather
   than that either is right, and it earned its keep twice over. Building the
