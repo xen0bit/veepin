@@ -118,6 +118,17 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("ikev2: LocalID is required")
 	case cfg.CertFile != "" && cfg.KeyFile == "":
 		return nil, fmt.Errorf("ikev2: CertFile requires KeyFile")
+	case cfg.IPTFSRate > 0 && !cfg.IPTFS:
+		return nil, fmt.Errorf("ikev2: %s needs %s: there is no constant-rate "+
+			"transmission without the AGGFRAG data path to carry it",
+			OptServerIPTFSRate, OptServerIPTFS)
+	case cfg.IPTFSRate > 0 && cfg.Shape > 0:
+		// See the client's validate: the paced path bypasses the shaper, so
+		// accepting both would leave -shape silently doing nothing, and
+		// constant-rate already fixes every datagram at one size anyway.
+		return nil, fmt.Errorf("ikev2: %s and %s cannot both be set: constant-rate "+
+			"transmission already fixes every datagram at one size, so %s would "+
+			"have nothing to pad", OptServerShape, OptServerIPTFSRate, OptServerShape)
 	}
 	logger := cfg.Logger
 	if logger == nil {

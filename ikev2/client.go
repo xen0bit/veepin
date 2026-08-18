@@ -231,6 +231,21 @@ func (cfg Config) validate() error {
 		// Without a certificate the PSK is what authenticates the server (and the
 		// client, unless EAP is used).
 		return fmt.Errorf("%s is required unless %s is set", OptPSK, OptCert)
+	case cfg.IPTFSRate > 0 && !cfg.IPTFS:
+		return fmt.Errorf("%s needs %s: there is no constant-rate transmission "+
+			"without the AGGFRAG data path to carry it", OptIPTFSRate, OptIPTFS)
+	case cfg.IPTFSRate > 0 && cfg.Shape > 0:
+		// Refused rather than ignored. The paced data path does not go through
+		// the shaper at all, so accepting both would mean -shape silently did
+		// nothing -- the same shape of bug as -kill-switch under -no-route,
+		// which this tree has already had once.
+		//
+		// It is also not a loss. Constant-rate transmission fixes every
+		// datagram at one size, which is what -shape pads *towards*; there is
+		// nothing left for it to do.
+		return fmt.Errorf("%s and %s cannot both be set: constant-rate transmission "+
+			"already fixes every datagram at one size, so %s would have nothing to pad",
+			OptShape, OptIPTFSRate, OptShape)
 	}
 	return nil
 }
