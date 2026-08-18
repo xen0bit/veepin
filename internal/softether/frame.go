@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+
+	"github.com/xen0bit/veepin/dataplane"
 )
 
 // The SE-VPN data path, once the control PACKs are done with.
@@ -91,6 +93,29 @@ func writeBlocks(w io.Writer, frames [][]byte) error {
 	}
 	_, err := w.Write(buf)
 	return err
+}
+
+// shapeFrame pads an Ethernet frame out to the shaper's target for its flow.
+//
+// The receiver trims it by the inner IP header's own Total Length, which is
+// what every IP stack does with a short frame carrying a shorter datagram --
+// the same mechanism internal/l2tpv3 relies on, and the reason a stock peer
+// needs no support for this. A frame carrying anything but IP is returned
+// untouched: there is no length field to trim by, and padding an ARP frame
+// would corrupt it.
+//
+// The padding is zeros rather than random bytes. It is inside TLS, so an
+// observer sees neither; zeros keep the append allocation-free of any entropy
+// call on the data path, and a receiver that does look will see the filler for
+// what it is rather than mistaking it for a truncated packet.
+func shapeFrame(frame []byte, shaper *dataplane.Shaper, mtu int) []byte {
+	target := shaper.TargetFrame(frame, mtu)
+	if target <= len(frame) {
+		return frame
+	}
+	out := make([]byte, target)
+	copy(out, frame)
+	return out
 }
 
 // writeKeepAlive sends a KEEP_ALIVE_MAGIC block with a random-length payload.

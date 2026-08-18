@@ -34,6 +34,15 @@ const (
 	OptHub      = "hub"
 	OptTUN      = "tun"
 	OptInsecure = "insecure"
+	OptShape    = "shape" // per-flow upstream shaping budget in bytes (0 = off)
+)
+
+// Frame geometry for shaping. SoftEther carries Ethernet, so the shaper's
+// target is a frame length: the tunnel's inner IP MTU plus the 14-octet
+// Ethernet header the frame already carries.
+const (
+	tunnelMTU    = 1500
+	ethHeaderLen = 14
 
 	OptServerListen = "listen"
 	OptServerPort   = "port"
@@ -43,6 +52,7 @@ const (
 	OptServerUser   = "user"
 	OptServerPass   = "pass"
 	OptServerTUN    = "tun"
+	OptServerShape  = "shape" // per-flow downstream shaping budget in bytes (0 = off)
 )
 
 // Config configures the SoftEther VPN client.
@@ -58,6 +68,12 @@ type Config struct {
 	// the self-signed certificates SoftEther ships with by default, and a
 	// downgrade to unauthenticated transport wherever it is set.
 	InsecureSkipVerify bool
+
+	// Shape pads the first N bytes of each inner flow out towards the frame
+	// MTU, so the size pattern of an inner handshake does not survive
+	// encapsulation. 0 is off, which is the default. See
+	// doc/traffic-shaping.md.
+	Shape int
 }
 
 // Session wraps a client connection.
@@ -157,6 +173,13 @@ func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
 		return nil, client.Result{}, fmt.Errorf("softether: connect: %w", err)
 	}
 
+	if cfg.Shape > 0 {
+		// The frame MTU, Ethernet header included: this is a layer-2 carrier,
+		// so the target the shaper pads towards is a frame length rather than
+		// an IP packet length.
+		cs.SetShaper(dataplane.NewShaper(dataplane.ShapeConfig{Bytes: cfg.Shape}), tunnelMTU+ethHeaderLen)
+	}
+
 	tap, err := dataplane.OpenTAP(cfg.TUNName)
 	if err != nil {
 		cs.Close()
@@ -211,6 +234,13 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 	cfg.Hub = opts[OptHub]
 	cfg.TUNName = opts[OptTUN]
 	cfg.InsecureSkipVerify = opts[OptInsecure] == "true"
+	if v := opts[OptShape]; v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("softether: invalid %s %q", OptShape, v)
+		}
+		cfg.Shape = n
+	}
 	if p := opts[OptPort]; p != "" {
 		n, err := strconv.Atoi(p)
 		if err != nil {
@@ -277,7 +307,10 @@ type ServerConfig struct {
 	User    string // username (required)
 	Pass    string // password (required)
 	TUNName string // TAP interface name
-	Logger  *log.Logger
+	// Shape pads the first N bytes of each inner flow out towards the frame
+	// MTU. 0 is off, which is the default.
+	Shape  int
+	Logger *log.Logger
 }
 
 // NewServer creates a SoftEther VPN server.
@@ -314,6 +347,10 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		logger = log.New(os.Stderr, "", log.LstdFlags)
 	}
 	srv.SetLogger(logger.Printf)
+
+	if cfg.Shape > 0 {
+		srv.SetShaper(dataplane.NewShaper(dataplane.ShapeConfig{Bytes: cfg.Shape}), tunnelMTU+ethHeaderLen)
+	}
 
 	listenIP := cfg.Listen
 	if listenIP == "" {
@@ -383,6 +420,13 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 		Pool:    opts[OptServerPool],
 		TUNName: opts[OptServerTUN],
 	}
+	if v := opts[OptServerShape]; v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("softether: invalid %s %q", OptServerShape, v)
+		}
+		sc.Shape = n
+	}
 	if p := opts[OptServerPort]; p != "" {
 		n, err := strconv.Atoi(p)
 		if err != nil {
@@ -404,5 +448,6 @@ func init() {
 		{Key: OptServerPool, Kind: client.OptCIDR, Default: "10.70.0.0/24", Help: "address pool (default 10.70.0.0/24)"},
 		{Key: OptServerListen, Kind: client.OptStr, Default: "0.0.0.0", Help: "local IP to bind the TLS listener on (default 0.0.0.0)"},
 		{Key: OptServerPort, Kind: client.OptInt, Default: "443", Help: "TLS port to listen on (default 443)"},
+		client.ShapeOpt(OptServerShape, "downstream"),
 	})
 }

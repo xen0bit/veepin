@@ -291,6 +291,16 @@ Ordered by value, not by ease:
    plausible vehicle (`SSH_MSG_IGNORE` exists for exactly this, a MASQUE capsule
    type can be unregistered-and-skipped, Nebula's payload is length-delimited),
    so this is mostly plumbing rather than design.
+
+   SoftEther was on this list and is not any more. It confirmed the "mostly
+   plumbing" reading — the padding is trailing filler on the Ethernet frame,
+   trimmed by the inner IP header's Total Length exactly as L2TPv3's is — with
+   one thing worth carrying to the three that remain: **`ShapeableFrame` matters
+   more on layer 2 than on layer 3.** ARP has no length field to trim by, so a
+   layer-2 shaper that padded every frame rather than only the IP-bearing ones
+   would corrupt the first exchange across the segment, before any IP packet
+   existed to notice. `TestShapeFramePadsIPAndLeavesEverythingElse` is the
+   guard, and `compose.softether-shaped.yml` is the cell.
 3. **A bounded constant-rate window**, if the count and timing leaks are judged
    worth paying for. Within a flow's shaped window, emit one MTU-sized packet per
    tick — a real one when queued, discardable filler when not — so the two are

@@ -1088,6 +1088,19 @@ func TestInteropVeepinClientSoftEtherServer(t *testing.T) {
 	runInterop(t, "compose.softether.yml", "veepin-softether-client", "192.168.30.1")
 }
 
+// TestInteropSoftEtherShaped runs the same veepin<->veepin cell with the server
+// padding the first 4 KiB of each inner flow out towards the frame MTU.
+//
+// The claim is that the padding is inert, and layer 2 is where that claim is
+// most easily broken: ARP has no length field to trim by, so an implementation
+// that padded every frame rather than only the IP-bearing ones would corrupt
+// the first exchange across the segment and the tunnel would never carry
+// anything. A ping that crosses proves both halves -- the padding was applied
+// and the receiver trimmed it.
+func TestInteropSoftEtherShaped(t *testing.T) {
+	runInterop(t, "compose.softether-shaped.yml", "veepin-softether-client", "10.70.0.1")
+}
+
 func TestInteropSoftEtherSelf(t *testing.T) {
 	runInteropBench(t, "compose.softether-self.yml",
 		"veepin-softether-client", "veepin-softether-server", "10.70.0.1")

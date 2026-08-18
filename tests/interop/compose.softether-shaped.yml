@@ -1,0 +1,54 @@
+# veepin SoftEther client -> veepin SoftEther server, with the server shaping.
+#
+# The thirteenth protocol to honour dataplane.Shaper, and the second layer-2
+# one. What is padded is the Ethernet frame, and the receiver trims it by the
+# inner IP header's own Total Length -- exactly as internal/l2tpv3 does, and as
+# every IP stack does with a frame longer than the datagram it carries.
+#
+# The cell exists to prove the padding is inert. A shaped tunnel that came up
+# and carried nothing would fail the ping; a shaped tunnel that corrupted ARP
+# would fail before the ping, because ARP is the first thing across a layer-2
+# segment and has no length field to trim by. shapeFrame leaves non-IP frames
+# alone for that reason, and this is the cell that would catch it if that
+# stopped being true.
+name: veepin-interop-softether-shaped
+
+volumes:
+  certs:
+
+services:
+  veepin-softether-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      USER: "alice"
+      PASSWORD: "s3cret"
+      TUN_IP: "10.70.0.1"
+      # 4 KiB of each inner flow padded towards the frame MTU.
+      SHAPE: "4096"
+    volumes:
+      - ./veepin/softether-server-entrypoint.sh:/entrypoint.sh:ro
+      - certs:/certs
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-softether-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-softether-server]
+    environment:
+      SERVER: "veepin-softether-server"
+      USER: "alice"
+      PASSWORD: "s3cret"
+      TUN_IP: "10.70.0.2"
+      PEER_IP: "10.70.0.1"
+    volumes:
+      - ./veepin/softether-client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

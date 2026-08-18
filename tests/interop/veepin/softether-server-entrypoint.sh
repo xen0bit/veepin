@@ -32,6 +32,7 @@ veepin serve softether \
     -key /certs/server.key \
     -user "$USER" \
     -pass "$PASSWORD" \
+    -shape "${SHAPE:-0}" \
     -tun tap0 &
 VEEPIN_PID=$!
 

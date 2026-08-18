@@ -10,6 +10,8 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+
+	"github.com/xen0bit/veepin/dataplane"
 )
 
 // SoftEther VPN native protocol session: TLS connection, PACK-based control
@@ -106,6 +108,12 @@ type Server struct {
 	// 10.70.0.2 for every client on the switch.
 	assignedMu sync.Mutex
 	assigned   map[PortID]net.IP
+
+	// shaper pads outbound frames so an inner flow's size pattern does not
+	// survive encapsulation, and shapeMTU is the frame-level target. Nil means
+	// no shaping, which is the default -- see doc/traffic-shaping.md.
+	shaper   *dataplane.Shaper
+	shapeMTU int
 
 	// local is the server's own interface as a switch port (local.go), or nil
 	// when nothing is attached. Guarded separately from sessions because
@@ -436,8 +444,12 @@ func (ss *ServerSession) forwardTo(dests []PortID, frame []byte) {
 	ss.srv.deliver(dests, frame, ss.port)
 }
 
-// writeFrame sends one Ethernet frame as a single-block burst.
+// writeFrame sends one Ethernet frame as a single-block burst, shaped if the
+// server is shaping.
 func (ss *ServerSession) writeFrame(frame []byte) error {
+	if ss.srv != nil {
+		frame = shapeFrame(frame, ss.srv.shaper, ss.srv.shapeMTU)
+	}
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 	return writeBlocks(ss.conn, [][]byte{frame})
@@ -464,6 +476,9 @@ type ClientSession struct {
 	bridge *Bridge
 	port   PortID
 	mu     sync.Mutex
+
+	shaper   *dataplane.Shaper
+	shapeMTU int
 
 	serverRandom [sha0Size]byte
 	uniqueID     [sha0Size]byte
@@ -619,8 +634,20 @@ func (cs *ClientSession) login(username, password string) error {
 	return nil
 }
 
+// SetShaper turns on downstream flow shaping. mtu is the frame-level target,
+// Ethernet header included.
+func (s *Server) SetShaper(sh *dataplane.Shaper, mtu int) {
+	s.shaper, s.shapeMTU = sh, mtu
+}
+
+// SetShaper turns on upstream flow shaping for a client session.
+func (cs *ClientSession) SetShaper(sh *dataplane.Shaper, mtu int) {
+	cs.shaper, cs.shapeMTU = sh, mtu
+}
+
 // WriteFrame sends an Ethernet frame to the server as a single-block burst.
 func (cs *ClientSession) WriteFrame(frame []byte) error {
+	frame = shapeFrame(frame, cs.shaper, cs.shapeMTU)
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 	return writeBlocks(cs.conn, [][]byte{frame})

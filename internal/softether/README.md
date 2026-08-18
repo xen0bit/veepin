@@ -98,8 +98,10 @@ State these plainly rather than discovering them later.
   head-of-line blocking.
 - **No RADIUS, no certificate authentication, no cascade connections, no
   multi-hub.** One hub, one local account list.
-- **No shaping.** Every other protocol here honours `dataplane.Shaper`; this one
-  does not yet.
+- ~~**No shaping.**~~ Closed: `-shape` pads the IP-bearing frames of the segment
+  towards the frame MTU, and the receiver trims by the inner IP header's own
+  Total Length. Non-IP frames are left alone — ARP has no length field to trim
+  by, and padding one would corrupt the first exchange across a layer-2 segment.
 - **The server has no cross-implementation cell.** The client direction has one
   (`compose.softether.yml`, against SoftEther VPN Server itself). The reverse —
   SoftEther's own `vpnclient` against veepin's server — needs two things this

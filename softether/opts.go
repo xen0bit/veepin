@@ -13,5 +13,6 @@ func init() {
 		{Key: OptHub, Kind: client.OptStr, Default: "VPN", Help: "virtual hub name (default VPN)"},
 		{Key: OptInsecure, Kind: client.OptBool, Help: "skip gateway certificate verification (downgrades the transport to unauthenticated)"},
 		{Key: OptTUN, Kind: client.OptStr, Help: "TAP interface name (empty = kernel picks)"},
+		client.ShapeOpt(OptShape, "upstream"),
 	})
 }

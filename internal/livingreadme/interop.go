@@ -224,7 +224,10 @@ var interopMatrix = []interopRow{
 			Label: "SoftEther VPN Server (native SE-VPN, SecureNAT)",
 		},
 		Server: interopCell{Label: "—‡"},
-		Self:   interopCell{Tests: []string{"TestInteropSoftEtherSelf"}, Label: "(layer 2, switched)"},
+		Self: interopCell{
+			Tests: []string{"TestInteropSoftEtherSelf", "TestInteropSoftEtherShaped"},
+			Label: "(layer 2, switched; shaped)",
+		},
 	},
 	{
 		Protocol: "AmneziaWG",

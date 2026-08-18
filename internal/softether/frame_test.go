@@ -7,6 +7,8 @@ import (
 	"errors"
 	"io"
 	"testing"
+
+	"github.com/xen0bit/veepin/dataplane"
 )
 
 // TestBlockFramingIsBigEndian pins the byte order of the data path. It is the
@@ -170,3 +172,84 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 }
 
 var _ io.Writer = (*countingWriter)(nil)
+
+// TestShapeFramePadsIPAndLeavesEverythingElse. Padding is only safe where the
+// receiver has a length field to trim by: an IP header's Total Length. An ARP
+// frame has no such field, so a padded one is a corrupted one -- and ARP is the
+// first thing across a layer-2 tunnel, so getting this wrong breaks the tunnel
+// before any IP packet exists to notice.
+func TestShapeFramePadsIPAndLeavesEverythingElse(t *testing.T) {
+	sh := dataplane.NewShaper(dataplane.ShapeConfig{Bytes: 4096})
+	const mtu = 1514
+
+	ip := testEthFrame(0x0800, ipv4Packet(40))
+	if got := shapeFrame(ip, sh, mtu); len(got) <= len(ip) {
+		t.Errorf("an IP frame was not padded: %d octets in, %d out", len(ip), len(got))
+	}
+
+	arp := testEthFrame(0x0806, make([]byte, 28))
+	if got := shapeFrame(arp, sh, mtu); len(got) != len(arp) {
+		t.Errorf("an ARP frame was padded to %d octets; it has no length field to trim by", len(got))
+	}
+}
+
+// TestShapeFrameIsInertWithoutAShaper: shaping is opt-in, and a nil shaper must
+// cost nothing and change nothing.
+func TestShapeFrameIsInertWithoutAShaper(t *testing.T) {
+	frame := testEthFrame(0x0800, ipv4Packet(40))
+	got := shapeFrame(frame, nil, 1514)
+	if len(got) != len(frame) {
+		t.Errorf("a nil shaper padded the frame to %d octets", len(got))
+	}
+}
+
+// TestShapedFrameSurvivesTheBlockCodec: a padded frame is still one block, and
+// still arrives whole. The block framing carries an explicit length, so the
+// padding travels inside it rather than being mistaken for the next block --
+// which is the failure a length-prefixed stream would have if the padding were
+// appended after the length was computed.
+func TestShapedFrameSurvivesTheBlockCodec(t *testing.T) {
+	sh := dataplane.NewShaper(dataplane.ShapeConfig{Bytes: 4096})
+	frame := shapeFrame(testEthFrame(0x0800, ipv4Packet(40)), sh, 1514)
+
+	var buf bytes.Buffer
+	if err := writeBlocks(&buf, [][]byte{frame, {0xaa, 0xbb}}); err != nil {
+		t.Fatal(err)
+	}
+
+	r := newBlockReader(bufio.NewReader(&buf))
+	got, err := r.next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(frame) {
+		t.Errorf("padded frame came back as %d octets, want %d", len(got), len(frame))
+	}
+	next, err := r.next()
+	if err != nil {
+		t.Fatalf("the frame after a padded one: %v", err)
+	}
+	if !bytes.Equal(next, []byte{0xaa, 0xbb}) {
+		t.Errorf("the block after a padded frame is %x; the padding ran into it", next)
+	}
+}
+
+// testEthFrame builds an Ethernet frame with the given ethertype and payload.
+func testEthFrame(ethertype uint16, payload []byte) []byte {
+	f := make([]byte, 0, 14+len(payload))
+	f = append(f, 0x02, 0, 0, 0, 0, 1) // dst
+	f = append(f, 0x02, 0, 0, 0, 0, 2) // src
+	f = binary.BigEndian.AppendUint16(f, ethertype)
+	return append(f, payload...)
+}
+
+// ipv4Packet builds a minimal IPv4 packet of n octets, Total Length set.
+func ipv4Packet(n int) []byte {
+	p := make([]byte, n)
+	p[0] = 0x45
+	binary.BigEndian.PutUint16(p[2:], uint16(n))
+	p[9] = 17 // UDP
+	copy(p[12:16], []byte{10, 0, 0, 1})
+	copy(p[16:20], []byte{10, 0, 0, 2})
+	return p
+}
