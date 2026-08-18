@@ -1,0 +1,58 @@
+# veepin client -> strongSwan responder, with IP-TFS (RFC 9347 AGGFRAG) on the
+# Child SA.
+#
+# The first cross-implementation proof AGGFRAG has ever had. It was in the tree,
+# unit-tested and negotiated in both roles, and internal/ikev2/aggfrag/README.md
+# said plainly that a self-test shows the two halves agree rather than that
+# either is right. Building this found two bugs, both invisible to every veepin
+# test that existed:
+#
+#   - The USE_AGGFRAG notify was sent with an EMPTY body. RFC 9347 §6.1.4 gives
+#     it one octet of requirement flags, and strongSwan's notify_payload.c checks
+#     the length before it looks at anything else -- "invalid notify data length
+#     for USE_AGGFRAG (0)" -- and refuses the entire IKE_AUTH message. Both
+#     veepin ends sent and accepted the empty form, so they agreed perfectly.
+#   - Inbound AGGFRAG was decapsulated by the WRONG METHOD on any TUN with GSO.
+#     dataplane's GRO batch path called the single-packet decapsulator, which
+#     rejects ESP next header 144 outright, so every inbound packet was dropped
+#     while the handshake reported IP-TFS negotiated and working.
+#
+# The peer is the strongswan-pq image (debian:sid, strongSwan 6.0.7) rather than
+# a new one: IP-TFS arrived in strongSwan 6.0.2 and the PQ cells already needed a
+# 6.x base, so the image that exists is new enough. The bookworm-based cells stay
+# where they are for the reason strongswan-pq/Dockerfile states.
+name: veepin-interop-iptfs
+
+services:
+  strongswan-server:
+    build:
+      context: strongswan-pq
+    image: interop-strongswan-pq
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+      net.ipv4.ip_forward: "1"
+    volumes:
+      - ./strongswan/swanctl-server-iptfs.conf:/etc/swanctl/swanctl.conf:ro
+      - ./strongswan-pq/99-stdout-log.conf:/etc/strongswan.d/99-stdout-log.conf:ro
+      - ./strongswan-pq/server-entrypoint.sh:/entrypoint.sh:ro
+    command: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [strongswan-server]
+    environment:
+      SERVER: "strongswan-server"
+      PSK: "interop-test-psk"
+      CLIENT_ID: "client.example.com"
+      SERVER_ID: "vpn.example.com"
+      IPTFS: "true"
+    volumes:
+      - ./veepin/client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

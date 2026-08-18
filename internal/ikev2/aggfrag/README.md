@@ -36,6 +36,15 @@ the end of the payload. It looks like an accident;
 ## What is implemented
 
 - Sub-type 0 (non-congestion-controlled) headers, both directions.
+- The `USE_AGGFRAG` **requirement flags**, which are one octet and not optional.
+  RFC 9347 §6.1.4 gives the notify a one-octet body; strongSwan's
+  `notify_payload.c` checks its length before it looks at anything else and
+  refuses the entire IKE_AUTH message over a body of any other size. veepin sent
+  it empty for as long as AGGFRAG existed here, and both veepin ends accepted
+  the empty form, so nothing failed until a cell was pointed at strongSwan.
+  veepin requires nothing of a peer — it reassembles, so Don't Fragment would be
+  a cost for nothing, and it does not implement sub-type 1, so asking for
+  congestion control it could not act on would be worse than not asking.
 - Aggregation on receive: a peer that puts several packets in one payload —
   strongSwan does — has all of them delivered, via `dataplane.MultiTunnel`.
 - Fragmentation and reassembly in both directions, including a block split
@@ -75,7 +84,19 @@ the end of the payload. It looks like an accident;
   make it a corrupted continuation on the wire.
   `TestPackDoesNotBorrowAPacketItReportedAsConsumed` is the guard, and it needs
   no race detector.
-- **Not yet interop-tested.** There is no strongSwan cell for this; the
-  negotiation and data path are covered only by unit tests and a veepin↔veepin
-  path. Per this repo's own standard that means it is **not proven correct** —
-  a self-test shows the two halves agree, not that either is right.
+- ~~**Not yet interop-tested.**~~ Closed: `compose.iptfs.yml`,
+  `compose.iptfs-server.yml` and `compose.iptfs-self.yml` run against strongSwan
+  6.0.7 in both directions.
+
+  This caveat used to say that a self-test shows the two halves agree rather
+  than that either is right, and it earned its keep twice over. Building the
+  cells found the empty `USE_AGGFRAG` body above, and a second bug nothing in
+  the tree could see: `dataplane`'s GRO batch path called the single-packet
+  decapsulator, which rejects ESP next header 144 outright, so on any TUN with
+  GSO — which is the veepin client's — every inbound AGGFRAG packet was dropped
+  while the handshake reported IP-TFS negotiated and working.
+
+  Every cell asserts a log line naming AGGFRAG, in the peer's own words:
+  swanctl.opt says the iptfs mode "is subject to mode negotiation; tunnel mode
+  is negotiated if the preferred mode is not available", so a veepin that failed
+  to negotiate gets a working plain tunnel and a ping that crosses it.

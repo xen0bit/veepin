@@ -102,6 +102,11 @@ type ClientResult struct {
 	// AggFrag is true when both peers agreed USE_AGGFRAG, so the Child SA
 	// carries RFC 9347 AGGFRAG payloads instead of plain inner IP packets.
 	AggFrag bool
+	// AggFragFlags is what the PEER requires of us, from its USE_AGGFRAG
+	// notify -- not what we asked of it. Its one flag that matters to a sender
+	// is Don't Fragment: a peer that set it cannot reassemble, so every inner
+	// packet must go in a single data block.
+	AggFragFlags aggfrag.Flags
 }
 
 // Client is an IKEv2 initiator. It performs the handshake and exposes the
@@ -757,11 +762,44 @@ func (c *Client) buildAuthInner(idBody []byte, auth *payload.AuthPayload) (*payl
 		// USE_AGGFRAG (RFC 9347 section 3.1). Both peers must send it; if the
 		// responder does not echo it the Child SA carries ordinary inner IP
 		// packets and we fall back, exactly as the PostQuantum path does.
+		//
+		// The one-octet flags body is not optional. This used to send the
+		// notify empty, which every veepin accepted and strongSwan refuses the
+		// whole IKE_AUTH message over -- "invalid notify data length for
+		// USE_AGGFRAG (0)", checked before it looks at anything else.
 		b.Add(payload.TypeNotify, false, payload.MarshalNotify(payload.NotifyPayload{
 			Protocol: payload.ProtoNone, Type: payload.UseAggFrag,
+			Data: aggfrag.OurFlags.NotifyData(),
 		}))
 	}
 	return b, childOutSPI
+}
+
+// acceptAggFrag reads the responder's USE_AGGFRAG echo and reports whether the
+// Child SA carries AGGFRAG payloads, along with the flags the peer requires.
+//
+// A malformed notify, or one requiring something unimplemented, turns AGGFRAG
+// OFF rather than failing the handshake. That is RFC 9347 section 5.1's own
+// instruction -- "the receiver SHOULD NOT enable use of AGGFRAG_PAYLOAD" -- and
+// it is the safe direction: the Child SA is already established and carries
+// plain inner IP perfectly well, whereas refusing it here would turn a
+// negotiable option into a connection failure.
+func (c *Client) acceptAggFrag(inners []payload.RawPayload) (bool, aggfrag.Flags) {
+	n := findNotify(inners, payload.UseAggFrag)
+	if n == nil {
+		return false, 0
+	}
+	flags, err := aggfrag.ParseFlags(n.Data)
+	if err != nil {
+		c.log.Printf("ike: %v; not enabling AGGFRAG", err)
+		return false, 0
+	}
+	if flags.Unsupported() {
+		c.log.Printf("ike: peer requires AGGFRAG flags 0x%02x this does not implement; "+
+			"not enabling AGGFRAG", byte(flags))
+		return false, 0
+	}
+	return true, flags
 }
 
 // verifyServerAuth checks the responder's IDr and AUTH payload. On the EAP
@@ -874,9 +912,10 @@ func (c *Client) applyAuthResult(inners []payload.RawPayload, childOutSPI uint32
 	// our own request would put next-header 144 on the wire against a peer
 	// expecting plain inner IP, and every packet would be dropped as malformed.
 	if c.cfg.IPTFS {
-		res.AggFrag = findNotify(inners, payload.UseAggFrag) != nil
+		res.AggFrag, res.AggFragFlags = c.acceptAggFrag(inners)
 		if res.AggFrag {
-			c.log.Printf("ike: AGGFRAG (RFC 9347) negotiated; ESP next header %d", aggfrag.ESPNextHeader)
+			c.log.Printf("ike: AGGFRAG (RFC 9347) negotiated; ESP next header %d, peer flags 0x%02x",
+				aggfrag.ESPNextHeader, byte(res.AggFragFlags))
 		} else {
 			c.log.Printf("ike: peer did not offer USE_AGGFRAG; falling back to plain ESP")
 		}

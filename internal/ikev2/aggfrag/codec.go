@@ -27,6 +27,7 @@ package aggfrag
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 )
 
 // ESPNextHeader is the ESP Next Header value that marks an AGGFRAG payload,
@@ -305,3 +306,75 @@ func innerLen(b []byte) int {
 	}
 	return 0
 }
+
+// The USE_AGGFRAG requirement flags (RFC 9347 section 6.1.4).
+//
+// The notify carries **exactly one octet** of flags, and that is the detail
+// this tree got wrong for as long as AGGFRAG existed in it: veepin sent the
+// notify with an empty body, both veepin ends accepted it, and strongSwan
+// answers `invalid notify data length for USE_AGGFRAG (0)` and refuses the
+// whole IKE_AUTH message. A notify with no data is not a notify with default
+// flags; it is malformed, and notify_payload.c checks the length before it
+// looks at anything else.
+//
+//	+-+-+-+-+-+-+-+-+
+//	|0|0|0|0|0|0|C|D|
+//	+-+-+-+-+-+-+-+-+
+//
+// The flags state what the SENDER requires of its peer, not what it intends to
+// do. D means "do not send me fragments"; C means "send me congestion-control
+// information periodically".
+type Flags uint8
+
+const (
+	// FlagDontFragment (D) tells the peer this side cannot reassemble, so every
+	// inner packet must arrive in a single data block.
+	FlagDontFragment Flags = 1 << 0
+	// FlagCongestionControl (C) requires the peer to return the sub-type 1
+	// congestion-control header periodically.
+	FlagCongestionControl Flags = 1 << 1
+	// flagsReserved is the six bits RFC 9347 requires to be zero on send. A
+	// peer that sets one is asking for something defined by a specification
+	// this does not implement, which is indistinguishable from asking for
+	// something impossible.
+	flagsReserved Flags = 0xfc
+)
+
+// OurFlags is what veepin requires of a peer, and it requires nothing.
+//
+// D is clear because Reassembler exists: a packet split across payloads is put
+// back together, so there is no reason to forbid the peer from splitting one.
+// C is clear because sub-type 1 is not implemented -- and asking for congestion
+// control we could not then act on would be worse than not asking.
+const OurFlags Flags = 0
+
+// NotifyData renders the flags as the notify's one-octet body.
+func (f Flags) NotifyData() []byte { return []byte{byte(f)} }
+
+// ParseFlags reads a USE_AGGFRAG notify body. A body of any length other than
+// one is rejected rather than tolerated: strongSwan refuses the entire IKE_AUTH
+// message over it, so accepting a short body here would only move the failure
+// somewhere less obvious.
+func ParseFlags(data []byte) (Flags, error) {
+	if len(data) != 1 {
+		return 0, fmt.Errorf("aggfrag: USE_AGGFRAG notify carries %d octets, want 1", len(data))
+	}
+	return Flags(data[0]), nil
+}
+
+// Unsupported reports whether the peer required something this implementation
+// cannot provide, in which case RFC 9347 section 5.1 says not to enable
+// AGGFRAG at all rather than to enable it and quietly ignore the requirement.
+//
+// Congestion control is unsupported because sub-type 1 is unimplemented. A
+// reserved bit is unsupported because it is defined by a specification this
+// predates -- strongSwan's child_create.c makes exactly the same two checks,
+// which is worth knowing when reading its logs.
+func (f Flags) Unsupported() bool {
+	return f&(FlagCongestionControl|flagsReserved) != 0
+}
+
+// MustNotFragment reports whether the peer asked not to receive fragments. A
+// sender honouring it emits each inner packet in one data block, which costs
+// padding on a payload too small to hold the next packet whole.
+func (f Flags) MustNotFragment() bool { return f&FlagDontFragment != 0 }

@@ -74,7 +74,8 @@ var interopMatrix = []interopRow{
 			"TestInteropVeepinClientStrongswanServerIPv6",
 			"TestInteropVeepinClientStrongswanServerV6Underlay",
 			"TestInteropVeepinClientStrongswanServerPQ",
-		}, Label: "strongSwan (PSK + pubkey, AES-GCM + ChaCha20, dual-stack, v6 underlay, ML-KEM-768)"},
+			"TestInteropVeepinClientStrongswanIPTFS",
+		}, Label: "strongSwan (PSK + pubkey, AES-GCM + ChaCha20, dual-stack, v6 underlay, ML-KEM-768, IP-TFS)"},
 		Server: interopCell{Tests: []string{
 			"TestInteropStrongswanClientVeepinServer",
 			"TestInteropStrongswanClientVeepinServerEAP",
@@ -83,12 +84,14 @@ var interopMatrix = []interopRow{
 			"TestInteropStrongswanClientVeepinServerIPv6",
 			"TestInteropStrongswanClientVeepinServerShaped",
 			"TestInteropStrongswanClientVeepinServerPQ",
-		}, Label: "strongSwan (+ EAP-MSCHAPv2, RFC 7383 frag, dual-stack, v6 underlay, TFC-padded, ML-KEM-768)"},
+			"TestInteropStrongswanClientVeepinServerIPTFS",
+		}, Label: "strongSwan (+ EAP-MSCHAPv2, RFC 7383 frag, dual-stack, v6 underlay, TFC-padded, ML-KEM-768, IP-TFS)"},
 		Self: interopCell{Tests: []string{
 			"TestInteropSelf",
 			"TestInteropIKEv2ChildRekey",
 			"TestInteropIKEv2IKERekey",
-		}},
+			"TestInteropIPTFSSelf",
+		}, Label: "(+ IP-TFS)"},
 	},
 	{
 		Protocol: "WireGuard",

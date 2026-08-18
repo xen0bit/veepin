@@ -1178,6 +1178,55 @@ func TestInteropSoftEtherClientVeepinServer(t *testing.T) {
 	requireARPInsideTunnel(t, "compose.softether-server.yml", "se-client", "vpn_se", "10.71.0.1")
 }
 
+// The IP-TFS (RFC 9347 AGGFRAG) cells, against strongSwan 6.0.7.
+//
+// Every one of them requires a log line naming AGGFRAG, and that is not
+// belt-and-braces. swanctl.opt says of the mode outright: "The transport, iptfs
+// and beet modes are subject to mode negotiation; tunnel mode is negotiated if
+// the preferred mode is not available." So a veepin that failed to negotiate
+// USE_AGGFRAG gets an ordinary tunnel-mode Child SA from strongSwan and a ping
+// that crosses it perfectly. A bare ping is the textbook false green here, in
+// the peer's own documented words.
+//
+// AGGFRAG had no cross-implementation cell at all until these, and
+// internal/ikev2/aggfrag/README.md said so: "a self-test shows the two halves
+// agree, not that either is right." Building them found two bugs neither half
+// could see. The notify was sent with an empty body where RFC 9347 §6.1.4 gives
+// it one octet of flags, which strongSwan refuses the whole IKE_AUTH message
+// over. And inbound AGGFRAG was decapsulated by the single-packet method on any
+// TUN with GSO -- which rejects ESP next header 144 outright, so every packet
+// was dropped while the handshake reported IP-TFS working.
+
+// TestInteropVeepinClientStrongswanIPTFS drives veepin's client against a
+// strongSwan responder configured with `mode = iptfs`.
+func TestInteropVeepinClientStrongswanIPTFS(t *testing.T) {
+	runInteropRequiringLog(t, "compose.iptfs.yml", "veepin-client", "10.20.30.254",
+		"AGGFRAG (RFC 9347) negotiated")
+}
+
+// TestInteropStrongswanClientVeepinServerIPTFS is the direction that catches a
+// responder echoing USE_AGGFRAG without meaning it: strongSwan installs an XFRM
+// SA in mode 5 (IPTFS) on the strength of the echo, so a veepin that then sent
+// plain inner IP would have every packet dropped by the kernel while the
+// handshake still looked perfect.
+//
+// The log requirement is read from the veepin SERVER, not from the pinging
+// container, because the claim is about what veepin did.
+func TestInteropStrongswanClientVeepinServerIPTFS(t *testing.T) {
+	runInteropRequiringLogFrom(t, "compose.iptfs-server.yml",
+		"strongswan-client", "veepin-server", "10.10.10.1",
+		"AGGFRAG (RFC 9347) negotiated")
+}
+
+// TestInteropIPTFSSelf proves both roles exist and that the aggregating data
+// path survives a real socket and a real TUN. It proves nothing about
+// correctness against a peer -- for as long as AGGFRAG existed in the tree, two
+// veepin ends agreed about a notify strongSwan refuses outright.
+func TestInteropIPTFSSelf(t *testing.T) {
+	runInteropRequiringLog(t, "compose.iptfs-self.yml", "veepin-client", "10.10.10.1",
+		"AGGFRAG (RFC 9347) negotiated")
+}
+
 // TOY is the example protocol (internal/toy) and provides no security; these
 // cells prove the *specification*, not the cryptography. The peer they talk to
 // is an independent Python implementation written from internal/toy/SPEC.md

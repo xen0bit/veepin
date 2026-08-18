@@ -240,3 +240,10 @@ func TestPumpVnetHonoursInnerMTU(t *testing.T) {
 		t.Logf("note: frag-needed reply does not embed the original header prefix")
 	}
 }
+
+// vnetWrites returns a copy of everything written through the vnet path.
+func (f *fakeGSOTUN) vnetWrites() [][]byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([][]byte(nil), f.vnetWr...)
+}

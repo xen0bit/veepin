@@ -162,6 +162,21 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 		CAFile:      opts[OptCA],
 		PostQuantum: opts[OptPQ] == "true",
 		IPTFS:       opts[OptIPTFS] == "true",
+		// Without this the engine's log goes nowhere: Dial discards a nil
+		// Logger, so every line internal/ikev2/ike writes -- AGGFRAG
+		// negotiated or declined, a rekey, a MOBIKE roam, a certificate
+		// warning -- was dropped on the floor for every dial through the
+		// registry, which is every dial `veepin connect ikev2` makes. The
+		// server half has always wired one (server.go); the client half never
+		// did, and nothing failed, because a discarded log looks exactly like
+		// a quiet protocol.
+		//
+		// It is also what makes an IKEv2 interop cell able to use
+		// runInteropRequiringLog. Without a log there is no way to assert that
+		// a negotiated option actually came up, and a ping passes just as
+		// happily on the fallback -- which for IP-TFS is strongSwan silently
+		// dropping to plain tunnel mode.
+		Logger: log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds),
 	}
 	if v := opts[OptIPTFSRate]; v != "" {
 		n, err := strconv.Atoi(v)

@@ -387,6 +387,11 @@ func (p *Pump) multiTunnelFor(pkt []byte, from *net.UDPAddr) (MultiTunnel, *Tunn
 	return mt, b.c, true
 }
 
+// noteInbound records authenticated inbound activity for the liveness check.
+// It exists so the two aggregated-decap paths -- the plain one here and the GRO
+// one in gro_linux.go -- cannot drift on which of them remembers to.
+func (p *Pump) noteInbound() { p.lastInbound.Store(time.Now().UnixNano()) }
+
 // handleInboundMulti delivers every inner packet one aggregated datagram holds.
 func (p *Pump) handleInboundMulti(t MultiTunnel, c *TunnelCounters, pkt []byte) {
 	inners, err := t.DecapsulateMulti(pkt, p.multiScratch[:0])
@@ -398,7 +403,7 @@ func (p *Pump) handleInboundMulti(t MultiTunnel, c *TunnelCounters, pkt []byte) 
 		return
 	}
 	p.multiScratch = inners[:0]
-	p.lastInbound.Store(time.Now().UnixNano())
+	p.noteInbound()
 	for _, inner := range inners {
 		if len(inner) == 0 {
 			continue

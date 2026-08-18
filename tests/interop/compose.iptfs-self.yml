@@ -1,0 +1,48 @@
+# veepin client <-> veepin server, both with IP-TFS.
+#
+# It proves both roles exist and that the aggregating data path survives a real
+# socket and a real TUN. It proves nothing about correctness against a peer, and
+# this row is the sharpest illustration of that in the tree: for as long as
+# AGGFRAG existed, the two halves agreed about a USE_AGGFRAG notify with an
+# empty body that strongSwan refuses outright. The kernel cells above are what
+# make the claim; this one isolates a veepin break from an interop break.
+name: veepin-interop-iptfs-self
+
+services:
+  veepin-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    sysctls:
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+      net.ipv4.ip_forward: "1"
+    environment:
+      PSK: "interop-test-psk"
+      SERVER_ID: "vpn.example.com"
+      POOL: "10.10.10.0/24"
+      IPTFS: "true"
+    volumes:
+      - ./veepin/server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-server]
+    environment:
+      SERVER: "veepin-server"
+      PSK: "interop-test-psk"
+      CLIENT_ID: "client.example.com"
+      SERVER_ID: "vpn.example.com"
+      IPTFS: "true"
+    volumes:
+      - ./veepin/client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

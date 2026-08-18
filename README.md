@@ -47,7 +47,7 @@ wire detail, caveats and API surface.
 
 | Protocol | Authentication | Data path | Verified against | Docs |
 |----------|----------------|-----------|------------------|------|
-| **IKEv2/ESP** | PSK, EAP-MSCHAPv2, X.509 certificate (RFC 7427) | ESP-in-UDP, RFC 4303 (NAT-T, dual-stack v4/v6 CP address assignment) | strongSwan | [ikev2](internal/ikev2/ike/README.md) |
+| **IKEv2/ESP** | PSK, EAP-MSCHAPv2, X.509 certificate (RFC 7427) | ESP-in-UDP, RFC 4303 (NAT-T, dual-stack v4/v6 CP address assignment, RFC 9347 AGGFRAG) | strongSwan | [ikev2](internal/ikev2/ike/README.md) |
 | **WireGuard** | Noise_IKpsk2 static keys | ChaCha20-Poly1305, cryptokey routing (both families), client rekey | wireguard-go | [wireguard](internal/wireguard/) |
 | **OpenVPN** | mutual TLS certificates | AES-256-GCM / -CBC; plain, `tls-auth`, `tls-crypt` (both roles) | `openvpn` | [openvpn](internal/openvpn/) |
 | **SSTP** | MS-CHAPv2 over PPP | PPP/IPCP over TLS, SHA-256 crypto binding | SoftEther, `sstpc`/pppd | [sstp](internal/sstp/wire/README.md) |
@@ -561,7 +561,7 @@ passed in that run, not a claim.
 <!-- livingreadme:interop:start -->
 | Protocol   | veepin client ↔ real server | real client ↔ veepin server | veepin ↔ veepin (self) |
 |------------|-----------------------------|-----------------------------|------------------------|
-| IKEv2 | ✓ strongSwan (PSK + pubkey, AES-GCM + ChaCha20, dual-stack, v6 underlay, ML-KEM-768) | ✓ strongSwan (+ EAP-MSCHAPv2, RFC 7383 frag, dual-stack, v6 underlay, TFC-padded, ML-KEM-768) | ✓ |
+| IKEv2 | ✓ strongSwan (PSK + pubkey, AES-GCM + ChaCha20, dual-stack, v6 underlay, ML-KEM-768, IP-TFS) | ✓ strongSwan (+ EAP-MSCHAPv2, RFC 7383 frag, dual-stack, v6 underlay, TFC-padded, ML-KEM-768, IP-TFS) | ✓ (+ IP-TFS) |
 | WireGuard | ✓ wireguard-go | ✓ wireguard-go (+ padded, IPv6 inner) | ✓ |
 | OpenVPN | ✓ `openvpn` (×4 variants) | ✓ `openvpn` (+ tls-auth, tls-crypt, padded) | ✓ |
 | SSTP | ✓ SoftEther | ✓ `sstpc`/pppd (+ PPP-padded) | ✓ |

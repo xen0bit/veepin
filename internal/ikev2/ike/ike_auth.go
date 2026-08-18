@@ -352,13 +352,22 @@ func (s *Server) finishIKEAuth(sa *IKESA, hdr payload.Header, inners []payload.R
 		// USE_AGGFRAG (RFC 9347 section 3.1) is only agreed when BOTH peers send
 		// it, so the echo is what turns it on. Echoing unconditionally would put
 		// next-header 144 on the wire against a client that never asked for it.
-		if s.cfg.IPTFS && findNotify(inners, payload.UseAggFrag) != nil {
-			respChild.AggFrag = true
-			b.Add(payload.TypeNotify, false, payload.MarshalNotify(payload.NotifyPayload{
-				Protocol: payload.ProtoNone, Type: payload.UseAggFrag,
-			}))
-			s.log.Printf("ike: AGGFRAG (RFC 9347) negotiated; ESP next header %d",
-				aggfrag.ESPNextHeader)
+		//
+		// The echo carries the one-octet flags body, as the request must. An
+		// empty notify is not a notify with default flags -- it is malformed,
+		// and strongSwan refuses the whole message over it before looking at
+		// anything else.
+		if s.cfg.IPTFS {
+			if flags, ok := s.acceptAggFrag(inners); ok {
+				respChild.AggFrag = true
+				respChild.AggFragFlags = flags
+				b.Add(payload.TypeNotify, false, payload.MarshalNotify(payload.NotifyPayload{
+					Protocol: payload.ProtoNone, Type: payload.UseAggFrag,
+					Data: aggfrag.OurFlags.NotifyData(),
+				}))
+				s.log.Printf("ike: AGGFRAG (RFC 9347) negotiated; ESP next header %d, peer flags 0x%02x",
+					aggfrag.ESPNextHeader, byte(flags))
+			}
 		}
 	} else if haveChild {
 		b.Add(payload.TypeNotify, false, payload.MarshalNotify(payload.NotifyPayload{
@@ -535,3 +544,29 @@ func u64BE(v uint64) []byte {
 	return b
 }
 func beU64(b []byte) uint64 { return binary.BigEndian.Uint64(b) }
+
+// acceptAggFrag decides whether to echo the initiator's USE_AGGFRAG, and
+// reports the flags it required of us.
+//
+// Declining is done by staying silent, not by erroring: RFC 9347 section 5.1
+// says a responder that cannot meet a requirement flag simply does not respond
+// with the notification, and the Child SA is then established carrying plain
+// inner IP. Failing the exchange instead would turn an option the initiator
+// offered into a refused connection.
+func (s *Server) acceptAggFrag(inners []payload.RawPayload) (aggfrag.Flags, bool) {
+	n := findNotify(inners, payload.UseAggFrag)
+	if n == nil {
+		return 0, false
+	}
+	flags, err := aggfrag.ParseFlags(n.Data)
+	if err != nil {
+		s.log.Printf("ike: %v; not enabling AGGFRAG", err)
+		return 0, false
+	}
+	if flags.Unsupported() {
+		s.log.Printf("ike: peer requires AGGFRAG flags 0x%02x this does not implement; "+
+			"not enabling AGGFRAG", byte(flags))
+		return 0, false
+	}
+	return flags, true
+}

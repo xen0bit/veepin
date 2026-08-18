@@ -276,9 +276,19 @@ says of every other protocol here. Enabling `-iptfs` therefore buys efficiency
 and a standards-track framing — it does not buy the traffic-analysis resistance
 the name suggests. Do not rely on it for that until the sender lands.
 
-The negotiation is also not interop-tested against strongSwan yet, so by this
-repo's own standard the wire format is unproven: a veepin↔veepin test shows the
-two halves agree, not that either is right.
+The negotiation and the framing **are** now interop-tested, against strongSwan
+6.0.7 in both directions. That closes the "unproven wire format" half of this
+section and does not touch the half above it: what is proven is that veepin's
+AGGFRAG framing interoperates, not that it confers traffic-flow confidentiality.
+
+Building those cells is also the reason to distrust a self-test here in
+particular. Two bugs survived every unit test and both veepin roles agreeing
+with each other: the `USE_AGGFRAG` notify was sent with an empty body where
+RFC 9347 gives it one octet of flags (strongSwan refuses the whole IKE_AUTH
+message over it), and every inbound AGGFRAG packet was dropped on any TUN with
+GSO because `dataplane`'s batch path reached for the single-packet
+decapsulator. The second is the one worth remembering: the tunnel reported
+IP-TFS negotiated and working while carrying nothing inbound.
 
 ## What counts as a secret option, and why the rule needs writing down
 

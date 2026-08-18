@@ -9,6 +9,8 @@ import (
 
 	"github.com/xen0bit/veepin/internal/ikev2/eap"
 	"github.com/xen0bit/veepin/internal/ikev2/payload"
+
+	"github.com/xen0bit/veepin/internal/ikev2/aggfrag"
 )
 
 // SAState is the lifecycle state of an IKE SA.
@@ -71,6 +73,9 @@ type ChildSA struct {
 	// this Child SA carries RFC 9347 AGGFRAG payloads with ESP next header 144
 	// instead of plain inner IP packets.
 	AggFrag bool
+	// AggFragFlags is what the initiator required of us in its USE_AGGFRAG
+	// notify. Only Don't Fragment affects what this end sends.
+	AggFragFlags aggfrag.Flags
 }
 
 // IKESA holds all state for one IKE Security Association.
