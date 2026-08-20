@@ -74,7 +74,9 @@ var interopMatrix = []interopRow{
 			"TestInteropVeepinClientStrongswanServerIPv6",
 			"TestInteropVeepinClientStrongswanServerV6Underlay",
 			"TestInteropVeepinClientStrongswanServerPQ",
-		}, Label: "strongSwan (PSK + pubkey, AES-GCM + ChaCha20, dual-stack, v6 underlay, ML-KEM-768)"},
+			"TestInteropVeepinClientStrongswanIPTFS",
+			"TestInteropIPTFSConstantRate",
+		}, Label: "strongSwan (PSK + pubkey, AES-GCM + ChaCha20, dual-stack, v6 underlay, ML-KEM-768, IP-TFS incl. constant-rate)"},
 		Server: interopCell{Tests: []string{
 			"TestInteropStrongswanClientVeepinServer",
 			"TestInteropStrongswanClientVeepinServerEAP",
@@ -83,12 +85,14 @@ var interopMatrix = []interopRow{
 			"TestInteropStrongswanClientVeepinServerIPv6",
 			"TestInteropStrongswanClientVeepinServerShaped",
 			"TestInteropStrongswanClientVeepinServerPQ",
-		}, Label: "strongSwan (+ EAP-MSCHAPv2, RFC 7383 frag, dual-stack, v6 underlay, TFC-padded, ML-KEM-768)"},
+			"TestInteropStrongswanClientVeepinServerIPTFS",
+		}, Label: "strongSwan (+ EAP-MSCHAPv2, RFC 7383 frag, dual-stack, v6 underlay, TFC-padded, ML-KEM-768, IP-TFS)"},
 		Self: interopCell{Tests: []string{
 			"TestInteropSelf",
 			"TestInteropIKEv2ChildRekey",
 			"TestInteropIKEv2IKERekey",
-		}},
+			"TestInteropIPTFSSelf",
+		}, Label: "(+ IP-TFS)"},
 	},
 	{
 		Protocol: "WireGuard",
@@ -231,21 +235,30 @@ var interopMatrix = []interopRow{
 	// times the dash was read as "nobody has spent the afternoon" and both
 	// times it was hiding something that a peer, and only a peer, could see.
 	//
-	// The Server cell — SoftEther's own vpnclient against veepin's server —
-	// keeps "‡" for now, and the mark is still the right one: the peer is
-	// Apache-2.0 and available, so "†" (no open-source peer exists, as with
-	// FortiOS) would be a false statement. What it needs is veepin's server to
-	// answer a real client, which is a larger job than the client direction
-	// was — PackWelcome carries a policy the reference's ParseWelcomeFromPack
-	// requires and veepin's welcome does not yet send, and the reference
-	// client establishes additional connections the server must accept.
+	// The Server cell carried "‡" — work outstanding rather than a limitation —
+	// and it is now built, which makes this row the third time it taught the
+	// same lesson in a row. The two things this comment named as what the cell
+	// needed were both wrong. PackWelcome's policy is not required: PackGetPolicy
+	// zero-fills, so a welcome without one parses and the client enforces none
+	// of the fields locally. The additional connections never happen: the
+	// welcome advertises max_connection=1 and ClientAdditionalConnectChance
+	// compares the live count against exactly that. What actually blocked it was
+	// one layer lower and had not been guessed at — vpnclient opens with `GET /`
+	// and posts the signature second, and veepin read one request and judged it.
+	//
+	// Two months of reasoning produced two confident blockers, neither real, and
+	// missed the one that was. That is not an argument for reasoning more
+	// carefully.
 	{
 		Protocol: "SoftEther VPN",
 		Client: interopCell{
 			Tests: []string{"TestInteropVeepinClientSoftEtherServer"},
 			Label: "SoftEther VPN Server (native SE-VPN, SecureNAT)",
 		},
-		Server: interopCell{Label: "—‡"},
+		Server: interopCell{
+			Tests: []string{"TestInteropSoftEtherClientVeepinServer"},
+			Label: "SoftEther VPN `vpnclient`",
+		},
 		Self: interopCell{
 			Tests: []string{"TestInteropSoftEtherSelf", "TestInteropSoftEtherShaped"},
 			Label: "(layer 2, switched; shaped)",

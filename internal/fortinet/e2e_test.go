@@ -3,6 +3,7 @@ package fortinet
 import (
 	"crypto/tls"
 	"encoding/binary"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -157,8 +158,15 @@ func TestLoginRejectsWrongPassword(t *testing.T) {
 	hc := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
 	jar, _ := cookiejar.New(nil)
 	hc.Jar = jar
-	if _, _, err := Login(hc, ts.URL, "alice", "wrong", "", nil); err == nil {
+	_, _, err := Login(hc, ts.URL, "alice", "wrong", "", nil)
+	if err == nil {
 		t.Error("Login accepted a wrong password")
+	}
+	// FortiOS locks an account after a run of failures, so the facade maps this
+	// to client.ErrAuth and `veepin connect -retry` stops rather than replaying
+	// the password into the lockout.
+	if !errors.Is(err, ErrAuth) {
+		t.Errorf("Login error = %v, want one satisfying errors.Is(err, ErrAuth)", err)
 	}
 }
 

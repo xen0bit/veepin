@@ -22,7 +22,6 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -163,6 +162,21 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 		CAFile:      opts[OptCA],
 		PostQuantum: opts[OptPQ] == "true",
 		IPTFS:       opts[OptIPTFS] == "true",
+		// Without this the engine's log goes nowhere: Dial discards a nil
+		// Logger, so every line internal/ikev2/ike writes -- AGGFRAG
+		// negotiated or declined, a rekey, a MOBIKE roam, a certificate
+		// warning -- was dropped on the floor for every dial through the
+		// registry, which is every dial `veepin connect ikev2` makes. The
+		// server half has always wired one (server.go); the client half never
+		// did, and nothing failed, because a discarded log looks exactly like
+		// a quiet protocol.
+		//
+		// It is also what makes an IKEv2 interop cell able to use
+		// runInteropRequiringLog. Without a log there is no way to assert that
+		// a negotiated option actually came up, and a ping passes just as
+		// happily on the fallback -- which for IP-TFS is strongSwan silently
+		// dropping to plain tunnel mode.
+		Logger: log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds),
 	}
 	if v := opts[OptIPTFSRate]; v != "" {
 		n, err := strconv.Atoi(v)
@@ -217,6 +231,21 @@ func (cfg Config) validate() error {
 		// Without a certificate the PSK is what authenticates the server (and the
 		// client, unless EAP is used).
 		return fmt.Errorf("%s is required unless %s is set", OptPSK, OptCert)
+	case cfg.IPTFSRate > 0 && !cfg.IPTFS:
+		return fmt.Errorf("%s needs %s: there is no constant-rate transmission "+
+			"without the AGGFRAG data path to carry it", OptIPTFSRate, OptIPTFS)
+	case cfg.IPTFSRate > 0 && cfg.Shape > 0:
+		// Refused rather than ignored. The paced data path does not go through
+		// the shaper at all, so accepting both would mean -shape silently did
+		// nothing -- the same shape of bug as -kill-switch under -no-route,
+		// which this tree has already had once.
+		//
+		// It is also not a loss. Constant-rate transmission fixes every
+		// datagram at one size, which is what -shape pads *towards*; there is
+		// nothing left for it to do.
+		return fmt.Errorf("%s and %s cannot both be set: constant-rate transmission "+
+			"already fixes every datagram at one size, so %s would have nothing to pad",
+			OptShape, OptIPTFSRate, OptShape)
 	}
 	return nil
 }
@@ -280,10 +309,8 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	c := ike.NewClient(ikeCfg)
 	res, err := connect(ctx, c)
 	if err != nil {
-		if errors.Is(err, ike.ErrAuthFailed) {
-			return nil, client.Result{}, fmt.Errorf("ikev2: %w: %v", client.ErrAuth, err)
-		}
-		return nil, client.Result{}, fmt.Errorf("ikev2: connect: %w", err)
+		return nil, client.Result{}, client.WrapAuth(
+			fmt.Errorf("ikev2: connect: %w", err), ike.ErrAuthFailed)
 	}
 	// From here on, any failure must close the IKE client.
 	fail := func(err error) (client.Session, client.Result, error) {

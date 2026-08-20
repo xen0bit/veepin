@@ -157,6 +157,16 @@ const (
 	// DropTUNWrite: the TUN device rejected the write. The interface is down or
 	// the queue is full.
 	DropTUNWrite
+	// DropPacerFull: a paced tunnel's send queue was full, so an outbound
+	// packet was discarded rather than waiting.
+	//
+	// It is its own reason because it means something no other drop does: the
+	// offered load exceeded the tunnel's configured rate. A constant-rate
+	// tunnel cannot go faster to absorb a burst -- that is the property it
+	// exists to provide -- so this counter rising is the operator's signal that
+	// the rate is set below what the traffic wants, and folding it into
+	// encap_failed would present a configuration choice as a fault.
+	DropPacerFull
 	numDropReasons
 )
 
@@ -180,6 +190,8 @@ func (r DropReason) String() string {
 		return "encap_failed"
 	case DropTUNWrite:
 		return "tun_write"
+	case DropPacerFull:
+		return "pacer_full"
 	default:
 		return "unknown"
 	}

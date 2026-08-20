@@ -2,7 +2,9 @@ package ikev2
 
 import (
 	"context"
+	"maps"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -107,5 +109,49 @@ func TestServerGateway(t *testing.T) {
 	// No ServerAddr: parse an IP-literal host.
 	if gw := serverGateway(&ike.ClientResult{}, "198.51.100.7"); !gw.Equal(net.IPv4(198, 51, 100, 7)) {
 		t.Errorf("gateway from host literal = %v, want 198.51.100.7", gw)
+	}
+}
+
+// TestAShaperUnderAConstantRateIsRefusedRatherThanIgnored.
+//
+// The paced data path does not go through dataplane's shaper at all -- the pump
+// hands packets to the tunnel and sends nothing itself -- so accepting both
+// would leave -shape doing nothing while the operator believed it was on. That
+// is the same bug this tree has already had once, as `-kill-switch` under
+// `-no-route`, and it is the reason the pair is a parse error.
+//
+// It costs nothing to refuse: constant-rate transmission fixes every datagram
+// at one size, which is what -shape pads *towards*.
+func TestAShaperUnderAConstantRateIsRefusedRatherThanIgnored(t *testing.T) {
+	base := map[string]string{
+		OptGateway: "vpn.example", OptLocalID: "client.example", OptPSK: "secret",
+		OptIPTFS: "true", OptIPTFSRate: "1250000",
+	}
+	if _, err := parseOptions(base); err != nil {
+		t.Fatalf("iptfs with a rate was rejected on its own: %v", err)
+	}
+
+	withShape := map[string]string{}
+	maps.Copy(withShape, base)
+	withShape[OptShape] = "16384"
+	_, err := parseOptions(withShape)
+	if err == nil {
+		t.Fatal("-shape alongside -iptfs-rate was accepted; it would silently do nothing")
+	}
+	if !strings.Contains(err.Error(), OptShape) || !strings.Contains(err.Error(), OptIPTFSRate) {
+		t.Errorf("error %q does not name both flags, so it does not say what to change", err)
+	}
+}
+
+// TestAConstantRateWithoutTheDataPathIsRefused. -iptfs-rate paces AGGFRAG
+// payloads; without -iptfs there is no AGGFRAG data path for it to pace, and
+// accepting the rate would report a feature that cannot run.
+func TestAConstantRateWithoutTheDataPathIsRefused(t *testing.T) {
+	opts := map[string]string{
+		OptGateway: "vpn.example", OptLocalID: "client.example", OptPSK: "secret",
+		OptIPTFSRate: "1250000",
+	}
+	if _, err := parseOptions(opts); err == nil {
+		t.Fatal("-iptfs-rate was accepted without -iptfs")
 	}
 }

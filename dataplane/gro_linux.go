@@ -77,6 +77,20 @@ func (t *groTable) grab() *groGroup {
 // handleInboundBatchGRO is HandleInboundBatch on a vnet TUN: decapsulate each
 // datagram, coalesce what the rules allow, write everything else through in
 // order. Always returns true (it is the vnet batch path).
+//
+// The MultiTunnel branch is not an optimisation and must not be dropped. This
+// path used to call decapInbound unconditionally -- the one-datagram-one-packet
+// decapsulator -- which meant that on any TUN that negotiated the vnet header,
+// an aggregating tunnel's inbound packets went to the wrong method. For IKEv2's
+// AGGFRAG tunnel that is not a lost aggregation: espTunnel.Decapsulate rejects
+// next header 144 outright, so EVERY inbound packet was dropped as malformed
+// while the handshake reported IP-TFS negotiated and working.
+//
+// It was invisible from three directions at once. dataplane's own tests use a
+// plain TUN, so they exercise HandleInbound (which does check). The veepin
+// client negotiates GSO, so the real path is this one. And a veepin-to-veepin
+// cell fails identically at both ends, which reads as "the tunnel is down"
+// rather than "the receive path is wrong".
 func (p *Pump) handleInboundBatchGRO(pkts [][]byte, froms []*net.UDPAddr) bool {
 	t := &p.gro
 	t.reset()
@@ -84,6 +98,15 @@ func (p *Pump) handleInboundBatchGRO(pkts [][]byte, froms []*net.UDPAddr) bool {
 		var from *net.UDPAddr
 		if froms != nil {
 			from = froms[i]
+		}
+		if mt, c, ok := p.multiTunnelFor(pkt, from); ok {
+			// An aggregated datagram carries several inner packets, so it
+			// cannot go through decapInbound's single-packet return. Deliver
+			// its contents through the same coalescing table as everything
+			// else -- a bulk TCP flow inside an IP-TFS tunnel deserves GRO as
+			// much as one outside it.
+			p.groMulti(t, mt, c, pkt)
+			continue
 		}
 		inner, c, ok := p.decapInbound(pkt, from)
 		if !ok {
@@ -108,6 +131,40 @@ func (p *Pump) handleInboundBatchGRO(pkts [][]byte, froms []*net.UDPAddr) bool {
 		g.flush(p)
 	}
 	return true
+}
+
+// groMulti opens one aggregated datagram and offers each inner packet to the
+// coalescing table, falling back to a direct TUN write for the ones GRO does
+// not handle. It is handleInboundMulti with the table in the middle.
+func (p *Pump) groMulti(t *groTable, mt MultiTunnel, c *TunnelCounters, pkt []byte) {
+	inners, err := mt.DecapsulateMulti(pkt, p.multiScratch[:0])
+	if err != nil {
+		p.drops[DropDecapFailed].Add(1)
+		if p.log != nil {
+			p.log.Printf("dataplane: aggregated decap failed: %v", err)
+		}
+		return
+	}
+	p.multiScratch = inners[:0]
+	p.noteInbound()
+	for _, inner := range inners {
+		if len(inner) == 0 {
+			continue
+		}
+		// Per inner packet, as handleInboundMulti counts: counting datagrams
+		// would report an IP-TFS tunnel moving a fraction of what it moved.
+		c.countRx(len(inner))
+		if t.add(p, inner) {
+			continue
+		}
+		if _, err := p.writeTUN(inner); err != nil {
+			p.drops[DropTUNWrite].Add(1)
+			if p.log != nil {
+				p.log.Printf("dataplane: TUN write failed: %v", err)
+			}
+			return
+		}
+	}
 }
 
 // coalescible reports whether pkt is the kind of packet GRO handles at all:

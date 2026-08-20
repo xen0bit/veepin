@@ -159,7 +159,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	if err != nil {
 		m.Close()
 		if errors.Is(err, io.EOF) || isTLSAuthError(err) {
-			return nil, client.Result{}, fmt.Errorf("openvpn: %w: %v", client.ErrAuth, err)
+			return nil, client.Result{}, fmt.Errorf("openvpn: %w: %w", client.ErrAuth, err)
 		}
 		return nil, client.Result{}, fmt.Errorf("openvpn: %w", err)
 	}

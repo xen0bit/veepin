@@ -498,8 +498,12 @@ func TestLoginRejectsWrongPassword(t *testing.T) {
 
 func TestLoginRejectsUnknownUser(t *testing.T) {
 	h := newHarness(t, ServerConfig{}, false)
-	if _, _, err := Login(h.hc, h.url, "mallory", "s3cret", "testhost"); err == nil {
+	_, _, err := Login(h.hc, h.url, "mallory", "s3cret", "testhost")
+	if err == nil {
 		t.Error("Login accepted an unknown user")
+	}
+	if !errors.Is(err, ErrAuth) {
+		t.Errorf("Login error = %v, want one satisfying errors.Is(err, ErrAuth)", err)
 	}
 }
 

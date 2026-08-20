@@ -13,6 +13,18 @@ import (
 	"github.com/xen0bit/veepin/internal/mschap"
 )
 
+// ErrAuth reports an MS-CHAPv2 exchange the peer refused: a CHAP Failure, or a
+// Success whose authenticator does not verify. Both are the same fact to a
+// caller -- the credentials are wrong -- and both must be distinguishable from
+// a transport fault, because `veepin connect -retry` treats a credential
+// failure as permanent and everything else as an outage worth waiting out.
+//
+// A mismatched authenticator is on this side of the line deliberately. It means
+// the peer proved it does not know the password, which is a failed
+// authentication and not a malformed packet, even though what arrived was
+// well-formed.
+var ErrAuth = errors.New("ppp: authentication failed")
+
 // LCP option types (RFC 1661 section 6).
 const (
 	optMRU       = 1
@@ -520,7 +532,7 @@ func (s *Session) handleCHAP(payload []byte) {
 		s.phase = phaseIPCP
 		s.startIPCP()
 	case chapFailure:
-		s.failLocked(fmt.Errorf("ppp: authentication failed: %s", failureMessage(pkt.Body)))
+		s.failLocked(fmt.Errorf("%w: %s", ErrAuth, failureMessage(pkt.Body)))
 	}
 }
 

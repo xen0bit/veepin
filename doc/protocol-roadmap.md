@@ -76,9 +76,9 @@ by nothing in the tree.
 > stop being the right one because its premise was subsequently fixed — but the
 > premise is no longer a description of the tree. What SoftEther still lacks is
 > narrower and is named in `internal/softether/README.md`: the segment ends at
-> the server rather than being bridged onto the host's wider network, every
-> client is assigned the constant `10.70.0.2`, and the two cross-implementation
-> cells against SoftEther VPN Server are unbuilt.
+> the server rather than being bridged onto the host's wider network, and every
+> client is assigned the constant `10.70.0.2`. The two cross-implementation
+> cells this paragraph called unbuilt are both built.
 
 L2TPv3 closes the gap on better terms, for one reason: **the peer is the Linux
 kernel.** `ip l2tp add tunnel` / `ip l2tp add session` configures a static
@@ -340,13 +340,21 @@ dynamic control plane.
 
 # 2. IP-TFS / AGGFRAG (RFC 9347) — an IKEv2 option *(partly landed)*
 
-> **Partly landed.** The codec, the `USE_AGGFRAG` negotiation in both roles, and
-> the ESP next-header-144 data path are in and unit-tested. **The constant-rate
-> sender is not** — which is the half that actually delivers traffic-flow
-> confidentiality — and there is no strongSwan interop cell yet, so the wire
-> format is unproven against a real peer. `internal/ikev2/aggfrag/README.md` and
-> `doc/security.md` both say so plainly; do not describe veepin as providing
-> IP-TFS traffic-flow confidentiality until the sender lands.
+> **Landed, including the constant-rate sender.** The codec, the `USE_AGGFRAG`
+> negotiation in both roles, the ESP next-header-144 data path, and the
+> constant-rate sender that actually delivers traffic-flow confidentiality are
+> all in, with four interop cells against strongSwan 6.0.7.
+>
+> The two predictions on this page worth marking. "veepin can implement the more
+> complete thing *and* still have a peer for the shared subset" was right and
+> understated: strongSwan's kernel receives a constant-rate stream perfectly
+> without producing one, because pad blocks are ordinary AGGFRAG, so even the
+> half nothing else implements has a cross-implementation cell. And "the wire
+> format is unproven against a real peer" was right in the way that mattered —
+> building the cells found the `USE_AGGFRAG` notify being sent with an empty
+> body where RFC 9347 gives it one octet of flags, which strongSwan refuses the
+> whole IKE_AUTH message over, plus a `dataplane` bug that dropped every inbound
+> AGGFRAG packet on any TUN with GSO.
 
 
 ## Why this is the most interesting candidate

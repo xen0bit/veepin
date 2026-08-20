@@ -176,7 +176,7 @@ func (s *Server) handleHello(body []byte, from *net.UDPAddr) {
 		// The username is not confirmed until AUTH, so this only says the name
 		// is unknown. Rejecting here avoids allocating for a name that can
 		// never authenticate.
-		s.reject(from, 0, "unknown user")
+		s.reject(from, 0, RejectUnknownUser)
 		s.log.Printf("toy: HELLO from %v for unknown user %q", from, hello.User)
 		return
 	}
@@ -209,7 +209,7 @@ func (s *Server) handleHello(body []byte, from *net.UDPAddr) {
 	// reservation, so re-admitting them would double-count and let a lossy link
 	// exhaust the cap.
 	if r := s.gate.Admit(from); r != dataplane.Admitted {
-		s.reject(from, 0, "server busy")
+		s.reject(from, 0, RejectBusy)
 		s.log.Printf("toy: refusing handshake from %v: %v", from, r)
 		return
 	}
@@ -217,13 +217,13 @@ func (s *Server) handleHello(body []byte, from *net.UDPAddr) {
 	id, err := s.newSessionID()
 	if err != nil {
 		s.gate.Done()
-		s.reject(from, 0, "no session available")
+		s.reject(from, 0, RejectNoSession)
 		return
 	}
 	assigned, err := s.cfg.Pool.Allocate()
 	if err != nil {
 		s.gate.Done()
-		s.reject(from, 0, "address pool exhausted")
+		s.reject(from, 0, RejectPoolFull)
 		s.log.Printf("toy: pool exhausted for %v", from)
 		return
 	}
@@ -276,7 +276,7 @@ func (s *Server) handleAuth(h Header, body []byte, from *net.UDPAddr) {
 		//
 		// This is the same rule as checking a packet tag before touching the
 		// replay window: unauthenticated input must not be able to destroy state.
-		s.reject(from, h.Session, "authentication failed")
+		s.reject(from, h.Session, RejectAuthFailed)
 		s.log.Printf("toy: session %d: authentication failed for %q", h.Session, p.user)
 		return
 	}

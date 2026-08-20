@@ -117,7 +117,9 @@ func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
 	if err != nil {
 		_ = c.Close()
 		_ = tun.Close()
-		return nil, client.Result{}, err
+		// A rejected group key or XAuth password must reach the caller as
+		// client.ErrAuth: retrying either is how an account locks out.
+		return nil, client.Result{}, client.WrapAuth(err, icisco.ErrAuth)
 	}
 	if nc.Banner != "" {
 		logger.Printf("cisco: gateway banner: %s", nc.Banner)

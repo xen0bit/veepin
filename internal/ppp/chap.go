@@ -68,7 +68,7 @@ func verifySuccess(body []byte, authChallenge, peerChallenge [mschap.ChallengeLe
 	}
 	want := mschap.AuthenticatorResponse(authChallenge, peerChallenge, username, password, ntResponse)
 	if !strings.EqualFold(fields[0], want) {
-		return fmt.Errorf("ppp: server authenticator mismatch")
+		return fmt.Errorf("%w: server authenticator mismatch", ErrAuth)
 	}
 	return nil
 }

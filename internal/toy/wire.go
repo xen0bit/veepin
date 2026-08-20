@@ -99,6 +99,14 @@ var (
 	ErrVersion   = errors.New("toy: unsupported protocol version")
 	ErrShort     = errors.New("toy: datagram is truncated")
 	ErrMalformed = errors.New("toy: message body is malformed")
+
+	// ErrAuth reports a REJECT whose reason means the credentials were refused.
+	// The facade maps it onto client.ErrAuth so `veepin connect -retry` stops
+	// instead of replaying a wrong secret, which is the same contract every
+	// real protocol in this tree honours -- TOY is the worked example, so it
+	// honours it too rather than leaving the reader a shape to copy that is
+	// missing a piece.
+	ErrAuth = errors.New("toy: authentication failed")
 )
 
 // Header is the parsed fixed header.
@@ -255,6 +263,34 @@ func AppendReject(b []byte, reason string) []byte {
 	}
 	b = append(b, byte(len(reason)))
 	return append(b, reason...)
+}
+
+// The REJECT reasons the server sends, as constants both roles share.
+//
+// They are constants because the REJECT body is prose and nothing else: the
+// wire format carries a length-prefixed string with no code beside it (SPEC.md,
+// message 0x05). A client that wants to tell "your password is wrong" from
+// "come back later" therefore has to match the text, and the only thing that
+// keeps that from being a guess is both roles reading the same constant.
+//
+// Were TOY a protocol anyone deployed, this would be a defect worth fixing on
+// the wire -- a numeric code beside the prose, the way every protocol in this
+// tree that got it right does. It is left as it is, named, because TOY exists to
+// be read: the shape of the mistake is more useful here than its absence.
+const (
+	RejectUnknownUser = "unknown user"
+	RejectAuthFailed  = "authentication failed"
+	RejectBusy        = "server busy"
+	RejectNoSession   = "no session available"
+	RejectPoolFull    = "address pool exhausted"
+)
+
+// RejectIsCredential reports whether a REJECT reason means the credentials were
+// refused, as opposed to the server being unable to take the session right now.
+// The difference decides whether retrying is useless (and, against a server that
+// counts failures, harmful) or is exactly the right thing to do.
+func RejectIsCredential(reason string) bool {
+	return reason == RejectUnknownUser || reason == RejectAuthFailed
 }
 
 // ParseReject reads a REJECT body.

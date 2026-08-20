@@ -8,10 +8,9 @@ WireGuard, OpenVPN, SSTP, SSH, L2TP/IPsec, L2TPv3 Ethernet pseudowire,
 AnyConnect, Nebula, MASQUE (CONNECT-IP and CONNECT-UDP over HTTP/3), Fortinet,
 GlobalProtect, Cisco IPsec, Ivanti Connect Secure, SoftEther VPN (SE-VPN) and
 AmneziaWG — each verified in Docker against a real third-party implementation
-and against itself. One row carries a partial exception the
-[matrix](#interoperability-matrix) names and this sentence should not hide:
-**SoftEther's client is verified against SoftEther VPN Server, but the reverse
-direction — SoftEther's own client against veepin's server — has no cell yet**.
+and against itself. That sentence used to carry an exception for SoftEther,
+whose server direction had no cell; it now has one, against SoftEther's own
+`vpnclient`, and the sentence stands without qualification.
 
 Every layer is covered by tests, including full VPN integration tests:
 `TestFullVPNFlow` drives a client through the handshake and verifies a real IP
@@ -48,7 +47,7 @@ wire detail, caveats and API surface.
 
 | Protocol | Authentication | Data path | Verified against | Docs |
 |----------|----------------|-----------|------------------|------|
-| **IKEv2/ESP** | PSK, EAP-MSCHAPv2, X.509 certificate (RFC 7427) | ESP-in-UDP, RFC 4303 (NAT-T, dual-stack v4/v6 CP address assignment) | strongSwan | [ikev2](internal/ikev2/ike/README.md) |
+| **IKEv2/ESP** | PSK, EAP-MSCHAPv2, X.509 certificate (RFC 7427) | ESP-in-UDP, RFC 4303 (NAT-T, dual-stack v4/v6 CP address assignment, RFC 9347 AGGFRAG) | strongSwan | [ikev2](internal/ikev2/ike/README.md) |
 | **WireGuard** | Noise_IKpsk2 static keys | ChaCha20-Poly1305, cryptokey routing (both families), client rekey | wireguard-go | [wireguard](internal/wireguard/) |
 | **OpenVPN** | mutual TLS certificates | AES-256-GCM / -CBC; plain, `tls-auth`, `tls-crypt` (both roles) | `openvpn` | [openvpn](internal/openvpn/) |
 | **SSTP** | MS-CHAPv2 over PPP | PPP/IPCP over TLS, SHA-256 crypto binding | SoftEther, `sstpc`/pppd | [sstp](internal/sstp/wire/README.md) |
@@ -62,7 +61,7 @@ wire detail, caveats and API surface.
 | **GlobalProtect** | password | RFC 4303 ESP over UDP, keyed by the config document, with a framed layer-3 TLS tunnel as fallback | openconnect | [gp](internal/gp/README.md) |
 | **Cisco IPsec** | group PSK + XAuth password | IKEv1 Aggressive Mode, Mode-Config, tunnel-mode ESP-in-UDP | strongSwan | [cisco](internal/cisco/README.md) |
 | **Ivanti Connect Secure** | password (EAP over IF-T/TLS) | RFC 4303 ESP over UDP, with the IF-T/TLS connection as fallback | openconnect | [pulse](internal/pulse/README.md) |
-| **SoftEther VPN** | password (SHA-0 challenge) | Ethernet frames over TLS in counted blocks, PACK control over HTTP, layer-2 TAP | SoftEther VPN Server — server direction, see `‡` | [softether](internal/softether/README.md) |
+| **SoftEther VPN** | password (SHA-0 challenge) | Ethernet frames over TLS in counted blocks, PACK control over HTTP, layer-2 TAP | SoftEther VPN Server and its `vpnclient` | [softether](internal/softether/README.md) |
 | **AmneziaWG** | Noise_IKpsk2 static keys | WireGuard's ChaCha20-Poly1305 unchanged; obfuscated headers, padding and junk packets | `amneziawg-go` | [amneziawg](wireguard/obfuscate.go) |
 
 Both roles share one registry API (`client.Register`/`client.RegisterServer`),
@@ -562,7 +561,7 @@ passed in that run, not a claim.
 <!-- livingreadme:interop:start -->
 | Protocol   | veepin client ↔ real server | real client ↔ veepin server | veepin ↔ veepin (self) |
 |------------|-----------------------------|-----------------------------|------------------------|
-| IKEv2 | ✓ strongSwan (PSK + pubkey, AES-GCM + ChaCha20, dual-stack, v6 underlay, ML-KEM-768) | ✓ strongSwan (+ EAP-MSCHAPv2, RFC 7383 frag, dual-stack, v6 underlay, TFC-padded, ML-KEM-768) | ✓ |
+| IKEv2 | ✓ strongSwan (PSK + pubkey, AES-GCM + ChaCha20, dual-stack, v6 underlay, ML-KEM-768, IP-TFS) | ✓ strongSwan (+ EAP-MSCHAPv2, RFC 7383 frag, dual-stack, v6 underlay, TFC-padded, ML-KEM-768, IP-TFS) | ✓ (+ IP-TFS) |
 | WireGuard | ✓ wireguard-go | ✓ wireguard-go (+ padded, IPv6 inner) | ✓ |
 | OpenVPN | ✓ `openvpn` (×4 variants) | ✓ `openvpn` (+ tls-auth, tls-crypt, padded) | ✓ |
 | SSTP | ✓ SoftEther | ✓ `sstpc`/pppd (+ PPP-padded) | ✓ |
@@ -576,7 +575,7 @@ passed in that run, not a claim.
 | GlobalProtect | —† | ✓ openconnect (SSL tunnel, ESP, padded) | ✓ (over ESP) |
 | Cisco IPsec | ✓ strongSwan (aggressive + XAuth) | ✓ strongSwan (Mode-Config, TFC-padded) | ✓ |
 | Ivanti Connect Secure | —† | ✓ openconnect (IF-T/TLS, ESP, padded) | ✓ (over ESP) |
-| SoftEther VPN | ✓ SoftEther VPN Server (native SE-VPN, SecureNAT) | —‡ | ✓ (layer 2, switched; shaped) |
+| SoftEther VPN | ✓ SoftEther VPN Server (native SE-VPN, SecureNAT) | ✓ SoftEther VPN `vpnclient` | ✓ (layer 2, switched; shaped) |
 | AmneziaWG | ✓ amneziawg-go | ✓ amneziawg-go | ✓ (H1-H4, S1-S4, junk) |
 | L2TPv3 | ✓ Linux kernel (`ip l2tp`, 8-octet asymmetric cookies) | ✓ Linux kernel (`ip l2tp`) | ✓ (shaped) |
 | TOY* | ✓ independent Python peer | ✓ independent Python peer | ✓ |
@@ -587,21 +586,30 @@ _Generated by the `interop` workflow from `a9e41fb` on 2026-08-20._
 `*` TOY is a **deliberately insecure example protocol**, not a real one (see
 [The example protocol](#the-example-protocol)). `†` Fortinet is asymmetric — no
 open-source FortiOS gateway exists for the client direction, so the openconnect
-*client* against the veepin server is the independent proof. `‡` marks a cell
-that is work outstanding rather than a limitation: an open-source peer exists
-(SoftEther VPN Server, Apache-2.0) but the Docker cell is not built yet. Only
-the server direction still carries it — SoftEther's own `vpnclient` against
-veepin's server — and what that needs is named in
-[`internal/softether/README.md`](internal/softether/README.md).
+*client* against the veepin server is the independent proof. There is no longer
+a `‡`: it marked a cell that was work outstanding rather than a limitation, and
+the last one carrying it — SoftEther's own `vpnclient` against veepin's server —
+is built.
 
-The client direction carried `‡` too, on the reasoning that nothing structural
-blocked it and nobody had spent the afternoon. Building it found that five
-layers of the wire format had never been interoperable — PACK's integer byte
-order, its three disagreeing string encodings, the SHA-0 password
-construction, the HTTP layer in front of the control messages, and the block
-framing of the data path — each of them invisible to the self cell, because
-both ends were wrong in the same direction every time. That is the clearest
-illustration on this page of why the matrix exists. The full
+Both SoftEther cross-implementation cells are worth reading as one story. The
+client direction carried `‡` on the reasoning that nothing structural blocked it
+and nobody had spent the afternoon. Building it found that five layers of the
+wire format had never been interoperable — PACK's integer byte order, its three
+disagreeing string encodings, the SHA-0 password construction, the HTTP layer in
+front of the control messages, and the block framing of the data path — each of
+them invisible to the self cell, because both ends were wrong in the same
+direction every time.
+
+The server direction then carried `‡` with two *specific* blockers named, which
+is a stronger claim than "nobody has spent the afternoon" and was wrong twice
+over. Neither was real — a welcome without SoftEther's policy structure parses
+fine, and a client told `max_connection=1` opens no additional connections — and
+the one thing that did block it had not been guessed at: `vpnclient` opens the
+connection with `GET /` and posts the signature second, where veepin's server
+read a single request and judged it. Every real client was refused on its
+opening move. Together they are the clearest illustration on this page of why
+the matrix exists, and the second is the sharper half: reasoning carefully about
+a peer produced two confident blockers, neither of them the one. The full
 rationale,
 the registry API behind the cells, and the interop harness are in
 [`doc/testing.md`](doc/testing.md) and
@@ -616,8 +624,9 @@ TCP stream — so read them as an order-of-magnitude comparison between carriers
 not a benchmark of the wire.
 
 A **dash** means iperf3 does not apply to that cell: a peer with no bindable
-tunnel address (SoftEther's SecureNAT gateway), the CONNECT-UDP datagram cells
-(which forward datagrams rather than route IP), or the untested Fortinet client.
+tunnel address (SoftEther's SecureNAT gateway, which the daemon synthesises
+rather than putting on an interface), the CONNECT-UDP datagram cells (which
+forward datagrams rather than route IP), or the untested Fortinet client.
 A **✗** means it does apply, was attempted across a tunnel that came up, and
 produced no number — a measurement that is broken rather than absent. The two
 used to render identically, which presented a broken measurement as a deliberate
@@ -757,8 +766,12 @@ each a localized extension point, not a structural rework:
   packet by the inner IP header, so **stock clients benefit unmodified**; and
   because the attack targets handshakes, the cost is per-flow rather than
   per-byte, leaving bulk throughput untouched. It does not shape packet counts
-  or timing (that would need constant-rate padding), does not cover the upstream
-  direction unless the client is also veepin, and is not probe resistance.
+  or timing, does not cover the upstream direction unless the client is also
+  veepin, and is not probe resistance. Packet counts and timing are a different
+  mechanism and IKEv2 now has one: `-iptfs -iptfs-rate` transmits at a fixed
+  rate regardless of load (RFC 9347), so the datagram stream stops depending on
+  the traffic inside it. It is IKEv2 only, costs its rate continuously, and is
+  off by default — see [`doc/security.md`](doc/security.md).
   Interop cells prove strongSwan, wireguard-go, `openvpn`, pppd and openconnect
   all accept the padding *and* trim it correctly; it stays off by default
   because the vendor OS stacks it is meant to protect are untested —

@@ -262,7 +262,13 @@ func (d *PumpDataPath) AddChild(sa *IKESA, child *ChildSA) {
 
 	var reg espTunnelIface = t
 	if child.AggFrag {
-		reg = newAggfragTunnel(t)
+		af := newAggfragTunnel(t)
+		reg = af
+		if child.IPTFSRate > 0 {
+			// The pump starts and stops the pacer through AddTunnel and
+			// RemoveTunnel, so nothing here has to own a goroutine.
+			reg = newPacedTunnel(af, child.IPTFSRate, iptfsPayloadSize)
+		}
 	}
 	d.mu.Lock()
 	d.byIn[child.InboundSPI] = reg

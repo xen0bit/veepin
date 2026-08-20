@@ -265,7 +265,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	if err != nil {
 		conn.Close()
 		if errors.Is(err, noise.ErrDecrypt) {
-			return nil, client.Result{}, fmt.Errorf("wireguard: %w: %v", client.ErrAuth, err)
+			return nil, client.Result{}, fmt.Errorf("wireguard: %w: %w", client.ErrAuth, err)
 		}
 		return nil, client.Result{}, fmt.Errorf("wireguard: handshake: %w", err)
 	}

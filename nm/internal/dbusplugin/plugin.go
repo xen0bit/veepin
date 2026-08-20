@@ -12,6 +12,7 @@ import (
 	"errors"
 	"log"
 	"net"
+	"strings"
 	"sync"
 
 	"github.com/godbus/dbus/v5"
@@ -58,6 +59,10 @@ const (
 	FailureBadIPConfig   uint32 = 2
 )
 
+// Settings is the connection dictionary NM delivers, aliased here so the
+// pending-connection field reads as what it holds.
+type Settings = nmconfig.Settings
+
 // Plugin holds the running plugin state: the bus connection, the current VPN
 // session (if any), and the exposed State property.
 type Plugin struct {
@@ -72,7 +77,27 @@ type Plugin struct {
 	state      uint32
 	session    client.Session
 	dialCancel context.CancelFunc // cancels an in-flight handshake
+
+	// pending holds the connection an interactive Connect is waiting on
+	// secrets for. It is non-nil only between emitting SecretsRequired and
+	// receiving NewSecrets, and it holds the SETTINGS rather than the parsed
+	// Connection because NewSecrets delivers a whole connection dict and the
+	// merge has to happen on the dict.
+	pending Settings
+	// asked counts SecretsRequired rounds for the pending connection, so a
+	// disagreement between what this plugin asks for and what the agent can
+	// supply ends in a Failure rather than in the two of them trading messages
+	// forever.
+	asked int
 }
+
+// maxSecretsRounds bounds the SecretsRequired/NewSecrets exchange. NM's agent
+// answers with whatever it has; if that still does not satisfy the protocol --
+// a connection configured for a password on a gateway that wants a token, an
+// agent the user keeps cancelling -- asking again gets the same answer. Three
+// rounds is enough for the two-secret protocols (cisco, l2tp) to be asked once
+// per secret with one to spare.
+const maxSecretsRounds = 3
 
 // New creates a Plugin bound to conn, claiming busName when Exported. busName
 // is the service NetworkManager spawned this process for — it passes it as
@@ -171,10 +196,109 @@ func (p *Plugin) Connect(settings nmconfig.Settings) *dbus.Error {
 	return nil
 }
 
-// ConnectInteractive behaves like Connect; interactive secret negotiation is not
-// used (secrets arrive with the connection).
+// ConnectInteractive is Connect with one difference that matters: when a secret
+// the protocol needs is not in the connection, it asks for that secret instead
+// of dialling without it.
+//
+// NM calls this first and falls back to Connect only if the plugin refuses it,
+// so this is the path a desktop actually takes. Without the ask, a connection
+// whose secrets are flagged NOT_SAVED and whose auth-dialog was dismissed
+// reached the gateway with an empty password: the gateway refused it, the user
+// saw a login failure for a password they were never asked for, and on a
+// gateway that counts failures the attempt was charged against them.
+//
+// The details dict NM passes carries interactivity hints this plugin has no use
+// for -- it has no UI of its own and asks through NM's agent either way -- so it
+// is accepted and ignored rather than being a reason to refuse the method.
 func (p *Plugin) ConnectInteractive(settings nmconfig.Settings, _ map[string]dbus.Variant) *dbus.Error {
+	hints, err := nmconfig.MissingSecretHints(settings)
+	if err != nil {
+		p.log.Printf("ConnectInteractive: bad settings: %v", err)
+		return dbus.MakeFailedError(err)
+	}
+	if len(hints) == 0 {
+		return p.Connect(settings)
+	}
+
+	p.mu.Lock()
+	if p.session != nil || p.dialCancel != nil || p.pending != nil {
+		p.mu.Unlock()
+		return dbus.MakeFailedError(errAlreadyConnected)
+	}
+	p.pending, p.asked = settings, 1
+	p.mu.Unlock()
+
+	p.setState(StateStarting)
+	p.requestSecrets(hints)
+	return nil
+}
+
+// NewSecrets delivers the secrets ConnectInteractive asked for, as a whole
+// connection dict rather than as the missing values alone. It is the second
+// half of the interactive flow and is only ever called after SecretsRequired.
+//
+// A connection arriving with nothing pending is refused rather than dialled.
+// NM does not send one, and treating an unsolicited dict as a Connect would
+// give any client on the bus a way to start a tunnel through a method that
+// looks like it only updates one.
+func (p *Plugin) NewSecrets(settings nmconfig.Settings) *dbus.Error {
+	p.mu.Lock()
+	pending := p.pending
+	round := p.asked
+	p.mu.Unlock()
+	if pending == nil {
+		return dbus.MakeFailedError(errNoSecretsPending)
+	}
+
+	hints, err := nmconfig.MissingSecretHints(settings)
+	if err != nil {
+		p.log.Printf("NewSecrets: bad settings: %v", err)
+		p.clearPending()
+		p.fail(FailureConnectFailed)
+		return dbus.MakeFailedError(err)
+	}
+	if len(hints) > 0 {
+		if round >= maxSecretsRounds {
+			p.log.Printf("NewSecrets: still missing %v after %d rounds; giving up", hints, round)
+			p.clearPending()
+			// LoginFailed, not ConnectFailed: nothing was wrong with the
+			// network, the credential never arrived. It is also what makes NM
+			// offer the prompt again on the next activation rather than
+			// remembering the connection as broken.
+			p.fail(FailureLoginFailed)
+			return nil
+		}
+		p.mu.Lock()
+		p.pending, p.asked = settings, round+1
+		p.mu.Unlock()
+		p.requestSecrets(hints)
+		return nil
+	}
+
+	p.clearPending()
 	return p.Connect(settings)
+}
+
+// requestSecrets emits SecretsRequired, naming the keys still needed so NM's
+// agent prompts for the right field. NeedSecrets cannot do this -- it answers
+// with a *setting* name, so "vpn" is the most precise thing it is allowed to
+// say and the agent has to guess.
+func (p *Plugin) requestSecrets(hints []string) {
+	msg := "The VPN needs " + strings.Join(hints, " and ")
+	if err := p.conn.Emit(ObjectPath, Iface+".SecretsRequired", msg, hints); err != nil {
+		p.log.Printf("emit SecretsRequired(%v): %v", hints, err)
+		p.clearPending()
+		p.fail(FailureConnectFailed)
+		return
+	}
+	p.log.Printf("waiting for secrets: %v", hints)
+}
+
+// clearPending drops the connection an interactive Connect was holding.
+func (p *Plugin) clearPending() {
+	p.mu.Lock()
+	p.pending, p.asked = nil, 0
+	p.mu.Unlock()
 }
 
 // NeedSecrets reports which setting (if any) still needs secrets before Connect.
@@ -195,6 +319,10 @@ func (p *Plugin) Disconnect() *dbus.Error {
 		p.dialCancel() // abort an in-flight handshake
 		p.dialCancel = nil
 	}
+	// A Disconnect while waiting on SecretsRequired has to drop the pending
+	// connection too, or a NewSecrets arriving afterwards would start a tunnel
+	// the user has already cancelled.
+	p.pending, p.asked = nil, 0
 	sess := p.session
 	p.session = nil
 	p.mu.Unlock()

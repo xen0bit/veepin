@@ -102,13 +102,30 @@ State these plainly rather than discovering them later.
   towards the frame MTU, and the receiver trims by the inner IP header's own
   Total Length. Non-IP frames are left alone — ARP has no length field to trim
   by, and padding one would corrupt the first exchange across a layer-2 segment.
-- **The server has no cross-implementation cell.** The client direction has one
-  (`compose.softether.yml`, against SoftEther VPN Server itself). The reverse —
-  SoftEther's own `vpnclient` against veepin's server — needs two things this
-  server does not do yet: `PackWelcome` carries a policy structure that the
-  reference client's `ParseWelcomeFromPack` requires and veepin's welcome omits,
-  and the reference client opens additional connections against one session,
-  which this accepts one of.
+- ~~**The server has no cross-implementation cell.**~~ Closed:
+  `compose.softether-server.yml` drives SoftEther's own `vpnclient` against
+  veepin's server, and both directions now have a cell against the reference.
+
+  This entry used to name two blockers, and **neither was one** — which is worth
+  leaving on the page rather than quietly deleting. `PackWelcome`'s policy is
+  not required: `PackGetPolicy` allocates a zeroed `POLICY` and fills it from
+  whatever elements are present, so a welcome carrying none parses, and the
+  client enforces only `AutoDisconnect` and `NoSavePassword` locally — for both
+  of which zero is the permissive value. And the client opens no additional
+  connections: `ClientAdditionalConnectChance` compares the live count against
+  `MaxConnection`, which is the welcome's own `max_connection`, and this server
+  advertises 1.
+
+  What did block it was a layer lower and had not been guessed at. `vpnclient`
+  opens the connection with `GET /` and posts the signature **second**;
+  `ServerDownloadSignature` is a loop that answers up to nineteen requests
+  before the signature arrives. veepin read exactly one request and judged it,
+  so every real client was refused on its opening move — and nothing noticed,
+  because veepin's own client posts the signature first. See `http.go`.
+
+  The policy is sent now anyway, for a reason that is not compatibility: an
+  omitted element gives the peer the value we wanted by accident rather than by
+  statement. `policy.go` carries that argument in full.
 
 ## Tests
 
@@ -131,4 +148,14 @@ State these plainly rather than discovering them later.
 - `local_test.go` — the server's own interface as a switch port: a client's
   frame reaching it, its own frames not being echoed back, its MAC being
   learned, and detaching taking it off the switch.
+- `policy_test.go` — the session policy: that the element names carry the
+  `policy:` prefix the reference reads, that every restriction flag is false
+  because this server enforces none of them, that the policy's timeout is
+  seconds where the welcome's is milliseconds, and that an absent policy is
+  distinguishable from one that grants no access — which the wire cannot say and
+  a reader acting on `Access` alone would get wrong.
+- `http_test.go` — the opening exchange: that the signature need not be the
+  first request (the bug the `vpnclient` cell found), that it still works when
+  it is, that a peer which never signs is cut off, and that the 403 page escapes
+  the peer-supplied target it reflects.
 - `fuzz_test.go` — the PACK decoder.

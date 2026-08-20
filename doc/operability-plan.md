@@ -1096,15 +1096,69 @@ enough to be useful.
 - **Item 9's `OptSpec.Default`** could not become the emitted value, only the
   flag's default, or an unset `-cipher` would silently override a `.ovpn` file.
 
+## The item the plan did not think to have
+
+Item 2 built `-retry`, and it was checked against the thing it was supposed to
+do: reconnect after an outage. It was not checked against the thing it was
+supposed to *refuse* to do.
+
+`cmd/veepin/retry.go`'s `permanent()` stops the loop on `client.ErrAuth`, and the
+comment beside it says exactly why: *"A wrong password retried with backoff is a
+lockout on any server that counts failures, and the error type that distinguishes
+it exists precisely so callers can tell."* Correct — and the distinguishing was
+never done. Three facades of sixteen produced `client.ErrAuth`: ikev2, wireguard
+and openvpn. The other thirteen returned their engine's error untouched:
+
+```sh
+for p in anyconnect cisco fortinet gp l2tp pulse softether ssh sstp; do
+  echo "$p: $(grep -c 'client.ErrAuth' $p/*.go 2>/dev/null | paste -sd+ | bc)"
+done
+# every one of them: 0
+```
+
+So `veepin connect fortinet -retry` with a typo in the password replayed that
+password every sixty seconds against a gateway that locks the account out after
+five. And the NetworkManager plugin, whose whole `classifyFailure` exists to map
+a rejected credential onto NM's `LoginFailed` so NM re-prompts, reported
+`ConnectFailed` instead: the user saw a broken network and never got the prompt
+that would have let them fix it.
+
+Nothing was failing. Every protocol had a rejection test, and every one of them
+asserted only that the login did not succeed — which is true of a wrong password
+and of an unplugged cable alike. The classification is the part the caller needs
+and the part nothing looked at.
+
+**Landed.** Four internal packages gained an auth sentinel where they had none
+(`internal/anyconnect`, `internal/ppp`, `internal/softether`, `internal/toy`),
+`client.WrapAuth` spells the mapping one way, and every facade that judges a
+credential now uses it. The existing rejection tests were sharpened from "it
+failed" to "it failed as `ErrAuth`", which is what they were always claiming to
+check. `ssh` is the awkward one: `x/crypto/ssh` exports no sentinel, so the
+match is on the leading clause of its message — the same match x/crypto's own
+`client_auth_test.go` makes — and `TestServerRefusingEveryMethodIsClientErrAuth`
+drives a real refusing server so an upstream rewording fails loudly rather than
+silently restoring the retry loop.
+
+The guard is `autherr_test.go`. It scans each facade that declares a `Secret`
+client option and requires it to mention `client.ErrAuth` or `client.WrapAuth`,
+or to appear in `noCredentialJudged` with the reason it judges no credential.
+Four do: l2tpv3 authenticates nothing, nebula's `Dial` completes no handshake,
+amneziawg's `Dial` *is* `wireguard.Dial`, and openvpn maps the sentinel directly.
+
+The general lesson is the one this tree keeps relearning in a new costume: **a
+test that asserts a failure without asserting which failure is a test of the
+happy path's negation, not of the behaviour the caller branches on.** It is the
+same shape as a ping that passes on a silent fallback.
+
 ## What is owed next
 
 1. **Run `doc/verifying-macos.md` on a Mac.** The client is written and
    compiles; nobody has run it. Until someone does, macOS is "written, not
    proven" and the README says so.
-2. **A SoftEther cell against SoftEther VPN Server.** The data path is written
-   and the self cell passes; the two cross-implementation columns now wait on a
-   peer image and the address assignment, since every client is still handed
-   the constant `10.70.0.2`.
+2. ~~**A SoftEther cell against SoftEther VPN Server.**~~ Both directions are
+   built. The client direction landed first and found five wire bugs; the server
+   direction found a sixth, in the HTTP layer, and disproved the two blockers
+   this tree had confidently written down for it.
 3. **A pf-based kill switch for macOS.** The route-based one cannot work there
    (no per-route metrics), so `-kill-switch` refuses. A pf anchor is the honest
    answer and means owning firewall state on the user's host — the same trade

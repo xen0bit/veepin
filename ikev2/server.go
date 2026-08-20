@@ -78,6 +78,11 @@ type ServerConfig struct {
 	// The responder never initiates it -- USE_AGGFRAG is only agreed when both
 	// peers send the notify -- so this gates the echo, not the offer.
 	IPTFS bool
+	// IPTFSRate, when positive, makes every AGGFRAG Child SA transmit at that
+	// many bytes per second regardless of load -- the traffic-flow
+	// confidentiality half of RFC 9347. It costs that bandwidth continuously,
+	// idle or not, and applies only where IPTFS is also set.
+	IPTFSRate int
 
 	// Logger receives progress logs; nil discards them.
 	Logger *log.Logger
@@ -113,6 +118,17 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("ikev2: LocalID is required")
 	case cfg.CertFile != "" && cfg.KeyFile == "":
 		return nil, fmt.Errorf("ikev2: CertFile requires KeyFile")
+	case cfg.IPTFSRate > 0 && !cfg.IPTFS:
+		return nil, fmt.Errorf("ikev2: %s needs %s: there is no constant-rate "+
+			"transmission without the AGGFRAG data path to carry it",
+			OptServerIPTFSRate, OptServerIPTFS)
+	case cfg.IPTFSRate > 0 && cfg.Shape > 0:
+		// See the client's validate: the paced path bypasses the shaper, so
+		// accepting both would leave -shape silently doing nothing, and
+		// constant-rate already fixes every datagram at one size anyway.
+		return nil, fmt.Errorf("ikev2: %s and %s cannot both be set: constant-rate "+
+			"transmission already fixes every datagram at one size, so %s would "+
+			"have nothing to pad", OptServerShape, OptServerIPTFSRate, OptServerShape)
 	}
 	logger := cfg.Logger
 	if logger == nil {
@@ -181,6 +197,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		ServerCert: serverCert,
 		ClientCAs:  clientCAs,
 		IPTFS:      cfg.IPTFS,
+		IPTFSRate:  cfg.IPTFSRate,
 		Logger:     logger,
 		AssignAddr: func() (ike.Assignment, error) {
 			ip, aerr := pool.Allocate()
@@ -322,6 +339,11 @@ const (
 	OptServerClientCA = "client-ca" // CA bundle PEM enabling client certificate auth
 	OptServerShape    = "shape"     // per-flow downstream shaping budget in bytes (0 = off)
 	OptServerIPTFS    = "iptfs"     // permit AGGFRAG (RFC 9347) for clients that request it
+	// OptServerIPTFSRate turns AGGFRAG into IP-TFS proper. It is a rate rather
+	// than a flag because the cost is continuous: a constant-rate SA sends that
+	// many bytes per second whether or not anyone is using it, so the operator
+	// has to name what they will spend.
+	OptServerIPTFSRate = "iptfs-rate"
 )
 
 func init() {
@@ -341,6 +363,7 @@ func init() {
 		{Key: OptServerClientCA, Kind: client.OptFilePath, Help: "CA bundle PEM enabling client certificate auth"},
 		client.ShapeOpt(OptServerShape, "downstream"),
 		{Key: OptServerIPTFS, Kind: client.OptBool, Help: "permit AGGFRAG / IP-TFS (RFC 9347) for clients that request it"},
+		{Key: OptServerIPTFSRate, Kind: client.OptInt, Default: "0", Help: "constant-rate IP-TFS transmission in bytes/sec on AGGFRAG SAs; 0 = aggregation only. Costs this bandwidth continuously, idle or not"},
 	})
 }
 
@@ -377,6 +400,13 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 		cfg.DNS = parseIPList(v)
 	}
 	cfg.IPTFS = opts[OptServerIPTFS] == "true"
+	if v := opts[OptServerIPTFSRate]; v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("bad %s %q", OptServerIPTFSRate, v)
+		}
+		cfg.IPTFSRate = n
+	}
 	if v := opts[OptServerShape]; v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 0 {

@@ -286,3 +286,191 @@ func TestStatePropertyReadable(t *testing.T) {
 		t.Fatalf("State property type = %T, want uint32", v.Value())
 	}
 }
+
+// waitForSignal reads from ch until one named sig arrives or the deadline
+// passes, returning its body.
+func waitForSignal(t *testing.T, ch <-chan *dbus.Signal, name string, d time.Duration) []any {
+	t.Helper()
+	deadline := time.After(d)
+	for {
+		select {
+		case sig := <-ch:
+			if sig.Name == Iface+"."+name {
+				return sig.Body
+			}
+		case <-deadline:
+			t.Fatalf("no %s signal within %s", name, d)
+			return nil
+		}
+	}
+}
+
+// watchSignals subscribes the caller connection to this plugin's signals.
+func watchSignals(t *testing.T, caller *dbus.Conn) chan *dbus.Signal {
+	t.Helper()
+	if err := caller.AddMatchSignal(
+		dbus.WithMatchInterface(Iface),
+		dbus.WithMatchObjectPath(ObjectPath),
+	); err != nil {
+		t.Fatalf("add match: %v", err)
+	}
+	ch := make(chan *dbus.Signal, 32)
+	caller.Signal(ch)
+	return ch
+}
+
+// TestConnectInteractiveAsksRatherThanDiallingWithoutTheSecret is the whole
+// point of the interactive flow. Before it, a connection whose secret was not
+// present was dialled anyway: the gateway refused the empty password, the user
+// was shown a login failure for a credential they were never asked for, and on
+// a gateway that counts failures it was charged against them.
+//
+// The assertion is that no handshake started, which is why it checks for
+// SecretsRequired and NOT for a Failure: a plugin that emitted both would have
+// asked *and* dialled, which is the bug wearing the fix's clothes.
+func TestConnectInteractiveAsksRatherThanDiallingWithoutTheSecret(t *testing.T) {
+	server, caller := newTestBus(t)
+	exportTestPlugin(t, server)
+	obj := caller.Object(testBusName, ObjectPath)
+	sigCh := watchSignals(t, caller)
+
+	call := obj.Call(Iface+".ConnectInteractive", 0, settings(
+		map[string]string{nmconfig.KeyGateway: "no-such-host.invalid", nmconfig.KeyLocalID: "client.example"},
+		map[string]string{}, // no PSK
+	), map[string]dbus.Variant{})
+	if call.Err != nil {
+		t.Fatalf("ConnectInteractive returned error: %v", call.Err)
+	}
+
+	body := waitForSignal(t, sigCh, "SecretsRequired", 5*time.Second)
+	if len(body) != 2 {
+		t.Fatalf("SecretsRequired body = %v, want (message, hints)", body)
+	}
+	hints, ok := body[1].([]string)
+	if !ok {
+		t.Fatalf("SecretsRequired hints = %T, want []string", body[1])
+	}
+	// The hint names the field, which is the thing NeedSecrets structurally
+	// cannot say: it answers with a setting name, so "vpn" is as precise as it
+	// is allowed to be and the agent has to guess which box to show.
+	if len(hints) != 1 || hints[0] != nmconfig.KeyPSK {
+		t.Errorf("hints = %v, want [%q]", hints, nmconfig.KeyPSK)
+	}
+
+	select {
+	case sig := <-sigCh:
+		if sig.Name == Iface+".Failure" {
+			t.Fatalf("a Failure was emitted: the plugin asked for the secret AND dialled without it")
+		}
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+// TestConnectInteractiveDialsStraightAwayWhenNothingIsMissing keeps the ask
+// from becoming an extra round trip on the common path, where NM's own
+// NeedSecrets flow has already collected everything.
+func TestConnectInteractiveDialsStraightAwayWhenNothingIsMissing(t *testing.T) {
+	server, caller := newTestBus(t)
+	exportTestPlugin(t, server)
+	obj := caller.Object(testBusName, ObjectPath)
+	sigCh := watchSignals(t, caller)
+
+	call := obj.Call(Iface+".ConnectInteractive", 0, settings(
+		map[string]string{nmconfig.KeyGateway: "no-such-host.invalid", nmconfig.KeyLocalID: "client.example"},
+		map[string]string{nmconfig.KeyPSK: "p"},
+	), map[string]dbus.Variant{})
+	if call.Err != nil {
+		t.Fatalf("ConnectInteractive returned error: %v", call.Err)
+	}
+
+	// The host does not resolve, so the handshake fails -- which is proof it
+	// was attempted. What must NOT appear is a SecretsRequired.
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case sig := <-sigCh:
+			if sig.Name == Iface+".SecretsRequired" {
+				t.Fatal("asked for secrets that were already present")
+			}
+			if sig.Name == Iface+".Failure" {
+				return
+			}
+		case <-deadline:
+			t.Fatal("no Failure signal: the connection was never dialled")
+		}
+	}
+}
+
+// TestNewSecretsCompletesTheConnection walks the whole exchange: ask, answer,
+// dial. The dial fails (the gateway does not resolve) and that is the proof it
+// happened -- a plugin that swallowed NewSecrets would sit silent forever.
+func TestNewSecretsCompletesTheConnection(t *testing.T) {
+	server, caller := newTestBus(t)
+	exportTestPlugin(t, server)
+	obj := caller.Object(testBusName, ObjectPath)
+	sigCh := watchSignals(t, caller)
+
+	data := map[string]string{nmconfig.KeyGateway: "no-such-host.invalid", nmconfig.KeyLocalID: "client.example"}
+	if call := obj.Call(Iface+".ConnectInteractive", 0,
+		settings(data, map[string]string{}), map[string]dbus.Variant{}); call.Err != nil {
+		t.Fatalf("ConnectInteractive: %v", call.Err)
+	}
+	waitForSignal(t, sigCh, "SecretsRequired", 5*time.Second)
+
+	if call := obj.Call(Iface+".NewSecrets", 0,
+		settings(data, map[string]string{nmconfig.KeyPSK: "p"})); call.Err != nil {
+		t.Fatalf("NewSecrets: %v", call.Err)
+	}
+	waitForSignal(t, sigCh, "Failure", 10*time.Second)
+}
+
+// TestNewSecretsThatStillMissesGivesUp bounds the exchange. An agent that keeps
+// answering without the secret -- a user dismissing the prompt, a connection
+// configured for the wrong credential -- must end in a Failure rather than in
+// the two of them trading messages forever.
+//
+// The reason is LoginFailed and not ConnectFailed: nothing was wrong with the
+// network, the credential never arrived, and LoginFailed is what makes NM offer
+// the prompt again next time instead of remembering the connection as broken.
+func TestNewSecretsThatStillMissesGivesUp(t *testing.T) {
+	server, caller := newTestBus(t)
+	exportTestPlugin(t, server)
+	obj := caller.Object(testBusName, ObjectPath)
+	sigCh := watchSignals(t, caller)
+
+	data := map[string]string{nmconfig.KeyGateway: "no-such-host.invalid", nmconfig.KeyLocalID: "client.example"}
+	empty := settings(data, map[string]string{})
+	if call := obj.Call(Iface+".ConnectInteractive", 0, empty, map[string]dbus.Variant{}); call.Err != nil {
+		t.Fatalf("ConnectInteractive: %v", call.Err)
+	}
+	waitForSignal(t, sigCh, "SecretsRequired", 5*time.Second)
+
+	for range maxSecretsRounds {
+		if call := obj.Call(Iface+".NewSecrets", 0, empty); call.Err != nil {
+			t.Fatalf("NewSecrets: %v", call.Err)
+		}
+	}
+	body := waitForSignal(t, sigCh, "Failure", 5*time.Second)
+	if len(body) != 1 || body[0].(uint32) != FailureLoginFailed {
+		t.Errorf("Failure reason = %v, want FailureLoginFailed(%d)", body, FailureLoginFailed)
+	}
+}
+
+// TestUnsolicitedNewSecretsIsRefused. NM only calls NewSecrets after
+// SecretsRequired, so a connection arriving with nothing pending is either a
+// bug or another client on the bus trying to start a tunnel through a method
+// that looks like it only updates one. Treating it as a Connect would make that
+// work.
+func TestUnsolicitedNewSecretsIsRefused(t *testing.T) {
+	server, caller := newTestBus(t)
+	exportTestPlugin(t, server)
+	obj := caller.Object(testBusName, ObjectPath)
+
+	call := obj.Call(Iface+".NewSecrets", 0, settings(
+		map[string]string{nmconfig.KeyGateway: "g", nmconfig.KeyLocalID: "id"},
+		map[string]string{nmconfig.KeyPSK: "p"},
+	))
+	if call.Err == nil {
+		t.Fatal("an unsolicited NewSecrets was accepted")
+	}
+}

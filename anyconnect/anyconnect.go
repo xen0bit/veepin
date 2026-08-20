@@ -175,7 +175,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, client.Result{}, fmt.Errorf("anyconnect: %w", ctxErr)
 		}
-		return nil, client.Result{}, err
+		return nil, client.Result{}, client.WrapAuth(err, engine.ErrAuth)
 	}
 	logger.Printf("anyconnect: tunnel up on %s, address %s", tun.Name(), tcfg.Address)
 

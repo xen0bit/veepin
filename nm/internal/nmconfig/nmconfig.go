@@ -28,7 +28,7 @@ type Settings = map[string]map[string]dbus.Variant
 const DefaultProtocol = "ikev2"
 
 // SupportedProtocols is every protocol the plugin can dial — the set the
-// requireKeys and secretMissing switches below handle. The service command must
+// requireKeys and missingSecrets switches below handle. The service command must
 // blank-import each one's package so client.Dial can find it at runtime; the
 // cmd package's TestAllSupportedProtocolsRegistered guards that the two lists
 // agree. The insecure "toy" example protocol is intentionally excluded.
@@ -157,7 +157,7 @@ func protocolOptions(data, secrets map[string]string) map[string]string {
 
 // requireKeys checks the non-secret options a protocol cannot start without.
 // Adding a protocol is a case here plus a matching import in the service's main
-// package (so client.Dial can find it) and a secretMissing branch below.
+// package (so client.Dial can find it) and a missingSecrets branch below.
 func requireKeys(protocol string, opts map[string]string) error {
 	switch protocol {
 	case "ikev2":
@@ -221,56 +221,96 @@ func MissingSecret(s Settings) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if secretMissing(conn.Protocol, conn.Options) {
+	if len(missingSecrets(conn.Protocol, conn.Options)) > 0 {
 		return "vpn", nil
 	}
 	return "", nil
 }
 
-// secretMissing reports whether a secret the protocol needs to dial is not yet
-// present in opts (data and secrets merged). File-path credentials — CA/cert/key
-// PEMs, wg-quick/.ovpn files, an SSH identity key — live in vpn.data, not
-// vpn.secrets, so they are not treated as NM-prompted secrets here.
+// MissingSecretHints names the individual secret keys still needed, in the
+// order a person is asked for them. It is what the interactive flow puts in
+// SecretsRequired, and it is strictly more than NeedSecrets can say: NeedSecrets
+// answers with a *setting* name, so "vpn" is the most precise thing it is
+// allowed to return, and an agent receiving it has to guess which field to
+// prompt for. A hint list names the field.
 //
-// Parse has already rejected any unknown protocol, so the default never fires for
-// a Connection that reached this point.
-func secretMissing(protocol string, opts map[string]string) bool {
+// The keys are the protocol's own option names, which is what the editor plugin
+// and the auth-dialog already key their widgets on, so no translation table
+// stands between this list and the prompt a person sees.
+func MissingSecretHints(s Settings) ([]string, error) {
+	conn, err := Parse(s)
+	if err != nil {
+		return nil, err
+	}
+	return missingSecrets(conn.Protocol, conn.Options), nil
+}
+
+// missingSecrets lists the secrets the protocol needs to dial that are not yet
+// present in opts (data and secrets merged), in the order to ask for them.
+// File-path credentials -- CA/cert/key PEMs, wg-quick/.ovpn files, an SSH
+// identity key -- live in vpn.data, not vpn.secrets, so they are not treated as
+// NM-prompted secrets here.
+//
+// It returns a list rather than a bool because the interactive flow has to name
+// what it wants: an agent told only "something is missing" prompts for the
+// wrong field, and on the two protocols that need two secrets it would prompt
+// for one of them twice. Parse has already rejected any unknown protocol, so
+// the default never fires for a Connection that reached this point.
+func missingSecrets(protocol string, opts map[string]string) []string {
+	need := func(keys ...string) []string {
+		var out []string
+		for _, k := range keys {
+			if opts[k] == "" {
+				out = append(out, k)
+			}
+		}
+		return out
+	}
 	switch protocol {
 	case "ikev2":
 		// The PSK is always required; the EAP password only when a user is set.
-		if opts[KeyPSK] == "" {
-			return true
+		keys := []string{KeyPSK}
+		if opts[KeyUser] != "" {
+			keys = append(keys, KeyPassword)
 		}
-		return opts[KeyUser] != "" && opts[KeyPassword] == ""
-	case "wireguard":
-		// A wg-quick file holds its own keys; otherwise the private key is required.
-		// The preshared key is optional.
-		return opts[KeyConfig] == "" && opts[KeyPrivateKey] == ""
+		return need(keys...)
+	case "wireguard", "amneziawg":
+		// A wg-quick file holds its own keys; otherwise the private key is
+		// required. The preshared key is optional.
+		if opts[KeyConfig] != "" {
+			return nil
+		}
+		return need(KeyPrivateKey)
 	case "openvpn":
-		// Password only when a username is configured; certificate-only auth (or an
-		// .ovpn with embedded credentials) needs no NM-prompted secret.
-		return opts[KeyUsername] != "" && opts[KeyPassword] == ""
+		// Password only when a username is configured; certificate-only auth
+		// (or an .ovpn with embedded credentials) needs no NM-prompted secret.
+		if opts[KeyUsername] == "" {
+			return nil
+		}
+		return need(KeyPassword)
 	case "sstp", "anyconnect", "fortinet", "gp", "pulse", "softether":
-		return opts[KeyPassword] == ""
-	case "amneziawg":
-		return opts[KeyConfig] == "" && opts[KeyPrivateKey] == ""
+		return need(KeyPassword)
 	case "cisco":
-		// Both the group pre-shared key and the XAuth password are required.
-		return opts[KeyGroupPSK] == "" || opts[KeyPassword] == ""
+		// Both the group pre-shared key and the XAuth password are required,
+		// and they are asked for in the order the gateway checks them.
+		return need(KeyGroupPSK, KeyPassword)
 	case "ssh":
 		// A private-key identity file is an alternative to a password.
-		return opts[KeyIdentity] == "" && opts[KeyPassword] == ""
+		if opts[KeyIdentity] != "" {
+			return nil
+		}
+		return need(KeyPassword)
 	case "l2tp":
 		// Both the IPsec PSK and the PPP password are required.
-		return opts[KeyPSK] == "" || opts[KeyPassword] == ""
+		return need(KeyPSK, KeyPassword)
 	case "l2tpv3":
 		// Static pseudowire: no secrets needed.
-		return false
+		return nil
 	case "nebula", "masque":
 		// Authenticated by a certificate / TLS only: no NM-prompted secret.
-		return false
+		return nil
 	default:
-		return false
+		return nil
 	}
 }
 

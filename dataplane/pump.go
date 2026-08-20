@@ -75,6 +75,38 @@ type MultiTunnel interface {
 // framing (IKEv2's non-ESP marker, for instance) is the sender's business.
 type Sender func(pkt []byte, to *net.UDPAddr)
 
+// PacedTunnel is a Tunnel that transmits on its OWN schedule rather than on the
+// pump's. The pump hands it each outbound packet and does not send anything;
+// the tunnel decides when a datagram goes out, and how many.
+//
+// It exists for RFC 9347 constant-rate IP-TFS, where the whole security claim
+// is that the datagram stream is independent of the traffic inside it. A
+// read-encapsulate-send loop cannot provide that at any level of tuning: its
+// output is one datagram per input packet, at the moment the input arrived,
+// which is precisely the signal constant-rate transmission removes. So the
+// schedule has to move, not the shaping.
+//
+// The pump keeps the socket and lends it: StartPacing receives the Sender when
+// the tunnel is added, StopPacing is called when it is removed. A tunnel that
+// held its own socket would not see MOBIKE's address changes, and would have to
+// duplicate the batching the pump already does.
+type PacedTunnel interface {
+	Tunnel
+	// Enqueue offers one inner packet for transmission, reporting whether it
+	// was taken. False means the queue is full and the packet is dropped --
+	// counted as DropPacerFull, which is the operator's signal that the offered
+	// load exceeds the configured rate.
+	//
+	// pkt is only valid for the duration of the call: an implementation that
+	// keeps it must copy.
+	Enqueue(pkt []byte) bool
+	// StartPacing begins transmission, writing each datagram through send.
+	StartPacing(send Sender)
+	// StopPacing ends it and releases whatever StartPacing began. It must be
+	// safe to call without a preceding StartPacing, and safe to call twice.
+	StopPacing()
+}
+
 // Demux extracts the tunnel-identifying key from an inbound packet, reporting
 // false if the packet carries none and should be dropped. It is the one part of
 // inbound routing that is protocol-specific: ESP puts its SPI in the first four
@@ -257,11 +289,18 @@ func (p *Pump) writeTUN(pkt []byte) (int, error) {
 // demux, and its routes for outbound.
 func (p *Pump) AddTunnel(t Tunnel) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	c := p.counters(t)
 	p.byKey[t.InboundKey()] = bound{t: t, c: c}
 	for _, r := range t.Routes() {
 		p.routes.insert(r, t)
+	}
+	p.mu.Unlock()
+
+	// Started outside the lock: StartPacing spawns a goroutine that sends, and
+	// send may take the pump's own locks. Holding mu across it is the kind of
+	// deadlock that only appears once the tunnel is busy.
+	if pt, ok := t.(PacedTunnel); ok {
+		pt.StartPacing(p.send)
 	}
 }
 
@@ -289,7 +328,6 @@ func (p *Pump) counters(t Tunnel) *TunnelCounters {
 // successor's routes with it.
 func (p *Pump) RemoveTunnel(t Tunnel) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	for key, reg := range p.byKey {
 		if reg.t == t {
 			delete(p.byKey, key)
@@ -306,6 +344,13 @@ func (p *Pump) RemoveTunnel(t Tunnel) {
 		p.retired.add(c.Snapshot())
 		p.retiredMu.Unlock()
 		delete(p.stats, t)
+	}
+	p.mu.Unlock()
+
+	// Outside the lock, as AddTunnel starts it: StopPacing waits for the send
+	// goroutine to finish, and that goroutine may be inside send.
+	if pt, ok := t.(PacedTunnel); ok {
+		pt.StopPacing()
 	}
 }
 
@@ -387,6 +432,11 @@ func (p *Pump) multiTunnelFor(pkt []byte, from *net.UDPAddr) (MultiTunnel, *Tunn
 	return mt, b.c, true
 }
 
+// noteInbound records authenticated inbound activity for the liveness check.
+// It exists so the two aggregated-decap paths -- the plain one here and the GRO
+// one in gro_linux.go -- cannot drift on which of them remembers to.
+func (p *Pump) noteInbound() { p.lastInbound.Store(time.Now().UnixNano()) }
+
 // handleInboundMulti delivers every inner packet one aggregated datagram holds.
 func (p *Pump) handleInboundMulti(t MultiTunnel, c *TunnelCounters, pkt []byte) {
 	inners, err := t.DecapsulateMulti(pkt, p.multiScratch[:0])
@@ -398,7 +448,7 @@ func (p *Pump) handleInboundMulti(t MultiTunnel, c *TunnelCounters, pkt []byte) 
 		return
 	}
 	p.multiScratch = inners[:0]
-	p.lastInbound.Store(time.Now().UnixNano())
+	p.noteInbound()
 	for _, inner := range inners {
 		if len(inner) == 0 {
 			continue
@@ -551,6 +601,21 @@ func (p *Pump) routeOutbound(pkt []byte) {
 				p.log.Printf("dataplane: writing ICMP frag-needed: %v", err)
 			}
 		}
+		return
+	}
+
+	// A paced tunnel sends on its own schedule, so the pump's job ends at the
+	// hand-off. Counting the packet here rather than at the wire is deliberate:
+	// TxPackets is what the caller offered the tunnel, and a constant-rate
+	// tunnel's datagram count is a property of its configured rate rather than
+	// of the traffic -- reporting the latter as TxPackets would make an idle
+	// IP-TFS tunnel look like it was moving traffic.
+	if pt, ok := t.(PacedTunnel); ok {
+		if !pt.Enqueue(pkt) {
+			p.drops[DropPacerFull].Add(1)
+			return
+		}
+		c.countTx(len(pkt))
 		return
 	}
 

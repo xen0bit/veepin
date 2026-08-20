@@ -63,6 +63,12 @@ type Config struct {
 	// ReleaseAddr, if set, reclaims the assignment when the SA is torn down.
 	ReleaseAddr func(Assignment)
 
+	// IPTFSRate, when positive, makes every AGGFRAG Child SA transmit at that
+	// many bytes per second regardless of load. It is the traffic-flow
+	// confidentiality half of RFC 9347 and it costs that bandwidth
+	// continuously, idle or not, which is why it is a number rather than a
+	// flag: the operator chooses what they will spend.
+	IPTFSRate int
 	// IPTFS permits AGGFRAG (RFC 9347) on Child SAs whose client asks for it.
 	// The responder never initiates it: USE_AGGFRAG is only agreed when both
 	// peers send the notify, so this gates the echo, not the offer.

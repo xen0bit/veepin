@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"io"
 	"math/big"
 	"net"
@@ -269,9 +270,16 @@ func TestWrongPasswordIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = conn.Close() }()
-	if _, err := Connect(conn, ln.Addr().String(), "/", "alice", "wrong", "testhost",
-		newFakeTUN(), nil, false, 0); err == nil {
+	_, cerr := Connect(conn, ln.Addr().String(), "/", "alice", "wrong", "testhost",
+		newFakeTUN(), nil, false, 0)
+	if cerr == nil {
 		t.Fatal("a wrong password was accepted")
+	}
+	// The classification, not just the refusal: the facade maps this onto
+	// client.ErrAuth so a wrong password stops `veepin connect -retry` instead
+	// of being replayed at a gateway that counts failures.
+	if !errors.Is(cerr, ErrAuth) {
+		t.Errorf("Connect error = %v, want one satisfying errors.Is(err, ErrAuth)", cerr)
 	}
 	if srv.Sessions() != 0 {
 		t.Errorf("the gateway kept %d sessions after a rejected login", srv.Sessions())

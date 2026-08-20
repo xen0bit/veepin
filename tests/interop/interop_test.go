@@ -1145,6 +1145,197 @@ func TestInteropSoftEtherSelf(t *testing.T) {
 		"veepin-softether-client", "veepin-softether-server", "10.70.0.1")
 }
 
+// TestInteropSoftEtherClientVeepinServer is the direction the README's `‡`
+// footnote has owed since the SoftEther row landed: SoftEther's own vpnclient
+// against veepin's server, which closes the last cell in the matrix that was
+// work outstanding rather than a limitation.
+//
+// Building it found one incompatibility, and in the same layer the client
+// direction found four of its five: vpnclient opens the connection with `GET /`
+// and posts the signature second. ServerDownloadSignature is a loop that
+// answers up to nineteen requests before the signature arrives; veepin's server
+// read exactly one request and judged it, so every real client was refused on
+// its opening move. Nothing in the tree noticed, because veepin's own client
+// posts the signature first and the self cell therefore never exercised the
+// case.
+//
+// It also settled two things internal/softether/README.md had named as blockers
+// and neither was. The welcome carries no policy structure: PackGetPolicy
+// zero-fills, so a welcome without one parses, and the client enforces none of
+// the fields locally. And the client opens no additional connections, because
+// max_connection=1 is what the welcome advertises and ClientAdditionalConnectChance
+// compares the live count against exactly that. Both had been reasoned about
+// for months; the cell answered them in an afternoon, which is the argument for
+// cells over reasoning in one sentence.
+//
+// The ARP assertion is the layer-2 claim and nothing else here makes it: a ping
+// between two statically-addressed endpoints succeeds identically over an L3
+// tunnel, so the neighbour entry -- learned on the virtual NIC specifically --
+// is what proves Ethernet frames crossed.
+func TestInteropSoftEtherClientVeepinServer(t *testing.T) {
+	runInteropBench(t, "compose.softether-server.yml",
+		"se-client", "veepin-softether-server", "10.71.0.1")
+	requireARPInsideTunnel(t, "compose.softether-server.yml", "se-client", "vpn_se", "10.71.0.1")
+}
+
+// The IP-TFS (RFC 9347 AGGFRAG) cells, against strongSwan 6.0.7.
+//
+// Every one of them requires a log line naming AGGFRAG, and that is not
+// belt-and-braces. swanctl.opt says of the mode outright: "The transport, iptfs
+// and beet modes are subject to mode negotiation; tunnel mode is negotiated if
+// the preferred mode is not available." So a veepin that failed to negotiate
+// USE_AGGFRAG gets an ordinary tunnel-mode Child SA from strongSwan and a ping
+// that crosses it perfectly. A bare ping is the textbook false green here, in
+// the peer's own documented words.
+//
+// AGGFRAG had no cross-implementation cell at all until these, and
+// internal/ikev2/aggfrag/README.md said so: "a self-test shows the two halves
+// agree, not that either is right." Building them found two bugs neither half
+// could see. The notify was sent with an empty body where RFC 9347 §6.1.4 gives
+// it one octet of flags, which strongSwan refuses the whole IKE_AUTH message
+// over. And inbound AGGFRAG was decapsulated by the single-packet method on any
+// TUN with GSO -- which rejects ESP next header 144 outright, so every packet
+// was dropped while the handshake reported IP-TFS working.
+
+// TestInteropVeepinClientStrongswanIPTFS drives veepin's client against a
+// strongSwan responder configured with `mode = iptfs`.
+func TestInteropVeepinClientStrongswanIPTFS(t *testing.T) {
+	runInteropRequiringLog(t, "compose.iptfs.yml", "veepin-client", "10.20.30.254",
+		"AGGFRAG (RFC 9347) negotiated")
+}
+
+// TestInteropStrongswanClientVeepinServerIPTFS is the direction that catches a
+// responder echoing USE_AGGFRAG without meaning it: strongSwan installs an XFRM
+// SA in mode 5 (IPTFS) on the strength of the echo, so a veepin that then sent
+// plain inner IP would have every packet dropped by the kernel while the
+// handshake still looked perfect.
+//
+// The log requirement is read from the veepin SERVER, not from the pinging
+// container, because the claim is about what veepin did.
+func TestInteropStrongswanClientVeepinServerIPTFS(t *testing.T) {
+	runInteropRequiringLogFrom(t, "compose.iptfs-server.yml",
+		"strongswan-client", "veepin-server", "10.10.10.1",
+		"AGGFRAG (RFC 9347) negotiated")
+}
+
+// TestInteropIPTFSSelf proves both roles exist and that the aggregating data
+// path survives a real socket and a real TUN. It proves nothing about
+// correctness against a peer -- for as long as AGGFRAG existed in the tree, two
+// veepin ends agreed about a notify strongSwan refuses outright.
+func TestInteropIPTFSSelf(t *testing.T) {
+	runInteropRequiringLog(t, "compose.iptfs-self.yml", "veepin-client", "10.10.10.1",
+		"AGGFRAG (RFC 9347) negotiated")
+}
+
+// TestInteropIPTFSConstantRate is the only cell in the harness that measures a
+// claim rather than proving a path, because the claim cannot be proved by a
+// path: constant-rate transmission says the datagram stream does not depend on
+// the traffic inside it, and a ping, a throughput run and an AGGFRAG log line
+// are all equally true of a sender that pauses when idle.
+//
+// So the traffic is varied and the stream is watched for NOT changing, and the
+// observer is the peer: strongSwan's own XFRM byte counters on the SA receiving
+// from veepin. That is as independent as this harness gets -- veepin is not
+// consulted about how much it sent.
+//
+// The peer receives a constant-rate stream perfectly without producing one. Pad
+// blocks are ordinary AGGFRAG and a receiver needs no knowledge that the sender
+// is pacing, which is what lets the half nothing else implements still have a
+// real cross-implementation cell.
+func TestInteropIPTFSConstantRate(t *testing.T) {
+	const file = "compose.iptfs-constant.yml"
+	// 1 250 000 B/s, matching IPTFS_RATE in the compose file.
+	const wantBytesPerSec = 1250000
+
+	runInteropRequiringLog(t, file, "veepin-client", "10.20.30.254",
+		"AGGFRAG (RFC 9347) negotiated")
+
+	idle := measureESPRate(t, file, 4*time.Second, nil)
+	busy := measureESPRate(t, file, 4*time.Second, func() {
+		// Saturate the tunnel for the whole window. -f floods, -w1 bounds it.
+		_, _ = compose(t, file, "exec", "-T", "veepin-client",
+			"ping", "-f", "-w", "4", "10.20.30.254")
+	})
+
+	t.Logf("ESP arriving at the peer: idle %.0f B/s, saturated %.0f B/s (configured %d)",
+		idle, busy, wantBytesPerSec)
+
+	if idle == 0 {
+		t.Fatal("the peer received nothing while the tunnel was idle: the sender stops " +
+			"when there is no traffic, which is the schedule constant-rate removes")
+	}
+	// Within 15% of the configured rate in both states. The tolerance is for
+	// timer jitter and the four-second window, not for load: a stream that
+	// tracked the traffic would differ by far more than this.
+	for _, m := range []struct {
+		name string
+		rate float64
+	}{{"idle", idle}, {"saturated", busy}} {
+		if ratio := m.rate / wantBytesPerSec; ratio < 0.85 || ratio > 1.15 {
+			t.Errorf("%s rate %.0f B/s is %.2f× the configured %d",
+				m.name, m.rate, ratio, wantBytesPerSec)
+		}
+	}
+	// And the two must agree with EACH OTHER, which is the claim itself.
+	if ratio := busy / idle; ratio < 0.85 || ratio > 1.15 {
+		t.Errorf("saturated/idle = %.2f: the datagram stream follows the offered load, "+
+			"so it still carries the signal constant-rate transmission exists to remove",
+			ratio)
+	}
+}
+
+// measureESPRate reads the peer's XFRM byte counter for the SA receiving from
+// veepin, before and after a window, and returns bytes per second. load, if
+// given, runs for the duration of the window.
+//
+// The counter is the peer's, deliberately. Asking veepin how much it sent would
+// test the sender against its own bookkeeping; asking the kernel that received
+// it tests what actually crossed the wire.
+func measureESPRate(t *testing.T, composeFile string, window time.Duration, load func()) float64 {
+	t.Helper()
+	before := espInBytes(t, composeFile)
+	start := time.Now()
+	if load != nil {
+		load()
+	}
+	if elapsed := time.Since(start); elapsed < window {
+		time.Sleep(window - elapsed)
+	}
+	elapsed := time.Since(start)
+	after := espInBytes(t, composeFile)
+	if after < before {
+		t.Fatalf("the peer's ESP byte counter went backwards (%d -> %d): the SA was "+
+			"rekeyed mid-measurement", before, after)
+	}
+	return float64(after-before) / elapsed.Seconds()
+}
+
+// espInBytes reads the inbound SA's lifetime byte count out of `ip -s xfrm
+// state`.
+//
+// The awk is fussier than it looks and has to be. "dir in" precedes its own
+// lifetime blocks, but there are two of them and the FIRST is `lifetime
+// config`, whose "limit: soft (INF)(bytes)" line matches a naive search for
+// "(bytes)" and parses as nothing. The counter wanted is under `lifetime
+// current`.
+func espInBytes(t *testing.T, composeFile string) uint64 {
+	t.Helper()
+	out, err := compose(t, composeFile, "exec", "-T", "strongswan-server",
+		"sh", "-c", `ip -s xfrm state | awk '/dir in/{d=1} d && /lifetime current/{c=1; next} c && /\(bytes\)/{print $1; exit}'`)
+	if err != nil {
+		t.Fatalf("reading the peer's XFRM counters: %v\n%s", err, out)
+	}
+	field := strings.TrimSpace(out)
+	if i := strings.IndexByte(field, '('); i >= 0 {
+		field = field[:i]
+	}
+	n, err := strconv.ParseUint(strings.TrimSpace(field), 10, 64)
+	if err != nil {
+		t.Fatalf("the peer's XFRM byte counter did not parse: %q (%v)", out, err)
+	}
+	return n
+}
+
 // TOY is the example protocol (internal/toy) and provides no security; these
 // cells prove the *specification*, not the cryptography. The peer they talk to
 // is an independent Python implementation written from internal/toy/SPEC.md

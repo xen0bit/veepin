@@ -1,0 +1,43 @@
+# strongSwan initiator -> veepin server, with IP-TFS on the Child SA.
+#
+# The direction that catches a responder which echoes USE_AGGFRAG without
+# meaning it. strongSwan installs an XFRM SA in mode 5 (IPTFS) on the strength
+# of that echo, so if veepin then sent plain inner IP the kernel would drop
+# every packet -- and the handshake would still have looked perfect.
+name: veepin-interop-iptfs-server
+
+services:
+  veepin-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    sysctls:
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+      net.ipv4.ip_forward: "1"
+    environment:
+      PSK: "interop-test-psk"
+      SERVER_ID: "vpn.example.com"
+      POOL: "10.10.10.0/24"
+      IPTFS: "true"
+    volumes:
+      - ./veepin/server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  strongswan-client:
+    build:
+      context: strongswan-pq
+    image: interop-strongswan-pq
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+    depends_on: [veepin-server]
+    volumes:
+      - ./strongswan/swanctl-client-iptfs.conf:/etc/swanctl/swanctl.conf:ro
+      - ./strongswan-pq/99-stdout-log.conf:/etc/strongswan.d/99-stdout-log.conf:ro
+      - ./strongswan-pq/client-entrypoint.sh:/entrypoint.sh:ro
+    command: ["/bin/sh", "/entrypoint.sh"]

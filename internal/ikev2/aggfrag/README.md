@@ -36,6 +36,15 @@ the end of the payload. It looks like an accident;
 ## What is implemented
 
 - Sub-type 0 (non-congestion-controlled) headers, both directions.
+- The `USE_AGGFRAG` **requirement flags**, which are one octet and not optional.
+  RFC 9347 §6.1.4 gives the notify a one-octet body; strongSwan's
+  `notify_payload.c` checks its length before it looks at anything else and
+  refuses the entire IKE_AUTH message over a body of any other size. veepin sent
+  it empty for as long as AGGFRAG existed here, and both veepin ends accepted
+  the empty form, so nothing failed until a cell was pointed at strongSwan.
+  veepin requires nothing of a peer — it reassembles, so Don't Fragment would be
+  a cost for nothing, and it does not implement sub-type 1, so asking for
+  congestion control it could not act on would be worse than not asking.
 - Aggregation on receive: a peer that puts several packets in one payload —
   strongSwan does — has all of them delivered, via `dataplane.MultiTunnel`.
 - Fragmentation and reassembly in both directions, including a block split
@@ -47,17 +56,26 @@ the end of the payload. It looks like an accident;
 
 ## Caveats
 
-- **One packet per payload on send.** `aggfragTunnel.Encapsulate` wraps a single
-  inner packet, which is well-formed — a payload is a run of blocks and one block
-  is a run of one — but it means veepin does not yet get aggregation's efficiency
-  benefit on egress. Aggregating several packets needs an outbound queue and a
-  timer, which `dataplane.Tunnel`'s one-in-one-out shape has nowhere to put.
-- **No constant-rate transmission**, which is the half of IP-TFS that actually
-  delivers traffic-flow confidentiality. `-iptfs-rate` is parsed and threaded
-  through but does nothing yet. Without it, packet counts and timing still track
-  the traffic inside, exactly as the README's "Scope and limitations" says of
-  every other protocol here. **Do not describe veepin as providing IP-TFS
-  traffic-flow confidentiality until this lands.**
+- **One packet per payload on send, unless `-iptfs-rate` is set.**
+  `aggfragTunnel.Encapsulate` wraps a single inner packet, which is well-formed
+  — a payload is a run of blocks and one block is a run of one — but it gets
+  none of aggregation's efficiency on egress. The constant-rate sender below
+  does aggregate, because it has the outbound queue and the timer that
+  `dataplane.Tunnel`'s one-in-one-out shape has nowhere to put; without a rate,
+  the one-in-one-out path is still what runs.
+- ~~**No constant-rate transmission.**~~ Landed: `-iptfs-rate` transmits a
+  fixed-size payload at a fixed interval whether or not there is anything to
+  carry, through `dataplane.PacedTunnel` and
+  `internal/ikev2/ike/aggfrag_pacer.go`. It is the half of IP-TFS that delivers
+  traffic-flow confidentiality, and the half strongSwan and the Linux kernel do
+  not implement — veepin does ESP in userspace and is not bound by the kernel
+  data path.
+
+  Two limits are real and are stated in `doc/security.md` rather than hidden
+  here: it spends its rate continuously, idle or not, and above roughly
+  100 Mbit/s a Go timer cannot deliver the interval, so the sender emits bursts
+  rather than a smooth stream. The stream stays independent of the offered load
+  either way, which is the security claim.
 - **No sub-type 1 (congestion-controlled).** Its header is 24 octets with RTT and
   loss-rate fields, and parsing it as sub-type 0 would misread every field, so it
   is rejected outright rather than guessed at.
@@ -75,7 +93,26 @@ the end of the payload. It looks like an accident;
   make it a corrupted continuation on the wire.
   `TestPackDoesNotBorrowAPacketItReportedAsConsumed` is the guard, and it needs
   no race detector.
-- **Not yet interop-tested.** There is no strongSwan cell for this; the
-  negotiation and data path are covered only by unit tests and a veepin↔veepin
-  path. Per this repo's own standard that means it is **not proven correct** —
-  a self-test shows the two halves agree, not that either is right.
+- ~~**Not yet interop-tested.**~~ Closed: `compose.iptfs.yml`,
+  `compose.iptfs-server.yml`, `compose.iptfs-self.yml` and
+  `compose.iptfs-constant.yml` run against strongSwan 6.0.7.
+
+  The constant-rate cell is the interesting one, and it has a real peer despite
+  strongSwan not implementing the feature: pad blocks are ordinary AGGFRAG, so
+  its kernel receives a constant-rate stream perfectly without producing one.
+  That makes it an independent observer rather than a mirror, and the cell reads
+  its claim straight off the peer's XFRM byte counters — idle versus saturated,
+  measured 1.28 MB/s against 1.30 MB/s at a configured 1.25 MB/s.
+
+  This caveat used to say that a self-test shows the two halves agree rather
+  than that either is right, and it earned its keep twice over. Building the
+  cells found the empty `USE_AGGFRAG` body above, and a second bug nothing in
+  the tree could see: `dataplane`'s GRO batch path called the single-packet
+  decapsulator, which rejects ESP next header 144 outright, so on any TUN with
+  GSO — which is the veepin client's — every inbound AGGFRAG packet was dropped
+  while the handshake reported IP-TFS negotiated and working.
+
+  Every cell asserts a log line naming AGGFRAG, in the peer's own words:
+  swanctl.opt says the iptfs mode "is subject to mode negotiation; tunnel mode
+  is negotiated if the preferred mode is not available", so a veepin that failed
+  to negotiate gets a working plain tunnel and a ping that crosses it.

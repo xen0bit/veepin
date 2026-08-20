@@ -119,7 +119,12 @@ func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
 	}
 	fcfg, cookie, err := ifortinet.Login(hc, base, cfg.Username, cfg.Password, cfg.Realm, token)
 	if err != nil {
-		return nil, client.Result{}, err
+		// Both refusals reach the caller as client.ErrAuth, and the second is
+		// the one that is easy to get wrong: a gateway demanding a second
+		// factor this connection cannot answer has refused the credentials,
+		// not failed to be reached, so retrying it with backoff buys nothing
+		// and counts against the account's lockout budget just the same.
+		return nil, client.Result{}, client.WrapAuth(err, ifortinet.ErrAuth, ifortinet.ErrChallenge)
 	}
 	if fcfg.AssignedIP == nil {
 		return nil, client.Result{}, fmt.Errorf("fortinet: server assigned no address")

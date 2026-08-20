@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"math/big"
 	"net"
 	"testing"
@@ -110,6 +111,13 @@ func TestWrongPasswordIsRejected(t *testing.T) {
 		sess.Close()
 		t.Fatal("the server accepted a login with the wrong password")
 	}
+	// And it must fail as ErrAuth, not as some error. SoftEther VPN Server
+	// locks an account out after a run of failures, so the facade needs this to
+	// reach client.ErrAuth and stop `veepin connect -retry` replaying the
+	// password into the lockout.
+	if !errors.Is(err, ErrAuth) {
+		t.Errorf("Connect error = %v, want one satisfying errors.Is(err, ErrAuth)", err)
+	}
 }
 
 // TestUnknownUserIsRejected: a valid password for a user that does not exist
@@ -122,6 +130,9 @@ func TestUnknownUserIsRejected(t *testing.T) {
 	if err == nil {
 		sess.Close()
 		t.Fatal("the server accepted a login for an unknown user")
+	}
+	if !errors.Is(err, ErrAuth) {
+		t.Errorf("Connect error = %v, want one satisfying errors.Is(err, ErrAuth)", err)
 	}
 }
 
@@ -146,6 +157,9 @@ func TestServerWithNoCredentialsRejectsEveryone(t *testing.T) {
 	if err == nil {
 		sess.Close()
 		t.Fatal("a server with no credentials configured accepted a login")
+	}
+	if !errors.Is(err, ErrAuth) {
+		t.Errorf("Connect error = %v, want one satisfying errors.Is(err, ErrAuth)", err)
 	}
 }
 

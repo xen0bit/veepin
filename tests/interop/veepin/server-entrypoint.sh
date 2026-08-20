@@ -36,6 +36,7 @@ set -- \
     -pool "${POOL:-10.10.10.0/24}" \
     -tun tun0 \
     -shape "$SHAPE" \
+    -iptfs="${IPTFS:-false}" \
     -setup-nat
 # `if` rather than `[ ... ] && ...`: under `set -e` a false test makes the whole
 # AND-list the script's last status and kills it, so the v4-only cells would die

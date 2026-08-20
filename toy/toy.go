@@ -175,7 +175,7 @@ func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
 	if err != nil {
 		_ = conn.Close()
 		_ = tun.Close()
-		return nil, client.Result{}, err
+		return nil, client.Result{}, client.WrapAuth(err, itoy.ErrAuth)
 	}
 
 	w := c.Welcome

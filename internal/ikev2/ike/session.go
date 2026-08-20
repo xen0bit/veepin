@@ -9,6 +9,8 @@ import (
 
 	"github.com/xen0bit/veepin/internal/ikev2/eap"
 	"github.com/xen0bit/veepin/internal/ikev2/payload"
+
+	"github.com/xen0bit/veepin/internal/ikev2/aggfrag"
 )
 
 // SAState is the lifecycle state of an IKE SA.
@@ -71,6 +73,14 @@ type ChildSA struct {
 	// this Child SA carries RFC 9347 AGGFRAG payloads with ESP next header 144
 	// instead of plain inner IP packets.
 	AggFrag bool
+	// AggFragFlags is what the initiator required of us in its USE_AGGFRAG
+	// notify. Only Don't Fragment affects what this end sends.
+	AggFragFlags aggfrag.Flags
+	// IPTFSRate, when positive, transmits on this SA at a constant rate of that
+	// many bytes per second regardless of offered load -- the traffic-flow
+	// confidentiality half of RFC 9347. Zero leaves the schedule following the
+	// traffic, which is aggregation without the confidentiality.
+	IPTFSRate int
 }
 
 // IKESA holds all state for one IKE Security Association.

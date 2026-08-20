@@ -1,0 +1,57 @@
+# SoftEther's own vpnclient -> veepin SoftEther server, native SE-VPN protocol.
+#
+# The cell the README's `‡` footnote has owed since the SoftEther row landed.
+# The client direction was built first and found five wire incompatibilities the
+# self cell had agreed with; this one found a sixth, and in the same place --
+# the HTTP layer in front of the control PACKs.
+#
+# What it found: `vpnclient` opens the connection with `GET /` and posts the
+# signature SECOND. ServerDownloadSignature is a loop that answers up to
+# nineteen requests before the signature, and veepin's server read exactly one
+# and judged it. Every real client was refused on its opening move, and nothing
+# in the tree noticed, because veepin's own client posts the signature first.
+#
+# What it did NOT find is worth recording too, because internal/softether's
+# README named both as blockers and neither was: the welcome's missing policy
+# structure (PackGetPolicy zero-fills, so a welcome without one parses) and the
+# client's additional connections (advertising max_connection=1 means it opens
+# none). Both were reasoned about; only the cell settled it.
+#
+# The peer is the same siomiz/softethervpn image the other two SoftEther cells
+# pin, with iperf3 added -- see softether/Dockerfile. Layer 2, so the harness
+# addresses both ends: the protocol assigns nothing, and a real deployment gets
+# an address from DHCP or static configuration inside the bridged segment.
+name: veepin-interop-softether-server
+
+services:
+  veepin-softether-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      USER: "alice"
+      PASSWORD: "s3cret"
+      TUN_IP: "10.71.0.1"
+    volumes:
+      - ./veepin/softether-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  se-client:
+    build:
+      context: softether
+    image: interop-softether-client
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-softether-server]
+    environment:
+      SERVER: "veepin-softether-server"
+      USER: "alice"
+      PASSWORD: "s3cret"
+      HUB: "DEFAULT"
+      TUN_IP: "10.71.0.3"
+    volumes:
+      - ./softether/vpnclient-init.sh:/init.sh:ro
+    entrypoint: ["/bin/sh", "/init.sh"]

@@ -120,7 +120,12 @@ func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
 
 	info, gwCfg, err := igp.Login(hc, base, cfg.Username, cfg.Password, computer)
 	if err != nil {
-		return nil, client.Result{}, err
+		// ErrSAML is deliberately NOT folded into ErrAuth. The credentials were
+		// never judged: the gateway wants a browser flow this client does not
+		// do, and reporting that as a rejected password makes NetworkManager
+		// re-prompt for a password that cannot ever work. It is permanent for a
+		// different reason, which is why it is a sentinel of its own.
+		return nil, client.Result{}, client.WrapAuth(err, igp.ErrAuth)
 	}
 
 	tun, err := dataplane.OpenTUN(cfg.TUNName)

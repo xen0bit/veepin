@@ -75,6 +75,7 @@ round trip:
 | `cmd/veepin/flags_test.go` | every bound flag reaches the option map (it perturbs each one and requires the map to change); every emitted key has a matching `Opt*` const |
 | `cmd/veepin/flags_test.go` — `TestRequiredClientOptsAreTheOnesTheParseRejects` | an option whose absence the parse rejects with "is required" is marked `Required: true` — **and** that the full option map built from the specs parses at all, without which the check is vacuous for that protocol |
 | `cmd/veepin/flags_test.go` — `TestSecretFlagsAgreeAcrossBothTables` | a key in both a protocol's client and server tables carries the same `Secret` flag in each |
+| `autherr_test.go` — `TestEveryProtocolJudgingACredentialReportsErrAuth` | every facade declaring a `Secret` client option references `client.ErrAuth`/`client.WrapAuth`, or is named in `noCredentialJudged` with the reason its `Dial` judges no credential |
 | `docs_test.go` — `TestEveryOptConstIsDescribedByAnOptSpec` | every `Opt*` const a facade declares is named as a `Key` in one of its two OptSpec tables |
 | `internal/livingreadme/interop_test.go` | every test named in the matrix exists, and every `TestInterop*` is in the matrix — **a test absent from the matrix runs in no CI shard and therefore never runs** |
 | `nm/cmd/.../TestAllSupportedProtocolsRegistered` | `nmconfig.SupportedProtocols` and the service's blank imports agree |
