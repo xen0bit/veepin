@@ -44,6 +44,15 @@ UDP is unavailable; DTLS is the faster optional path.
   session offers neither, the DTLS PSK is underivable — and a **silent fallback to
   the TLS tunnel is correct**, not a failure. (The Fortinet DTLS channel differs:
   it is cert-based, not exporter-based.)
+- **The client asks as well as answers.** CSTP's dead-peer detection is a
+  request the peer echoes verbatim. This end always echoed and never asked, so it
+  could prove itself alive to a server and learn nothing about the server —
+  which matters most on DTLS, where data goes over UDP whenever it is up and a
+  path that silently stops produces no read error for `dtlsReadLoop` to demote
+  the channel on. `Client.Probe` sends a DPD request on whichever carrier is
+  currently moving data, so it tests the path the packets take rather than the
+  control connection beside it. The probe is matched by its payload, because the
+  protocol carries no sequence number to match on.
 - **DTLS shares the UDP port across clients** via [`udpmux`](../udpmux) with an
   App-ID admission rule (the DTLS session ID carries the App-ID that binds a
   datagram to a CSTP session).

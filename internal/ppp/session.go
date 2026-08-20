@@ -1,8 +1,10 @@
 package ppp
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -111,6 +113,14 @@ type Session struct {
 
 	authChallenge, peerChallenge [mschap.ChallengeLen]byte
 	ntResponse                   [mschap.NTResponseLen]byte
+
+	// echoID is the identifier of the LCP Echo-Request a probe is waiting on,
+	// and echoWait the channel closed when the matching Echo-Reply arrives (or
+	// the link dies). LCP matches a reply to its request by identifier, so that
+	// is what this keys on rather than the magic number, which says whose link
+	// it is and not which question it answers.
+	echoID   byte
+	echoWait chan struct{}
 }
 
 // New builds a PPP client session that authenticates as username/password,
@@ -225,6 +235,12 @@ func (s *Session) failLocked(err error) {
 	s.phase = phaseClosed
 	s.lcpRestart.stop()
 	s.ipcpRestart.stop()
+	// Release a probe blocked on a reply that is never coming, so a link that
+	// has already declared itself dead does not also cost the caller a timeout.
+	if s.echoWait != nil {
+		close(s.echoWait)
+		s.echoWait = nil
+	}
 	s.h.Closed(err)
 }
 
@@ -336,6 +352,11 @@ func (s *Session) handleLCP(payload []byte) {
 		s.failLocked(fmt.Errorf("ppp: peer closed the link"))
 	case codeEchoRequest:
 		s.sendEchoReply(pkt)
+	case codeEchoReply:
+		if s.echoWait != nil && pkt.ID == s.echoID {
+			close(s.echoWait)
+			s.echoWait = nil
+		}
 	}
 }
 
@@ -399,6 +420,49 @@ func hasAuthProto(opts []option) bool {
 		}
 	}
 	return false
+}
+
+// ErrLinkClosed reports an echo on a link that is no longer up.
+var ErrLinkClosed = errors.New("ppp: link is closed")
+
+// SendEcho sends an LCP Echo-Request and waits for the peer's Echo-Reply.
+//
+// This is PPP's own liveness check (RFC 1661 section 5.8) and it is the right
+// probe for any carrier that can go quiet without erroring: it travels the same
+// path the data does, so it tests that path rather than a control connection
+// sitting beside it.
+//
+// This end has always answered a peer's Echo-Request and never sent one. Half a
+// mechanism proves this end alive to the peer and learns nothing about the
+// peer, which is the wrong half to have on a client.
+func (s *Session) SendEcho(ctx context.Context) error {
+	s.mu.Lock()
+	if s.phase == phaseClosed {
+		s.mu.Unlock()
+		return ErrLinkClosed
+	}
+	wait := s.echoWait
+	if wait == nil {
+		wait = make(chan struct{})
+		s.echoWait, s.echoID = wait, s.nextID()
+		var magic [4]byte
+		binary.BigEndian.PutUint32(magic[:], s.magic)
+		s.send(ProtocolLCP, cpPacket{Code: codeEchoRequest, ID: s.echoID, Body: magic[:]}.marshal())
+	}
+	s.mu.Unlock()
+
+	select {
+	case <-wait:
+		s.mu.Lock()
+		closed := s.phase == phaseClosed
+		s.mu.Unlock()
+		if closed {
+			return ErrLinkClosed
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *Session) sendEchoReply(req cpPacket) {

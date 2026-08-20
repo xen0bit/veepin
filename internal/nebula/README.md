@@ -81,5 +81,19 @@ flowchart TD
   peer's direct address makes every later packet a plain datagram to the relay,
   which the socket accepts and the relay drops. The tunnel reports itself up,
   the sends succeed, and nothing arrives — see `isRelayUnderlay`.
+- **A quiet tunnel is asked whether it still works, and dropped if it does not
+  answer.** This end always replied to nebula's `test` packets and never sent
+  one, so the mechanism proved this host alive to peers and learned nothing
+  about them; the only thing that noticed a tunnel had silently stopped carrying
+  traffic was `expireTunnels`, at ten minutes. `probeQuietTunnels` sends a test
+  request to any tunnel quiet for `tunnelProbeIdle` and drops it if nothing
+  answers within `tunnelProbeGrace`.
+
+  It drops **the tunnel, not the host**, and that is the difference between a
+  mesh and every point-to-point protocol in this tree: one unreachable peer is
+  not a dead session, so nebula deliberately does not implement
+  `client.Prober` — whose contract is that a failed probe closes the session.
+  A dropped tunnel costs nothing, because the next packet for that peer starts
+  a fresh handshake.
 - **Not implemented: multi-lighthouse consensus.** Two lighthouses that disagree
   about where a host is are not reconciled; the last answer wins.

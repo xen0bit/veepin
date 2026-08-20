@@ -1,9 +1,12 @@
 package openvpn
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/internal/openvpn/keys"
 )
 
@@ -169,5 +172,80 @@ func TestPeerInfoAdvertisesConfiguredCipher(t *testing.T) {
 	pi := peerInfo(&Config{Cipher: cipherCBC})
 	if !strings.Contains(pi, "IV_CIPHERS=AES-256-CBC") {
 		t.Error("peer info does not advertise the configured CBC cipher")
+	}
+}
+
+// TestLivenessDeadlineComesFromWhatTheServerPromised. OpenVPN's ping is never
+// echoed, so inbound silence is the only liveness signal there is and it means
+// nothing unless the server said it would be sending something. Each case here
+// is a different thing a server can say.
+func TestLivenessDeadlineComesFromWhatTheServerPromised(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		reply string
+		want  time.Duration
+	}{{
+		name:  "ping-restart is OpenVPN's own name for this question",
+		reply: "PUSH_REPLY,ifconfig 10.8.0.2 255.255.255.0,ping 10,ping-restart 60",
+		want:  60 * time.Second,
+	}, {
+		name:  "ping alone gives the stock keepalive 10 60 ratio",
+		reply: "PUSH_REPLY,ifconfig 10.8.0.2 255.255.255.0,ping 10",
+		want:  60 * time.Second,
+	}, {
+		name:  "ping-restart wins even when it is the shorter of the two",
+		reply: "PUSH_REPLY,ifconfig 10.8.0.2 255.255.255.0,ping 10,ping-restart 25",
+		want:  25 * time.Second,
+	}, {
+		name:  "a server that promised nothing gets no deadline invented for it",
+		reply: "PUSH_REPLY,ifconfig 10.8.0.2 255.255.255.0",
+		want:  0,
+	}, {
+		name:  "a nonsense interval is not a promise either",
+		reply: "PUSH_REPLY,ifconfig 10.8.0.2 255.255.255.0,ping 0,ping-restart abc",
+		want:  0,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := parsePush(tc.reply)
+			if err != nil {
+				t.Fatalf("parsePush: %v", err)
+			}
+			if got := livenessDeadline(p); got != tc.want {
+				t.Errorf("livenessDeadline = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestASilentServerIsOnlyDeadIfItPromisedToSpeak is the claim that keeps this
+// probe from tearing down healthy tunnels. A server run without `keepalive`
+// sends nothing at all on an idle tunnel, so silence there is the normal state
+// -- and a timeout on it would disconnect a working session every few minutes.
+func TestASilentServerIsOnlyDeadIfItPromisedToSpeak(t *testing.T) {
+	s := &session{deadline: 0}
+	if err := s.Probe(context.Background()); err != nil {
+		t.Errorf("Probe on a server that promised nothing returned %v, want nil: "+
+			"there is no claim to check, so there is nothing to fail", err)
+	}
+	if got := s.LivenessConfig(); got != (client.LivenessConfig{}) {
+		t.Errorf("LivenessConfig = %+v, want the zero value so the monitor takes "+
+			"the package defaults rather than spinning against a no-op probe", got)
+	}
+}
+
+// TestLivenessConfigDoesNotAddAMinuteToTheServersDeadline. Probe compares one
+// clock against one deadline, so a failure is conclusive; the default four
+// failures at fifteen seconds would silently stretch every ping-restart a
+// server pushed by another minute.
+func TestLivenessConfigDoesNotAddAMinuteToTheServersDeadline(t *testing.T) {
+	s := &session{deadline: 60 * time.Second}
+	cfg := s.LivenessConfig()
+	if cfg.MaxFailures != 1 {
+		t.Errorf("MaxFailures = %d, want 1: the deadline has already done the tolerating",
+			cfg.MaxFailures)
+	}
+	if cfg.Interval <= 0 || cfg.Interval > s.deadline {
+		t.Errorf("Interval = %v, want a positive value no larger than the %v deadline",
+			cfg.Interval, s.deadline)
 	}
 }

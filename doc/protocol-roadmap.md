@@ -294,6 +294,43 @@ green: SCCRQ/SCCRP/SCCCN, ICRQ/ICRP/ICCN, Hello, StopCCN and the v3 AVPs, with
 `ql2tpd` as the peer. It is what makes `serve` useful against an unmodified
 peer, but it is not what proves layer 2 works.
 
+> **`ql2tpd` cannot be that peer, and neither can anything else.** Surveyed when
+> the static cells went green and this became the next thing to do. Recorded
+> here so nobody repeats the search.
+>
+> - **`ql2tpd`** is described by its own manual as "a daemon for creating
+>   *static* L2TPv3 tunnels and sessions". Its acquiescent mode ACKs control
+>   messages and sends HELLO — which is exactly what `internal/l2tpv3` already
+>   speaks — and it establishes no session through ICRQ.
+> - **`go-l2tp`'s library** looks like the way out, because
+>   `Context.NewDynamicTunnel`'s doc comment says it "runs a full RFC2661
+>   (L2TPv2) or RFC3931 (L2TPv3) tunnel instance". The function's first act
+>   contradicts its own comment (`l2tp/l2tp_dynamic_tunnel.go:567`, at
+>   `0f3bb65`):
+>
+>   ```go
+>   // Currently only handle L2TPv2
+>   if cfg.Version != ProtocolVersion2 {
+>       return nil, fmt.Errorf("L2TPv3 dynamic tunnels are not (yet) supported")
+>   }
+>   ```
+>
+> - **`xl2tpd`** is L2TPv2. **The Linux kernel** is the static data plane and
+>   runs no control protocol at all — which is exactly why it was such a good
+>   peer for the static pseudowire.
+>
+> So the dynamic control plane is the one item on this page that would ship with
+> **no cross-implementation test available at any price**: a veepin↔veepin cell
+> proving the two halves agree with each other, which this page's own opening
+> says is not the same as being right. By the Fortinet precedent that earns a
+> fixed `—†`, not a `✓`.
+>
+> That does not make it wrong to build — "a peer expecting to negotiate will not
+> connect" is a real limitation with real users. It makes it a **different kind
+> of decision** from every other item here, and one that should be taken
+> deliberately rather than inherited from a plan that named a peer which does not
+> exist.
+
 ## Cost
 
 ~1,400 LOC including tests, ~32 files, for the static pseudowire. +900 for the
@@ -690,7 +727,10 @@ before expecting CI.
    spurious `Validate` failure.
 2. ~~**L2TPv3 static pseudowire**~~ — **done**, green against the kernel in both
    directions.
-3. **L2TPv3 dynamic control plane** — gated on 2 being green, which it now is.
+3. **L2TPv3 dynamic control plane** — gated on 2 being green, which it now is,
+   but **re-gated on a question the plan did not ask**: no open-source peer
+   implements it, `ql2tpd` included. See the survey at the end of section 1. It
+   would ship with a `—†` in both real-peer columns.
 4. **IP-TFS aggregation + fragmentation** — codec, negotiation and data path are
    in; **the strongSwan cell is not**, so this is not yet proven.
 5. **IP-TFS constant-rate** — not started. This is the half that makes the

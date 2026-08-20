@@ -13,13 +13,27 @@ import (
 // The split is deliberate:
 //
 //   - Protocols that ride a *reliable* transport (TLS/TCP, or QUIC with its own
-//     idle timeout — OpenVPN-TCP, SSTP, SSH, AnyConnect's TLS channel, MASQUE,
-//     Fortinet) already surface a dead peer: the transport's read fails and the
-//     session's Wait returns. They need nothing here.
+//     idle timeout — SSTP, SSH, MASQUE, Fortinet, SoftEther) already surface a
+//     dead peer: the transport's read fails and the session's Wait returns. They
+//     need nothing here.
 //   - Protocols over a *datagram* transport with no built-in liveness (IKEv2/ESP,
-//     WireGuard, OpenVPN-UDP, L2TP, AnyConnect's DTLS path) can black-hole
+//     WireGuard and AmneziaWG, OpenVPN-UDP, L2TP, Cisco IPsec, GlobalProtect's
+//     ESP path, Ivanti's, AnyConnect's DTLS path, L2TPv3) can black-hole
 //     silently — the socket stays "up" while nothing crosses. Those implement
 //     Prober, and this package drives it.
+//
+// The second list was aspirational for three of the protocols on it. OpenVPN-UDP,
+// L2TP and AnyConnect were named here as Prober implementations for a long time
+// while implementing no Probe at all, and each had the *answering* half of a
+// liveness exchange already built: OpenVPN sent pings and never timed out on
+// silence, L2TP answered HELLO and never sent one, AnyConnect echoed DPD and
+// never asked. Half a mechanism proves this end alive to a peer and learns
+// nothing about the peer, which is the wrong half to have.
+//
+// Nebula is deliberately absent from both lists. It is a mesh, so one
+// unreachable peer is not a dead session and closing the session would be the
+// wrong response; its reachability probe lives in internal/nebula and drops the
+// individual tunnel instead.
 //
 // A Session that implements Prober is wrapped automatically by Dial, so the
 // capability is entirely abstracted away from callers: the CLI, the NM plugin

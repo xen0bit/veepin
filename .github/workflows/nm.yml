@@ -35,10 +35,10 @@ jobs:
         working-directory: nm
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: "1.25"
           cache: true
@@ -79,7 +79,14 @@ jobs:
 
       - name: Build packages (.deb/.rpm)
         run: |
-          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+          # Pinned, not @latest. nfpm v2.47.0 raised its own go directive to
+          # 1.26.4, and setup-go's explicit go-version sets GOTOOLCHAIN=local,
+          # so `@latest` turned this job red with no change on our side --
+          # between one green run and the next. v2.46.3 is the last release that
+          # builds on the Go this workflow pins. Same reasoning as the
+          # golangci-lint pin in ci.yml: a dependency that moves on its own
+          # schedule gets a version, not a floating tag.
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.46.3
           make packages VERSION=0.0.0 NFPM="$(go env GOPATH)/bin/nfpm"
 
       - name: Upload packages

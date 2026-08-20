@@ -3,6 +3,7 @@ package client
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"sort"
 	"sync"
 	"time"
@@ -31,6 +32,30 @@ type Server interface {
 	Gateway() net.IP
 	// Network is the tunnel subnet the server assigns client addresses from.
 	Network() *net.IPNet
+}
+
+// DualStackServer is an optional Server capability: a server that also assigns
+// clients an IPv6 address inside the tunnel, and therefore needs the host
+// configured for it -- an address on the interface, forwarding, and NAT.
+//
+// It is optional rather than part of Server because one protocol of seventeen
+// has it (ikev2's config mode), and widening Server would make every other
+// facade answer a question it has no answer to.
+//
+// The types are netip rather than the net.IP/*net.IPNet of Gateway/Network
+// above, which is a deliberate inconsistency: the v4 pair predates netip and
+// changing it would touch every facade, while the v6 pair is netip at its
+// source (dataplane.AddrPool6) and at its only consumer. Converting at this
+// boundary would mean converting back, and netip.Prefix additionally has a zero
+// value a caller can test -- IsValid -- where a nil *net.IPNet reads as an
+// absent field and a bug equally well.
+type DualStackServer interface {
+	// Gateway6 is the server's own address inside the tunnel's IPv6 subnet. It
+	// is the zero Addr when this server was configured without a v6 pool.
+	Gateway6() netip.Addr
+	// Network6 is the IPv6 subnet client addresses come from, or the zero
+	// Prefix.
+	Network6() netip.Prefix
 }
 
 // ServerParseFunc turns a protocol's string-keyed options into a constructed

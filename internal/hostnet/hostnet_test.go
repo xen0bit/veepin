@@ -8,6 +8,7 @@ package hostnet
 import (
 	"errors"
 	"net"
+	"net/netip"
 	"slices"
 	"strings"
 	"testing"
@@ -170,7 +171,7 @@ func TestEnsureRuleIsIdempotentWhenRuleAlreadyExists(t *testing.T) {
 	// returns without adding.
 	rule := []string{"-A", "FORWARD", "-i", "tun0", "-j", "ACCEPT",
 		"-m", "comment", "--comment", "veepin:site-a"}
-	if err := ensureRule(rec.run, rule); err != nil {
+	if err := ensureRule(rec.run, "iptables", rule); err != nil {
 		t.Fatalf("ensureRule: %v", err)
 	}
 	for _, c := range rec.logs {
@@ -197,7 +198,7 @@ func TestEnsureRuleAddsWhenAbsent(t *testing.T) {
 		}
 		return nil, nil
 	}
-	if err := ensureRule(run, rule); err != nil {
+	if err := ensureRule(run, "iptables", rule); err != nil {
 		t.Fatalf("ensureRule: %v", err)
 	}
 	want := []string{
@@ -218,7 +219,7 @@ func TestEnsureRuleAddsNothingWhenPresent(t *testing.T) {
 		issued = append(issued, name+" "+strings.Join(args, " "))
 		return nil, nil // -C succeeds: the rule is there
 	}
-	if err := ensureRule(run, []string{"-A", "FORWARD", "-i", "tun0", "-j", "ACCEPT"}); err != nil {
+	if err := ensureRule(run, "iptables", []string{"-A", "FORWARD", "-i", "tun0", "-j", "ACCEPT"}); err != nil {
 		t.Fatalf("ensureRule: %v", err)
 	}
 	if len(issued) != 1 || !strings.Contains(issued[0], "-C") {
@@ -471,18 +472,30 @@ func TestTaggedTeardownDeletesRulesItFindsInRealIptablesOutput(t *testing.T) {
 	filterRules := `-P FORWARD DROP
 -A FORWARD -i veepin0 -o eth0 -m comment --comment "veepin:site-a" -j ACCEPT
 `
+	// The v6 chains carry one tagged rule of their own, so this also pins that
+	// the recovery sweep looks at both families: it cannot know which the
+	// listener used, because losing that is what put it on this path.
+	natRules6 := `-P POSTROUTING ACCEPT
+-A POSTROUTING -s fd00:10:10::/64 -o eth0 -m comment --comment "veepin:site-a" -j MASQUERADE
+`
 	var deletes [][]string
+	var sawBin []string
 	run := func(name string, args ...string) ([]byte, error) {
 		if len(args) >= 3 && args[2] == "-S" {
-			switch args[1] {
-			case "nat":
+			switch {
+			case name == "ip6tables" && args[1] == "nat":
+				return []byte(natRules6), nil
+			case name == "ip6tables":
+				return nil, nil // no tagged FORWARD rules on the v6 side
+			case args[1] == "nat":
 				return []byte(natRules), nil
-			case "filter":
+			case args[1] == "filter":
 				return []byte(filterRules), nil
 			}
 		}
 		if slices.Contains(args, "-D") {
 			deletes = append(deletes, slices.Clone(args))
+			sawBin = append(sawBin, name)
 		}
 		return nil, nil
 	}
@@ -490,8 +503,13 @@ func TestTaggedTeardownDeletesRulesItFindsInRealIptablesOutput(t *testing.T) {
 	if err := teardownByTagWith("site-a", run); err != nil {
 		t.Fatalf("teardown: %v", err)
 	}
-	if len(deletes) != 2 {
-		t.Fatalf("deleted %d rules, want the 2 tagged veepin:site-a: %v", len(deletes), deletes)
+	if len(deletes) != 3 {
+		t.Fatalf("deleted %d rules, want the 3 tagged veepin:site-a across both families: %v",
+			len(deletes), deletes)
+	}
+	if !slices.Contains(sawBin, "ip6tables") {
+		t.Error("no v6 rule was deleted, so a dual-stack listener leaves its ip6tables " +
+			"rules on the host when its recorded state is lost")
 	}
 	for _, args := range deletes {
 		for _, a := range args {
@@ -505,5 +523,243 @@ func TestTaggedTeardownDeletesRulesItFindsInRealIptablesOutput(t *testing.T) {
 		if slices.Contains(args, "veepin:other") {
 			t.Errorf("delete touched another listener's rule: %v", args)
 		}
+	}
+}
+
+// TestApplyConfiguresBothFamiliesForADualStackListener.
+//
+// ikev2's server has always been able to hand a client an IPv6 address from its
+// own pool through config mode, and Gateway6/Network6 were documented as being
+// "for routing and NAT rules" while having no caller anywhere in the tree. The
+// consequences were both invisible from inside the tunnel: the v6 gateway never
+// reached the interface, so the server could not answer a ping to its own
+// tunnel address, and a client's v6 traffic arrived at a host that would not
+// forward it.
+func TestApplyConfiguresBothFamiliesForADualStackListener(t *testing.T) {
+	rec := &recCommander{errs: map[call]error{}}
+	cfg := Config{
+		TUNName:  "tun0",
+		Gateway:  net.ParseIP("10.10.0.1"),
+		Network:  mustCIDR(t, "10.10.0.0/24"),
+		Gateway6: netip.MustParseAddr("fd00:10:10::1"),
+		Network6: netip.MustParsePrefix("fd00:10:10::/64"),
+		WAN:      "eth0",
+	}
+	run := func(name string, args ...string) ([]byte, error) {
+		if slices.Contains(args, "-C") {
+			rec.logs = append(rec.logs, call(name+" "+strings.Join(args, " ")))
+			return nil, errors.New("no such rule")
+		}
+		return rec.run(name, args...)
+	}
+	if err := ApplyWithName("site-a", cfg, run); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	var got []string
+	for _, c := range rec.logs {
+		got = append(got, string(c))
+	}
+	for _, want := range []string{
+		"ip addr add 10.10.0.1/24 dev tun0",
+		"ip -6 addr add fd00:10:10::1/64 dev tun0",
+		"sysctl -w net.ipv4.ip_forward=1",
+		"sysctl -w net.ipv6.conf.all.forwarding=1",
+		"iptables -t nat -A POSTROUTING -s 10.10.0.0/24 -o eth0 -j MASQUERADE",
+		"ip6tables -t nat -A POSTROUTING -s fd00:10:10::/64 -o eth0 -j MASQUERADE",
+		"ip6tables -A FORWARD -i tun0 -j ACCEPT",
+		"ip6tables -A FORWARD -o tun0 -j ACCEPT",
+	} {
+		if !containsPrefix(got, want) {
+			t.Errorf("missing: %q\nfull sequence:\n%s", want, strings.Join(got, "\n"))
+		}
+	}
+	// Same ordering claim as the v4 test, for the same reason.
+	fwd6 := indexOfPrefix(got, "sysctl -w net.ipv6.conf.all.forwarding=1")
+	masq6 := indexOfPrefix(got, "ip6tables -t nat -A POSTROUTING")
+	if fwd6 < 0 || masq6 < 0 || fwd6 > masq6 {
+		t.Errorf("v6 forwarding enabled at %d, v6 MASQUERADE at %d; forwarding must come first\n%s",
+			fwd6, masq6, strings.Join(got, "\n"))
+	}
+	for _, g := range got {
+		if strings.Contains(g, "tables") && slices.Contains(strings.Fields(g), "-A") &&
+			!strings.Contains(g, "veepin:site-a") {
+			t.Errorf("an installed rule carries no teardown tag: %s", g)
+		}
+	}
+}
+
+// TestAV4OnlyListenerNeverNamesIp6tables. A host that has no ip6tables at all
+// must be unaffected by this package unless a listener actually hands out v6
+// addresses -- otherwise adding the v6 half would break every existing
+// deployment that never asked for it.
+func TestAV4OnlyListenerNeverNamesIp6tables(t *testing.T) {
+	rec := &recCommander{errs: map[call]error{}}
+	cfg := Config{
+		TUNName: "tun0",
+		Gateway: net.ParseIP("10.10.0.1"),
+		Network: mustCIDR(t, "10.10.0.0/24"),
+		WAN:     "eth0",
+	}
+	run := func(name string, args ...string) ([]byte, error) {
+		if slices.Contains(args, "-C") {
+			rec.logs = append(rec.logs, call(name+" "+strings.Join(args, " ")))
+			return nil, errors.New("no such rule")
+		}
+		return rec.run(name, args...)
+	}
+	if err := ApplyWithName("site-a", cfg, run); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	for _, c := range rec.logs {
+		if strings.HasPrefix(string(c), "ip6tables") || strings.Contains(string(c), "ipv6") {
+			t.Errorf("a v4-only listener touched IPv6 state: %s", c)
+		}
+	}
+}
+
+// TestTeardownRemovesBothFamiliesInReverse. The recorded State carries the v6
+// subnet separately so a listener that gained or lost its v6 pool since Apply
+// still tears down what was actually installed -- the reason State exists.
+func TestTeardownRemovesBothFamiliesInReverse(t *testing.T) {
+	var deletes []string
+	run := func(name string, args ...string) ([]byte, error) {
+		joined := name + " " + strings.Join(args, " ")
+		if slices.Contains(args, "-D") {
+			deletes = append(deletes, joined)
+		}
+		return nil, nil // -C succeeds, so every rule is found and removed once
+	}
+	st := State{
+		TUNName:  "tun0",
+		WAN:      "eth0",
+		Network:  "10.10.0.0/24",
+		Network6: "fd00:10:10::/64",
+	}
+	if err := TeardownStateWithName("site-a", st, run); err != nil {
+		t.Fatalf("TeardownState: %v", err)
+	}
+	if !containsPrefix(deletes, "ip6tables -t nat -D POSTROUTING -s fd00:10:10::/64") {
+		t.Errorf("the v6 MASQUERADE was not removed:\n%s", strings.Join(deletes, "\n"))
+	}
+	if !containsPrefix(deletes, "iptables -t nat -D POSTROUTING -s 10.10.0.0/24") {
+		t.Errorf("the v4 MASQUERADE was not removed:\n%s", strings.Join(deletes, "\n"))
+	}
+	v6At := indexOfPrefix(deletes, "ip6tables -t nat -D POSTROUTING")
+	v4At := indexOfPrefix(deletes, "iptables -t nat -D POSTROUTING")
+	if v6At > v4At {
+		t.Errorf("v4 was torn down at %d before v6 at %d; teardown must reverse apply's order\n%s",
+			v4At, v6At, strings.Join(deletes, "\n"))
+	}
+}
+
+// TestTeardownOfAV4OnlyStateLeavesIp6tablesAlone is the teardown half of
+// TestAV4OnlyListenerNeverNamesIp6tables.
+func TestTeardownOfAV4OnlyStateLeavesIp6tablesAlone(t *testing.T) {
+	var issued []string
+	run := func(name string, args ...string) ([]byte, error) {
+		issued = append(issued, name+" "+strings.Join(args, " "))
+		return nil, nil
+	}
+	st := State{TUNName: "tun0", WAN: "eth0", Network: "10.10.0.0/24"}
+	if err := TeardownStateWithName("site-a", st, run); err != nil {
+		t.Fatalf("TeardownState: %v", err)
+	}
+	for _, c := range issued {
+		if strings.HasPrefix(c, "ip6tables") {
+			t.Errorf("a v4-only teardown named ip6tables: %s", c)
+		}
+	}
+}
+
+// TestStateRecordsTheV6SubnetSeparately. Teardown is driven by the State, so a
+// v6 subnet that never reaches it is a rule that stays on the host forever.
+func TestStateRecordsTheV6SubnetSeparately(t *testing.T) {
+	cfg := Config{
+		TUNName:  "tun0",
+		Network:  mustCIDR(t, "10.10.0.0/24"),
+		Network6: netip.MustParsePrefix("fd00:10:10::/64"),
+		WAN:      "eth0",
+	}
+	st := cfg.State()
+	if st.Network != "10.10.0.0/24" {
+		t.Errorf("State.Network = %q", st.Network)
+	}
+	if st.Network6 != "fd00:10:10::/64" {
+		t.Errorf("State.Network6 = %q, want the v6 subnet: without it the v6 "+
+			"MASQUERADE outlives the listener", st.Network6)
+	}
+}
+
+// TestAHostWithoutIp6tablesStillServesV4.
+//
+// ikev2's v6 pool is on by DEFAULT -- NewServer fills Pool6 with
+// fd00:10:10::/64 when the option is unset -- so every ikev2 listener asks this
+// package for v6. Treating a missing ip6tables as fatal would therefore stop
+// every existing v4 deployment on a v6-less host from serving at all, over a
+// capability its operator never asked for.
+func TestAHostWithoutIp6tablesStillServesV4(t *testing.T) {
+	var issued []string
+	run := func(name string, args ...string) ([]byte, error) {
+		issued = append(issued, name+" "+strings.Join(args, " "))
+		if name == "ip6tables" {
+			return []byte("ip6tables: command not found"), errors.New("exec: not found")
+		}
+		if slices.Contains(args, "-C") {
+			return nil, errors.New("no such rule")
+		}
+		return nil, nil
+	}
+	cfg := Config{
+		TUNName:  "tun0",
+		Gateway:  net.ParseIP("10.10.0.1"),
+		Network:  mustCIDR(t, "10.10.0.0/24"),
+		Gateway6: netip.MustParseAddr("fd00:10:10::1"),
+		Network6: netip.MustParsePrefix("fd00:10:10::/64"),
+		WAN:      "eth0",
+	}
+	err := ApplyWithName("site-a", cfg, run)
+	if !errors.Is(err, ErrNoIPv6) {
+		t.Fatalf("Apply = %v, want ErrNoIPv6 so the caller can log and carry on", err)
+	}
+	// The v4 half must be fully installed regardless.
+	for _, want := range []string{
+		"ip addr add 10.10.0.1/24 dev tun0",
+		"ip link set tun0 up",
+		"sysctl -w net.ipv4.ip_forward=1",
+		"iptables -t nat -A POSTROUTING -s 10.10.0.0/24 -o eth0 -j MASQUERADE",
+	} {
+		if !containsPrefix(issued, want) {
+			t.Errorf("the v4 half is incomplete, missing: %q\n%s", want, strings.Join(issued, "\n"))
+		}
+	}
+	// And no v6 address was put on the interface, since the host cannot route it.
+	if containsPrefix(issued, "ip -6 addr add") {
+		t.Error("a v6 address was assigned on a host that cannot forward or NAT it")
+	}
+}
+
+// TestNoWANAndNoIPv6ReportsBoth. Each is "configured, but does not reach
+// everything", and a caller testing errors.Is for either must still find it.
+func TestNoWANAndNoIPv6ReportsBoth(t *testing.T) {
+	run := func(name string, args ...string) ([]byte, error) {
+		if name == "ip6tables" {
+			return nil, errors.New("exec: not found")
+		}
+		return nil, nil
+	}
+	cfg := Config{
+		TUNName:  "tun0",
+		Gateway:  net.ParseIP("10.10.0.1"),
+		Network:  mustCIDR(t, "10.10.0.0/24"),
+		Gateway6: netip.MustParseAddr("fd00:10:10::1"),
+		Network6: netip.MustParsePrefix("fd00:10:10::/64"),
+		// No WAN.
+	}
+	err := ApplyWithName("site-a", cfg, run)
+	if !errors.Is(err, ErrNoWAN) {
+		t.Errorf("Apply = %v, want it to report ErrNoWAN", err)
+	}
+	if !errors.Is(err, ErrNoIPv6) {
+		t.Errorf("Apply = %v, want it to report ErrNoIPv6 as well", err)
 	}
 }

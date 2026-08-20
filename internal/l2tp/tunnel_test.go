@@ -1,6 +1,8 @@
 package l2tp
 
 import (
+	"context"
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -148,5 +150,67 @@ func waitUp(t *testing.T, who string, e *endpoint) {
 		t.Fatalf("%s error before up: %v", who, err)
 	case <-time.After(2 * time.Second):
 		t.Fatalf("%s timed out before PPP up", who)
+	}
+}
+
+// TestHelloIsAcknowledgedByTheReliableChannel. HELLO is the one control message
+// with no reply of its own -- the peer answers with the ZLB acknowledgement the
+// reliable channel requires of everything -- so this asserts that the probe
+// resolves on that acknowledgement and not on an inbound message type it will
+// never see.
+func TestHelloIsAcknowledgedByTheReliableChannel(t *testing.T) {
+	client, server := newEndpoint(RoleLAC), newEndpoint(RoleLNS)
+	toServer, toClient := make(chan []byte, 64), make(chan []byte, 64)
+	client.tun = NewTunnel(RoleLAC, func(b []byte) error { toServer <- b; return nil }, client)
+	server.tun = NewTunnel(RoleLNS, func(b []byte) error { toClient <- b; return nil }, server)
+
+	done := make(chan struct{})
+	go pump(done, toServer, server.tun)
+	go pump(done, toClient, client.tun)
+	defer close(done)
+
+	client.tun.Start()
+	waitUp(t, "client", client)
+	waitUp(t, "server", server)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := client.tun.SendHello(ctx); err != nil {
+		t.Fatalf("SendHello: %v", err)
+	}
+
+	// And again, so the waiter state is proven to reset rather than working
+	// exactly once per tunnel.
+	if err := client.tun.SendHello(ctx); err != nil {
+		t.Fatalf("second SendHello: %v", err)
+	}
+}
+
+// TestAHelloNobodyAnswersFailsRatherThanHanging. A probe that blocked forever on
+// a dead peer would be worse than no probe: the liveness monitor bounds each
+// call with its own context, but a tunnel that has already declared itself dead
+// must release the waiter rather than making the caller wait out that bound.
+func TestAHelloNobodyAnswersFailsRatherThanHanging(t *testing.T) {
+	client := newEndpoint(RoleLAC)
+	// A send that goes nowhere: the peer is a black hole, which is exactly the
+	// failure this probe exists to detect.
+	client.tun = NewTunnel(RoleLAC, func([]byte) error { return nil }, client)
+	client.tun.Start()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	if err := client.tun.SendHello(ctx); err == nil {
+		t.Fatal("SendHello returned nil against a peer that answered nothing")
+	}
+
+	// Once the tunnel is closed the answer is immediate and names the reason,
+	// rather than costing the caller another context deadline.
+	client.tun.Close()
+	start := time.Now()
+	if err := client.tun.SendHello(context.Background()); !errors.Is(err, ErrTunnelClosed) {
+		t.Errorf("SendHello on a closed tunnel = %v, want ErrTunnelClosed", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("SendHello on a closed tunnel took %v, want an immediate answer", elapsed)
 	}
 }

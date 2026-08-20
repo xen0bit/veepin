@@ -1,12 +1,14 @@
 package anyconnect
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"io"
 	"math/big"
 	"net"
@@ -229,4 +231,127 @@ func assertPacket(t *testing.T, dir string, out <-chan []byte, want []byte) {
 	case <-time.After(3 * time.Second):
 		t.Fatalf("%s: timed out waiting for packet", dir)
 	}
+}
+
+// TestTheClientCanAskWhetherTheServerIsStillThere. This end has always echoed a
+// server's DPD request and never sent one, so the mechanism could prove this
+// client alive to a server and learn nothing about the server. That matters
+// most on the DTLS path: data goes over UDP whenever it is up, and a UDP path
+// that silently stops produces no read error, so the read loop never demotes it
+// and the healthy idle TLS connection beside it reports the tunnel up.
+func TestTheClientCanAskWhetherTheServerIsStillThere(t *testing.T) {
+	c, _, _ := dpdLoopback(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := c.Probe(ctx); err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+	// Twice, so the outstanding-probe slot is proven to release rather than
+	// working exactly once per session.
+	if err := c.Probe(ctx); err != nil {
+		t.Fatalf("second Probe: %v", err)
+	}
+}
+
+// TestAProbeIgnoresAnEchoThatIsNotItsOwn. The payload is the only thing tying an
+// answer to a question here -- CSTP's DPD carries no sequence number -- so a
+// response with different contents must not release the probe. Otherwise a
+// server's own DPD request, echoed back by this client, could satisfy a probe
+// the server never answered.
+func TestAProbeIgnoresAnEchoThatIsNotItsOwn(t *testing.T) {
+	c := &Client{}
+	p := &dpdProbe{payload: []byte("question"), done: make(chan struct{})}
+	c.dpd.Store(p)
+
+	c.matchDPD([]byte("something else"))
+	select {
+	case <-p.done:
+		t.Fatal("a mismatched echo released the probe, so any inbound DPD traffic " +
+			"would keep a dead tunnel looking alive")
+	default:
+	}
+
+	c.matchDPD([]byte("question"))
+	select {
+	case <-p.done:
+	default:
+		t.Fatal("the matching echo did not release the probe")
+	}
+}
+
+// TestAProbeAgainstASilentServerGivesUp. The liveness monitor bounds each probe
+// with a context, and a probe that ignored it would stall the monitor rather
+// than failing a check.
+func TestAProbeAgainstASilentServerGivesUp(t *testing.T) {
+	// A client whose connection goes to a pipe nobody reads: the request is
+	// written and nothing ever answers, which is a black-holed carrier.
+	server, client := net.Pipe()
+	t.Cleanup(func() { _ = server.Close(); _ = client.Close() })
+	go func() { _, _ = io.Copy(io.Discard, server) }()
+
+	c := NewClient(client, newFakeTUN(), ClientConfig{})
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	err := c.Probe(ctx)
+	if !errors.Is(err, ErrPeerSilent) {
+		t.Errorf("Probe against a silent server = %v, want ErrPeerSilent", err)
+	}
+}
+
+// dpdLoopback brings up a client and server over a real TLS listener and starts
+// the client's read loop, which is what delivers a DPD response.
+func dpdLoopback(t *testing.T) (*Client, *Server, *fakeTUN) {
+	t.Helper()
+	pool, gateway, err := dataplane.NewAddrPool("10.11.0.0/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = gateway
+	serverTUN := newFakeTUN()
+	srv := NewServer(serverTUN, ServerConfig{
+		Users:   map[string]string{"alice": "password"},
+		Pool:    pool,
+		Gateway: gateway,
+	})
+	srv.Start()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{selfSignedCert(t)},
+		MinVersion:   tls.VersionTLS12,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go srv.ServeConn(conn)
+		}
+	}()
+
+	conn, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{
+		InsecureSkipVerify: true, //nolint:gosec // throwaway self-signed test cert
+		MinVersion:         tls.VersionTLS12,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientTUN := newFakeTUN()
+	c := NewClient(conn, clientTUN, ClientConfig{
+		Host:     ln.Addr().String(),
+		Username: "alice",
+		Password: "password",
+	})
+	t.Cleanup(func() { _ = c.Close() })
+	if _, err := c.Handshake(); err != nil {
+		t.Fatalf("handshake: %v", err)
+	}
+	go func() { _ = c.Run(0) }()
+	return c, srv, clientTUN
 }

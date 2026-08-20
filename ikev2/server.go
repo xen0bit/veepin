@@ -94,7 +94,7 @@ type Server struct {
 	pump  *dataplane.Pump
 	tun   *dataplane.TUN
 	pool  *dataplane.AddrPool
-	pool6 *dataplane.AddrPool6 // nil unless dual-stack
+	pool6 *dataplane.AddrPool6 // always set: Pool6 defaults, so every server is dual-stack
 
 	gateway  net.IP
 	gateway6 netip.Addr
@@ -238,13 +238,34 @@ func (s *Server) TUNName() string { return s.tun.Name() }
 func (s *Server) Gateway() net.IP { return s.gateway }
 
 // Gateway6 is the server's tunnel-side IPv6 address (the v6 pool's first host).
+// It and Network6 implement client.DualStackServer, which is what carries the
+// v6 half through to internal/hostnet: the interface address, forwarding, and
+// the ip6tables MASQUERADE and FORWARD rules.
+//
+// They had no caller at all for a long time, while their own comments said they
+// were "for routing and NAT rules". Config mode was handing every client a v6
+// address out of pool6 -- which defaults, so every ikev2 server did it -- and
+// the host was configured for none of it: the gateway address never reached the
+// interface, so the server could not answer a ping to its own v6 tunnel
+// address, and client v6 traffic arrived at a host that would not forward it.
+// Dual-stack worked inside the tunnel and stopped at its edge, and the only
+// interop cell covering it ran veepin's CLIENT against strongSwan, which does
+// its own host networking.
 func (s *Server) Gateway6() netip.Addr { return s.gateway6 }
 
 // Network is the tunnel subnet, for routing and NAT rules.
 func (s *Server) Network() *net.IPNet { return s.pool.Network() }
 
-// Network6 is the tunnel's IPv6 subnet, for routing and NAT rules.
+// Network6 is the tunnel's IPv6 subnet, for routing and NAT rules. See
+// Gateway6.
 func (s *Server) Network6() netip.Prefix { return s.pool6.Prefix() }
+
+// Server implements client.DualStackServer, which is how cmd/veepin and the
+// supervisor find the v6 half without client.Server having to carry a pair of
+// methods sixteen other facades would answer nothing to. Asserted here so
+// renaming either method is a compile error rather than a listener that
+// silently stops configuring v6.
+var _ client.DualStackServer = (*Server)(nil)
 
 // ListenAndServe starts the data path and serves IKE until Close.
 func (s *Server) ListenAndServe() error {

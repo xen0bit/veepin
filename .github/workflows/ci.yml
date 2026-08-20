@@ -32,10 +32,10 @@ jobs:
         go: ["1.25", "1.x"] # pinned + latest, so we catch upcoming-toolchain breakage
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ matrix.go }}
           cache: true
@@ -70,10 +70,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: "1.25"
           cache: true
@@ -91,11 +91,13 @@ jobs:
         run: go vet ./...
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v7
+        uses: golangci/golangci-lint-action@v9
         with:
-          # Pinned (v7 action → golangci-lint v2 line). Pinning keeps a new
-          # release from turning green CI red without a code change; matches the
-          # v2 schema in .golangci.yml.
+          # Pinned (v9 action → golangci-lint v2 line; v8+ requires >= v2.1.0).
+          # Pinning keeps a new release from turning green CI red without a code
+          # change; matches the v2 schema in .golangci.yml. The action version
+          # moved for the Node 24 runtime, not for the linter -- this pin is
+          # what keeps the lint behaviour identical across that bump.
           version: v2.12.2
 
   govulncheck:
@@ -103,10 +105,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           # govulncheck reports standard-library vulnerabilities against the
           # toolchain it runs under, so this job is only as current as its Go.
@@ -146,10 +148,10 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: "1.25"
           cache: true

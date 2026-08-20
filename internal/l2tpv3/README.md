@@ -180,6 +180,13 @@ Two details that a v2 implementation gets wrong when carried over:
   StopCCN; there is no SCCRQ/SCCRP/SCCCN or ICRQ/ICRP/ICCN, so sessions and
   cookies must be configured by hand at both ends and a peer expecting to
   negotiate will not connect. See the section above for why.
+
+  Worth knowing before picking this up: **no open-source implementation runs a
+  dynamic L2TPv3 control plane**, so building one here could not be verified
+  against a real peer. `ql2tpd` is static/acquiescent by its own description,
+  `go-l2tp`'s library refuses v3 in `newDynamicTunnel` despite the doc comment
+  above it, `xl2tpd` is v2, and the kernel runs no control protocol at all. The
+  survey and its evidence are in `doc/protocol-roadmap.md`.
 - **The control connection is unauthenticated.** RFC 3931 offers a Message
   Digest AVP with a shared secret; it is not implemented, and an inbound hidden
   AVP is rejected rather than mis-parsed. The Control Connection ID is checked on

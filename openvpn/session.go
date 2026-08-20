@@ -162,9 +162,88 @@ type session struct {
 	conn   *net.UDPConn
 	logger *log.Logger
 
+	// deadline is how long inbound silence may last before Probe calls the peer
+	// gone, derived from what the server promised in its PUSH_REPLY. Zero means
+	// it promised nothing and this session implements no liveness claim.
+	deadline time.Duration
+
 	closeOnce sync.Once
 	closeErr  error
 	done      chan struct{}
+}
+
+// errPeerSilent is the probe's verdict. It is a value rather than a formatted
+// error so the reason can be attached without the liveness monitor's repeated
+// failures each allocating one.
+var errPeerSilent = errors.New("openvpn: the server stopped sending the keepalives it promised")
+
+// livenessDeadline turns the server's PUSH_REPLY into the silence this client
+// will tolerate.
+//
+// `ping-restart N` is OpenVPN's own name for exactly this question -- "restart
+// if nothing has been received for N seconds" -- so where the server pushes it,
+// that is the answer and nothing here needs to invent one. Where it pushes only
+// `ping N`, the deadline is a small multiple of it: OpenVPN's own stock pairing
+// is `keepalive 10 60`, a factor of six, and matching that keeps a client from
+// declaring death sooner than the server that configured it expects.
+//
+// Where the server pushed neither, this returns zero and Probe makes no claim.
+// That is the honest answer and not a gap to be filled with a guess: a server
+// run without `keepalive` sends nothing on an idle tunnel, so silence there is
+// the normal state and a timeout on it would tear down healthy sessions.
+func livenessDeadline(p *pushConfig) time.Duration {
+	if p.pingRestart > 0 {
+		return p.pingRestart
+	}
+	if p.ping > 0 {
+		return 6 * p.ping
+	}
+	return 0
+}
+
+// Probe implements client.Prober.
+//
+// OpenVPN over UDP is named in client/liveness.go as a protocol that can
+// black-hole silently -- the socket stays up while nothing crosses -- and it is
+// the one there with no request/response liveness of any kind. Its ping is
+// fire-and-forget and is never echoed, so the only signal available is that
+// nothing has arrived, and that signal only means something if the server said
+// it would be sending something.
+//
+// So this consults the pump's idle clock rather than putting a packet on the
+// wire. The session's own keepalive goroutine is what holds the NAT binding
+// open; adding a second outbound ping here would hold it open just as well and
+// still learn nothing, because nothing answers either one.
+func (s *session) Probe(context.Context) error {
+	if s.deadline <= 0 {
+		return nil
+	}
+	idle := s.pump.IdleFor()
+	if idle < s.deadline {
+		return nil
+	}
+	return fmt.Errorf("%w: silent for %v, deadline %v", errPeerSilent, idle.Round(time.Second), s.deadline)
+}
+
+// LivenessConfig implements client.LivenessTuner. The deadline is already the
+// whole judgement -- Probe compares one clock against it and returns -- so a
+// single failure is conclusive and there is nothing for MaxFailures to tolerate
+// that the deadline has not tolerated already. The default four failures at
+// fifteen seconds would silently add another minute to every ping-restart the
+// server pushed.
+func (s *session) LivenessConfig() client.LivenessConfig {
+	if s.deadline <= 0 {
+		// No claim to check, so nothing to check it on: take the package
+		// default rather than spinning a timer against a probe that has
+		// already decided to return nil.
+		return client.LivenessConfig{}
+	}
+	interval := max(s.deadline/4, time.Second)
+	return client.LivenessConfig{
+		Interval:    interval,
+		Timeout:     time.Second, // Probe reads a clock; it cannot block.
+		MaxFailures: 1,
+	}
 }
 
 // keepalive sends a data-channel ping now and on an interval, so the server (and
@@ -228,6 +307,12 @@ type pushConfig struct {
 	peerID  uint32
 	mtu     int
 	cipher  string // the data cipher the server negotiated, if it pushed one
+	// ping is how often the server said it will send a keepalive, and
+	// pingRestart how long it said a peer should wait before giving up. Both
+	// are zero when the server pushed neither, which is the case in which this
+	// client can make no liveness claim at all -- see (*session).Probe.
+	ping        time.Duration
+	pingRestart time.Duration
 }
 
 // parsePush decodes a server PUSH_REPLY, extracting the tunnel address, gateway,
@@ -277,6 +362,22 @@ func parsePush(reply string) (*pushConfig, error) {
 			if len(fields) >= 2 {
 				if n, err := strconv.Atoi(fields[1]); err == nil {
 					p.mtu = n
+				}
+			}
+		case "ping":
+			// The server's own promise: "I will send a keepalive this often."
+			// It is the only thing that makes inbound silence mean anything on
+			// this protocol, because an OpenVPN ping is not echoed and there
+			// is no request/response liveness to fall back on.
+			if len(fields) >= 2 {
+				if n, err := strconv.Atoi(fields[1]); err == nil && n > 0 {
+					p.ping = time.Duration(n) * time.Second
+				}
+			}
+		case "ping-restart":
+			if len(fields) >= 2 {
+				if n, err := strconv.Atoi(fields[1]); err == nil && n > 0 {
+					p.pingRestart = time.Duration(n) * time.Second
 				}
 			}
 		}

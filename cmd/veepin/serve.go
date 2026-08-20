@@ -90,10 +90,20 @@ func runServe(args []string) error {
 		logger.Printf("    sudo ip link set %s master br0    # or: ip addr add <addr>/<len> dev %s",
 			srv.TUNName(), srv.TUNName())
 	case *setup:
-		if err := setupNetworking(srv.TUNName(), srv.Gateway(), srv.Network(), *wanIface); err != nil {
-			logger.Printf("-setup-nat: %v (continuing; configure manually)", err)
-		} else {
+		switch err := setupNetworking(srv, srv.TUNName(), srv.Gateway(), srv.Network(), *wanIface); {
+		case err == nil:
 			logger.Printf("configured %s gateway=%s and NAT via %s", srv.TUNName(), srv.Gateway(), *wanIface)
+		case errors.Is(err, hostnet.ErrNoWAN), errors.Is(err, hostnet.ErrNoIPv6):
+			// Partly configured, which is worth distinguishing from "nothing
+			// worked": the tunnel is up and carries what it can. ErrNoIPv6 is
+			// the common one, because ikev2 assigns v6 by default and plenty of
+			// hosts have no ip6tables.
+			logger.Printf("configured %s gateway=%s, with a limit:", srv.TUNName(), srv.Gateway())
+			for _, line := range strings.Split(err.Error(), "\n") {
+				logger.Printf("    %s", line)
+			}
+		default:
+			logger.Printf("-setup-nat: %v (continuing; configure manually)", err)
 		}
 	default:
 		logger.Printf("TUN not auto-configured. Bring it up with:")
@@ -149,18 +159,37 @@ func maskBits(n *net.IPNet) int {
 }
 
 // setupNetworking configures the TUN interface address, brings it up, enables
-// IPv4 forwarding and installs MASQUERADE / FORWARD rules tagged for the bare
+// forwarding and installs MASQUERADE / FORWARD rules tagged for the bare
 // "serve" invocation. It is the single-protocol command's caller of
 // internal/hostnet, which owns the shared-with-supervisor implementation; the
 // operator name "serve" keeps bare-mode iptables comments visually distinct
 // from the supervisor's "<listener>" tags.
-func setupNetworking(tunName string, gateway net.IP, network *net.IPNet, wan string) error {
-	return hostnet.Apply("serve", hostnet.Config{
+//
+// srv is passed rather than its address fields because the IPv6 half is an
+// optional capability -- see hostnetConfig.
+func setupNetworking(srv client.Server, tunName string, gateway net.IP, network *net.IPNet, wan string) error {
+	return hostnet.Apply("serve", hostnetConfig(srv, tunName, gateway, network, wan))
+}
+
+// hostnetConfig builds the host-network config for one server, asking it for
+// the IPv6 half only if it has one.
+//
+// The v6 pair is a separate optional interface because one protocol of
+// seventeen assigns v6 inside the tunnel, and widening client.Server would make
+// every other facade answer a question it has no answer to. It is shared with
+// the supervisor so the bare command and the fleet configure a host the same
+// way, which is the whole reason internal/hostnet exists.
+func hostnetConfig(srv client.Server, tunName string, gateway net.IP, network *net.IPNet, wan string) hostnet.Config {
+	cfg := hostnet.Config{
 		TUNName: tunName,
 		Gateway: gateway,
 		Network: network,
 		WAN:     wan,
-	})
+	}
+	if ds, ok := srv.(client.DualStackServer); ok {
+		cfg.Gateway6, cfg.Network6 = ds.Gateway6(), ds.Network6()
+	}
+	return cfg
 }
 
 // runSupervisorMode reads -config <dir> and runs the fleet: one client.Server

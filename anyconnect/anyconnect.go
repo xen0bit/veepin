@@ -218,6 +218,32 @@ type session struct {
 	errc   chan error
 }
 
+// Probe implements client.Prober.
+//
+// client/liveness.go names AnyConnect's DTLS path as one that can black-hole
+// silently, and the reason it needs a probe rather than relying on the TLS
+// connection is that the two carriers fail differently: TLS surfaces a dead
+// peer through a read error, while a DTLS channel whose NAT binding has expired
+// simply stops delivering. Data goes over DTLS whenever it is up, so a healthy
+// idle TLS connection beside a dead UDP path is a tunnel that reports itself up
+// and carries nothing.
+//
+// The probe is sent on whichever carrier is currently moving data, which is the
+// only way it tests the path that matters.
+func (s *session) Probe(ctx context.Context) error { return s.engine.Probe(ctx) }
+
+// LivenessConfig implements client.LivenessTuner. A DPD round trip is one
+// datagram each way, so it is cheap enough to run often; the tolerance comes
+// from MaxFailures rather than from a long interval, because a single lost UDP
+// datagram must not be read as a dead peer.
+func (s *session) LivenessConfig() client.LivenessConfig {
+	return client.LivenessConfig{
+		Interval:    10 * time.Second,
+		Timeout:     3 * time.Second,
+		MaxFailures: 3,
+	}
+}
+
 func (s *session) Wait(ctx context.Context) error {
 	select {
 	case err := <-s.errc:

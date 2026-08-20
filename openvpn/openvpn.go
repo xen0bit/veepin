@@ -155,7 +155,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	}
 	_ = ch.SetDeadline(deadline)
 
-	result, tunnel, err := negotiate(ctx, &cfg, ch, tlsCfg, endpoint, logger)
+	result, tunnel, silenceDeadline, err := negotiate(ctx, &cfg, ch, tlsCfg, endpoint, logger)
 	if err != nil {
 		m.Close()
 		if errors.Is(err, io.EOF) || isTLSAuthError(err) {
@@ -197,7 +197,11 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	m.setPump(pump)
 	go pump.Run()
 
-	s := &session{muxer: m, tun: tun, pump: pump, tunnel: tunnel, conn: conn, logger: logger, done: make(chan struct{})}
+	s := &session{
+		muxer: m, tun: tun, pump: pump, tunnel: tunnel, conn: conn, logger: logger,
+		deadline: silenceDeadline,
+		done:     make(chan struct{}),
+	}
 	go s.keepalive()
 
 	logger.Printf("openvpn: tunnel up on %s, internal IP %s, peer %s", result.TUNName, result.AssignedIP, endpoint)
@@ -252,24 +256,24 @@ func verifyChainToCA(pool *x509.CertPool) func([][]byte, [][]*x509.Certificate) 
 // negotiate runs the post-connect handshake over the control channel: TLS, the
 // key_method_2 exchange, key derivation, and the config pull. It returns the
 // Result (minus the TUN name) and the built data tunnel.
-func negotiate(ctx context.Context, cfg *Config, ch *control.Channel, tlsCfg *tls.Config, endpoint *net.UDPAddr, logger *log.Logger) (client.Result, *tunnel, error) {
+func negotiate(ctx context.Context, cfg *Config, ch *control.Channel, tlsCfg *tls.Config, endpoint *net.UDPAddr, logger *log.Logger) (client.Result, *tunnel, time.Duration, error) {
 	tlsConn := tls.Client(ch, tlsCfg)
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
-		return client.Result{}, nil, fmt.Errorf("tls handshake: %w", err)
+		return client.Result{}, nil, 0, fmt.Errorf("tls handshake: %w", err)
 	}
 	logger.Printf("openvpn: TLS established, negotiating keys")
 
 	// Send our key material, then read the server's and derive data keys.
 	clientKS, err := keys.NewClientKeySource()
 	if err != nil {
-		return client.Result{}, nil, err
+		return client.Result{}, nil, 0, err
 	}
 	if _, err := tlsConn.Write(clientKS.MarshalClient(occOptions(cfg), cfg.Username, cfg.Password, peerInfo(cfg))); err != nil {
-		return client.Result{}, nil, fmt.Errorf("send key material: %w", err)
+		return client.Result{}, nil, 0, fmt.Errorf("send key material: %w", err)
 	}
 	serverKS, _, err := readServerKeys(tlsConn)
 	if err != nil {
-		return client.Result{}, nil, fmt.Errorf("read server key material: %w", err)
+		return client.Result{}, nil, 0, fmt.Errorf("read server key material: %w", err)
 	}
 
 	clientSID := keys.SessionID(ch.LocalSessionID())
@@ -279,17 +283,17 @@ func negotiate(ctx context.Context, cfg *Config, ch *control.Channel, tlsCfg *tl
 
 	// Pull the pushed configuration.
 	if _, err := tlsConn.Write([]byte("PUSH_REQUEST\x00")); err != nil {
-		return client.Result{}, nil, fmt.Errorf("push request: %w", err)
+		return client.Result{}, nil, 0, fmt.Errorf("push request: %w", err)
 	}
 	reply, err := readPushReply(tlsConn)
 	if err != nil {
-		return client.Result{}, nil, fmt.Errorf("read push reply: %w", err)
+		return client.Result{}, nil, 0, fmt.Errorf("read push reply: %w", err)
 	}
 	logger.Printf("openvpn: server pushed %q", reply)
 
 	pushed, err := parsePush(reply)
 	if err != nil {
-		return client.Result{}, nil, err
+		return client.Result{}, nil, 0, err
 	}
 
 	// The server's pushed cipher is authoritative under NCP; if it pushes none,
@@ -300,7 +304,7 @@ func negotiate(ctx context.Context, cfg *Config, ch *control.Channel, tlsCfg *tl
 	}
 	dc, err := buildDataCipher(effectiveCipher, cfg, ks2, clientSID, serverSID, pushed.peerID)
 	if err != nil {
-		return client.Result{}, nil, err
+		return client.Result{}, nil, 0, err
 	}
 	logger.Printf("openvpn: data channel cipher %s", effectiveCipher)
 	tun := &tunnel{
@@ -320,7 +324,7 @@ func negotiate(ctx context.Context, cfg *Config, ch *control.Channel, tlsCfg *tl
 		Gateway: endpoint.IP,
 		MTU:     pushed.mtu,
 	}
-	return res, tun, nil
+	return res, tun, livenessDeadline(pushed), nil
 }
 
 // readServerKeys reads TLS bytes until a complete server key_method_2 message is

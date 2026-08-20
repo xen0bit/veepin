@@ -65,6 +65,16 @@ the end of the payload. It looks like an accident;
   boundary while a fragment is pending, the pending head is discarded rather than
   spliced onto unrelated bytes. That loses one packet, which is the correct
   trade — the alternative corrupts one.
+- **`Pack` owns the tail it carries; it does not borrow the caller's packet.**
+  A split packet is dropped from the returned `remaining` list, which says the
+  caller may reuse that buffer immediately, so `Packer` copies the tail into
+  storage of its own. It used to alias, and the two statements together — "this
+  packet is consumed" and "I am still reading it" — cannot both be true. Nothing
+  in this package could see it, because a test that packs and unpacks without
+  recycling in between agrees with itself; it took a caller with a free list to
+  make it a corrupted continuation on the wire.
+  `TestPackDoesNotBorrowAPacketItReportedAsConsumed` is the guard, and it needs
+  no race detector.
 - **Not yet interop-tested.** There is no strongSwan cell for this; the
   negotiation and data path are covered only by unit tests and a veepin↔veepin
   path. Per this repo's own standard that means it is **not proven correct** —

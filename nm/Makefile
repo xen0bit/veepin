@@ -158,7 +158,7 @@ all: build names editor authdialog
 .PHONY: packages
 packages: build names editor authdialog
 	@command -v $(NFPM) >/dev/null 2>&1 || { \
-		echo "nfpm not found: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest"; exit 1; }
+		echo "nfpm not found: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.46.3"; exit 1; }
 ifneq ($(HAVE_EDITOR),yes)
 	@echo "Refusing to package without the editor .so (install libnm-dev libgtk-3-dev)"; exit 1
 endif
