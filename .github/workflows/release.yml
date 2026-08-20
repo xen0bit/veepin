@@ -84,7 +84,14 @@ jobs:
 
       - name: Build packages (.deb/.rpm)
         run: |
-          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+          # Pinned, not @latest. nfpm v2.47.0 raised its own go directive to
+          # 1.26.4, and setup-go's explicit go-version sets GOTOOLCHAIN=local,
+          # so `@latest` turned this job red with no change on our side --
+          # between one green run and the next. v2.46.3 is the last release that
+          # builds on the Go this workflow pins. Same reasoning as the
+          # golangci-lint pin in ci.yml: a dependency that moves on its own
+          # schedule gets a version, not a floating tag.
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.46.3
           # Strip the leading "v" so the package version is bare semver.
           make packages VERSION="${GITHUB_REF_NAME#v}" PKG_ARCH=${{ matrix.pkg_arch }} \
             NFPM="$(go env GOPATH)/bin/nfpm"
@@ -143,7 +150,14 @@ jobs:
       - name: Build packages (.deb/.rpm)
         working-directory: nm
         run: |
-          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+          # Pinned, not @latest. nfpm v2.47.0 raised its own go directive to
+          # 1.26.4, and setup-go's explicit go-version sets GOTOOLCHAIN=local,
+          # so `@latest` turned this job red with no change on our side --
+          # between one green run and the next. v2.46.3 is the last release that
+          # builds on the Go this workflow pins. Same reasoning as the
+          # golangci-lint pin in ci.yml: a dependency that moves on its own
+          # schedule gets a version, not a floating tag.
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.46.3
           # Derive the GNU triplet (cross gcc prefix) and multiarch directory
           # (target pkg-config path) from the Debian architecture name.
           triplet="$(dpkg-architecture -a${{ matrix.arch }} -qDEB_HOST_GNU_TYPE 2>/dev/null)"
