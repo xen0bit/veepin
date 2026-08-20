@@ -1,0 +1,72 @@
+# Direction B dual-stack: strongSwan client (initiator) -> veepin server
+# (`veepin serve ikev2`), requesting a virtual address in BOTH families and
+# pinging the veepin server's tunnel gateway in each.
+#
+# What this cell exists to prove is not the negotiation -- compose.client-ss-v6
+# already proves veepin speaks INTERNAL_IP6 -- but the half that had no cell at
+# all: that veepin's own SERVER configures the host for the v6 addresses it
+# hands out. ikev2's Server.Gateway6/Network6 were documented as being "for
+# routing and NAT rules" and had no caller anywhere in the tree, so the v6
+# gateway never reached the interface and client v6 traffic arrived at a host
+# that would not forward it. The v4 ping passed throughout, which is exactly why
+# a cell that pinged only 10.10.10.1 could not see it.
+#
+# The direction matters here in a way it usually does not: in the client cell
+# it is strongSwan that configures its own host, so veepin's host-side v6 was
+# never on the path.
+name: veepin-interop-b-v6
+
+networks:
+  dual:
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: 172.32.0.0/24
+        - subnet: fd00:c0df::/64
+
+services:
+  veepin-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    # IPv6 forwarding is set here as well as by -setup-nat: a container may
+    # refuse the sysctl write, and this cell must fail on veepin's rules rather
+    # than on the kernel knob underneath them.
+    sysctls:
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+      net.ipv4.ip_forward: "1"
+      net.ipv6.conf.all.forwarding: "1"
+      net.ipv6.conf.all.disable_ipv6: "0"
+    networks:
+      dual:
+        ipv4_address: 172.32.0.10
+    environment:
+      PSK: "interop-test-psk"
+      SERVER_ID: "vpn.example.com"
+      POOL: "10.10.10.0/24"
+      POOL6: "fd00:10:10::/64"
+      WAN: "eth0"
+    volumes:
+      - ./veepin/server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  strongswan-client:
+    build:
+      context: strongswan
+    image: interop-strongswan
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+      net.ipv6.conf.all.forwarding: "1"
+      net.ipv6.conf.all.disable_ipv6: "0"
+    depends_on: [veepin-server]
+    networks: [dual]
+    volumes:
+      - ./strongswan/swanctl-client-v6.conf:/etc/swanctl/swanctl.conf:ro
+      - ./strongswan/client-entrypoint.sh:/entrypoint.sh:ro
+    command: ["/bin/sh", "/entrypoint.sh"]

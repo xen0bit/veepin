@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -652,18 +653,33 @@ func (m *Manager) start(r *running, cfg ListenerConfig) error {
 			Network: srv.Network(),
 			WAN:     cfg.WAN,
 		}
+		// The IPv6 half, for the one protocol that assigns v6 inside the
+		// tunnel. Optional rather than part of client.Server, so a facade
+		// without a v6 pool answers nothing rather than answering nil.
+		if ds, ok := srv.(client.DualStackServer); ok {
+			hn.Gateway6, hn.Network6 = ds.Gateway6(), ds.Network6()
+		}
 		switch aerr := m.applyHostnet(cfg.Name, hn); {
 		case aerr == nil:
 			m.persistHostnetState(cfg.Name, hn.State())
-		case errors.Is(aerr, hostnet.ErrNoWAN):
-			// The listener is addressed, up, and forwarding; it just has no
-			// route off the host. That is a misconfiguration worth saying out
-			// loud, not a reason to refuse to serve -- and certainly not a
-			// reason to take the rest of the fleet down, which is what
-			// returning here used to do at startup. The state is still
-			// persisted, so a later rebuild that adds a WAN tears the rules
-			// it then installs down correctly.
-			m.log.Printf("supervisor: %s: %v; clients will reach this host but nothing beyond it", cfg.Name, aerr)
+		case errors.Is(aerr, hostnet.ErrNoWAN), errors.Is(aerr, hostnet.ErrNoIPv6):
+			// Both mean "the listener is serving, but does not reach
+			// everything": ErrNoWAN that it is addressed, up and forwarding
+			// with no route off the host, ErrNoIPv6 that its v4 half is
+			// complete and the host cannot do the v6 half. Each is a
+			// misconfiguration worth saying out loud, not a reason to refuse to
+			// serve -- and certainly not a reason to take the rest of the fleet
+			// down, which is what returning here used to do at startup.
+			//
+			// ErrNoIPv6 especially: ikev2's v6 pool is on by default, so a host
+			// without ip6tables would otherwise fail every ikev2 listener over
+			// a capability nobody asked for.
+			//
+			// The state is still persisted, so a later rebuild that adds a WAN
+			// tears the rules it then installs down correctly.
+			for _, line := range strings.Split(aerr.Error(), "\n") {
+				m.log.Printf("supervisor: %s: %s", cfg.Name, line)
+			}
 			m.persistHostnetState(cfg.Name, hn.State())
 		default:
 			// Apply may have installed part of its state before failing. Take it

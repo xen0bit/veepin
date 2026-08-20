@@ -80,9 +80,10 @@ var interopMatrix = []interopRow{
 			"TestInteropStrongswanClientVeepinServerEAP",
 			"TestInteropStrongswanClientVeepinServerFragmented",
 			"TestInteropStrongswanClientVeepinServerV6Underlay",
+			"TestInteropStrongswanClientVeepinServerIPv6",
 			"TestInteropStrongswanClientVeepinServerShaped",
 			"TestInteropStrongswanClientVeepinServerPQ",
-		}, Label: "strongSwan (+ EAP-MSCHAPv2, RFC 7383 frag, v6 underlay, TFC-padded, ML-KEM-768)"},
+		}, Label: "strongSwan (+ EAP-MSCHAPv2, RFC 7383 frag, dual-stack, v6 underlay, TFC-padded, ML-KEM-768)"},
 		Self: interopCell{Tests: []string{
 			"TestInteropSelf",
 			"TestInteropIKEv2ChildRekey",

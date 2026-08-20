@@ -193,6 +193,26 @@ func TestInteropVeepinClientStrongswanServerIPv6(t *testing.T) {
 	runInterop(t, "compose.client-ss-v6.yml", "veepin-client", "10.20.30.254", "fd00:20:30::254")
 }
 
+// TestInteropStrongswanClientVeepinServerIPv6 is Direction B dual-stack: a
+// strongSwan initiator requests a virtual address in both families and pings the
+// veepin server's own tunnel gateway in each.
+//
+// The v6 ping is the point, and it is a claim about the HOST rather than about
+// the protocol. compose.client-ss-v6 already proves veepin speaks INTERNAL_IP6
+// -- but in that direction it is strongSwan that configures its own host, so
+// veepin's host-side v6 was never on the path. ikev2's Server.Gateway6/Network6
+// were documented as being "for routing and NAT rules" and had no caller
+// anywhere in the tree, while config mode handed every client a v6 address from
+// a pool that defaults. The gateway address therefore never reached the TUN and
+// nothing answered fd00:10:10::1, while the v4 ping in
+// TestInteropStrongswanClientVeepinServer passed throughout.
+//
+// That is the shape of gap this matrix exists to close: a capability proven in
+// one direction and never in the other.
+func TestInteropStrongswanClientVeepinServerIPv6(t *testing.T) {
+	runInterop(t, "compose.server-ss-v6.yml", "strongswan-client", "10.10.10.1", "fd00:10:10::1")
+}
+
 // TestInteropStrongswanClientVeepinServerFragmented is Direction B with IKE
 // fragmentation forced (RFC 7383): the strongSwan initiator splits its IKE_AUTH
 // into SKF fragments (fragmentation=force + a small fragment_size), which the
