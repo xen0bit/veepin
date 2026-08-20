@@ -94,8 +94,23 @@ func ParseHeader(pkt []byte) (Header, error) {
 // remainder must lead the next payload and that payload's BlockOffset must say
 // how many octets it occupies.
 type Packer struct {
-	// pending is the unsent tail of a packet split across payloads.
+	// pending is the unsent tail of a packet split across payloads. It is a
+	// slice of pendingBuf and never of the caller's packet, which is the whole
+	// of the ownership rule below.
 	pending []byte
+	// pendingBuf is storage this Packer owns, reused across calls so carrying a
+	// tail costs no allocation once a steady send loop is warm.
+	//
+	// Pack reports a split packet as consumed -- it is removed from the
+	// returned remaining list -- so the caller is entitled to reuse or recycle
+	// that buffer the instant Pack returns. Aliasing it, which this did, means
+	// the caller's next write lands in the middle of a packet that is still
+	// being transmitted: the receiver reassembles the tail from whatever
+	// arrived in its place and drops it on the checksum. That is silent loss
+	// proportional to how often packets fragment, which on a constant-rate
+	// tunnel is most of them, and it is invisible to a test that packs and
+	// unpacks without recycling in between.
+	pendingBuf []byte
 	// buf is reused across calls so a steady send loop does not allocate.
 	buf []byte
 }
@@ -153,8 +168,14 @@ func (p *Packer) Pack(pkts [][]byte, size int) (payload []byte, remaining [][]by
 				continue
 			}
 			// Split: as much as fits goes here, the tail leads the next payload.
+			// The tail is COPIED into storage this Packer owns, because the
+			// line below reports pkt as consumed and the caller may hand the
+			// buffer straight back to whatever it allocates packets from.
+			// p.pending is empty here -- the loop only runs when it is -- so
+			// truncating pendingBuf cannot cut a tail still being sent.
 			p.buf = append(p.buf, pkt[:room]...)
-			p.pending = pkt[room:]
+			p.pendingBuf = append(p.pendingBuf[:0], pkt[room:]...)
+			p.pending = p.pendingBuf
 			room = 0
 			pkts = pkts[1:]
 			break

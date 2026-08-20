@@ -278,3 +278,68 @@ func TestPackReusesItsBuffer(t *testing.T) {
 		t.Errorf("Pack allocated %v times per payload, want at most 1 (the pad)", got)
 	}
 }
+
+// TestPackDoesNotBorrowAPacketItReportedAsConsumed is an ownership claim, and
+// the reason it is worth a test of its own is that violating it is invisible to
+// every other test here: pack then unpack, with nothing touching the input in
+// between, agrees with itself perfectly.
+//
+// A split packet is dropped from the returned remaining list, which tells the
+// caller it is finished with the buffer. internal/ikev2/ike's constant-rate
+// sender takes that at its word and recycles it onto a free list that Enqueue
+// draws from, so the next inner packet is written over a tail Pack has not sent
+// yet. On the wire that is a corrupted continuation and a packet the receiver
+// drops -- once per fragmentation, which at a fixed payload size is most
+// packets.
+func TestPackDoesNotBorrowAPacketItReportedAsConsumed(t *testing.T) {
+	const size = HeaderLen + 16
+	p := NewPacker()
+
+	pkt := bytes.Repeat([]byte{0xAA}, 24)
+	_, remaining := p.Pack([][]byte{pkt}, size)
+	if len(remaining) != 0 {
+		t.Fatalf("got %d packets back, want 0: a split packet is reported as consumed", len(remaining))
+	}
+	if !p.Pending() {
+		t.Fatal("Pending is false after a split, so nothing carried the 8-octet tail")
+	}
+
+	// The caller was told it was done with pkt, so it recycles it.
+	for i := range pkt {
+		pkt[i] = 0xBB
+	}
+
+	payload, _ := p.Pack(nil, size)
+	hdr, err := ParseHeader(payload)
+	if err != nil {
+		t.Fatalf("ParseHeader: %v", err)
+	}
+	if hdr.BlockOffset != 8 {
+		t.Fatalf("BlockOffset is %d, want 8", hdr.BlockOffset)
+	}
+	if got := payload[HeaderLen : HeaderLen+8]; !bytes.Equal(got, bytes.Repeat([]byte{0xAA}, 8)) {
+		t.Errorf("continuation is %#x, want the original 0xAA tail -- the Packer "+
+			"aliased a buffer it had told the caller it was finished with", got)
+	}
+}
+
+// TestPackCarriesATailWithoutAllocating: the fix above must not cost an
+// allocation per fragmented packet, which on a constant-rate tunnel would be
+// one per payload -- the exact path TestPackReusesItsBuffer exists to protect.
+func TestPackCarriesATailWithoutAllocating(t *testing.T) {
+	const size = 1400
+	p := NewPacker()
+	// A packet that cannot fit in one payload, so every call both finishes a
+	// tail and starts a new one.
+	pkts := [][]byte{ipv4(1200, 3), ipv4(1200, 4)}
+	for range 4 {
+		p.Pack(pkts, size) // prime both buffers so their growth is not counted
+	}
+
+	if got := testing.AllocsPerRun(100, func() {
+		p.Pack(pkts, size)
+	}); got > 1 {
+		t.Errorf("Pack allocated %v times per payload while fragmenting, want at "+
+			"most 1 (the pad)", got)
+	}
+}
