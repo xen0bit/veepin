@@ -53,6 +53,13 @@ flowchart TD
   the form is hand-built (`challengeEcho` with `magic` last). See [[fortinet-ssl-vpn]].
 - **openconnect's `--token-secret` treats a bare value as raw ASCII** — a base32
   TOTP secret needs the `base32:` prefix, or the generated codes won't match.
+- **Liveness is an LCP Echo over whichever carrier is live.** Fortinet reads as
+  a TLS protocol, and a TLS read error does surface a dead peer — but once DTLS
+  attaches it is the egress, and a UDP path can stop delivering without ever
+  erroring (an expired NAT binding is the ordinary way). `readAlt` detaches on an
+  error and silence is not one, so the healthy TCP connection sat beside a tunnel
+  that moved nothing. `internal/ppp` answered echoes and never sent one; it now
+  has `SendEcho`, and `Client.Probe` runs it down the current carrier.
 - **The client direction has no open-source gateway to test against** with a full
   data path; the independent-implementation proof is real openconnect *client* ↔
   veepin server (see the interop-matrix note in the root README). RSA-key gateways

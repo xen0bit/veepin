@@ -666,3 +666,169 @@ func TestBusyTunnelsSurviveExpiry(t *testing.T) {
 		t.Error("a tunnel carrying traffic was expired")
 	}
 }
+
+// tunnelTo returns a host's established tunnel to an overlay peer, waiting for
+// the handshake to finish.
+func tunnelTo(t *testing.T, h *testHost, peer netip.Addr) *tunnel {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for {
+		h.mu.RLock()
+		for _, tun := range h.byIndex {
+			if tun.PeerAddr() == peer {
+				h.mu.RUnlock()
+				return tun
+			}
+		}
+		h.mu.RUnlock()
+		select {
+		case <-deadline:
+			t.Fatalf("no tunnel to %v", peer)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+// countTunnels reports how many tunnels a host currently holds.
+func countTunnels(h *testHost) int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.byIndex)
+}
+
+// TestAQuietTunnelIsAskedWhetherItStillWorks. This end has always answered a
+// peer's test packets and never sent one, so nothing but the ten-minute idle
+// expiry noticed a tunnel that had silently stopped carrying traffic. Ten
+// minutes is a long time to keep selecting a route that goes nowhere.
+//
+// The probe is driven directly rather than through the maintenance ticker,
+// because waiting out tunnelProbeIdle would make this a thirty-second test to
+// assert something that takes one call.
+func TestAQuietTunnelIsAskedWhetherItStillWorks(t *testing.T) {
+	f := newFabric()
+	addrA, addrB := mustAddrPort("192.0.2.1:4242"), mustAddrPort("192.0.2.2:4242")
+	overlayA, overlayB := netip.MustParseAddr("10.42.0.1"), netip.MustParseAddr("10.42.0.2")
+
+	hostA := startHost(t, f, "host-a.crt", "host-a.key", addrA, func(c *Config) {
+		c.StaticHosts[overlayB] = []netip.AddrPort{addrB}
+	})
+	hostB := startHost(t, f, "host-b.crt", "host-b.key", addrB, func(c *Config) {
+		c.StaticHosts[overlayA] = []netip.AddrPort{addrA}
+	})
+	sendUntilDelivered(t, hostA, hostB, overlayA, overlayB, "establish")
+
+	tun := tunnelTo(t, hostA, overlayB)
+
+	// Age the tunnel past the probe threshold. B is still there and answering,
+	// so the probe must find it and clear rather than drop it.
+	tun.lastSeen.Store(time.Now().Add(-2 * tunnelProbeIdle).UnixNano())
+	hostA.probeQuietTunnels()
+
+	deadline := time.After(5 * time.Second)
+	for tun.LastSeen().Before(time.Now().Add(-tunnelProbeIdle)) {
+		select {
+		case <-deadline:
+			t.Fatal("the peer never answered a reachability probe, though it is up " +
+				"and replying: the request half of nebula's test exchange is not reaching it")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	if countTunnels(hostA) != 1 {
+		t.Fatalf("hostA holds %d tunnels, want the 1 it just proved alive", countTunnels(hostA))
+	}
+
+	// A second sweep with the peer heard from recently must clear the probe
+	// rather than counting it against the tunnel.
+	hostA.probeQuietTunnels()
+	if d := tun.probeDeadline.Load(); d != 0 {
+		t.Errorf("probe deadline still set after the peer answered; an answered probe "+
+			"must not age into a drop (deadline=%d)", d)
+	}
+}
+
+// TestAPeerThatStopsAnsweringLosesItsTunnel. The point of asking is to act on
+// silence: a tunnel nothing answers on is dropped, so the next packet for that
+// peer starts a fresh handshake instead of being handed to a dead route.
+//
+// The tunnel is dropped rather than the host being reported dead, which is the
+// difference between a mesh and every point-to-point protocol here.
+func TestAPeerThatStopsAnsweringLosesItsTunnel(t *testing.T) {
+	f := newFabric()
+	addrA, addrB := mustAddrPort("192.0.2.1:4242"), mustAddrPort("192.0.2.2:4242")
+	overlayA, overlayB := netip.MustParseAddr("10.42.0.1"), netip.MustParseAddr("10.42.0.2")
+
+	hostA := startHost(t, f, "host-a.crt", "host-a.key", addrA, func(c *Config) {
+		c.StaticHosts[overlayB] = []netip.AddrPort{addrB}
+	})
+	hostB := startHost(t, f, "host-b.crt", "host-b.key", addrB, func(c *Config) {
+		c.StaticHosts[overlayA] = []netip.AddrPort{addrA}
+	})
+	sendUntilDelivered(t, hostA, hostB, overlayA, overlayB, "establish")
+
+	tun := tunnelTo(t, hostA, overlayB)
+
+	// B goes away. Its socket closing is what a host leaving looks like to the
+	// fabric, and to a real socket: writes still "succeed" and nothing returns.
+	if err := hostB.Close(); err != nil {
+		t.Fatalf("closing hostB: %v", err)
+	}
+
+	// First sweep: quiet enough to ask, so a probe goes out and the tunnel
+	// stays. Nothing has failed yet.
+	tun.lastSeen.Store(time.Now().Add(-2 * tunnelProbeIdle).UnixNano())
+	hostA.probeQuietTunnels()
+	if countTunnels(hostA) != 1 {
+		t.Fatalf("hostA dropped the tunnel on the first silence; the grace period "+
+			"exists so one lost datagram is not a dead peer (tunnels=%d)", countTunnels(hostA))
+	}
+	if tun.probeDeadline.Load() == 0 {
+		t.Fatal("no probe was recorded as outstanding, so the sweep asked nothing")
+	}
+
+	// Second sweep, after the grace has run out and still no answer.
+	tun.probeDeadline.Store(time.Now().Add(-time.Second).UnixNano())
+	hostA.probeQuietTunnels()
+	if n := countTunnels(hostA); n != 0 {
+		t.Errorf("hostA holds %d tunnels, want 0: a peer that answered nothing within "+
+			"the grace period keeps its tunnel", n)
+	}
+	if p, ok := hostA.lookupPeer(overlayB); ok {
+		p.mu.Lock()
+		stale := p.tun
+		p.mu.Unlock()
+		if stale == tun {
+			t.Error("the peer still points at the dropped tunnel, so the next packet " +
+				"is handed to a route that cannot carry it")
+		}
+	}
+}
+
+// TestProbeStateSurvivesTheThreeThingsThatCanHappenToIt pins the small state
+// machine on its own: asked, answered, expired. It is separate from the
+// host-level tests because those exercise one path each and the interesting
+// property is that a second probe is not queued while the first is in flight.
+func TestProbeStateSurvivesTheThreeThingsThatCanHappenToIt(t *testing.T) {
+	tun := &tunnel{}
+	now := time.Now()
+
+	if !tun.awaitProbe(now.Add(time.Minute)) {
+		t.Fatal("the first probe was refused")
+	}
+	if tun.awaitProbe(now.Add(time.Minute)) {
+		t.Error("a second probe was accepted while the first is outstanding; the " +
+			"sweep would then send one per tick and expire the tunnel on its own timing")
+	}
+	if tun.probeExpired(now) {
+		t.Error("the probe expired before its deadline")
+	}
+	if !tun.probeExpired(now.Add(2 * time.Minute)) {
+		t.Error("the probe did not expire after its deadline")
+	}
+	tun.clearProbe()
+	if tun.probeExpired(now.Add(time.Hour)) {
+		t.Error("a cleared probe still expires, so a peer that answered would be dropped anyway")
+	}
+	if !tun.awaitProbe(now.Add(time.Minute)) {
+		t.Error("a cleared probe blocks the next one, so a tunnel is asked exactly once ever")
+	}
+}

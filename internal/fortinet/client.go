@@ -9,6 +9,7 @@ package fortinet
 // framing until the link carries IP.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -207,6 +208,16 @@ func runClient(conn net.Conn, cfg Config, tun io.ReadWriteCloser, logger *log.Lo
 // stays open as the fallback, and losing UDP costs a detach rather than the
 // tunnel. conn comes from DialDTLS, which has already presented the cookie.
 func (c *Client) AttachDTLS(conn net.Conn) { c.link.attachDTLS(conn) }
+
+// Probe sends an LCP Echo-Request and waits for the peer's Echo-Reply.
+//
+// It goes out over whichever carrier the link is currently using, which is the
+// point: a DTLS carrier is the egress while it lives, and it can stop
+// delivering without ever producing a read error -- an expired NAT binding is
+// the ordinary way. readAlt detaches on an error, and silence is not one, so a
+// dead UDP path sits underneath a healthy TLS connection with the tunnel
+// reporting itself up and carrying nothing.
+func (c *Client) Probe(ctx context.Context) error { return c.link.probe(ctx) }
 
 // Wait blocks until the tunnel stops.
 func (c *Client) Wait() error { return c.link.Wait() }

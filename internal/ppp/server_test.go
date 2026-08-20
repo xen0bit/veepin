@@ -1,9 +1,12 @@
 package ppp
 
 import (
+	"context"
+	"errors"
 	"net"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/xen0bit/veepin/internal/mschap"
 )
@@ -149,5 +152,90 @@ func TestServerRejectsWrongPassword(t *testing.T) {
 	}
 	if clientH.err == nil {
 		t.Error("client did not report an auth failure")
+	}
+}
+
+// echoPair brings a client and server session up over the in-memory wire, so a
+// test about liveness does not restate the handshake.
+func echoPair(t *testing.T) (*wire, *Session, *ServerSession) {
+	t.Helper()
+	const username, password = "alice", "s3cret"
+	w := &wire{}
+	client := New(username, password, w.clientTransport(), &recordHandler{})
+	server := NewServer(ServerConfig{
+		ClientIP: net.IPv4(10, 0, 0, 5),
+		ServerIP: net.IPv4(10, 0, 0, 1),
+		Auth:     func(u string) (string, bool) { return password, u == username },
+	}, w.serverTransport(), &serverRecordHandler{})
+	client.Start()
+	server.Start()
+	w.drive(client, server)
+	return w, client, server
+}
+
+// TestAnEchoRequestIsAnsweredByTheServer. This package has always answered a
+// peer's LCP Echo-Request and never sent one, which proves this end alive to a
+// peer and learns nothing about the peer -- the wrong half to have on a client.
+// Fortinet rides this layer and prefers a DTLS carrier that can stop delivering
+// without ever erroring, so the asking half is what tells it the carrier died.
+func TestAnEchoRequestIsAnsweredByTheServer(t *testing.T) {
+	w, client, server := echoPair(t)
+
+	done := make(chan error, 1)
+	go func() { done <- client.SendEcho(context.Background()) }()
+
+	// Let the request reach the server and the reply come back. drive is
+	// synchronous, so it is run until the echo resolves rather than once.
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("SendEcho: %v", err)
+			}
+			return
+		case <-deadline:
+			t.Fatal("the server never answered an LCP Echo-Request")
+		default:
+			w.drive(client, server)
+			time.Sleep(time.Millisecond)
+		}
+	}
+}
+
+// TestAnEchoNobodyAnswersDoesNotHangForever. The liveness monitor bounds each
+// probe with a context; this asserts the bound is honoured rather than the
+// caller being stuck on a channel nothing will close.
+func TestAnEchoNobodyAnswersDoesNotHangForever(t *testing.T) {
+	w := &wire{}
+	// A client with no peer at all: frames queue on the wire and nothing
+	// consumes them, which is exactly a black-holed carrier.
+	client := New("alice", "s3cret", w.clientTransport(), &recordHandler{})
+	client.Start()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := client.SendEcho(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("SendEcho against a silent peer = %v, want a deadline", err)
+	}
+}
+
+// TestAnEchoOnAClosedLinkSaysSoImmediately. A link that has already declared
+// itself dead must release a waiting probe rather than making it wait out the
+// context, so a torn-down session does not cost the caller a timeout it has
+// already earned the answer to.
+func TestAnEchoOnAClosedLinkSaysSoImmediately(t *testing.T) {
+	_, client, _ := echoPair(t)
+	// Tear the link down the way a transport failure does: there is no public
+	// Close on a client session, because the carrier's owner closes the carrier
+	// and the session learns from the send that follows.
+	client.withLock(func() { client.failLocked(errors.New("test: carrier gone")) })
+
+	start := time.Now()
+	if err := client.SendEcho(context.Background()); !errors.Is(err, ErrLinkClosed) {
+		t.Errorf("SendEcho on a closed link = %v, want ErrLinkClosed", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("SendEcho on a closed link took %v, want an immediate answer", elapsed)
 	}
 }

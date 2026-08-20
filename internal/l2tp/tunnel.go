@@ -1,8 +1,10 @@
 package l2tp
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -92,6 +94,15 @@ type Tunnel struct {
 	timer    *time.Timer
 	retries  int
 	closeErr error
+
+	// helloNs is the sequence number of the HELLO a probe is waiting on, and
+	// helloWait the channel closed when the peer acknowledges it (or the
+	// tunnel dies). One waiter rather than a registry, because a probe is the
+	// only caller that needs to know a specific message landed -- every other
+	// control message is driven by the state machine, which learns the same
+	// thing from the reply it was expecting anyway.
+	helloNs   uint16
+	helloWait chan struct{}
 }
 
 // NewTunnel builds a tunnel for the given role. The LAC must call Start to open
@@ -342,6 +353,62 @@ func (t *Tunnel) sendICCN() {
 	t.queueControl(uint16(t.peerSessionID.Load()), b.bytes())
 }
 
+// ErrTunnelClosed reports a probe on a tunnel that is no longer up.
+var ErrTunnelClosed = errors.New("l2tp: tunnel is closed")
+
+// SendHello sends a HELLO and waits for the peer to acknowledge it.
+//
+// HELLO is L2TP's keepalive (RFC 2661 section 6.5) and it is the one control
+// message with no reply of its own: the peer answers it with the ZLB
+// acknowledgement the reliable control channel requires of every message, and
+// that acknowledgement is the entire liveness proof. So this does not wait for
+// an inbound message type -- it waits for its own Ns to leave the unacked
+// window, which is what purgeAcked does when the ZLB arrives.
+//
+// This end has always answered a peer's HELLO and never sent one, which meant
+// an L2TP tunnel whose ESP transport had gone quiet stayed up forever with
+// nothing crossing it. The retransmit timer would have noticed -- it fails the
+// tunnel after maxRetransmits -- but only if something had been queued for it
+// to retransmit, and on an idle tunnel nothing ever is.
+func (t *Tunnel) SendHello(ctx context.Context) error {
+	t.mu.Lock()
+	if t.state == stateClosed {
+		t.mu.Unlock()
+		return ErrTunnelClosed
+	}
+	if t.helloWait != nil {
+		// A probe is already outstanding. Wait on that one rather than
+		// queueing a second: the monitor's interval can outpace a lossy path,
+		// and one HELLO per outstanding probe is what the retransmit timer is
+		// already sized for.
+		wait := t.helloWait
+		t.mu.Unlock()
+		return t.awaitHello(ctx, wait)
+	}
+	wait := make(chan struct{})
+	t.helloWait, t.helloNs = wait, t.ns
+	var b avpBuilder
+	b.addUint16(avpMessageType, msgHELLO)
+	t.queueControl(0, b.bytes())
+	t.mu.Unlock()
+	return t.awaitHello(ctx, wait)
+}
+
+// awaitHello blocks until the HELLO is acknowledged, the tunnel dies, or ctx
+// runs out. A closed tunnel releases the channel too, so the three cases are
+// distinguished by re-reading the state rather than by which channel fired.
+func (t *Tunnel) awaitHello(ctx context.Context, wait <-chan struct{}) error {
+	select {
+	case <-wait:
+		if t.closedFlag.Load() {
+			return ErrTunnelClosed
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // queueControl assigns the next Ns, records the message for retransmission, and
 // sends it. Called under mu.
 func (t *Tunnel) queueControl(sessionID uint16, avps []byte) {
@@ -369,6 +436,10 @@ func (t *Tunnel) purgeAcked(peerNr uint16) {
 	kept := t.unacked[:0]
 	for _, p := range t.unacked {
 		if seqLess(p.ns, peerNr) {
+			if t.helloWait != nil && p.ns == t.helloNs {
+				close(t.helloWait)
+				t.helloWait = nil
+			}
 			continue // acknowledged
 		}
 		kept = append(kept, p)
@@ -436,6 +507,13 @@ func (t *Tunnel) finishClose(err error) {
 	if t.timer != nil {
 		t.timer.Stop()
 		t.timer = nil
+	}
+	// A probe blocked on an acknowledgement that is never coming is released
+	// here rather than left to its context deadline, so a tunnel that has
+	// already declared itself dead does not also cost the caller a timeout.
+	if t.helloWait != nil {
+		close(t.helloWait)
+		t.helloWait = nil
 	}
 	t.mu.Unlock()
 	t.h.Closed(err)

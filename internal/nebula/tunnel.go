@@ -66,6 +66,12 @@ type tunnel struct {
 	lastSeen    atomic.Int64
 	established time.Time
 
+	// probeDeadline is when an outstanding reachability probe gives up, as Unix
+	// nanoseconds, or zero when none is outstanding. It is separate from
+	// lastSeen because the question it answers is different: lastSeen says when
+	// the peer was last heard from, and this says whether it has been asked.
+	probeDeadline atomic.Int64
+
 	mu     sync.Mutex
 	window *replay.Window
 
@@ -238,6 +244,25 @@ func (t *tunnel) decrypt(pkt []byte) (header, []byte, error) {
 	t.lastSeen.Store(time.Now().UnixNano())
 	return h, pt, nil
 }
+
+// awaitProbe records that a reachability probe has gone out and must be
+// answered by deadline. It reports false if one is already outstanding, so a
+// second probe is not sent while the first is still in flight.
+func (t *tunnel) awaitProbe(deadline time.Time) bool {
+	return t.probeDeadline.CompareAndSwap(0, deadline.UnixNano())
+}
+
+// probeExpired reports whether an outstanding probe has passed its deadline
+// without the peer being heard from.
+func (t *tunnel) probeExpired(now time.Time) bool {
+	d := t.probeDeadline.Load()
+	return d != 0 && now.UnixNano() > d
+}
+
+// clearProbe forgets any outstanding probe. Called when the peer is heard from
+// -- by any packet, not only a test reply, since anything that authenticates on
+// this tunnel answers the question a probe was asking.
+func (t *tunnel) clearProbe() { t.probeDeadline.Store(0) }
 
 // LastSeen is when a packet last authenticated on this tunnel; the zero time
 // means nothing has.

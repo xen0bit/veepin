@@ -180,6 +180,19 @@ type session struct {
 	tun    *dataplane.TUN
 }
 
+// Probe implements client.Prober.
+//
+// client/liveness.go names L2TP as a protocol that can black-hole silently, and
+// it is the case with two layers to go quiet: the ESP transport SA underneath
+// and the L2TP control connection inside it. A HELLO and its acknowledgement
+// cross both, so one probe covers both.
+//
+// This end has always answered a peer's HELLO. It had never sent one, so an
+// idle tunnel queued nothing, the control channel's retransmit timer had
+// nothing to retransmit, and the session stayed up reporting health it had not
+// checked.
+func (s *session) Probe(ctx context.Context) error { return s.engine.Probe(ctx) }
+
 func (s *session) Wait(ctx context.Context) error {
 	done := make(chan error, 1)
 	go func() { done <- s.engine.Wait() }()

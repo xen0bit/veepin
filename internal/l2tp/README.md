@@ -60,5 +60,13 @@ Control vs data is demuxed by the header **T-bit**.
   the ESP SA; wiring it to a bare UDP socket (tests) vs an ESP transport SA
   (production) is the owner's job. This is what makes the state machine unit-testable
   without IPsec.
+- **HELLO is sent as well as answered, and its ZLB is the liveness proof.** This
+  end answered a peer's HELLO from the start and never sent one, so an idle
+  tunnel queued nothing, the retransmit timer had nothing to retransmit, and a
+  tunnel whose ESP transport had gone quiet stayed up forever carrying nothing.
+  `Tunnel.SendHello` waits for its own Ns to leave the unacked window — HELLO has
+  no reply of its own, so the acknowledgement the reliable channel requires of
+  every message is the whole answer. One probe crosses both layers that can go
+  quiet here: the ESP transport SA and the L2TP control connection inside it.
 - Data messages carry PPP frames handed to [`internal/ppp`](../ppp); the inner IP
   ultimately rides TUN ⇄ PPP ⇄ L2TP ⇄ ESP.

@@ -3,6 +3,8 @@ package anyconnect
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -70,6 +72,12 @@ type Client struct {
 	dtls atomic.Pointer[dtlsChannel]
 
 	dtlsParams DTLSParams
+
+	// dpd is the outstanding dead-peer-detection probe, or nil. AnyConnect's
+	// DPD is a request the peer must echo verbatim, so the probe is identified
+	// by its payload rather than by a sequence number the protocol does not
+	// carry.
+	dpd atomic.Pointer[dpdProbe]
 
 	mu       sync.Mutex
 	closed   bool
@@ -160,6 +168,8 @@ func (c *Client) dtlsReadLoop(ch *dtlsChannel) {
 			}
 		case typeDPDReq:
 			_ = ch.send(typeDPDResp, payload)
+		case typeDPDResp:
+			c.matchDPD(payload)
 		}
 	}
 }
@@ -330,7 +340,9 @@ func (c *Client) readLoop() {
 				c.fail(err)
 				return
 			}
-		case typeDPDResp, typeKeepalive:
+		case typeDPDResp:
+			c.matchDPD(payload)
+		case typeKeepalive:
 		case typeDisconnect, typeTerminate:
 			c.fail(fmt.Errorf("anyconnect: server closed the session"))
 			return
@@ -397,6 +409,85 @@ func (c *Client) Drops() uint64 { return c.drops.Load() }
 // IP with no link header, so the version nibble is the first thing in the frame.
 func isIPv4(pkt []byte) bool {
 	return len(pkt) >= 20 && pkt[0]>>4 == 4
+}
+
+// dpdProbe is one outstanding dead-peer-detection request: the payload the peer
+// must echo, and the channel closed when it does.
+type dpdProbe struct {
+	payload []byte
+	done    chan struct{}
+}
+
+// dpdPayloadLen is the size of a probe's nonce. AnyConnect's DPD carries an
+// opaque payload the peer returns unchanged, so its only job is to be unlikely
+// to collide with a probe the peer originated -- eight random octets is
+// generous for a mechanism that has at most one request outstanding.
+const dpdPayloadLen = 8
+
+// ErrPeerSilent reports a dead-peer-detection probe the peer did not answer.
+var ErrPeerSilent = errors.New("anyconnect: the peer did not answer dead-peer detection")
+
+// Probe sends a DPD request on whichever carrier currently moves data and waits
+// for the peer to echo it back.
+//
+// The carrier matters, and it is why the probe does not simply use the TLS
+// connection. When DTLS is up, data goes over UDP while TLS carries only
+// control traffic -- so a UDP path that has silently stopped (a NAT binding
+// expiring is the ordinary way) loses every packet while the TLS connection
+// sits there healthy and idle. Probing TLS would report that tunnel up. The
+// read loop demotes the DTLS channel on a read *error*; silence is not an
+// error, which is exactly the case this covers.
+//
+// This end has always echoed the peer's DPD requests and never sent one of its
+// own, so the mechanism was half-built: it could prove this client alive to a
+// server, and could learn nothing about the server.
+func (c *Client) Probe(ctx context.Context) error {
+	payload := make([]byte, dpdPayloadLen)
+	if _, err := rand.Read(payload); err != nil {
+		return fmt.Errorf("anyconnect: dpd nonce: %w", err)
+	}
+	p := &dpdProbe{payload: payload, done: make(chan struct{})}
+	if !c.dpd.CompareAndSwap(nil, p) {
+		// One probe at a time. A second concurrent call would make the echo
+		// ambiguous, and the liveness monitor never issues one anyway.
+		return errors.New("anyconnect: a dead-peer-detection probe is already outstanding")
+	}
+	defer c.dpd.CompareAndSwap(p, nil)
+
+	var err error
+	if ch := c.dtls.Load(); ch != nil && ch.up.Load() {
+		err = ch.send(typeDPDReq, payload)
+	} else {
+		err = c.send(typeDPDReq, payload)
+	}
+	if err != nil {
+		return err
+	}
+
+	select {
+	case <-p.done:
+		return nil
+	case <-c.done:
+		return ErrPeerSilent
+	case <-ctx.Done():
+		return fmt.Errorf("%w: %w", ErrPeerSilent, ctx.Err())
+	}
+}
+
+// matchDPD releases the outstanding probe if this response is its echo. A
+// response carrying anything else is ignored rather than treated as proof: the
+// payload is the only thing tying an answer to a question here, so accepting a
+// mismatched echo would let a stale reply keep a dead tunnel looking alive.
+func (c *Client) matchDPD(payload []byte) {
+	p := c.dpd.Load()
+	if p == nil || !bytes.Equal(p.payload, payload) {
+		return
+	}
+	select {
+	case <-p.done: // already released
+	default:
+		close(p.done)
+	}
 }
 
 // keepaliveLoop holds the connection open through idle NAT timeouts.

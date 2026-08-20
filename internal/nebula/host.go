@@ -47,6 +47,20 @@ const (
 	// neither implementation rotates keys on a timer or a counter, so a tunnel
 	// is re-keyed by going quiet and being rebuilt on the next packet.
 	tunnelIdleTimeout = 10 * time.Minute
+
+	// tunnelProbeIdle is how quiet a tunnel must be before it is asked whether
+	// the peer is still there, and tunnelProbeGrace how long the answer may
+	// take. Their sum bounds how long a silently-broken tunnel keeps being
+	// selected by the routing table -- against tunnelIdleTimeout, which was
+	// previously the only thing that noticed.
+	//
+	// The idle threshold is well below tunnelIdleTimeout so a probe always runs
+	// before expiry would have dropped the tunnel anyway, and the grace is
+	// generous enough that a single lost datagram on a lossy path does not
+	// read as a dead peer: the next sweep re-probes rather than the first
+	// silence being conclusive.
+	tunnelProbeIdle  = 30 * time.Second
+	tunnelProbeGrace = 15 * time.Second
 )
 
 // ErrNoRoute reports a packet for an overlay address with no known peer.
@@ -270,6 +284,10 @@ func (h *Host) maintain() {
 	// only static peers still accumulates tunnels.
 	expiry := time.NewTicker(tunnelIdleTimeout / 4)
 	defer expiry.Stop()
+	// Reachability runs on its own, much shorter, cycle: expiry asks whether a
+	// tunnel is worth keeping, this asks whether it still works.
+	probe := time.NewTicker(tunnelProbeIdle / 2)
+	defer probe.Stop()
 
 	if len(h.lighthouses) == 0 {
 		for {
@@ -278,6 +296,8 @@ func (h *Host) maintain() {
 				return
 			case <-expiry.C:
 				h.expireTunnels()
+			case <-probe.C:
+				h.probeQuietTunnels()
 			}
 		}
 	}
@@ -293,6 +313,8 @@ func (h *Host) maintain() {
 			return
 		case <-expiry.C:
 			h.expireTunnels()
+		case <-probe.C:
+			h.probeQuietTunnels()
 		case <-ticker.C:
 			h.reportToLighthouses()
 		}
@@ -329,20 +351,38 @@ func (h *Host) expireTunnels() {
 	h.mu.Unlock()
 
 	for _, t := range dead {
-		if p, ok := h.lookupPeer(t.PeerAddr()); ok {
-			p.mu.Lock()
-			if p.tun == t {
-				p.tun = nil
-			}
-			p.mu.Unlock()
-		}
-		// Any relay this host was part of goes with it. A relay entry outlives
-		// the tunnel that authenticates its hop, so keeping one means offering
-		// the data path a path that cannot carry anything, and holding an
-		// index the peer will have forgotten by the time it comes back.
-		h.relays.forget(t.PeerAddr())
+		h.releaseTunnel(t)
 		h.log.Printf("nebula: tunnel with %v idle for %v; dropped", t.PeerAddr(), tunnelIdleTimeout)
 	}
+}
+
+// dropTunnel removes a tunnel from the index and releases what refers to it.
+// expireTunnels does its own removal because it is already walking the map
+// under the lock; this is for callers that decided a single tunnel is dead.
+func (h *Host) dropTunnel(t *tunnel) {
+	h.mu.Lock()
+	if cur, ok := h.byIndex[t.localIndex]; ok && cur == t {
+		delete(h.byIndex, t.localIndex)
+	}
+	h.mu.Unlock()
+	h.releaseTunnel(t)
+}
+
+// releaseTunnel drops the peer's reference to a tunnel already removed from the
+// index, and forgets any relay that ran over it.
+func (h *Host) releaseTunnel(t *tunnel) {
+	if p, ok := h.lookupPeer(t.PeerAddr()); ok {
+		p.mu.Lock()
+		if p.tun == t {
+			p.tun = nil
+		}
+		p.mu.Unlock()
+	}
+	// Any relay this host was part of goes with it. A relay entry outlives
+	// the tunnel that authenticates its hop, so keeping one means offering
+	// the data path a path that cannot carry anything, and holding an
+	// index the peer will have forgotten by the time it comes back.
+	h.relays.forget(t.PeerAddr())
 }
 
 // Close shuts the host down and waits for its loops to finish.
@@ -968,6 +1008,10 @@ func (h *Host) handleTest(pkt []byte, hdr header, _ netip.AddrPort) {
 		return
 	}
 	if hdr.Subtype != subTypeTestRequest {
+		// A reply. decrypt has already moved lastSeen, which is the whole
+		// answer -- the reply's payload carries no identity of its own, so
+		// there is nothing to match it against and nothing more to learn from
+		// it than that something authenticated arrived.
 		return
 	}
 	p, ok := h.lookupPeer(t.PeerAddr())
@@ -976,6 +1020,65 @@ func (h *Host) handleTest(pkt []byte, hdr header, _ netip.AddrPort) {
 	}
 	if err := h.sendToPeer(p, t.encrypt(typeTest, subTypeTestReply, payload)); err != nil {
 		h.log.Printf("nebula: replying to test from %v: %v", t.PeerAddr(), err)
+	}
+}
+
+// probeQuietTunnels asks tunnels that have gone silent whether they are still
+// there, and drops the ones that do not answer.
+//
+// This end has always replied to a peer's test packets and never sent one, so
+// the mechanism could prove this host alive to others and learn nothing about
+// them. Without it the only thing that noticed a tunnel had stopped working was
+// expireTunnels, at tunnelIdleTimeout -- ten minutes of a peer that looks
+// established, is selected by the routing table, and carries nothing.
+//
+// It drops the tunnel rather than reporting the session dead, which is the
+// difference between a mesh and every point-to-point protocol here: one
+// unreachable peer is not a dead host. A dropped tunnel costs nothing, because
+// the next packet for that peer starts a fresh handshake -- exactly what
+// happens on first contact.
+func (h *Host) probeQuietTunnels() {
+	now := time.Now()
+	quiet := now.Add(-tunnelProbeIdle)
+
+	h.mu.RLock()
+	tunnels := make([]*tunnel, 0, len(h.byIndex))
+	for _, t := range h.byIndex {
+		tunnels = append(tunnels, t)
+	}
+	h.mu.RUnlock()
+
+	var dead []*tunnel
+	for _, t := range tunnels {
+		seen := t.LastSeen()
+		if seen.IsZero() {
+			seen = t.established
+		}
+		if seen.After(quiet) {
+			// Heard from recently: anything that authenticated answers the
+			// question, so an outstanding probe is moot.
+			t.clearProbe()
+			continue
+		}
+		if t.probeExpired(now) {
+			dead = append(dead, t)
+			continue
+		}
+		if !t.awaitProbe(now.Add(tunnelProbeGrace)) {
+			continue // one already in flight
+		}
+		p, ok := h.lookupPeer(t.PeerAddr())
+		if !ok {
+			continue
+		}
+		if err := h.sendToPeer(p, t.encrypt(typeTest, subTypeTestRequest, nil)); err != nil {
+			h.log.Printf("nebula: probing %v: %v", t.PeerAddr(), err)
+		}
+	}
+	for _, t := range dead {
+		h.log.Printf("nebula: %v did not answer a reachability probe in %v; tunnel dropped",
+			t.PeerAddr(), tunnelProbeGrace)
+		h.dropTunnel(t)
 	}
 }
 

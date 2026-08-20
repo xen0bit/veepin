@@ -10,6 +10,8 @@ package fortinet
 // roles; only the session it drives differs.
 
 import (
+	"context"
+	"errors"
 	"io"
 	"log"
 	"net"
@@ -54,6 +56,16 @@ type pppLink struct {
 	done      chan struct{}
 	closeOnce sync.Once
 	err       error
+}
+
+// probe runs PPP's own liveness check over the link's current carrier. Only a
+// client link has one to run: a server link answers echoes rather than sending
+// them, and it has many peers rather than one.
+func (l *pppLink) probe(ctx context.Context) error {
+	if l.client == nil {
+		return errors.New("fortinet: only a client link probes")
+	}
+	return l.client.SendEcho(ctx)
 }
 
 // rd is the read side of the link.

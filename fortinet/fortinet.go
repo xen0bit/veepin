@@ -237,6 +237,28 @@ func dialTLSPath(host, cookie string, fcfg ifortinet.Config, tlsConfig *tls.Conf
 	return c, nil
 }
 
+// Probe implements client.Prober.
+//
+// Fortinet reads as a TLS protocol, which is why it was on the "rides a
+// reliable transport, needs nothing here" side of client/liveness.go's split.
+// That is true only until DTLS attaches: from then on the UDP carrier is the
+// egress and the TLS connection carries nothing, so a UDP path that silently
+// stops leaves a healthy TCP connection beside a tunnel that moves no packets.
+// The probe is an LCP Echo over whichever carrier is live, so it tests the path
+// the data actually takes.
+func (s *Session) Probe(ctx context.Context) error { return s.client.Probe(ctx) }
+
+// LivenessConfig implements client.LivenessTuner. An LCP echo is two small
+// frames, so it can run often; the tolerance is in MaxFailures, because over
+// DTLS a single lost datagram must not read as a dead peer.
+func (s *Session) LivenessConfig() client.LivenessConfig {
+	return client.LivenessConfig{
+		Interval:    10 * time.Second,
+		Timeout:     3 * time.Second,
+		MaxFailures: 3,
+	}
+}
+
 // Wait blocks until the session ends or ctx is cancelled.
 func (s *Session) Wait(ctx context.Context) error {
 	done := make(chan error, 1)

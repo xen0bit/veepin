@@ -149,6 +149,24 @@ func (c *Client) Handshake(ctx context.Context) (NetConfig, error) {
 	}
 }
 
+// Probe sends an L2TP HELLO and waits for the peer to acknowledge it.
+//
+// This protocol nests two things that can go quiet independently: an ESP
+// transport SA and an L2TP control connection inside it. A HELLO exercises
+// both, because the acknowledgement has to come back up the same path -- which
+// is why the probe is here and not a bare ESP liveness check. Neither end sends
+// unprompted traffic on an idle tunnel, so without this the socket stays up and
+// nothing ever notices the far end is gone.
+func (c *Client) Probe(ctx context.Context) error {
+	c.mu.Lock()
+	t, closed := c.tunnel, c.closed
+	c.mu.Unlock()
+	if closed || t == nil {
+		return ErrTunnelClosed
+	}
+	return t.SendHello(ctx)
+}
+
 // Wait blocks until the tunnel closes.
 func (c *Client) Wait() error {
 	<-c.done
