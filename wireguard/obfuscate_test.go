@@ -89,6 +89,22 @@ func TestObfuscationRoundTripsEveryMessageKind(t *testing.T) {
 // TestObfuscationHidesTheStockSignature states the whole purpose: after the
 // transform, neither the fixed type constant nor the fixed length is visible.
 // If this fails the protocol is doing nothing an observer would notice.
+//
+// The type is checked where the type actually IS, which is not offset 0 when
+// padding is configured. This used to read
+//
+//	if onWire[0] == wire.TypeHandshakeInitiation {
+//
+// and that assertion measured nothing: with PadInitiation of 17, offset 0 is
+// the first octet of the randFill'd junk, so the comparison was one random byte
+// against TypeHandshakeInitiation's value of 1. It therefore failed by chance
+// once per 256 runs -- reproduced at 18 failures in 3000 -- turning a green
+// pipeline red on a test that was reading the RNG rather than the transform.
+//
+// Asserting on the junk cannot be made meaningful, only less likely to misfire,
+// so it is gone rather than widened to a four-octet compare. What replaces it
+// is deterministic and is the actual claim: the type word carries the
+// configured value rather than the stock one.
 func TestObfuscationHidesTheStockSignature(t *testing.T) {
 	cfg := awgTestConfig()
 	init := stockMessage(wire.TypeHandshakeInitiation, wire.SizeHandshakeInitiation)
@@ -97,8 +113,33 @@ func TestObfuscationHidesTheStockSignature(t *testing.T) {
 	if len(onWire) == wire.SizeHandshakeInitiation {
 		t.Error("the initiation is still 148 bytes on the wire")
 	}
-	if onWire[0] == wire.TypeHandshakeInitiation {
-		t.Error("the initiation still starts with the stock type constant")
+	typeAt := int(cfg.PadInitiation)
+	if got := binary.LittleEndian.Uint32(onWire[typeAt : typeAt+4]); got != cfg.TypeInitiation {
+		t.Errorf("type word at offset %d is %d, want the configured %d -- the stock "+
+			"constant is still what an observer keys on", typeAt, got, cfg.TypeInitiation)
+	}
+}
+
+// TestObfuscationHidesTheTypeWithNoPadding is the same claim on the path where
+// offset 0 IS the type field, so it can be read directly and deterministically:
+// with no padding configured, obfuscateSend rewrites the type word in place and
+// the packet keeps its stock length. That is the configuration in which hiding
+// the constant is the only thing the transform does.
+func TestObfuscationHidesTheTypeWithNoPadding(t *testing.T) {
+	cfg := awgTestConfig()
+	cfg.PadInitiation = 0
+
+	init := stockMessage(wire.TypeHandshakeInitiation, wire.SizeHandshakeInitiation)
+	onWire := obfuscateSend(init, cfg)
+
+	if len(onWire) != wire.SizeHandshakeInitiation {
+		t.Fatalf("on-wire length %d, want the stock %d: no padding was configured",
+			len(onWire), wire.SizeHandshakeInitiation)
+	}
+	if got := binary.LittleEndian.Uint32(onWire[:4]); got == wire.TypeHandshakeInitiation {
+		t.Error("the initiation still carries the stock type constant at offset 0")
+	} else if got != cfg.TypeInitiation {
+		t.Errorf("type word %d, want the configured %d", got, cfg.TypeInitiation)
 	}
 }
 
