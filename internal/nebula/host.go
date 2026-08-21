@@ -177,6 +177,18 @@ type Host struct {
 
 	gate *dataplane.Gate
 
+	// shaper pads outbound inner packets so the inner traffic's size pattern
+	// does not survive encapsulation (dataplane/shape.go). nil disables it,
+	// which is the behaviour from before it existed. shapeMTU is the largest
+	// inner packet the path carries, which is what the shaper pads towards.
+	//
+	// Owned by the TUN reader goroutine, like every other shaper in the tree:
+	// dataplane.Shaper is unlocked scratch, and sendPacket is called from that
+	// one loop.
+	shaper     *dataplane.Shaper
+	shapeMTU   int
+	shapedOnce sync.Once
+
 	mu      sync.RWMutex
 	byAddr  map[netip.Addr]*peer
 	byIndex map[uint32]*tunnel
@@ -453,6 +465,31 @@ func (h *Host) readTUN() {
 	}
 }
 
+// SetShaper installs downstream flow shaping. mtu is the inner interface MTU --
+// the size the shaper pads towards. It must be called before Run; the shaper is
+// read from the TUN loop without synchronisation, the same contract
+// dataplane.Pump.SetShaper carries.
+func (h *Host) SetShaper(s *dataplane.Shaper, mtu int) {
+	h.shaper = s
+	h.shapeMTU = mtu
+}
+
+// padInner grows an inner IP packet to target octets with zero filler.
+//
+// It only ever grows, and it never rewrites the IP header: the receiver -- ours
+// or a stock nebula's -- recovers the real packet from the header's own Total
+// Length, so a padded packet and an unpadded one are the same packet to
+// everything above IP. Changing Total Length would make the filler part of the
+// packet and corrupt whatever transport was inside it.
+func padInner(pkt []byte, target int) []byte {
+	if target <= len(pkt) {
+		return pkt
+	}
+	out := make([]byte, target)
+	copy(out, pkt)
+	return out
+}
+
 // sendPacket routes one inner IP packet to its peer.
 func (h *Host) sendPacket(pkt []byte) error {
 	dst, ok := destinationAddr(pkt)
@@ -484,6 +521,32 @@ func (h *Host) sendPacket(pkt []byte) error {
 		// through will find the tunnel up. That is how nebula behaves too.
 		h.beginHandshake(p)
 		return fmt.Errorf("nebula: tunnel to %v is not up yet", dst)
+	}
+
+	// Downstream flow shaping (dataplane/shape.go). The padding goes INSIDE the
+	// AEAD plaintext, which is not a stylistic choice: nebula's 16-octet header
+	// is passed to the AEAD as additional data, so anything appended after the
+	// tag is not covered by the authentication and a conforming receiver rejects
+	// the datagram rather than trimming it.
+	//
+	// Inside the plaintext it is inert to a stock nebula peer, by the same
+	// mechanism every other shaped protocol here uses: the receiver decrypts,
+	// writes the plaintext to its TUN, and the kernel's IP stack delimits the
+	// real packet by the inner header's Total Length. The filler is never seen
+	// by anything above IP.
+	if h.shaper != nil {
+		if target := h.shaper.Target(pkt, h.shapeMTU); target > len(pkt) {
+			// Said out loud once, because a ping proves nothing about whether
+			// shaping happened -- it passes just as happily on a silent no-op,
+			// which is the failure mode this tree keeps rediscovering. The
+			// shaped interop cell requires this line, so a padder that quietly
+			// stopped padding fails the cell instead of passing it.
+			h.shapedOnce.Do(func() {
+				h.log.Printf("nebula: shaping outbound packets to %d octets (first: %d -> %d)",
+					h.shapeMTU, len(pkt), target)
+			})
+			pkt = padInner(pkt, target)
+		}
 	}
 
 	out := t.encrypt(typeMessage, subTypeNone, pkt)

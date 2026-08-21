@@ -161,8 +161,9 @@ var interopMatrix = []interopRow{
 	},
 	{
 		Protocol: "Nebula",
-		Client:   interopCell{Tests: []string{"TestInteropVeepinNebulaHostReferenceLighthouse"}, Label: "`nebula` (lighthouse)"},
-		Server:   interopCell{Tests: []string{"TestInteropNebulaHostVeepinLighthouse"}, Label: "`nebula` (host)"},
+		Client: interopCell{Tests: []string{"TestInteropVeepinNebulaHostReferenceLighthouse",
+			"TestInteropVeepinNebulaShaped"}, Label: "`nebula` (lighthouse, shaped)"},
+		Server: interopCell{Tests: []string{"TestInteropNebulaHostVeepinLighthouse"}, Label: "`nebula` (host)"},
 		Self: interopCell{
 			Tests: []string{"TestInteropNebulaSelf", "TestInteropNebulaRelay"},
 			Label: "(via lighthouse; relayed with the direct path blocked)",

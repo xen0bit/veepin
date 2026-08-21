@@ -287,10 +287,40 @@ Ordered by value, not by ease:
    than an open question: see [`verifying-shaping.md`](verifying-shaping.md). It
    is the highest-value item on this list by a distance, because until it is done
    the feature is off and everything else here is dormant.
-2. **The protocols still unshaped**: SSH, MASQUE and Nebula. Each has a
-   plausible vehicle (`SSH_MSG_IGNORE` exists for exactly this, a MASQUE capsule
-   type can be unregistered-and-skipped, Nebula's payload is length-delimited),
-   so this is mostly plumbing rather than design.
+2. **The protocols still unshaped**: SSH and MASQUE. A MASQUE capsule type can
+   be unregistered-and-skipped, which RFC 9297 requires receivers to tolerate —
+   and veepin's own reader already does, in both directions, so only aioquic's
+   behaviour is an open question.
+
+   **SSH's named vehicle does not exist, and this document was wrong about it.**
+   The claim here used to be that "`SSH_MSG_IGNORE` exists for exactly this".
+   The message exists in the protocol; it is not reachable through
+   `x/crypto/ssh`'s public surface. `msgIgnore = 2` is unexported
+   (`ssh/messages.go`), there is no raw-packet write, and `Conn.SendRequest`
+   sends a global request (message 80) instead. This is the same shape of
+   rejection as the RFC 9221 MASQUE datagram finding already recorded in
+   `protocol-roadmap.md`, and it is recorded here rather than quietly deleted
+   because the next person to read the old sentence would have spent the same
+   afternoon discovering it.
+
+   The remaining vehicle for SSH is trailing filler trimmed by the inner IP
+   header's Total Length, as everywhere else here — but it is **not** simply
+   plumbing, because `internal/sshtun`'s reader recovers packet boundaries from
+   the IP length on a byte stream, so octets after a packet are read as the next
+   packet's address-family header. A stock OpenSSH peer would tolerate the
+   filler (it writes each channel message to its tun in one call, and the kernel
+   trims); veepin's own reader would not. Closing that needs a framing decision,
+   not a padding call.
+
+   **Nebula was on this list and is not any more.** Its padding goes *inside*
+   the AEAD plaintext rather than after the tag, and that is forced rather than
+   chosen: nebula's 16-octet header is passed to the cipher as additional data,
+   so trailing octets on the datagram are unauthenticated and a conforming
+   receiver rejects the packet instead of trimming it. Inside the plaintext it
+   is inert by the usual mechanism, and `compose.nebula-shaped.yml` proves the
+   reference `slackhq/nebula` daemon accepts and trims it having been told
+   nothing. That cell requires a log line as well as a ping, because a ping
+   passes just as happily on a shaper that quietly did nothing.
 
    SoftEther was on this list and is not any more. It confirmed the "mostly
    plumbing" reading — the padding is trailing filler on the Ethernet frame,

@@ -50,7 +50,7 @@ whatever comes after this plan is chosen from something written down.
 | # | Item | Value | Risk | Verdict | Status |
 |---|------|-------|------|---------|--------|
 | 5 | SSH is unshaped — and the vehicle the docs name does not exist | Medium | Low | **Do** | ☐ |
-| 6 | Nebula is unshaped | Medium | Low | Do | ☐ |
+| 6 | Nebula is unshaped | Medium | Low | Do | ✅ landed |
 | 7 | MASQUE is unshaped | Medium | Low | Do | ☐ |
 
 ### Part 3 — the next capability

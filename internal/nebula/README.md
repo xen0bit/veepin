@@ -97,3 +97,17 @@ flowchart TD
   a fresh handshake.
 - **Not implemented: multi-lighthouse consensus.** Two lighthouses that disagree
   about where a host is are not reconciled; the last answer wins.
+- **Shaping pads inside the AEAD plaintext, and that is forced rather than
+  chosen.** The 16-octet header is passed to the cipher as additional data
+  (`header.go`), so trailing octets appended after the tag are not covered by
+  the authentication and a conforming receiver rejects the datagram rather than
+  trimming it. Inside the plaintext the filler is inert by the mechanism every
+  shaped protocol here uses: the receiver decrypts, writes the plaintext to its
+  TUN, and the kernel delimits the real packet by the inner IP header's Total
+  Length. `padInner` therefore never rewrites Total Length — doing so would make
+  the filler part of the packet and hand the inner transport garbage.
+
+  Two limits worth naming. Nebula is a mesh, so "downstream" does not identify a
+  direction the way it does for a client/server protocol: `-shape` covers the
+  traffic *this host sends*, and a mesh where both peers set it gets both
+  directions. And shaping is IPv4-only here, like the rest of the v1 overlay.

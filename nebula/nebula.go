@@ -100,6 +100,7 @@ const (
 	OptCipher       = "cipher"        // "aes" (default) or "chachapoly"
 	OptTUN          = "tun"           // TUN interface name
 	OptMTU          = "mtu"           // inner MTU
+	OptShape        = "shape"         // per-flow shaping budget in bytes (0 = off)
 )
 
 // Config is the parsed form of the options above.
@@ -142,6 +143,15 @@ type Config struct {
 
 	// MTU is the inner interface MTU. Zero uses defaultMTU.
 	MTU int
+
+	// Shape is the per-flow shaping budget in bytes; zero disables shaping,
+	// which is the behaviour from before it existed.
+	//
+	// Nebula is a mesh, so "downstream" does not name a direction here the way
+	// it does for a client/server protocol -- every host is both ends. What this
+	// shapes is the traffic THIS host sends, and a mesh where both peers set it
+	// gets both directions. See doc/traffic-shaping.md.
+	Shape int
 
 	// Logger receives operational messages. Nil discards them.
 	Logger *log.Logger
@@ -210,12 +220,17 @@ func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
 		return nil, client.Result{}, err
 	}
 
-	host.Run()
-
 	mtu := cfg.MTU
 	if mtu <= 0 {
 		mtu = defaultMTU
 	}
+	// Before Run: the shaper is read from the TUN loop without
+	// synchronisation, so it has to be in place before that loop starts.
+	if cfg.Shape > 0 {
+		host.SetShaper(dataplane.NewShaper(dataplane.ShapeConfig{Bytes: cfg.Shape}), mtu)
+	}
+
+	host.Run()
 
 	sess := &Session{host: host, tun: tun, done: make(chan struct{})}
 	res := client.Result{
@@ -346,6 +361,14 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 			return nil, fmt.Errorf("nebula: invalid mtu %q", v)
 		}
 		cfg.MTU = mtu
+	}
+
+	if v := opts[OptShape]; v != "" {
+		shape, err := strconv.Atoi(v)
+		if err != nil || shape < 0 {
+			return nil, fmt.Errorf("nebula: invalid shape %q", v)
+		}
+		cfg.Shape = shape
 	}
 
 	if v := opts[OptLighthouses]; v != "" {

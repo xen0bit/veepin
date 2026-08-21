@@ -862,6 +862,25 @@ func TestInteropVeepinNebulaHostReferenceLighthouse(t *testing.T) {
 	runInteropBench(t, "compose.nebula.yml", "veepin-nebula", "nebula-host", "10.42.0.1")
 }
 
+// TestInteropVeepinNebulaShaped is the cell that makes nebula's shaping mean
+// something. veepin pads each inner packet out to the interface MTU inside the
+// AEAD plaintext, and the reference slackhq/nebula daemon is told nothing about
+// it: it decrypts, writes the plaintext to its TUN, and the kernel delimits the
+// real packet by the inner IP header's Total Length.
+//
+// A veepin-to-veepin cell would prove only that our padder and our trimmer
+// agree, which is the failure this matrix exists to distrust. The claim is
+// about a receiver we did not write.
+func TestInteropVeepinNebulaShaped(t *testing.T) {
+	// The log line is required, not decorative. A ping passes just as happily
+	// on a shaper that quietly did nothing -- the same silent-fallback trap
+	// runInteropRequiringLog exists for elsewhere in this file -- so the cell
+	// has to demand that padding actually happened as well as that the peer
+	// tolerated it.
+	runInteropRequiringLog(t, "compose.nebula-shaped.yml", "veepin-nebula", "10.42.0.1",
+		"shaping outbound packets to")
+}
+
 // TestInteropNebulaHostVeepinLighthouse is the mirror, and the direction that
 // proves veepin's responder and its lighthouse: the reference daemon reports
 // its location to a veepin lighthouse, queries it, and handshakes against
