@@ -531,6 +531,32 @@ func TestInteropSSHSelf(t *testing.T) {
 	runInteropBench(t, "compose.ssh-self.yml", "veepin-ssh-client", "veepin-ssh-server", "10.200.0.1")
 }
 
+// TestInteropSSHClientVeepinServerShaped is the cell that makes SSH's shaping
+// mean something, and the one that decides a framing question a unit test
+// cannot.
+//
+// An SSH channel is a byte stream with no packet delimiter, so veepin's reader
+// recovers boundaries from the IP length -- which means trailing filler would
+// be read as the next packet's address-family header. ReadPacket now skips
+// whole zero words, which a header (00 00 00 02 / 00 00 00 0a) can never be.
+// A real `ssh -w` needs none of that: it writes each channel message to its tun
+// in one call and the kernel delimits the packet by Total Length.
+//
+// That last sentence is an argument until this cell runs. The log line is
+// required as well as the ping, because a ping passes just as happily on a
+// shaper that did nothing.
+func TestInteropSSHClientVeepinServerShaped(t *testing.T) {
+	requireDocker(t)
+	keyDir := filepath.Join("ssh", "keys")
+	if err := generateSSHKeys(keyDir); err != nil {
+		t.Fatalf("generate SSH keys: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(keyDir) })
+	runInteropRequiringLogFrom(t, "compose.ssh-server-shaped.yml",
+		"ssh-client", "veepin-ssh-server", "10.200.0.1",
+		"shaping outbound packets to")
+}
+
 // TestInteropSSHClientVeepinServer is the reverse direction: a real OpenSSH
 // client (`ssh -w`) opens a tunnel-forwarding channel to the veepin *server* and
 // pings its tunnel gateway. It proves the responder — the SSH server handshake,

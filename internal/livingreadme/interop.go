@@ -137,8 +137,9 @@ var interopMatrix = []interopRow{
 	{
 		Protocol: "SSH",
 		Client:   interopCell{Tests: []string{"TestInteropVeepinClientSSHServer"}, Label: "`sshd` (PermitTunnel)"},
-		Server:   interopCell{Tests: []string{"TestInteropSSHClientVeepinServer"}, Label: "`ssh -w`"},
-		Self:     interopCell{Tests: []string{"TestInteropSSHSelf"}},
+		Server: interopCell{Tests: []string{"TestInteropSSHClientVeepinServer",
+			"TestInteropSSHClientVeepinServerShaped"}, Label: "`ssh -w`"},
+		Self: interopCell{Tests: []string{"TestInteropSSHSelf"}},
 	},
 	{
 		Protocol: "L2TP/IPsec",

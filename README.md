@@ -785,16 +785,15 @@ each a localized extension point, not a structural rework:
   [USENIX Security '24](https://www.usenix.org/conference/usenixsecurity24/presentation/xue-fingerprinting),
   which byte-level obfuscation does not address. `veepin serve <protocol> -shape
   <bytes>` pads the first N bytes of each inner flow out to the tunnel MTU on
-  fifteen of the sixteen protocols — RFC 4303 §2.7 TFC padding for ESP (IKEv2,
+  all sixteen protocols — RFC 4303 §2.7 TFC padding for ESP (IKEv2,
   Cisco IPsec, GlobalProtect, Ivanti), trailing octets for WireGuard and
   AmneziaWG, the RFC 1661 §5.1 PPP Information field for SSTP, Fortinet and
   L2TP/IPsec, the length-delimited data payload for AnyConnect and OpenVPN, and
   trailing filler on the IP-bearing frames of an L2TPv3 pseudowire or a
-  SoftEther layer-2 segment, and — inside the sealed or length-covered payload,
-  because neither has room after it — a Nebula transport message and a MASQUE
-  DATAGRAM capsule. The one still unshaped is SSH, which
-  [`doc/traffic-shaping.md`](doc/traffic-shaping.md) records as work outstanding
-  rather than a design boundary. All are inert to a conforming receiver, which delimits the real
+  SoftEther layer-2 segment, trailing filler on an SSH tunnel channel, and —
+  inside the sealed or length-covered payload, because neither has room after
+  it — a Nebula transport message and a MASQUE DATAGRAM capsule. All are inert
+  to a conforming receiver, which delimits the real
   packet by the inner IP header, so **stock clients benefit unmodified**; and
   because the attack targets handshakes, the cost is per-flow rather than
   per-byte, leaving bulk throughput untouched. It does not shape packet counts

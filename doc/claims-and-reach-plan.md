@@ -71,11 +71,11 @@ What remains, and why each stopped where it did:
 | 3 | The L2TPv3 control connection is unit-tested only, and the tree says so | Medium | **Medium** | Do, timeboxed | ☐ |
 | 4 | Which other fixtures make the easy case the only case? | Medium | Low | Do (survey) | ☐ |
 
-### Part 2 — shaping reaches thirteen of sixteen
+### Part 2 — shaping reaches thirteen of sixteen (now all sixteen)
 
 | # | Item | Value | Risk | Verdict | Status |
 |---|------|-------|------|---------|--------|
-| 5 | SSH is unshaped — and the vehicle the docs name does not exist | Medium | Low | **Do** | ☐ |
+| 5 | SSH is unshaped — and the vehicle the docs name does not exist | Medium | Low | **Do** | ✅ landed |
 | 6 | Nebula is unshaped | Medium | Low | Do | ✅ landed |
 | 7 | MASQUE is unshaped | Medium | Low | Do | ✅ landed |
 
