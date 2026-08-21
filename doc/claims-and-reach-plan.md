@@ -27,6 +27,32 @@ through 4 are the plan proper. [The longer horizon](#the-longer-horizon) at the
 end is the menu behind it — twelve larger items that are not scheduled, so that
 whatever comes after this plan is chosen from something written down.
 
+## What has landed, and what has not
+
+The first branch off this plan (`feat/claims-and-reach`) executed **Part 0,
+items 1, 2, 6 and 10, and H1, H2 and H9** — nine of the twenty-six rows below.
+Item 8 was resolved as a *don't*, which is an outcome rather than an omission.
+
+What remains, and why each stopped where it did:
+
+- **Item 3 (ql2tpd)** and **item 4 (the fixture survey)** are investigations
+  rather than changes, and item 4 should run before Part 2 adds cells that could
+  inherit the same blind spot.
+- **Item 5 (SSH shaping)** came back with a harder answer than the plan
+  predicted, and the prediction is in *Where this plan is probably wrong* below.
+  The vehicle the docs named does not exist, and the fallback is not plumbing
+  either: `internal/sshtun` recovers packet boundaries from the IP length on a
+  byte stream, so filler after a packet is read as the next packet's
+  address-family header. A stock OpenSSH peer tolerates it; veepin's own reader
+  does not. Closing that is a framing decision, and the correction to
+  `doc/traffic-shaping.md` landed without it.
+- **Item 7 (MASQUE)** is unblocked and unstarted.
+- **Item 9 (RFC 9329)**, **item 11 (macOS pf)** and **item 12 (`slog`)** are
+  unstarted; 11 is still gated on somebody running the macOS client on hardware.
+- **The horizon list** past H1, H2 and H9 is unstarted by design. H3 is the one
+  whose gate moved: Go 1.27 supplies `crypto/mldsa` and the floor is now raised,
+  so H3a is reachable in a way it was not when this page was written.
+
 ## Summary
 
 ### Part 0 — the toolchain floor
