@@ -793,7 +793,7 @@ than a bare assertion.
 | H2 | OpenVPN's server caps TLS at 1.2, which forecloses H1 for it | Medium | Low | ✅ landed — the hypothesis held |
 | H3 | PQ **authentication** — unblocked by Go 1.27's `crypto/mldsa` | **High** | Medium | ✅ H3a landed; H3b still gated on the IKEv2 interop survey |
 | H4 | Inner IPv6 reaches one protocol of sixteen | **High** | **High** | pick two protocols, not all fifteen |
-| H5 | GSO/GRO are IPv4-only, and IKEv2 now carries inner v6 | Medium | Medium | measure the v6 slow path first |
+| H5 | GSO/GRO are IPv4-only, and IKEv2 now carries inner v6 | Medium | Medium | ✅ surveyed: there is no slow path, only an absent optimisation |
 | H6 | `scaling-the-data-path.md` Option 2 — parallelism with per-tunnel affinity | Medium | **High** | a profile showing the ceiling actually binds |
 | H7 | Site-to-site: multi-SA, subnet selectors, no config-mode assignment | **High** | **High** | a decision that veepin is for more than road warriors |
 | H8 | Record the peer, replay it offline | **High** | Medium | none — the cheapest leverage on this page |
@@ -1393,6 +1393,13 @@ enough to be useful. The previous two both have this section and both earned it.
   fail, in the commit written to stop exactly that. The shipped version drops any
   IKE datagram over 1400 octets by length, and was verified by sabotage: with the
   fragmentation call short-circuited, the ping itself fails.
+- **H5's premise was wrong, and in the reassuring direction.** This page said
+  IKEv2's inner v6 "already carries inner v6 traffic — down the slow path,
+  silently". There is no slow path: `TUNSETOFFLOAD` negotiates TSO4 only, so the
+  kernel never produces a v6 super-frame and v6 takes the ordinary path
+  everything took before GSO existed. An absent optimisation, not a degradation.
+  The real risk was the opposite one — somebody adding `TUN_F_TSO6` because "we
+  carry v6 now" without writing the segmenter — and that now fails a test.
 - **Item 3 was not a veepin bug, and the recorded hypothesis was wrong.** It was
   not the Ns duplicate check: the acknowledgement path (`processAckQueue`,
   reached through `nrChan`) never consults that check at all, which reading the
