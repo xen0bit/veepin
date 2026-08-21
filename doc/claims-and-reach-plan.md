@@ -33,15 +33,15 @@ whatever comes after this plan is chosen from something written down.
 
 | # | Item | Value | Risk | Verdict | Status |
 |---|------|-------|------|---------|--------|
-| 0a | Raise the `go.mod` floor to 1.27 across both modules, CI and the image | Prerequisite | Low | **Do first — everything else assumes it** | ☐ |
-| 0b | `cryptocustomrand` silently disarms nebula's ephemeral-key test seam | **High** | Low | **Do with 0a — it is what 0a breaks** | ☐ |
+| 0a | Raise the `go.mod` floor to 1.27 across both modules, CI and the image | Prerequisite | Low | **Do first — everything else assumes it** | ✅ landed |
+| 0b | `cryptocustomrand` silently disarms nebula's ephemeral-key test seam | **High** | Low | **Do with 0a — it is what 0a breaks** | ✅ landed |
 
 ### Part 1 — claims the tests do not check
 
 | # | Item | Value | Risk | Verdict | Status |
 |---|------|-------|------|---------|--------|
-| 1 | IKEv2 never fragments its own output, and the reason it gives is false | **High** | Low | **Do first** | ☐ |
-| 2 | The cert cell mints the smallest certificate that exists | **High** | None | **Do — it is item 1's guard** | ☐ |
+| 1 | IKEv2 never fragments its own output, and the reason it gives is false | **High** | Low | **Do first** | ✅ landed |
+| 2 | The cert cell mints the smallest certificate that exists | **High** | None | **Do — it is item 1's guard** | ✅ landed |
 | 3 | The L2TPv3 control connection is unit-tested only, and the tree says so | Medium | **Medium** | Do, timeboxed | ☐ |
 | 4 | Which other fixtures make the easy case the only case? | Medium | Low | Do (survey) | ☐ |
 
@@ -1346,6 +1346,19 @@ enough to be useful. The previous two both have this section and both earned it.
   paths (`client.go` and `ike_auth.go`), retransmission holds the encoded message
   and must now hold a *set* of them, and the message-ID window reasons about one
   message per ID. Any of those three could double the estimate.
+- **Item 1's size estimate was too high, and item 2's blocking mechanism did not
+  work.** Both were found by building it. An RSA-2048 certificate is 765 octets
+  of DER, so leaf + intermediate + a 256-octet signature is ~2 KB rather than the
+  2.5–3.5 KB claimed above — still over the 1500-octet path MTU, so the
+  conclusion held, but the number was guessed and should have been measured.
+  Worse, the cell's `iptables -A INPUT -f -j DROP` blocked nothing: netfilter's
+  connection-tracking defragmenter runs at priority −400, ahead of both the raw
+  (−300) and filter tables, so by the time any rule sees the datagram it has been
+  reassembled and `-f` matches nothing. The first version of the cell passed with
+  outbound fragmentation deliberately switched off — a fixture that could not
+  fail, in the commit written to stop exactly that. The shipped version drops any
+  IKE datagram over 1400 octets by length, and was verified by sabotage: with the
+  fragmentation call short-circuited, the ping itself fails.
 - **Item 3 may not be a veepin bug at all**, and the plan is written to make that
   an acceptable outcome. If it turns out the answer was hypothesis one — go-l2tp
   discarding our ACK on its Ns duplicate check — then the fix is upstream and

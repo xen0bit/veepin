@@ -10,8 +10,14 @@ import (
 
 // sealFragment builds one SKF (Encrypted Fragment) message carrying chunk as
 // fragment fragNum of total (RFC 7383 section 2.5). It mirrors what a peer set
-// to always fragment emits — veepin itself never fragments its output, so this
-// encoder lives only in the tests that drive the reassembly path.
+// to always fragment emits.
+//
+// Production now has its own encoder (sealSKF in fragment.go) and this one is
+// deliberately NOT replaced by it. Two independent encoders is the point: a
+// reassembly test driven by the encoder that shares its bugs proves the two
+// halves agree, which is the failure this tree keeps rediscovering. This one
+// stands in for the peer, and TestFragmentEncodersAgree pins them against each
+// other so a divergence is reported rather than assumed away.
 //
 // skfNext is the SKF generic header's Next Payload: the first inner payload's
 // type for fragment 1, and NoNextPayload for the rest.

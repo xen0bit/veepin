@@ -345,6 +345,21 @@ func (c *Client) writeIKE(pkt []byte) error {
 	return err
 }
 
+// writeIKEAll sends every datagram of a protected message in fragment order. A
+// partial send is a failed message: RFC 7383 reassembly needs all of them, and
+// the peer's reassembler drops what it has when the next message ID arrives.
+func (c *Client) writeIKEAll(pkts [][]byte) error {
+	if len(pkts) > 1 {
+		c.log.Printf("ikev2 client: fragmenting request into %d RFC 7383 fragments", len(pkts))
+	}
+	for _, p := range pkts {
+		if err := c.writeIKE(p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // DataConn returns the IKE socket (floated to 4500) for the data path to share
 // for ESP. Ownership stays with the Client; Close closes it.
 func (c *Client) DataConn() *net.UDPConn { return c.conn }
@@ -492,11 +507,11 @@ func (c *Client) authPSK() error {
 	inner, childOutSPI := c.buildAuthInner(idBody, &payload.AuthPayload{
 		Method: payload.AuthSharedKeyMIC, Data: authData,
 	})
-	pkt, err := c.seal(payload.IKE_AUTH, c.authMsgID, inner.FirstType(), inner.Bytes())
+	pkts, err := c.seal(payload.IKE_AUTH, c.authMsgID, inner.FirstType(), inner.Bytes())
 	if err != nil {
 		return err
 	}
-	if err := c.writeIKE(pkt); err != nil {
+	if err := c.writeIKEAll(pkts); err != nil {
 		return err
 	}
 
@@ -525,11 +540,11 @@ func (c *Client) authCert() error {
 	}
 
 	inner, childOutSPI := c.buildCertAuthInner(idBody, method, authData)
-	pkt, err := c.seal(payload.IKE_AUTH, c.authMsgID, inner.FirstType(), inner.Bytes())
+	pkts, err := c.seal(payload.IKE_AUTH, c.authMsgID, inner.FirstType(), inner.Bytes())
 	if err != nil {
 		return err
 	}
-	if err := c.writeIKE(pkt); err != nil {
+	if err := c.writeIKEAll(pkts); err != nil {
 		return err
 	}
 
@@ -652,11 +667,11 @@ func (c *Client) authEAP() error {
 
 	// Message 1: IDi + CP + SA + TS, no AUTH (signals EAP).
 	inner, childOutSPI := c.buildAuthInner(idBody, nil)
-	pkt, err := c.seal(payload.IKE_AUTH, c.authMsgID, inner.FirstType(), inner.Bytes())
+	pkts, err := c.seal(payload.IKE_AUTH, c.authMsgID, inner.FirstType(), inner.Bytes())
 	if err != nil {
 		return err
 	}
-	if err := c.writeIKE(pkt); err != nil {
+	if err := c.writeIKEAll(pkts); err != nil {
 		return err
 	}
 
@@ -718,11 +733,11 @@ func (c *Client) authEAP() error {
 	authData := PSKAuth(c.suite.PRF, msk, octets)
 	b := payload.NewBuilder()
 	b.Add(payload.TypeAUTH, false, payload.MarshalAuth(payload.AuthPayload{Method: payload.AuthSharedKeyMIC, Data: authData}))
-	pkt, err = c.seal(payload.IKE_AUTH, c.authMsgID+3, b.FirstType(), b.Bytes())
+	pkts, err = c.seal(payload.IKE_AUTH, c.authMsgID+3, b.FirstType(), b.Bytes())
 	if err != nil {
 		return err
 	}
-	if err := c.writeIKE(pkt); err != nil {
+	if err := c.writeIKEAll(pkts); err != nil {
 		return err
 	}
 
@@ -738,11 +753,11 @@ func (c *Client) authEAP() error {
 func (c *Client) sendEAP(msgID uint32, p eap.Packet) error {
 	b := payload.NewBuilder()
 	b.Add(payload.TypeEAP, false, p.Marshal())
-	pkt, err := c.seal(payload.IKE_AUTH, msgID, b.FirstType(), b.Bytes())
+	pkts, err := c.seal(payload.IKE_AUTH, msgID, b.FirstType(), b.Bytes())
 	if err != nil {
 		return err
 	}
-	return c.writeIKE(pkt)
+	return c.writeIKEAll(pkts)
 }
 
 // buildAuthInner assembles the IKE_AUTH inner payloads. If auth is nil the AUTH
@@ -1053,11 +1068,11 @@ func (c *Client) sendUpdateSAAddresses(srv *net.UDPAddr) error {
 	}))
 
 	msgID := c.sendMsgID
-	pkt, err := c.seal(payload.INFORMATIONAL, msgID, b.FirstType(), b.Bytes())
+	pkts, err := c.seal(payload.INFORMATIONAL, msgID, b.FirstType(), b.Bytes())
 	if err != nil {
 		return err
 	}
-	if err := c.writeIKE(pkt); err != nil {
+	if err := c.writeIKEAll(pkts); err != nil {
 		return fmt.Errorf("ike: roam send: %w", err)
 	}
 
@@ -1083,12 +1098,15 @@ func findMobikeCookie2(inners []payload.RawPayload) []byte {
 
 // --- helpers ---
 
-func (c *Client) seal(ex payload.ExchangeType, msgID uint32, first payload.PayloadType, inner []byte) ([]byte, error) {
+// seal builds the datagrams for one protected message: one, or several SKF
+// fragments when the message would exceed fragmentThreshold and the peer
+// advertised RFC 7383 support. Every returned datagram must be sent, in order.
+func (c *Client) seal(ex payload.ExchangeType, msgID uint32, first payload.PayloadType, inner []byte) ([][]byte, error) {
 	hdr := payload.Header{
 		InitiatorSPI: c.spiI, ResponderSPI: c.spiR, Version: 0x20,
 		ExchangeType: ex, Flags: payload.FlagInitiator, MessageID: msgID,
 	}
-	return buildEncryptedMessage(hdr, c.suite, c.keys, dirInitiatorToResponder, first, inner)
+	return sealMaybeFragment(hdr, c.suite, c.keys, dirInitiatorToResponder, first, inner, c.frag)
 }
 
 func (c *Client) recvInners() ([]payload.RawPayload, error) {

@@ -717,9 +717,10 @@ each a localized extension point, not a structural rework:
   child and the message-ID window accepts only the next expected request. IKEv2
   *does* implement MOBIKE (RFC 4555 `UPDATE_SA_ADDRESSES`, so a roaming peer
   survives an address change without re-handshaking), IKE fragmentation
-  reassembly (RFC 7383 — it negotiates and reassembles inbound SKF fragments but
-  never fragments its own, always-small output) and the RFC 7296 §2.6 cookie
-  exchange; every server bounds unauthenticated work through `dataplane.Gate`.
+  (RFC 7383 — it negotiates support, reassembles inbound SKF fragments, and
+  fragments its own output above 1280 octets, which certificate authentication
+  needs: an RSA chain puts IKE_AUTH near 2 KB in both directions) and the
+  RFC 7296 §2.6 cookie exchange; every server bounds unauthenticated work through `dataplane.Gate`.
 - **Client liveness and SA rekey are unified across protocols.** A
   cross-protocol monitor (`client.Prober`, applied automatically by
   `client.Dial`) detects a dead peer and tears the tunnel down for a clean

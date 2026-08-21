@@ -183,6 +183,38 @@ func TestInteropVeepinClientStrongswanServerCert(t *testing.T) {
 	runInterop(t, "compose.client-ss-cert.yml", "veepin-client", "10.20.30.254")
 }
 
+// TestInteropVeepinClientStrongswanServerCertRSA is the cell above with the
+// fixture's blind spot removed. That one mints ECDSA P-256 -- the smallest
+// certificate there is -- so its IKE_AUTH fits in one datagram, which is why it
+// passed for as long as veepin never fragmented its own output. Here the chain
+// is RSA-2048 leaf + intermediate, putting IKE_AUTH at 2.5-3.5 KB, and the
+// strongSwan side drops every non-first IP fragment.
+//
+// The required log line is the whole point. A ping passes just as happily if
+// the message somehow got through unfragmented, and "the handshake worked" is
+// exactly the evidence that hid the original defect. Requiring the client to
+// SAY it fragmented is what makes this a test of the code rather than of the
+// network.
+func TestInteropVeepinClientStrongswanServerCertRSA(t *testing.T) {
+	runInteropRequiringLog(t, "compose.client-ss-cert-rsa.yml", "veepin-client", "10.20.30.254",
+		"fragmenting request into")
+}
+
+// TestInteropStrongswanClientVeepinServerCertRSA is the responder half, and it
+// covers two gaps at once: no cell tested certificate authentication in
+// Direction B at all, and the veepin server's IKE_AUTH builder (ike_auth.go)
+// had the same missing outbound size check the client's did. A veepin server
+// therefore could not answer a strongSwan client whose CA issues RSA.
+//
+// The strongSwan initiator drops non-first IP fragments, so its ping succeeds
+// only if the veepin RESPONDER fragmented. The log line is required from the
+// server for the same reason as above.
+func TestInteropStrongswanClientVeepinServerCertRSA(t *testing.T) {
+	runInteropRequiringLogFrom(t, "compose.server-ss-cert-rsa.yml",
+		"strongswan-client", "veepin-server", "10.10.10.1",
+		"fragmenting")
+}
+
 // TestInteropVeepinClientStrongswanServerIPv6 is Direction A dual-stack: the
 // strongSwan responder assigns both an IPv4 and an IPv6 virtual address and
 // offers v4+v6 traffic selectors, and the veepin client pings a strongSwan-side

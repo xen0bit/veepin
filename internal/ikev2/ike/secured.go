@@ -107,12 +107,22 @@ func (s *Server) respondEncrypted(sa *IKESA, ex payload.ExchangeType, msgID uint
 		Flags:        payload.FlagResponse,
 		MessageID:    msgID,
 	}
-	pkt, err := buildEncryptedMessage(hdr, sa.Suite, sa.Keys, sa.dirForOutbound(), firstInner, innerChain)
+	// sa.fragEnabled records whether the initiator advertised RFC 7383 in
+	// IKE_SA_INIT. It gates fragmentation for exactly the same reason the
+	// client's c.frag does: a peer that did not advertise support will not
+	// reassemble SKF payloads, and sending them to one is a dead handshake.
+	pkts, err := sealMaybeFragment(hdr, sa.Suite, sa.Keys, sa.dirForOutbound(),
+		firstInner, innerChain, sa.fragEnabled)
 	if err != nil {
 		s.log.Printf("ikev2: build encrypted %s response: %v", ex, err)
 		return
 	}
-	s.send(pkt, remote, sa.OnPort4500)
+	if len(pkts) > 1 {
+		s.log.Printf("ikev2: fragmenting %s response (msgid %d) into %d RFC 7383 fragments", ex, msgID, len(pkts))
+	}
+	for _, pkt := range pkts {
+		s.send(pkt, remote, sa.OnPort4500)
+	}
 }
 
 // respondEncryptedNotify sends an encrypted response carrying a single Notify.

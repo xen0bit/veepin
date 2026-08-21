@@ -60,11 +60,11 @@ func (c *Client) RekeyChild(ctx context.Context) (newRes *ClientResult, oldInSPI
 	b.Add(payload.TypeTSr, false, payload.MarshalTS(tsAll))
 
 	msgID := c.sendMsgID
-	pkt, err := c.seal(payload.CREATE_CHILD_SA, msgID, b.FirstType(), b.Bytes())
+	pkts, err := c.seal(payload.CREATE_CHILD_SA, msgID, b.FirstType(), b.Bytes())
 	if err != nil {
 		return nil, 0, err
 	}
-	if err := c.writeIKE(pkt); err != nil {
+	if err := c.writeIKEAll(pkts); err != nil {
 		return nil, 0, fmt.Errorf("ike: rekey send: %w", err)
 	}
 	inners, err := c.recvInnersFrom(c.recvControl(ctx))
@@ -177,11 +177,11 @@ func (c *Client) RekeyIKE(ctx context.Context) error {
 	b.Add(payload.TypeKE, false, payload.MarshalKE(payload.KEPayload{Group: c.suite.DHID, KeyData: pub}))
 
 	msgID := c.sendMsgID
-	pkt, err := c.seal(payload.CREATE_CHILD_SA, msgID, b.FirstType(), b.Bytes())
+	pkts, err := c.seal(payload.CREATE_CHILD_SA, msgID, b.FirstType(), b.Bytes())
 	if err != nil {
 		return err
 	}
-	if err := c.writeIKE(pkt); err != nil {
+	if err := c.writeIKEAll(pkts); err != nil {
 		return fmt.Errorf("ike: rekey-IKE send: %w", err)
 	}
 	inners, err := c.recvInnersFrom(c.recvControl(ctx))
@@ -254,11 +254,11 @@ func (c *Client) deleteOldIKESA(ctx context.Context, msgID uint32) error {
 	b.Add(payload.TypeDelete, false, payload.MarshalDelete(payload.DeletePayload{
 		Protocol: payload.ProtoIKE, SPISize: 0,
 	}))
-	pkt, err := c.seal(payload.INFORMATIONAL, msgID, b.FirstType(), b.Bytes())
+	pkts, err := c.seal(payload.INFORMATIONAL, msgID, b.FirstType(), b.Bytes())
 	if err != nil {
 		return err
 	}
-	if err := c.writeIKE(pkt); err != nil {
+	if err := c.writeIKEAll(pkts); err != nil {
 		return fmt.Errorf("ike: delete-IKE send: %w", err)
 	}
 	if _, err := c.recvInnersFrom(c.recvControl(ctx)); err != nil {
@@ -282,11 +282,11 @@ func (c *Client) DeleteChildSA(ctx context.Context, inSPI uint32) error {
 		Protocol: payload.ProtoESP, SPISize: 4, SPIs: [][]byte{u32BE(inSPI)},
 	}))
 	msgID := c.sendMsgID
-	pkt, err := c.seal(payload.INFORMATIONAL, msgID, b.FirstType(), b.Bytes())
+	pkts, err := c.seal(payload.INFORMATIONAL, msgID, b.FirstType(), b.Bytes())
 	if err != nil {
 		return err
 	}
-	if err := c.writeIKE(pkt); err != nil {
+	if err := c.writeIKEAll(pkts); err != nil {
 		return fmt.Errorf("ike: delete send: %w", err)
 	}
 	if _, err := c.recvInnersFrom(c.recvControl(ctx)); err != nil {
