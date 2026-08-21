@@ -267,6 +267,32 @@ The package ships a systemd template unit — drop arguments in
 `/usr/share/doc/veepin/veepin.conf.example`); it grants the daemon the
 capabilities it needs, so no root shell or setcap step.
 
+### Verifying a release
+
+Each GitHub release carries `checksums.txt`, a cosign signature over it, and a
+CycloneDX SBOM per binary. The signature is **keyless**: it is bound to this
+repository's release workflow through GitHub's OIDC identity, so there is no
+long-lived signing key to trust, and verification checks *which workflow built
+the artifact* rather than *who holds a key*.
+
+```sh
+cosign verify-blob checksums.txt \
+  --certificate checksums.txt.pem \
+  --signature checksums.txt.sig \
+  --certificate-identity-regexp 'https://github[.]com/xen0bit/veepin/[.]github/workflows/release[.]yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+sha256sum -c checksums.txt --ignore-missing
+```
+
+One signature over the checksum file rather than one per artifact: the checksums
+already cover every artifact, so verifying the signature and then the checksums
+gives the same guarantee.
+
+The SBOM is short — `golang.org/x/{crypto,net,sys,text}` and the standard
+library — which is the point of publishing it. The dependency claim at the top
+of this file is then something a scanner can check rather than a sentence you
+have to take on trust.
+
 `.deb`/`.rpm`/`.apk` packages and plain tarballs for every version are on
 [GitHub Releases](https://github.com/xen0bit/veepin/releases)
 (`apt install ./veepin_<ver>_linux_<arch>.deb` works directly).

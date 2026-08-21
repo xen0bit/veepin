@@ -102,6 +102,45 @@ nfpms:
 checksum:
   name_template: "checksums.txt"
 
+# Cosign keyless signing of the checksum file, via GitHub's OIDC identity.
+#
+# One signature over checksums.txt rather than one per artifact, deliberately:
+# the checksum file already covers every artifact, so signing it signs all of
+# them, and a verifier who checks the signature and then the checksums has the
+# same guarantee for a fraction of the release time.
+#
+# Keyless means there is no private key to store, rotate or lose -- the identity
+# is the workflow itself, and `cosign verify-blob` checks that the signature
+# came from this repository's release workflow rather than from someone holding
+# a key. That is a stronger claim than a long-lived key kept in a repository
+# secret, which is the alternative and the thing most projects actually do.
+#
+# It runs only when COSIGN_EXPERIMENTAL-style OIDC is available, i.e. in the
+# release workflow with `id-token: write`. A local `goreleaser release
+# --snapshot` skips it rather than failing.
+signs:
+  - cmd: cosign
+    certificate: "${artifact}.pem"
+    args:
+      - "sign-blob"
+      - "--output-certificate=${certificate}"
+      - "--output-signature=${signature}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: checksum
+    output: true
+
+# A CycloneDX SBOM per binary, so a consumer can answer "does this contain the
+# module with today's advisory" without building anything.
+#
+# The answer for veepin is short -- golang.org/x/{crypto,net,sys,text} and the
+# standard library -- and that is exactly why it is worth publishing: the claim
+# at the top of the README is that the dependency list is tiny, and an SBOM is
+# that claim in a form a scanner can check rather than a sentence a reader has
+# to trust.
+sboms:
+  - artifacts: binary
+
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
 

@@ -471,6 +471,31 @@ Two smaller notes on the same file:
   not a visible error but a login that never succeeds. A password arriving on
   a pipe is read once and is not echoed by anything.
 
+## The management plane is for one operator on one host, permanently
+
+This is a decision, recorded so it stops looking like an omission somebody will
+eventually "fix" by adding a login form.
+
+The management plane is designed for the person who is already root on the box:
+a bearer token in a `0600` root-only file, a panel with no login, and a
+localhost bind plus a `Host` check as the boundary. Every one of those is
+correct for a single operator with shell access, and every one of them is a
+hard ceiling on anything else.
+
+**veepin is not going to grow a multi-operator management plane.** The pieces
+for one are in the tree — `internal/userdb`, `internal/otp`, `internal/profile`
+— but they exist for the *VPN's* users, not for its administrators, and reusing
+them here would change what the security boundary is. Real authentication means
+the localhost bind stops being what protects the panel, which in turn means
+every handler, the audit log, and the `Host` check all need to be re-reasoned
+about against a hostile network peer rather than a trusted one. That is a
+different project with a different threat model, not a feature.
+
+If more than one person needs to administer a veepin host, the supported answer
+is the one that already works and that this design assumes: give them shell
+access, or put an authenticating reverse proxy in front of the API. Both put the
+multi-user problem where there are mature tools for it.
+
 ## The management plane binds to localhost; do not bind it to a routable interface
 
 The supervisor (`veepin serve -config <dir>`) starts a management HTTP API and

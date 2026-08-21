@@ -18,6 +18,12 @@ permissions:
 jobs:
   goreleaser:
     runs-on: ubuntu-latest
+    # id-token is what makes cosign's keyless signing possible: the signature is
+    # bound to this workflow's OIDC identity, so there is no private key to
+    # store, rotate or leak. contents: write is for the release itself.
+    permissions:
+      contents: write
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -32,6 +38,21 @@ jobs:
 
       - name: Run tests
         run: go test -race ./...
+
+      # syft produces the SBOMs and cosign signs the checksum file. Both are
+      # pinned rather than floating, for the reason the golangci-lint pin in
+      # ci.yml spells out: a dependency that moves on its own schedule turns a
+      # green release red without a change on our side, and a release is the
+      # worst moment to discover that.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: "v2.4.1"
+
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@v0
+        with:
+          syft-version: "v1.18.1"
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
