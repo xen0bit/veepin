@@ -87,8 +87,12 @@ led its defaults with it since Go 1.24 and veepin pins `CurvePreferences`
 nowhere — a guard test enforces that it stays that way. That covers MASQUE and
 the OpenVPN server unconditionally, and AnyConnect, Fortinet, GlobalProtect,
 Ivanti, SSTP, SoftEther and the OpenVPN client whenever the peer speaks TLS 1.3.
-**Authentication remains classical** in all of them; see
-[`doc/security.md`](doc/security.md) for what that does and does not protect.
+**Authentication can be post-quantum too**, as of Go 1.27: point a server at an
+ML-DSA (FIPS 204) certificate and key and both halves of the handshake are
+post-quantum — key exchange and signature — with no dependency outside the
+standard library. It is opt-in because an ML-DSA certificate is only useful
+against a peer that accepts one. See [`doc/security.md`](doc/security.md) for
+what each half does and does not protect.
 
 AES from the standard library; ChaCha20-Poly1305 from `x/crypto` (the same AEAD
 WireGuard already pulls in). ChaCha20-Poly1305 for IKEv2/ESP shares AES-GCM-16's

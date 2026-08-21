@@ -219,12 +219,26 @@ Concretely:
 
 Three things this does **not** cover, and each is a real boundary:
 
-- **Authentication is classical everywhere.** The same limit
-  [post-quantum IKEv2 has](#post-quantum-ikev2-protects-the-key-exchange-not-the-authentication):
-  certificates are signed with RSA or ECDSA, so an adversary attacking the
-  authentication *live* rather than retroactively is unaffected. Go 1.27's
-  `crypto/mldsa` makes closing this reachable — `crypto/x509` parses ML-DSA keys
-  and `crypto/tls` offers `MLDSA44/65/87` — and it has not been done.
+- **Authentication is classical by default, and no longer has to be.** The same
+  limit [post-quantum IKEv2 has](#post-quantum-ikev2-protects-the-key-exchange-not-the-authentication):
+  a certificate signed with RSA or ECDSA leaves an adversary attacking the
+  authentication *live* rather than retroactively unaffected.
+
+  Go 1.27's `crypto/mldsa` closes it, inside the dependency policy and with no
+  new module. `crypto/x509` mints, marshals and verifies ML-DSA certificates,
+  `crypto/tls` offers `MLDSA44/65/87` as TLS 1.3 signature schemes, and veepin's
+  credential paths carry them without any protocol work — they load PEM and hand
+  it to `tls.X509KeyPair`, which is the whole of what is needed.
+  `TestAFullyPostQuantumHandshake` pins both halves at once (ML-KEM key exchange
+  and an ML-DSA signature), and `TestServerAcceptsMLDSACredentials` does it
+  through a real facade with **mutual** authentication, so both signatures on
+  the connection are post-quantum.
+
+  **It is opt-in and it is not the default**, for one reason: an ML-DSA
+  certificate is only useful against a peer that accepts one, and most deployed
+  clients do not yet. Point a veepin server at an ML-DSA certificate and key and
+  the handshake is post-quantum end to end; point it at an RSA one and it is
+  hybrid on the key exchange and classical on the signature, as before.
 - **The DTLS data channels are not.** `internal/dtls` is a from-scratch DTLS 1.2
   with two fixed suites and no post-quantum path at all, so AnyConnect's and
   Fortinet's *data* channels stay classical even when their control channels do
