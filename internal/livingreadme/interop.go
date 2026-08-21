@@ -172,8 +172,9 @@ var interopMatrix = []interopRow{
 	{
 		Protocol: "MASQUE-IP",
 		Client:   interopCell{Tests: []string{"TestInteropVeepinMasqueClientAioquicProxy"}, Label: "aioquic CONNECT-IP"},
-		Server:   interopCell{Tests: []string{"TestInteropAioquicClientVeepinProxy"}, Label: "aioquic CONNECT-IP"},
-		Self:     interopCell{Tests: []string{"TestInteropMasqueSelf"}},
+		Server: interopCell{Tests: []string{"TestInteropAioquicClientVeepinProxy",
+			"TestInteropAioquicClientVeepinProxyShaped"}, Label: "aioquic CONNECT-IP"},
+		Self: interopCell{Tests: []string{"TestInteropMasqueSelf"}},
 	},
 	{
 		Protocol: "MASQUE-UDP",

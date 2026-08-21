@@ -287,10 +287,20 @@ Ordered by value, not by ease:
    than an open question: see [`verifying-shaping.md`](verifying-shaping.md). It
    is the highest-value item on this list by a distance, because until it is done
    the feature is off and everything else here is dormant.
-2. **The protocols still unshaped**: SSH and MASQUE. A MASQUE capsule type can
-   be unregistered-and-skipped, which RFC 9297 requires receivers to tolerate —
-   and veepin's own reader already does, in both directions, so only aioquic's
-   behaviour is an open question.
+2. **The protocol still unshaped**: SSH.
+
+   **MASQUE was on this list and is not any more**, and it did not need the
+   vehicle this document proposed. The suggestion was a filler capsule of an
+   unregistered type, which RFC 9297 requires receivers to skip. That would have
+   tested aioquic's compliance with a MUST; what shipped instead pads *inside*
+   the DATAGRAM capsule's value, after the IP packet, because RFC 9484's
+   context-0 payload is "context ID, then an IP packet" with no length of its
+   own — so the receiver hands everything after the context ID to its TUN and
+   the kernel delimits the real packet by Total Length, exactly as every other
+   shaped protocol here relies on. It works against a receiver that skips
+   unknown capsules and one that does not, which is a strictly weaker
+   requirement on the peer. `compose.masque-server-shaped.yml` proves aioquic
+   accepts and trims it having been told nothing.
 
    **SSH's named vehicle does not exist, and this document was wrong about it.**
    The claim here used to be that "`SSH_MSG_IGNORE` exists for exactly this".

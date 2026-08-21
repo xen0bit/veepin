@@ -106,11 +106,41 @@ type DatagramEncoder struct {
 // the length, the context ID, and the packet. The returned slice aliases the
 // encoder's buffer and is only valid until the next Encode.
 func (e *DatagramEncoder) Encode(packet []byte) []byte {
+	return e.EncodePadded(packet, 0)
+}
+
+// EncodePadded is Encode with trailing filler after the inner packet, so the
+// capsule reaches at least minInner octets of payload. A minInner at or below
+// the packet's own length pads nothing, which is what Encode passes.
+//
+// The filler goes INSIDE the DATAGRAM capsule's value, after the IP packet, and
+// that placement is what makes it inert. RFC 9484's context-0 payload is
+// "context ID, then an IP packet" with no length of its own, so a receiver --
+// ours or aioquic's -- hands everything after the context ID to its TUN and the
+// kernel's IP stack delimits the real packet by the inner header's Total
+// Length. This is the same mechanism WireGuard, L2TPv3, SoftEther and Nebula
+// use; MASQUE needs no capsule type of its own for it.
+//
+// The alternative the docs used to suggest -- a filler capsule of an
+// unregistered type, which RFC 9297 requires receivers to skip -- was rejected
+// on the grounds that it tests the peer's compliance with a MUST rather than
+// relying on behaviour every IP stack already has. A receiver that mishandles
+// trailing octets is broken in a way a ping notices; a receiver that rejects an
+// unknown capsule is merely non-compliant, and there would be no way to shape
+// against it at all.
+func (e *DatagramEncoder) EncodePadded(packet []byte, minInner int) []byte {
+	inner := len(packet)
+	if minInner > inner {
+		inner = minInner
+	}
 	e.buf = e.buf[:0]
 	e.buf = http3.AppendVarint(e.buf, CapsuleDatagram)
-	e.buf = http3.AppendVarint(e.buf, uint64(http3.VarintLen(contextIDPackets)+len(packet)))
+	e.buf = http3.AppendVarint(e.buf, uint64(http3.VarintLen(contextIDPackets)+inner))
 	e.buf = http3.AppendVarint(e.buf, contextIDPackets)
 	e.buf = append(e.buf, packet...)
+	for range inner - len(packet) {
+		e.buf = append(e.buf, 0)
+	}
 	return e.buf
 }
 

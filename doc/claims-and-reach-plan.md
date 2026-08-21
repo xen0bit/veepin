@@ -77,7 +77,7 @@ What remains, and why each stopped where it did:
 |---|------|-------|------|---------|--------|
 | 5 | SSH is unshaped — and the vehicle the docs name does not exist | Medium | Low | **Do** | ☐ |
 | 6 | Nebula is unshaped | Medium | Low | Do | ✅ landed |
-| 7 | MASQUE is unshaped | Medium | Low | Do | ☐ |
+| 7 | MASQUE is unshaped | Medium | Low | Do | ✅ landed |
 
 ### Part 3 — the next capability
 

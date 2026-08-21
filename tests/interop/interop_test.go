@@ -938,6 +938,22 @@ func TestInteropAioquicClientVeepinProxy(t *testing.T) {
 	runInteropBench(t, "compose.masque-server.yml", "aioquic-masque-client", "veepin-masque-server", "10.32.0.1")
 }
 
+// TestInteropAioquicClientVeepinProxyShaped is the cell that makes MASQUE's
+// shaping mean something. veepin pads each inner packet out to the inner MTU
+// inside the DATAGRAM capsule's value, and aioquic is told nothing about it:
+// RFC 9484's context-0 payload carries no length of its own, so the receiver
+// hands everything after the context ID to its TUN and the kernel delimits the
+// real packet by the inner IP header's Total Length.
+//
+// The log line is required as well as the ping. A ping passes just as happily
+// on a shaper that quietly did nothing, which is the whole failure mode the
+// -shape work exists to avoid claiming.
+func TestInteropAioquicClientVeepinProxyShaped(t *testing.T) {
+	runInteropRequiringLogFrom(t, "compose.masque-server-shaped.yml",
+		"aioquic-masque-client", "veepin-masque-server", "10.32.0.1",
+		"shaping outbound packets to")
+}
+
 // TestInteropMasqueSelf is the veepin<->veepin sanity check over real QUIC. Its
 // value is attribution: if it passes while the two cross-implementation cells
 // fail, veepin and the RFC have diverged rather than veepin being broken.

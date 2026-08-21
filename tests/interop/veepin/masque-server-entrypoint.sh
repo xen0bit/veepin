@@ -14,11 +14,18 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
     -keyout /tmp/proxy.key -out /tmp/proxy.crt -days 1 -nodes \
     -subj "/CN=veepin-masque-proxy" >/dev/null 2>&1
 
-echo "veepin-masque-server: starting on 0.0.0.0:${PORT:-443}, pool ${POOL}"
+# SHAPE pads the first N bytes of each inner flow out to the inner MTU. The
+# filler goes inside the DATAGRAM capsule's value, after the IP packet: RFC
+# 9484's context-0 payload has no length of its own, so the receiver hands
+# everything after the context ID to its TUN and the kernel delimits the real
+# packet by the inner header's Total Length. The shaped cell exists to prove
+# aioquic does exactly that without being told anything.
+echo "veepin-masque-server: starting on 0.0.0.0:${PORT:-443}, pool ${POOL}, shape ${SHAPE:-0}"
 exec veepin serve masque \
     -listen 0.0.0.0 \
     -port "${PORT:-443}" \
     -pool "$POOL" \
+    -shape "${SHAPE:-0}" \
     -cert /tmp/proxy.crt -key /tmp/proxy.key \
     -tun masque0 \
     -setup-nat -wan eth0
