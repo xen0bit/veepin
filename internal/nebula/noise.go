@@ -28,11 +28,11 @@ import (
 	"crypto/cipher"
 	"crypto/ecdh"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 
 	"github.com/xen0bit/veepin/internal/cryptoutil"
 )
@@ -234,10 +234,22 @@ func newNoiseHandshake(c noiseCipher, initiator bool, static *ecdh.PrivateKey) *
 // PeerStatic returns the peer's static public key once it has been received.
 func (hs *noiseHandshake) PeerStatic() []byte { return hs.rs }
 
-// generateEphemeral creates the ephemeral keypair. It is a parameter so tests
-// can supply a fixed one and check against known vectors.
-func (hs *noiseHandshake) generateEphemeral(rand io.Reader) error {
-	e, err := ecdh.X25519().GenerateKey(rand)
+// generateEphemeral installs the ephemeral keypair: the caller's, or a fresh one
+// from crypto/rand when it passes nil.
+//
+// The seam is the *key* rather than the entropy behind it, deliberately, and the
+// distinction stopped being cosmetic in Go 1.26. That release added the
+// `cryptocustomrand` GODEBUG, which defaults to 0 for a go.mod at 1.26 or later
+// and makes crypto/... APIs ignore the io.Reader they are handed. This function
+// used to take one; at the 1.27 floor it would have been silently ignored and
+// the known-answer vectors below would have been tested against fresh entropy.
+// A parameter the runtime discards is worse than no parameter, so it is gone.
+func (hs *noiseHandshake) generateEphemeral(eph *ecdh.PrivateKey) error {
+	if eph != nil {
+		hs.e = eph
+		return nil
+	}
+	e, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
 		return err
 	}
@@ -254,11 +266,14 @@ func dh(priv *ecdh.PrivateKey, pub []byte) ([]byte, error) {
 }
 
 // WriteMessage1 produces the initiator's message: -> e, s
-func (hs *noiseHandshake) WriteMessage1(payload []byte, rand io.Reader) ([]byte, error) {
+//
+// eph is nil everywhere except in tests, which supply a fixed ephemeral key to
+// reproduce the vectors in noise_test.go. See generateEphemeral.
+func (hs *noiseHandshake) WriteMessage1(payload []byte, eph *ecdh.PrivateKey) ([]byte, error) {
 	if !hs.initiator {
 		return nil, errors.New("nebula: responder cannot send the first handshake message")
 	}
-	if err := hs.generateEphemeral(rand); err != nil {
+	if err := hs.generateEphemeral(eph); err != nil {
 		return nil, err
 	}
 
@@ -302,11 +317,13 @@ func (hs *noiseHandshake) ReadMessage1(msg []byte) ([]byte, error) {
 }
 
 // WriteMessage2 produces the responder's message: <- e, ee, se, s, es
-func (hs *noiseHandshake) WriteMessage2(payload []byte, rand io.Reader) ([]byte, error) {
+//
+// eph is nil everywhere except in tests. See generateEphemeral.
+func (hs *noiseHandshake) WriteMessage2(payload []byte, eph *ecdh.PrivateKey) ([]byte, error) {
 	if hs.initiator {
 		return nil, errors.New("nebula: initiator cannot send the second handshake message")
 	}
-	if err := hs.generateEphemeral(rand); err != nil {
+	if err := hs.generateEphemeral(eph); err != nil {
 		return nil, err
 	}
 

@@ -65,18 +65,18 @@ func mustX25519(t *testing.T, hexKey string) *ecdh.PrivateKey {
 	return k
 }
 
-// fixedReader hands out the same bytes every time, so an ephemeral keypair
-// generated from it is deterministic.
-type fixedReader struct{ b []byte }
-
-func (r *fixedReader) Read(p []byte) (int, error) { return copy(p, r.b), nil }
+// The ephemeral keys are handed in whole rather than as an entropy source. That
+// used to be a fixedReader feeding ecdh.GenerateKey, which stopped working at a
+// go.mod floor of 1.26: cryptocustomrand makes crypto APIs ignore the reader, so
+// the "fixed" ephemeral key was silently random and these vectors failed. The
+// vectors themselves are unchanged -- only the seam moved.
 
 func TestNoiseIXKnownAnswer(t *testing.T) {
 	ini := newNoiseHandshake(cipherAESGCM, true, mustX25519(t, katInitStaticPriv))
 	res := newNoiseHandshake(cipherAESGCM, false, mustX25519(t, katRespStaticPriv))
 
-	initEph := &fixedReader{mustDecodeHex(t, katInitEphemeral)}
-	respEph := &fixedReader{mustDecodeHex(t, katRespEphemeral)}
+	initEph := mustX25519(t, katInitEphemeral)
+	respEph := mustX25519(t, katRespEphemeral)
 
 	msg1, err := ini.WriteMessage1([]byte(katPayload1), initEph)
 	if err != nil {
@@ -146,7 +146,7 @@ func sealWith(t *testing.T, key [keySize]byte, n uint64, pt []byte) []byte {
 // in the handshake path breaks.
 func TestNoiseIXFirstMessageExposesInitiatorStatic(t *testing.T) {
 	ini := newNoiseHandshake(cipherAESGCM, true, mustX25519(t, katInitStaticPriv))
-	msg1, err := ini.WriteMessage1(nil, &fixedReader{mustDecodeHex(t, katInitEphemeral)})
+	msg1, err := ini.WriteMessage1(nil, mustX25519(t, katInitEphemeral))
 	if err != nil {
 		t.Fatalf("WriteMessage1: %v", err)
 	}
@@ -168,14 +168,14 @@ func TestNoiseRoundTripBothCiphers(t *testing.T) {
 			ini := newNoiseHandshake(tc.cipher, true, mustX25519(t, katInitStaticPriv))
 			res := newNoiseHandshake(tc.cipher, false, mustX25519(t, katRespStaticPriv))
 
-			msg1, err := ini.WriteMessage1([]byte("one"), &fixedReader{mustDecodeHex(t, katInitEphemeral)})
+			msg1, err := ini.WriteMessage1([]byte("one"), mustX25519(t, katInitEphemeral))
 			if err != nil {
 				t.Fatalf("WriteMessage1: %v", err)
 			}
 			if _, err := res.ReadMessage1(msg1); err != nil {
 				t.Fatalf("ReadMessage1: %v", err)
 			}
-			msg2, err := res.WriteMessage2([]byte("two"), &fixedReader{mustDecodeHex(t, katRespEphemeral)})
+			msg2, err := res.WriteMessage2([]byte("two"), mustX25519(t, katRespEphemeral))
 			if err != nil {
 				t.Fatalf("WriteMessage2: %v", err)
 			}
@@ -196,14 +196,14 @@ func TestNoiseRejectsTamperedMessage2(t *testing.T) {
 	ini := newNoiseHandshake(cipherAESGCM, true, mustX25519(t, katInitStaticPriv))
 	res := newNoiseHandshake(cipherAESGCM, false, mustX25519(t, katRespStaticPriv))
 
-	msg1, err := ini.WriteMessage1(nil, &fixedReader{mustDecodeHex(t, katInitEphemeral)})
+	msg1, err := ini.WriteMessage1(nil, mustX25519(t, katInitEphemeral))
 	if err != nil {
 		t.Fatalf("WriteMessage1: %v", err)
 	}
 	if _, err := res.ReadMessage1(msg1); err != nil {
 		t.Fatalf("ReadMessage1: %v", err)
 	}
-	msg2, err := res.WriteMessage2([]byte("two"), &fixedReader{mustDecodeHex(t, katRespEphemeral)})
+	msg2, err := res.WriteMessage2([]byte("two"), mustX25519(t, katRespEphemeral))
 	if err != nil {
 		t.Fatalf("WriteMessage2: %v", err)
 	}
@@ -224,10 +224,47 @@ func TestNoiseRejectsShortMessages(t *testing.T) {
 	}
 
 	ini := newNoiseHandshake(cipherAESGCM, true, mustX25519(t, katInitStaticPriv))
-	if _, err := ini.WriteMessage1(nil, &fixedReader{mustDecodeHex(t, katInitEphemeral)}); err != nil {
+	if _, err := ini.WriteMessage1(nil, mustX25519(t, katInitEphemeral)); err != nil {
 		t.Fatalf("WriteMessage1: %v", err)
 	}
 	if _, err := ini.ReadMessage2(make([]byte, keySize)); err == nil {
 		t.Error("accepted a truncated second message")
+	}
+}
+
+// TestNilEphemeralGeneratesAFreshKey: production passes nil, and the seam that
+// lets a test pin the ephemeral key must not become a way to accidentally reuse
+// one. Two handshakes built the same way have to disagree about their first 32
+// octets, which is the ephemeral public key in the clear.
+func TestNilEphemeralGeneratesAFreshKey(t *testing.T) {
+	first, err := newNoiseHandshake(cipherAESGCM, true, mustX25519(t, katInitStaticPriv)).
+		WriteMessage1(nil, nil)
+	if err != nil {
+		t.Fatalf("WriteMessage1: %v", err)
+	}
+	second, err := newNoiseHandshake(cipherAESGCM, true, mustX25519(t, katInitStaticPriv)).
+		WriteMessage1(nil, nil)
+	if err != nil {
+		t.Fatalf("WriteMessage1: %v", err)
+	}
+	if bytes.Equal(first[:keySize], second[:keySize]) {
+		t.Fatal("two handshakes shared an ephemeral public key; nil must mean generate")
+	}
+}
+
+// TestPinnedEphemeralIsTheKeyThatGoesOnTheWire is the regression guard for the
+// bug this seam was reshaped to prevent. When crypto APIs ignored the caller's
+// io.Reader (Go 1.26 cryptocustomrand), a "fixed" ephemeral key was silently
+// random and only the known-answer vectors noticed. Asserting the pinned key
+// reaches the wire directly means a future change cannot quietly drop it.
+func TestPinnedEphemeralIsTheKeyThatGoesOnTheWire(t *testing.T) {
+	eph := mustX25519(t, katInitEphemeral)
+	msg, err := newNoiseHandshake(cipherAESGCM, true, mustX25519(t, katInitStaticPriv)).
+		WriteMessage1(nil, eph)
+	if err != nil {
+		t.Fatalf("WriteMessage1: %v", err)
+	}
+	if got, want := msg[:keySize], eph.PublicKey().Bytes(); !bytes.Equal(got, want) {
+		t.Fatalf("ephemeral on the wire = %x, want the pinned key %x", got, want)
 	}
 }

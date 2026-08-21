@@ -282,9 +282,11 @@ func (s *Server) handleConn(raw net.Conn) {
 	s.logf("softether: new connection from %s (port %d)", tlsConn.RemoteAddr(), port)
 
 	s.addSession(ss)
-	if err := ss.exchange(); err != nil {
-		s.logf("softether: session %d: %v", port, err)
-	}
+	// exchange returns only when the session is over, and it always returns an
+	// error: the frame loop's sole exit is a failed read, so even an orderly
+	// client disconnect arrives here as io.EOF. Logging it unconditionally is
+	// what the `err != nil` check did anyway -- the check was never false.
+	s.logf("softether: session %d: %v", port, ss.exchange())
 
 	s.removeSession(port)
 	s.releaseAddress(port)
@@ -292,7 +294,9 @@ func (s *Server) handleConn(raw net.Conn) {
 	tlsConn.Close()
 }
 
-// exchange runs the full control exchange and then forwards frames.
+// exchange runs the full control exchange and then forwards frames until the
+// session ends. It never returns nil -- frameLoop loops until a read fails, so
+// the return value says how the session ended rather than whether it succeeded.
 func (ss *ServerSession) exchange() error {
 	// Phase 0: the HTTP signature. A SoftEther connection opens with an HTTP
 	// POST, not with a PACK -- see http.go. Anything that reaches this

@@ -16,10 +16,8 @@ package nebula
 
 import (
 	"crypto/ecdh"
-	"crypto/rand"
 	"errors"
 	"fmt"
-	"io"
 	"time"
 )
 
@@ -174,7 +172,11 @@ type handshakeConfig struct {
 	identity *Identity
 	pool     *CAPool
 	now      func() time.Time
-	rand     io.Reader
+	// eph pins the ephemeral keypair for a deterministic exchange. Tests set it;
+	// production leaves it nil and each handshake generates its own. It is a key
+	// rather than an io.Reader because Go 1.26's cryptocustomrand makes crypto
+	// APIs ignore a caller-supplied reader -- see noise.go generateEphemeral.
+	eph *ecdh.PrivateKey
 }
 
 func (c *handshakeConfig) clock() time.Time {
@@ -234,7 +236,7 @@ func (c *handshakeConfig) initiate() (*initiatorHandshake, []byte, error) {
 		CertVersion:    certVersion1,
 	}.marshal()
 
-	body, err := hs.noise.WriteMessage1(payload, c.randReader())
+	body, err := hs.noise.WriteMessage1(payload, c.ephemeral())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -249,14 +251,9 @@ func (c *handshakeConfig) initiate() (*initiatorHandshake, []byte, error) {
 	return hs, append(h.encode(nil), body...), nil
 }
 
-// randReader is the entropy source for ephemeral keys. Tests substitute a
-// deterministic one; everything else gets crypto/rand.
-func (c *handshakeConfig) randReader() io.Reader {
-	if c.rand != nil {
-		return c.rand
-	}
-	return rand.Reader
-}
+// ephemeral is the fixed ephemeral keypair a test pinned, or nil to have the
+// handshake generate its own from crypto/rand.
+func (c *handshakeConfig) ephemeral() *ecdh.PrivateKey { return c.eph }
 
 // respond consumes an initiator's message and produces the reply plus the
 // established tunnel. The responder finishes the IX pattern, so it has keys as
@@ -300,7 +297,7 @@ func (c *handshakeConfig) respond(pkt []byte) ([]byte, *tunnel, error) {
 		CertVersion:    certVersion1,
 	}.marshal()
 
-	body, err := noiseHS.WriteMessage2(reply, c.randReader())
+	body, err := noiseHS.WriteMessage2(reply, c.ephemeral())
 	if err != nil {
 		return nil, nil, err
 	}

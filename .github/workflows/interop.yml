@@ -106,7 +106,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: "1.25"
+          go-version: "1.27"
           cache: true
 
       - name: Derive the shard matrix from the interop manifest
@@ -136,7 +136,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: "1.25"
+          go-version: "1.27"
           cache: true
 
       - name: Enable TUN + IPsec kernel modules
@@ -273,7 +273,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: "1.25"
+          go-version: "1.27"
           cache: true
 
       - name: Collect every shard's results

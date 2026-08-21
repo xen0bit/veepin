@@ -27,7 +27,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: "1.25"
+          go-version: "1.27"
           cache: true
 
       - name: Run tests
@@ -73,7 +73,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: "1.25"
+          go-version: "1.27"
           cache: true
           cache-dependency-path: nm/go.sum
 
@@ -144,7 +144,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: "1.25"
+          go-version: "1.27"
           cache: false # actions/cache needs zstd, absent in the container
 
       - name: Build packages (.deb/.rpm)

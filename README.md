@@ -258,7 +258,7 @@ capabilities it needs, so no root shell or setcap step.
 
 ## Build
 
-Requires Go 1.21+ (developed against Go 1.26).
+Requires Go 1.27+ (`crypto/mldsa`; developed against Go 1.27).
 
 ```sh
 go build ./...
