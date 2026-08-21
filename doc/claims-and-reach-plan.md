@@ -91,7 +91,7 @@ What remains, and why each stopped where it did:
 | # | Item | Value | Risk | Verdict | Status |
 |---|------|-------|------|---------|--------|
 | 10 | An abandoned listener leaks its pump goroutine and its TUN fd | **High** | Low | **Do** | ✅ landed (visibility half) |
-| 11 | No kill switch on macOS | Medium | **Medium** | Do — it means owning pf state | ☐ |
+| 11 | No kill switch on macOS | Medium | **Medium** | Decided: **no** — see below | ✅ resolved |
 | 12 | `-log-level` gates the stream, not the call site | Low | Medium | Do last | ☐ |
 
 **If only three things happen: 1, 2 and 10.** One and two are a defect that
