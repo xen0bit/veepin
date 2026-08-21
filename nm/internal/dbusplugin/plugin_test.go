@@ -474,3 +474,37 @@ func TestUnsolicitedNewSecretsIsRefused(t *testing.T) {
 		t.Fatal("an unsolicited NewSecrets was accepted")
 	}
 }
+
+// TestPublishStateSurvivesAClosedBus is the regression guard for a panic that
+// killed the service on the way down.
+//
+// prop.Properties.SetMust panics on any error from its internal set, including
+// the emit failing with "dbus: connection closed by user" -- which is not a
+// programming error but what a shutdown looks like. The last thing this plugin
+// does is setState(StateStopped), so losing that race took the process out with
+// a panic instead of exiting.
+//
+// It closes the connection first and then publishes, which is the losing side
+// of the race made deterministic.
+func TestPublishStateSurvivesAClosedBus(t *testing.T) {
+	server, _ := newTestBus(t)
+	p := exportTestPlugin(t, server)
+
+	_ = server.Close()
+	// Must not panic. A failure here is a crashed VPN service, not a lost
+	// property update.
+	p.publishState(StateStopped)
+
+	// And the guard has teeth: the underlying call really does panic on a
+	// closed bus, so publishState is doing work rather than the API having
+	// quietly become safe.
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("SetMust no longer panics on a closed bus; publishState's recover " +
+					"is now dead code and the comment explaining it is wrong")
+			}
+		}()
+		p.props.SetMust(Iface, "State", StateStopped)
+	}()
+}

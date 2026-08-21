@@ -428,12 +428,44 @@ func (p *Plugin) setState(s uint32) {
 	p.mu.Lock()
 	p.state = s
 	p.mu.Unlock()
-	if p.props != nil {
-		p.props.SetMust(Iface, "State", s)
-	}
+	p.publishState(s)
 	if err := p.conn.Emit(ObjectPath, Iface+".StateChanged", s); err != nil {
 		p.log.Printf("emit StateChanged(%d): %v", s, err)
 	}
+}
+
+// publishState pushes the state onto the D-Bus property, and survives the bus
+// having gone away underneath it.
+//
+// prop.Properties.SetMust documents itself as panicking "if the interface or
+// the property name are invalid" -- both programming errors. It actually panics
+// on ANY error from its internal set, and that includes the emit failing with
+// "dbus: connection closed by user", which is not a programming error at all:
+// it is what a shutdown looks like from here. The last thing this plugin does
+// on the way down is setState(StateStopped), so the losing side of that race
+// took the whole process out with a panic instead of exiting.
+//
+// Caught in CI rather than locally, and only once -- the window is the few
+// microseconds between the bus connection closing and the final state update,
+// which a loaded runner widens and a developer's machine almost never hits.
+//
+// There is no non-panicking setter on that type (Set is the D-Bus method
+// handler and enforces writability), so this recovers rather than avoiding the
+// call. A flag would narrow the window without closing it: the connection can
+// close between the check and the call.
+func (p *Plugin) publishState(s uint32) {
+	if p.props == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			// Worth a line rather than silence: if this ever fires for a reason
+			// other than shutdown, the state property has silently stopped
+			// tracking the plugin and nothing else would say so.
+			p.log.Printf("publishing State(%d) failed, most likely because the bus is gone: %v", s, r)
+		}
+	}()
+	p.props.SetMust(Iface, "State", s)
 }
 
 func (p *Plugin) fail(reason uint32) {
