@@ -1512,7 +1512,49 @@ func runInterop(t *testing.T, composeFile, pingSvc string, targets ...string) {
 			t.Fatalf("cross-tunnel ping %s -> %s never succeeded within %s:\n%s",
 				pingSvc, target, pingDeadline, last)
 		}
+		pingLarge(t, composeFile, pingSvc, target)
 	}
+}
+
+// largePingPayload is the ICMP payload of the second ping every cell now sends,
+// after the small one has proved the tunnel is up.
+//
+// Every cell in this matrix used to ping with ping's default 56-octet payload
+// and nothing else, which made the easy case the only case across the whole
+// matrix. datapath_test.go sweeps {64, 576, 1400} in Go, but a length field one
+// octet short, a buffer sized from a literal, a shaper that overshoots its
+// target, or an MTU derived wrongly are all invisible to an 84-octet datagram
+// and all of them break a real transfer immediately.
+//
+// 1000 is chosen against the smallest inner MTU in the tree -- nebula's 1300 --
+// so it is a genuinely large packet on every protocol without becoming a test
+// of path-MTU discovery, which is a different mechanism with its own cells. It
+// is twelve times the packet the matrix used to settle for.
+const largePingPayload = 1000
+
+// pingLarge sends the large ping and fails if it does not cross.
+//
+// It is a fatal check rather than a warning: a tunnel that carries 84 octets and
+// not 1028 is broken for every real use, and reporting that as a pass is exactly
+// the shape of false green this matrix exists to catch. It retries, because the
+// small ping succeeding does not mean every route and NAT rule has settled.
+func pingLarge(t *testing.T, composeFile, pingSvc, target string) {
+	t.Helper()
+	deadline := time.Now().Add(pingDeadline)
+	var last string
+	for time.Now().Before(deadline) {
+		out, err := compose(t, composeFile, "exec", "-T", pingSvc,
+			"ping", "-c2", "-W2", "-s", strconv.Itoa(largePingPayload), target)
+		if err == nil && strings.Contains(out, "0% packet loss") {
+			t.Logf("%s pinged %s with a %d-octet payload", pingSvc, target, largePingPayload)
+			return
+		}
+		last = out
+		time.Sleep(3 * time.Second)
+	}
+	t.Fatalf("%s -> %s carries a small ping but not a %d-octet one within %s; "+
+		"something in the framing, the buffers or the MTU is sized for the easy case:\n%s",
+		pingSvc, target, largePingPayload, pingDeadline, last)
 }
 
 // benchWarmup lets an iperf3 server settle before the client connects.

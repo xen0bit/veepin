@@ -69,7 +69,7 @@ What remains, and why each stopped where it did:
 | 1 | IKEv2 never fragments its own output, and the reason it gives is false | **High** | Low | **Do first** | ✅ landed |
 | 2 | The cert cell mints the smallest certificate that exists | **High** | None | **Do — it is item 1's guard** | ✅ landed |
 | 3 | The L2TPv3 control connection is unit-tested only, and the tree says so | Medium | **Medium** | Do, timeboxed | ☐ |
-| 4 | Which other fixtures make the easy case the only case? | Medium | Low | Do (survey) | ☐ |
+| 4 | Which other fixtures make the easy case the only case? | Medium | Low | Do (survey) | ✅ landed |
 
 ### Part 2 — shaping reaches thirteen of sixteen (now all sixteen)
 
@@ -419,45 +419,53 @@ timebox honest rather than a way of giving up early.
 
 ---
 
-## 4. Which other fixtures make the easy case the only case?
+## 4. Which other fixtures make the easy case the only case? *(surveyed)*
 
-Item 2 is one instance. The general question is worth one deliberate pass,
-because the answer is not derivable from the matrix — every cell in it is green.
+The survey ran. Four categories were checked; one was a real finding, two were
+already covered, and one was fixed by item 2.
+
+### The finding: every cell in the matrix pinged 84 octets, and nothing else
 
 ```sh
-# Every cell that mints a certificate, and what it mints:
-grep -rn 'newkey\|pki --gen\|genrsa' tests/interop/*/*.sh tests/interop/veepin/*.sh
+grep -n '"ping", "-c2", "-W2"' tests/interop/interop_test.go
+# the one shared helper every cell goes through -- ping's default 56-octet
+# payload, an 84-octet IP packet, and no other size anywhere
 ```
 
-That survey already shows `ec:prime256v1` in five veepin server entrypoints and
-`rsa:2048` in one. The certificate size only matters where it crosses a datagram
-boundary — which is IKEv2 and Cisco IPsec, not the TLS-carried protocols, where
-a stream will carry any size. So the cert axis is narrow.
+`datapath_test.go` sweeps `{64, 576, 1400}` in Go, and the matrix settled for
+one small packet on every protocol, in every direction. A length field one octet
+short, a buffer sized from a literal, a shaper that overshoots its target, or an
+MTU derived wrongly are all invisible to an 84-octet datagram — and every one of
+them breaks a real transfer immediately.
 
-The wider question is the one to actually spend the pass on: **for each cell,
-what is the parameter that would break it, and does the fixture vary it?**
-Candidates visible from the tree without running anything:
+`runInterop` now sends a second ping with a 1000-octet payload after the small
+one has proved the tunnel is up, and fails if it does not cross. 1000 is chosen
+against the smallest inner MTU in the tree (nebula's 1300), so it is a genuinely
+large packet on every protocol without becoming a test of path-MTU discovery,
+which is a different mechanism with its own cells.
 
-- **Inner packet size.** Cells ping with the default 56-octet payload. The
-  fragmentation, GSO, GRO and PMTU paths all key on size, and
-  `datapath_test.go` sweeps `{64, 576, 1400}` in Go but the cells do not.
-- **Cookie asymmetry**, which L2TPv3 already got right — "8-octet asymmetric
-  cookies" is in the matrix label precisely because a symmetric fixture would
-  hide a both-ends-backwards bug.
-- **Key direction on every ESP-carrying protocol.** Pulse has
-  `TestKeyBlocksNameTheirOwnInboundDirection`; GlobalProtect and Cisco carry the
-  same shape of keying and it is worth checking they have the equivalent.
+**It found no bug**, which is worth stating plainly rather than dressed up: every
+cell passed on the first run. That is a real result — the framing across sixteen
+protocols is not sized for the easy case — and the guard is what keeps it true.
 
-Deliverable: a short section appended to
-[`tests/interop/README.md`](../tests/interop/README.md) naming, per cell, the
-parameter the fixture pins and why that pinning is safe — or a new cell where it
-is not. This is the cheapest way to stop the next item-1 from being written.
+### Already covered
+
+- **Cookie asymmetry.** L2TPv3 mints asymmetric 8-octet cookies precisely so a
+  both-ends-backwards bug cannot pass, and the matrix label says so.
+- **Key direction on ESP-carrying protocols.** `internal/pulse` has
+  `TestKeyBlocksNameTheirOwnInboundDirection`, written from the peer's point of
+  view, which is the model the roadmap names.
+
+### Fixed by item 2
+
+- **Certificate size.** Before this branch every fixture in the tree minted
+  ECDSA P-256 or `openssl req -newkey ec`, except SoftEther's RSA-2048 server
+  key. The RSA cert cells are the fix; the survey is what confirms nothing else
+  was hiding behind the same assumption.
 
 ### Cost
 
-Half a day for the survey. Whatever it finds is costed separately.
-
----
+Half a day, most of it waiting for sixteen protocols' worth of Docker.
 
 # Part 2: shaping reaches thirteen of sixteen
 
