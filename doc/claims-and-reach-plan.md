@@ -763,7 +763,7 @@ than a bare assertion.
 | H6 | `scaling-the-data-path.md` Option 2 — parallelism with per-tunnel affinity | Medium | **High** | a profile showing the ceiling actually binds |
 | H7 | Site-to-site: multi-SA, subnet selectors, no config-mode assignment | **High** | **High** | a decision that veepin is for more than road warriors |
 | H8 | Record the peer, replay it offline | **High** | Medium | none — the cheapest leverage on this page |
-| H9 | Memory hygiene that can actually hold, instead of zeroing that cannot | Medium | Low | none |
+| H9 | Memory hygiene that can actually hold, instead of zeroing that cannot | Medium | Low | ✅ landed |
 | H10 | The management panel's authentication ceiling | Medium | Medium | a decision, then either work or a written boundary |
 | H11 | Windows — and the README names the wrong obstacle first | Low | **High** | somebody who wants it enough to argue it |
 | H12 | Signed releases, SBOM, continuous fuzzing | Low | Low | before a researcher asks, not after |

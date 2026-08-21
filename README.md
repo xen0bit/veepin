@@ -488,6 +488,25 @@ the level can mean while the tree logs through `*log.Logger`, which has no
 per-call level — and it is useful rather than half-implemented because a fatal
 error returns to `main` and reaches stderr directly, never through the logger.
 
+### Process hardening
+
+`serve` takes two Linux-only switches for the boundary
+[`doc/security.md`](doc/security.md) opens by naming — the one it refuses to
+defend by zeroing key material, because Go's collector makes that a gesture
+rather than a guarantee:
+
+- `-lock-memory` — `mlockall`, so no page reaches swap and key material cannot
+  be recovered from a swap file afterwards. Needs `CAP_IPC_LOCK` or
+  `RLIMIT_MEMLOCK` headroom.
+- `-no-core-dumps` — `prctl(PR_SET_DUMPABLE, 0)`, so a crash writes no core file
+  carrying live session keys and a same-uid process cannot `ptrace` in.
+
+Both are off by default because each trades something real, and both **abort the
+server if refused** rather than warning and carrying on. A hardening switch that
+silently does nothing is worse than no switch: the appearance invites confidence
+the process has not earned. Neither reduces what a debugger with
+`CAP_SYS_PTRACE`, a hypervisor, or code execution in the process can reach.
+
 ### Embedding the client
 
 The handshake and data path are a reusable library: `Dial` performs the handshake

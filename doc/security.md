@@ -15,10 +15,36 @@ wipes keys while leaving them in memory anyway — worse than not doing it, beca
 the appearance invites confidence the implementation has not earned.
 
 The honest consequence: **veepin does not claim protection against an attacker
-who can read process memory.** An adversary with a core dump, a debugger, swap
-access, or code execution in the process recovers live session keys. Defend that
-boundary at the layer that can actually hold it — process isolation, disabled
-core dumps, encrypted swap — not by hoping the language cooperated.
+who can read process memory.** An adversary with a debugger, or code execution
+in the process, recovers live session keys. Defend that boundary at the layer
+that can actually hold it, not by hoping the language cooperated.
+
+Two of those layers the process can take itself, and `veepin serve` now offers
+both. They are off by default because each trades something real:
+
+- **`-lock-memory`** — `mlockall(MCL_CURRENT|MCL_FUTURE)`. No page of the
+  process reaches swap, so key material cannot be recovered from a swap
+  partition or file afterwards. The cost is that the whole resident set becomes
+  unswappable, which on a memory-constrained host trades an availability risk
+  for a confidentiality gain. It needs `CAP_IPC_LOCK` or `RLIMIT_MEMLOCK`
+  headroom (`LimitMEMLOCK=infinity` in a systemd unit).
+- **`-no-core-dumps`** — `prctl(PR_SET_DUMPABLE, 0)`. A crash writes no core
+  file carrying live session keys, and a same-uid process cannot `ptrace` in.
+  The cost is that `/proc/self` becomes root-owned, which a deployment reading
+  its own `/proc` entries for monitoring needs to know.
+
+**Both fail loudly rather than silently.** A refused `mlockall` aborts the
+server; it does not warn and continue. A hardening switch that quietly does
+nothing is worse than no switch at all, for exactly the reason given above about
+fake key wiping — the appearance invites confidence the process has not earned.
+For the same reason, a partial application is never reported: asking for both
+and getting one is an error, not a success with a caveat.
+
+What remains uncovered, and is not reduced by either: a debugger with
+`CAP_SYS_PTRACE`, a hypervisor, a kernel exploit, or anything with code
+execution in the process. See [`internal/harden`](../internal/harden). Both are
+Linux-only, and on other platforms requesting either is an error rather than a
+no-op.
 
 ## Throughput is bounded by one core per direction
 

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/xen0bit/veepin/client"
+	"github.com/xen0bit/veepin/internal/harden"
 	"github.com/xen0bit/veepin/internal/hostnet"
 	"github.com/xen0bit/veepin/internal/mgmt"
 	"github.com/xen0bit/veepin/internal/mgmt/ui"
@@ -52,6 +53,7 @@ func runServe(args []string) error {
 	setup := fs.Bool("setup-nat", false, "auto-configure the TUN address, routing and NAT via ip/iptables (needs privileges)")
 	wanIface := fs.String("wan", "", "WAN interface for -setup-nat masquerading (e.g. eth0)")
 	logCfg := bindLogFlags(fs)
+	hardenCfg := bindHardenFlags(fs)
 
 	options, err := serveFlags(protocol, fs)
 	if err != nil {
@@ -64,6 +66,26 @@ func runServe(args []string) error {
 	logger, err := logCfg.logger()
 	if err != nil {
 		return err
+	}
+
+	// 0. Process hardening, before the TUN is opened and before any key is
+	// derived. Order matters for mlockall: MCL_FUTURE covers later allocations,
+	// but MCL_CURRENT only covers what is already mapped, so doing this first
+	// is what makes "no key material reaches swap" true of every key rather
+	// than of the ones allocated after the call.
+	//
+	// A refusal is fatal rather than a warning. An operator who asked for
+	// memory locking and did not get it is running with a protection they
+	// believe is in place, which is worse than not asking -- the same argument
+	// doc/security.md makes for refusing to fake key zeroing.
+	if hardenCfg.options().Any() {
+		applied, herr := harden.Apply(hardenCfg.options())
+		if herr != nil {
+			return herr
+		}
+		for _, a := range applied {
+			logger.Printf("veepin: %s", a)
+		}
 	}
 
 	// 1. Construct the server (opens the TUN, validates config); it is not yet
