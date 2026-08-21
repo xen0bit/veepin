@@ -58,6 +58,35 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 			label(st.Name), label(st.Protocol), up)
 	}
 
+	// Abandoned listeners: a listener whose Close overran the supervisor's grace
+	// period and is still holding its packet-pump goroutine and TUN fd.
+	//
+	// This is the one series here that is not also on /api/listeners, and it
+	// earns the exception because it is the only failure in the supervisor that
+	// gets worse over time rather than merely staying broken -- a fleet
+	// restarting a genuinely wedged listener on a timer accumulates one of each
+	// per attempt. Before this it was visible only as a log line.
+	//
+	// Both halves are exported deliberately. The gauge answers "is something
+	// wedged right now"; the counter answers "has this ever happened", which is
+	// what survives a listener that eventually unblocks and would otherwise
+	// erase the evidence between two scrapes.
+	// Optional on the backend rather than part of ManagerBackend, the same way
+	// client.DualStackServer is optional on a server: a fake backend in a test
+	// or the e2e harness has nothing to report, and a required method would
+	// make every one of them implement a stub that lies. A backend that cannot
+	// say is absent from the scrape rather than exported as zero, for the same
+	// reason the peer block above skips a listener it cannot ask.
+	if r, ok := s.mgr.(interface{ Abandoned() (int, uint64) }); ok {
+		current, total := r.Abandoned()
+		metric(&b, "veepin_listeners_abandoned", "gauge",
+			"Listeners whose Close overran the stop grace period and still hold a goroutine and TUN fd.")
+		fmt.Fprintf(&b, "veepin_listeners_abandoned %d\n", current)
+		metric(&b, "veepin_listeners_abandoned_total", "counter",
+			"Listeners abandoned since this process started.")
+		fmt.Fprintf(&b, "veepin_listeners_abandoned_total %d\n", total)
+	}
+
 	// Peers are collected once and used for both the count and the per-peer
 	// series, so the two can never disagree within one scrape -- which they
 	// would if each metric block asked the manager again and a client

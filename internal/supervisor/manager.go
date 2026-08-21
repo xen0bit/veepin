@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xen0bit/veepin/client"
@@ -116,6 +117,56 @@ type Manager struct {
 	// mutation already in flight on an HTTP goroutine cannot rebuild the fleet
 	// out from under a shutdown that has already torn it down.
 	closed bool
+
+	// abandoned counts listeners whose Close overran stopGrace and are still
+	// holding their goroutine and TUN fd; abandonedTotal counts every one that
+	// ever has.
+	//
+	// The pair is deliberate. The gauge answers "is something wedged right
+	// now", which is what an operator wants; the counter answers "has this
+	// happened", which is what survives a listener that eventually unblocks
+	// and would otherwise erase the evidence. reap decrements the gauge and
+	// never the counter.
+	//
+	// Atomics rather than fields under mu, and NOT as a micro-optimisation.
+	// stopListenerLocked runs with Manager.mu held by Stop, Close and Apply, so
+	// touching mu from the abandonment path deadlocks the manager -- the exact
+	// failure this package exists to prevent, and one
+	// TestStopDoesNotWedgeTheManager catches in ten seconds. reap has the same
+	// constraint from the other direction: it must be able to record a
+	// completion while a caller holds mu waiting on something else.
+	abandoned      atomic.Int64
+	abandonedTotal atomic.Uint64
+}
+
+// Abandoned reports how many listeners are currently abandoned -- Close overran
+// stopGrace and has not returned since -- and how many ever have been.
+//
+// This is a leak made visible rather than a leak fixed. Each abandoned listener
+// still holds a goroutine and a TUN fd until its own Close finally returns, and
+// a fleet that restarts a genuinely wedged listener on a timer accumulates one
+// of each per attempt. Before this pair existed it did so silently: the only
+// trace was a log line nobody greps for. The real fix is for the blocking path
+// to become interruptible, which lives in whichever protocol owns it.
+func (m *Manager) Abandoned() (current int, total uint64) {
+	return int(m.abandoned.Load()), m.abandonedTotal.Load()
+}
+
+// reap watches an abandoned teardown after stopListenerLocked has stopped
+// waiting for it. If Close eventually returns, the goroutine and fd it was
+// holding are released, so the gauge comes back down and the log says so --
+// which is the difference between "wedged and stuck" and "wedged and slow", and
+// an operator staring at a dashboard cannot tell them apart otherwise.
+//
+// It holds no locks while waiting, so a Close that never returns costs one
+// parked goroutine and nothing else. That goroutine is itself part of the leak
+// being counted; it is not free, and it is much cheaper than the pump and fd it
+// is reporting on.
+func (m *Manager) reap(name string, closed <-chan struct{}, started time.Time) {
+	<-closed
+	m.abandoned.Add(-1)
+	m.log.Printf("supervisor: %s: abandoned listener's Close finally returned after %s; "+
+		"its goroutine and TUN fd are released", name, time.Since(started).Round(time.Millisecond))
 }
 
 // NewManager returns a Manager whose ctor is real if none is supplied.
@@ -760,11 +811,18 @@ const stopGrace = 5 * time.Second
 // the failure this whole package exists to avoid. Bounded, the listener is
 // abandoned with a log line and the rest of the fleet keeps serving.
 //
-// Abandoning leaks the pump goroutine and its fd until the process exits. That
-// is the lesser of the two evils here and is named in
-// internal/supervisor/README.md; the real fix is for dataplane to make a blocked
-// TUN read interruptible, which is a change to the allocation-guarded data path
-// and belongs on its own.
+// Abandoning leaks the pump goroutine and its fd until that listener's Close
+// finally returns, or until the process exits if it never does. That is the
+// lesser of the two evils here and is named in internal/supervisor/README.md;
+// the real fix is for the blocking path to become interruptible, which lives in
+// whichever protocol owns it rather than in this package.
+//
+// What this package can do, and now does, is stop the leak being invisible.
+// Manager.Abandoned reports a gauge and a cumulative counter, /api/metrics
+// exports both, and reap keeps watching so a Close that eventually returns
+// brings the gauge back down. A fleet restarting a wedged listener on a timer
+// used to accumulate a goroutine and an fd per attempt with a log line as the
+// only trace; now it accumulates a number an operator can alert on.
 func (m *Manager) stopListener(r *running) {
 	r.buildMu.Lock()
 	defer r.buildMu.Unlock()
@@ -803,9 +861,13 @@ func (m *Manager) stopListenerLocked(r *running) {
 		case <-closed:
 		case <-deadline:
 			abandoned = true
+			current := m.abandoned.Add(1)
+			total := m.abandonedTotal.Add(1)
 			m.log.Printf("supervisor: %s: Close did not return within %s; abandoning the listener "+
-				"(its packet pump is blocked reading the TUN and will exit when a packet arrives)",
-				cfg.Name, stopGrace)
+				"(its packet pump is blocked reading the TUN and will exit when a packet arrives). "+
+				"%d listener(s) abandoned now, %d since start -- see Manager.Abandoned",
+				cfg.Name, stopGrace, current, total)
+			go m.reap(cfg.Name, closed, time.Now())
 		}
 	}
 	// No point waiting on the serve goroutine if Close has not even returned:

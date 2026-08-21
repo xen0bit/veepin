@@ -64,7 +64,7 @@ whatever comes after this plan is chosen from something written down.
 
 | # | Item | Value | Risk | Verdict | Status |
 |---|------|-------|------|---------|--------|
-| 10 | An abandoned listener leaks its pump goroutine and its TUN fd | **High** | Low | **Do** | ☐ |
+| 10 | An abandoned listener leaks its pump goroutine and its TUN fd | **High** | Low | **Do** | ✅ landed (visibility half) |
 | 11 | No kill switch on macOS | Medium | **Medium** | Do — it means owning pf state | ☐ |
 | 12 | `-log-level` gates the stream, not the call site | Low | Medium | Do last | ☐ |
 

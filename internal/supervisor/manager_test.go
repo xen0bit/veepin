@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -1209,5 +1210,131 @@ func TestRebuildDoesNotResurrectAStoppedListener(t *testing.T) {
 	last := ctor.byName(t, "site-a")
 	if !last.isClosed() {
 		t.Errorf("the server the rebuild started was left running after the listener was stopped")
+	}
+}
+
+// TestAbandonedListenersAreCountedAndReleased: the bound in
+// TestAWedgedCloseDoesNotFreezeTheFleet keeps one wedged listener from taking
+// the fleet down, and the cost of that bound is a leaked goroutine and TUN fd.
+// That cost used to be invisible -- a log line and nothing else -- so a fleet
+// restarting a genuinely wedged listener on a timer accumulated one of each per
+// attempt with no way to notice.
+//
+// Two claims here, and the second is the one worth having. Abandoning bumps the
+// gauge and the counter; and when the blocked Close finally returns, the gauge
+// comes back down while the counter does not, so the evidence survives a
+// listener that merely turned out to be slow.
+func TestAbandonedListenersAreCountedAndReleased(t *testing.T) {
+	dir := t.TempDir()
+	writeCfg(t, dir, "site-a", "wireguard")
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+
+	mgr := NewManager(dir, testLogger(t),
+		func(protocol string, opts map[string]string) (client.Server, error) {
+			return &wedgedServer{
+				fakeServer: fakeServer{name: opts["__name"], tun: "tun0", serveCh: make(chan struct{})},
+				release:    release,
+			}, nil
+		})
+	if err := mgr.Apply(); err != nil {
+		t.Fatal(err)
+	}
+	if cur, total := mgr.Abandoned(); cur != 0 || total != 0 {
+		t.Fatalf("before any stop: Abandoned() = (%d, %d), want (0, 0)", cur, total)
+	}
+
+	if err := mgr.Stop("site-a"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	cur, total := mgr.Abandoned()
+	if cur != 1 || total != 1 {
+		t.Fatalf("after abandoning one listener: Abandoned() = (%d, %d), want (1, 1)", cur, total)
+	}
+
+	// Let the wedged Close return. The reaper is watching, so the gauge must
+	// fall back to zero while the counter keeps its record.
+	releaseOnce.Do(func() { close(release) })
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if cur, _ = mgr.Abandoned(); cur == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cur, total = mgr.Abandoned()
+	if cur != 0 {
+		t.Errorf("the blocked Close returned but the gauge is still %d, want 0; the reaper is not watching", cur)
+	}
+	if total != 1 {
+		t.Errorf("cumulative count = %d, want 1; a listener that unblocked must not erase the evidence", total)
+	}
+}
+
+// TestAbandonedGoroutineAndFDReturnToBaseline is the claim the gauge is a proxy
+// for: once a wedged Close returns, the resources it was holding are actually
+// released rather than merely uncounted.
+//
+// The fd half is read from /proc/self/fd rather than inferred, because
+// runtime.NumGoroutine alone is flaky -- the runtime's own goroutines come and
+// go -- and an fd count is the thing an operator actually runs out of. On a
+// platform without /proc the fd half is skipped and the goroutine half still
+// runs.
+func TestAbandonedGoroutineAndFDReturnToBaseline(t *testing.T) {
+	dir := t.TempDir()
+	writeCfg(t, dir, "site-a", "wireguard")
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+
+	openFDs := func() int {
+		ents, err := os.ReadDir("/proc/self/fd")
+		if err != nil {
+			return -1
+		}
+		return len(ents)
+	}
+	baselineFDs := openFDs()
+	baselineGoroutines := runtime.NumGoroutine()
+
+	mgr := NewManager(dir, testLogger(t),
+		func(protocol string, opts map[string]string) (client.Server, error) {
+			return &wedgedServer{
+				fakeServer: fakeServer{name: opts["__name"], tun: "tun0", serveCh: make(chan struct{})},
+				release:    release,
+			}, nil
+		})
+	if err := mgr.Apply(); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Stop("site-a"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	releaseOnce.Do(func() { close(release) })
+
+	// Wait for the reaper to observe the completion, then let the released
+	// goroutines actually finish scheduling out.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if cur, _ := mgr.Abandoned(); cur == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for time.Now().Before(deadline) {
+		if runtime.NumGoroutine() <= baselineGoroutines+2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if got := runtime.NumGoroutine(); got > baselineGoroutines+2 {
+		t.Errorf("goroutines = %d, baseline %d: an abandoned listener's goroutines did not exit", got, baselineGoroutines)
+	}
+	if baselineFDs >= 0 {
+		if got := openFDs(); got > baselineFDs+2 {
+			t.Errorf("open fds = %d, baseline %d: an abandoned listener's descriptors were not released", got, baselineFDs)
+		}
 	}
 }
