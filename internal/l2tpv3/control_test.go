@@ -273,3 +273,65 @@ func TestRetransmittedHelloIsAckedAgain(t *testing.T) {
 			"a peer that lost an ACK retransmits and must be answered again", got)
 	}
 }
+
+// TestAckCarriesTheNextSequenceNumber pins RFC 3931 section 3.1's rule for a
+// message that consumes no sequence number: its Ns is the next sequence number
+// the sender will use, not the last one it used.
+//
+// It exists because a real peer breaks on it, and the temptation when that
+// happens is to make veepin wrong in order to make the peer happy. go-l2tp
+// v0.1.8 -- the only open-source L2TPv3 control implementation, and therefore
+// the only possible interop peer -- wedges its receive queue on an ACK whose Ns
+// is ahead of its Nr: transport.go's msgIsInSequence and msgIsStale between them
+// classify such a message as neither, so dequeueRxMessage never returns it, and
+// a second bug on the line above (`m := xport.rxQueue[0]` inside a loop over i)
+// means nothing behind it is ever processed either. See
+// TestPendingQl2tpdKeepalive in tests/interop for the capture.
+//
+// Lowering our Ns would clear that peer and would misstate the next sequence
+// number to every conforming one. This test is what makes that a deliberate
+// decision rather than an accident.
+func TestAckCarriesTheNextSequenceNumber(t *testing.T) {
+	var sent [][]byte
+	c := NewControlConn(ControlConfig{
+		LocalCCID: 100, RemoteCCID: 200, HelloInterval: time.Hour,
+		PeerAddr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1701},
+	}, func(pkt []byte, _ *net.UDPAddr) { sent = append(sent, append([]byte(nil), pkt...)) }, nil)
+
+	// A peer HELLO at the sequence number we expect. The reply is an ACK.
+	hello := AppendControl(nil, 100, 0, 0, msgHello, nil)
+	c.HandleControl(hello, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1701})
+
+	if len(sent) != 1 {
+		t.Fatalf("a HELLO produced %d replies, want exactly one ACK", len(sent))
+	}
+	ack, err := ParseControl(sent[0])
+	if err != nil {
+		t.Fatalf("parsing our own ACK: %v", err)
+	}
+	if ack.Type != msgAck {
+		t.Fatalf("reply type = %d, want ACK (%d)", ack.Type, msgAck)
+	}
+	if ack.Nr != 1 {
+		t.Errorf("ACK Nr = %d, want 1: it must acknowledge the HELLO at Ns 0", ack.Nr)
+	}
+	// The claim. Our own Ns has not advanced -- an ACK consumes no sequence
+	// number -- so the ACK carries the number our NEXT message will use.
+	if ack.Ns != 0 {
+		t.Errorf("ACK Ns = %d, want 0, the next sequence number we will send", ack.Ns)
+	}
+
+	// And sending an actual message next uses that same number, which is what
+	// makes "the next sequence number" true rather than merely stated.
+	c.sendHello()
+	if len(sent) != 2 {
+		t.Fatalf("SendHello produced %d datagrams in total, want 2", len(sent))
+	}
+	h, err := ParseControl(sent[1])
+	if err != nil {
+		t.Fatalf("parsing our HELLO: %v", err)
+	}
+	if h.Ns != ack.Ns {
+		t.Errorf("the HELLO after the ACK used Ns %d, but the ACK announced %d", h.Ns, ack.Ns)
+	}
+}

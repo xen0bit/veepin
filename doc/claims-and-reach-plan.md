@@ -68,7 +68,7 @@ What remains, and why each stopped where it did:
 |---|------|-------|------|---------|--------|
 | 1 | IKEv2 never fragments its own output, and the reason it gives is false | **High** | Low | **Do first** | ✅ landed |
 | 2 | The cert cell mints the smallest certificate that exists | **High** | None | **Do — it is item 1's guard** | ✅ landed |
-| 3 | The L2TPv3 control connection is unit-tested only, and the tree says so | Medium | **Medium** | Do, timeboxed | ☐ |
+| 3 | The L2TPv3 control connection is unit-tested only, and the tree says so | Medium | **Medium** | Do, timeboxed | ✅ landed — upstream bug, located |
 | 4 | Which other fixtures make the easy case the only case? | Medium | Low | Do (survey) | ✅ landed |
 
 ### Part 2 — shaping reaches thirteen of sixteen (now all sixteen)
@@ -1393,10 +1393,15 @@ enough to be useful. The previous two both have this section and both earned it.
   fail, in the commit written to stop exactly that. The shipped version drops any
   IKE datagram over 1400 octets by length, and was verified by sabotage: with the
   fragmentation call short-circuited, the ping itself fails.
-- **Item 3 may not be a veepin bug at all**, and the plan is written to make that
-  an acceptable outcome. If it turns out the answer was hypothesis one — go-l2tp
-  discarding our ACK on its Ns duplicate check — then the fix is upstream and
-  veepin's only change is a comment.
+- **Item 3 was not a veepin bug, and the recorded hypothesis was wrong.** It was
+  not the Ns duplicate check: the acknowledgement path (`processAckQueue`,
+  reached through `nrChan`) never consults that check at all, which reading the
+  source settles in a few minutes. The real cause is two lines of go-l2tp
+  v0.1.8 interacting — an ACK whose `Ns` is ahead of the peer's `Nr` is
+  classified as neither in-sequence nor stale and therefore never dequeued, and
+  `dequeueRxMessage` inspects `rxQueue[0]` inside a loop over `i` so it cannot
+  look past a stuck head. veepin's only change is a comment and a test, which is
+  the outcome this plan said would be acceptable.
 - **Item 5 assumes OpenSSH tolerates trailing octets on a tun channel frame.**
   The argument is sound and identical to the one L2TPv3 and SoftEther already
   proved, but it is an argument, not a capture. If the cell says otherwise, SSH
