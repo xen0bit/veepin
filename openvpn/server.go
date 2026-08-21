@@ -670,13 +670,34 @@ func serverTLSConfig(cfg *ServerConfig) (*tls.Config, error) {
 	return &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS12,
-		// Cap at TLS 1.2: OpenVPN runs TLS over its own reliable control channel,
-		// and TLS 1.3's post-handshake NewSessionTicket messages do not fit that
-		// half-duplex request/response model cleanly, stalling some clients before
-		// they send key_method_2.
-		MaxVersion: tls.VersionTLS12,
-		ClientAuth: tls.RequireAndVerifyClientCert,
-		ClientCAs:  pool,
+		MaxVersion:   tls.VersionTLS13,
+		// SessionTicketsDisabled is what allows TLS 1.3 here, and it is not a
+		// privacy setting.
+		//
+		// This used to be capped at TLS 1.2, because OpenVPN runs TLS over its
+		// own reliable control channel and TLS 1.3's post-handshake
+		// NewSessionTicket messages do not fit that half-duplex
+		// request/response model cleanly -- they stalled clients before they
+		// sent key_method_2. The cap fixed the stall and cost the server half of
+		// OpenVPN its post-quantum key exchange, since Go's default
+		// CurvePreferences lead with X25519MLKEM768 and only TLS 1.3 has a
+		// key_share to carry it. Every other TLS protocol here was hybrid and
+		// this one was classical.
+		//
+		// Suppressing the tickets removes the actual cause rather than the
+		// version that exposed it: the server emits no NewSessionTicket, so
+		// there is nothing to arrive out of turn. Tickets buy nothing here
+		// anyway -- OpenVPN negotiates one TLS session per tunnel and resumes
+		// nothing.
+		//
+		// Verified against the real `openvpn` binary rather than reasoned about:
+		// every OpenVPN interop cell passes with this -- plain, tls-auth,
+		// tls-crypt, shaped, CBC, and the veepin-to-veepin pair. If a client is
+		// ever found that still stalls, cap that path and name the client;
+		// do not restore a blanket cap whose reason had a narrower cause.
+		SessionTicketsDisabled: true,
+		ClientAuth:             tls.RequireAndVerifyClientCert,
+		ClientCAs:              pool,
 	}, nil
 }
 

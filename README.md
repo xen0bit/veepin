@@ -79,6 +79,17 @@ real protocol; see [The example protocol](#the-example-protocol).
 | IKE/ESP ciphers | AES-GCM-16 (AEAD, RFC 5282), ChaCha20-Poly1305 (AEAD, RFC 7634), AES-CBC + HMAC-SHA2 (encrypt-then-MAC) |
 | Integrity | HMAC-SHA1-96, HMAC-SHA2-256-128/384-192/512-256 |
 
+**Post-quantum key exchange is on by default nearly everywhere**, and in two
+independent ways. IKEv2 negotiates ML-KEM-768 over RFC 9370 + RFC 9242 with
+`-pq`, verified against strongSwan in both directions. And every TLS 1.3 path in
+the tree is hybrid X25519MLKEM768 without asking, because Go's `crypto/tls` has
+led its defaults with it since Go 1.24 and veepin pins `CurvePreferences`
+nowhere — a guard test enforces that it stays that way. That covers MASQUE and
+the OpenVPN server unconditionally, and AnyConnect, Fortinet, GlobalProtect,
+Ivanti, SSTP, SoftEther and the OpenVPN client whenever the peer speaks TLS 1.3.
+**Authentication remains classical** in all of them; see
+[`doc/security.md`](doc/security.md) for what that does and does not protect.
+
 AES from the standard library; ChaCha20-Poly1305 from `x/crypto` (the same AEAD
 WireGuard already pulls in). ChaCha20-Poly1305 for IKEv2/ESP shares AES-GCM-16's
 exact framing — a 4-octet implicit salt, an 8-octet explicit IV and a 16-octet

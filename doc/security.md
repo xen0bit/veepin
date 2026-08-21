@@ -169,6 +169,47 @@ is a dependency-free path (no new module beyond the stdlib). The IANA group ID
 for ML-KEM-768 in IKEv2 is 36.
 
 
+## Every TLS 1.3 protocol has a post-quantum key exchange, and its authentication is classical
+
+Post-quantum key exchange in this tree is not only IKEv2's. Go's `crypto/tls`
+has led its default `CurvePreferences` with **X25519MLKEM768** (CurveID 4588)
+since Go 1.24, and veepin pins `CurvePreferences` nowhere. So every TLS 1.3
+handshake here is hybrid — Curve25519 and ML-KEM-768 both, with the derived
+secret at least as strong as the stronger half.
+
+Concretely:
+
+- **MASQUE is post-quantum unconditionally.** All three of its `tls.Config`s are
+  TLS 1.3-only.
+- **OpenVPN's server is too, as of the `SessionTicketsDisabled` change.** It was
+  the one exception: capped at TLS 1.2 because TLS 1.3's post-handshake
+  `NewSessionTicket` stalled clients on OpenVPN's half-duplex control channel,
+  and only TLS 1.3 carries a `key_share`. Suppressing the tickets removes the
+  cause instead of the version.
+- **AnyConnect, Fortinet, GlobalProtect, Ivanti, SSTP, SoftEther and the OpenVPN
+  client** are hybrid whenever the peer negotiates TLS 1.3, which every current
+  one does. Their floor is TLS 1.2 for vendor compatibility, and at 1.2 the key
+  exchange is classical.
+
+Three things this does **not** cover, and each is a real boundary:
+
+- **Authentication is classical everywhere.** The same limit
+  [post-quantum IKEv2 has](#post-quantum-ikev2-protects-the-key-exchange-not-the-authentication):
+  certificates are signed with RSA or ECDSA, so an adversary attacking the
+  authentication *live* rather than retroactively is unaffected. Go 1.27's
+  `crypto/mldsa` makes closing this reachable — `crypto/x509` parses ML-DSA keys
+  and `crypto/tls` offers `MLDSA44/65/87` — and it has not been done.
+- **The DTLS data channels are not.** `internal/dtls` is a from-scratch DTLS 1.2
+  with two fixed suites and no post-quantum path at all, so AnyConnect's and
+  Fortinet's *data* channels stay classical even when their control channels do
+  not.
+- **A protocol that ever pins `CurvePreferences` silently drops out of this
+  list.** The handshake still succeeds; it is just classical again.
+  `TestNoTLSConfigPinsCurvePreferences` is what stops that happening in a commit
+  about something else, and `TestGoDefaultsStillNegotiateMLKEM` is what stops the
+  guard from outliving the default it assumes.
+
+
 ## SoftEther is layer 2, and shares a broadcast domain between clients
 
 Every other protocol here routes IP. SoftEther bridges Ethernet, which means

@@ -755,8 +755,8 @@ than a bare assertion.
 
 | # | Item | Value | Cost | Gate |
 |---|------|-------|------|------|
-| H1 | Every TLS 1.3 protocol already does hybrid PQ key exchange, and nothing says so | **High** | Low | none — do it in the next quiet window |
-| H2 | OpenVPN's server caps TLS at 1.2, which forecloses H1 for it | Medium | Low | H1 |
+| H1 | Every TLS 1.3 protocol already does hybrid PQ key exchange, and nothing says so | **High** | Low | ✅ landed |
+| H2 | OpenVPN's server caps TLS at 1.2, which forecloses H1 for it | Medium | Low | ✅ landed — the hypothesis held |
 | H3 | PQ **authentication** — unblocked by Go 1.27's `crypto/mldsa` | **High** | Medium | raising `go.mod`'s floor from 1.25 to 1.27 |
 | H4 | Inner IPv6 reaches one protocol of sixteen | **High** | **High** | pick two protocols, not all fifteen |
 | H5 | GSO/GRO are IPv4-only, and IKEv2 now carries inner v6 | Medium | Medium | measure the v6 slow path first |
