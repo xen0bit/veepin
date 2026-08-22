@@ -1,0 +1,25 @@
+# veepin replay corpus. Captured peer traffic, replayed offline.
+#
+# This is NOT a substitute for the live interop cell. It pins the peer as it
+# was on the capture date below and can never notice that the peer changed.
+# Regenerate it from the cell; do not hand-edit it to make a test pass.
+# Direction B of the WireGuard row: a real wireguard-go initiator, veepin responding.
+# That direction is deliberate. The initiation is the message with the MACs and the
+# encrypted static key in it, so capturing the cell where the *peer* sends it is what
+# lets veepin's responder be run against somebody else's arithmetic offline.
+
+cell = compose.wireguard-server.yml
+peer = wireguard-go (wg-quick, alpine)
+captured = 2026-08-22
+
+> peer handshake_initiation
+01000000b95fde629d8e5834ec3512519472fc0027283170e7b0150c7064892d
+547f8ab116373c77ff8d10beecbe9cd97d4f0b15021f37ebdae2e38f745fbe29
+64ffaa9edde99fb7a560a821cea04ed7b4e3c4c81a16c59739371843d0867ca4
+527d02a93aeb26415c39db8e43572e28debd6786616c58c5c976aa951103eb6d
+1b3481c900000000000000000000000000000000
+
+> veepin handshake_response
+020000008c2a90e3b95fde62c93a21438ea8c000fc54fe7dccd8995aebfd8837
+e6cefe24a40c6b631f26a976f26c62905e274e4729fcf3fa2a4e0e45d63822e3
+5719f041ef0921e0511b40c300000000000000000000000000000000

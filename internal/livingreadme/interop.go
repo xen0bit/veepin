@@ -77,7 +77,8 @@ var interopMatrix = []interopRow{
 			"TestInteropVeepinClientStrongswanServerPQ",
 			"TestInteropVeepinClientStrongswanIPTFS",
 			"TestInteropIPTFSConstantRate",
-		}, Label: "strongSwan (PSK + pubkey ECDSA/RSA, RFC 7383 frag, AES-GCM + ChaCha20, dual-stack, v6 underlay, ML-KEM-768, IP-TFS incl. constant-rate)"},
+			"TestInteropIKEv2CorpusStillMatchesTheLivePeer",
+		}, Label: "strongSwan (PSK + pubkey ECDSA/RSA, RFC 7383 frag, AES-GCM + ChaCha20, dual-stack, v6 underlay, ML-KEM-768, IP-TFS incl. constant-rate, recorded)"},
 		Server: interopCell{Tests: []string{
 			"TestInteropStrongswanClientVeepinServer",
 			"TestInteropStrongswanClientVeepinServerEAP",
@@ -103,7 +104,8 @@ var interopMatrix = []interopRow{
 			"TestInteropWireguardClientVeepinServer",
 			"TestInteropWireguardClientVeepinServerShaped",
 			"TestInteropWireguardClientVeepinServerV6",
-		}, Label: "wireguard-go (+ padded, IPv6 inner)"},
+			"TestInteropWireguardCorpusStillMatchesTheLivePeer",
+		}, Label: "wireguard-go (+ padded, IPv6 inner, recorded)"},
 		Self: interopCell{Tests: []string{"TestInteropWireguardSelf", "TestInteropWireguardRekey"}},
 	},
 	{
