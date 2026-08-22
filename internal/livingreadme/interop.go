@@ -124,7 +124,8 @@ var interopMatrix = []interopRow{
 			"TestInteropOpenVPNClientVeepinServerTLSAuth",
 			"TestInteropOpenVPNClientVeepinServerTLSCrypt",
 			"TestInteropOpenVPNClientVeepinServerShaped",
-		}, Label: "`openvpn` (+ tls-auth, tls-crypt, padded)"},
+			"TestInteropOpenVPNClientVeepinServerV6",
+		}, Label: "`openvpn` (+ tls-auth, tls-crypt, padded, IPv6 inner)"},
 		Self: interopCell{Tests: []string{"TestInteropOpenVPNSelf"}},
 	},
 	{

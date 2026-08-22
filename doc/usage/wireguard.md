@@ -52,6 +52,20 @@ PublicKey  = <client public key>
 AllowedIPs = 10.10.0.2/32
 ```
 
+`Address` is a list, and both families are honoured on both sides — the server's
+own v6 address goes on the interface with `-setup-nat`, and the client's is
+installed on its TUN:
+
+```ini
+[Interface]
+Address = 10.10.0.1/24, fd00:10::1/64
+```
+
+WireGuard assigns nothing, so a peer's v6 address is its `AllowedIPs` and is
+configured at both ends, exactly as its v4 address is. Order does not matter:
+each entry lands in the field its own family names, and two addresses of one
+family are refused rather than silently reduced to one.
+
 Cryptokey routing runs both ways: `AllowedIPs` selects which peer an outbound
 packet goes to, and an inbound packet whose source is outside a peer's
 `AllowedIPs` is dropped. Peers roam (the return address follows each packet's
