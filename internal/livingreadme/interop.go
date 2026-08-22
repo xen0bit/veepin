@@ -99,7 +99,10 @@ var interopMatrix = []interopRow{
 	},
 	{
 		Protocol: "WireGuard",
-		Client:   interopCell{Tests: []string{"TestInteropVeepinClientWireguardServer"}, Label: "wireguard-go"},
+		Client: interopCell{Tests: []string{
+			"TestInteropVeepinClientWireguardServer",
+			"TestInteropVeepinClientWireguardServerV6",
+		}, Label: "wireguard-go (+ IPv6 inner)"},
 		Server: interopCell{Tests: []string{
 			"TestInteropWireguardClientVeepinServer",
 			"TestInteropWireguardClientVeepinServerShaped",
