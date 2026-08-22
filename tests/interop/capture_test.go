@@ -163,9 +163,25 @@ func runCapture(t *testing.T, spec captureSpec) {
 	}
 }
 
-// startTCPDump launches tcpdump inside the capture service, recording its pid
-// so it can be stopped again. The pid file is needed because the peer images
-// are minimal and several have no pkill.
+// startTCPDump launches tcpdump inside the capture service and does not return
+// until it is provably recording.
+//
+// Two things here were wrong the first time and are worth stating, because both
+// produced a green-looking cell that captured nothing.
+//
+// It does not use `docker compose exec -d`. That worked on a developer's Docker
+// and did nothing at all on the CI runner's -- no process, no pid file, and the
+// first sign of it was `cat: /tmp/tcpdump.pid: No such file or directory` two
+// minutes later, after the tunnel had come up perfectly. Backgrounding inside
+// the shell instead is portable, and it writes the pid file *before* the exec
+// returns, so a failure to start is an error here rather than a mystery there.
+//
+// And it waits for the capture file to exist rather than sleeping. tcpdump
+// writes the pcap file header as soon as it opens the file, so a non-empty
+// /tmp/capture.pcap is proof it reached its capture loop -- which is the actual
+// precondition for starting the dialler. A fixed sleep is a guess at that, and
+// a guess that is short by 200ms loses the handshake, which is the only part of
+// the exchange this cell is for.
 func startTCPDump(t *testing.T, file string, spec captureSpec) {
 	t.Helper()
 	deadline := time.Now().Add(captureDeadline)
@@ -182,25 +198,42 @@ func startTCPDump(t *testing.T, file string, spec captureSpec) {
 		t.Fatalf("%s never produced a usable tcpdump within %s:\n%s", spec.captureSvc, captureDeadline, last)
 	}
 
-	cmd := fmt.Sprintf("tcpdump -i eth0 -s 0 -U -w /tmp/capture.pcap %q & echo $! > /tmp/tcpdump.pid; wait", spec.filter)
-	if out, err := compose(t, file, "exec", "-T", "-d", spec.captureSvc, "sh", "-c", cmd); err != nil {
+	cmd := fmt.Sprintf(
+		"rm -f %[1]s %[2]s %[3]s; tcpdump -i eth0 -s 0 -U -w %[1]s %[4]q > %[3]s 2>&1 & echo $! > %[2]s",
+		capturePath, pidPath, logPath, spec.filter)
+	if out, err := compose(t, file, "exec", "-T", spec.captureSvc, "sh", "-c", cmd); err != nil {
 		t.Fatalf("starting tcpdump in %s: %v\n%s", spec.captureSvc, err, out)
 	}
-	// -U writes each packet as it arrives, but the process still has to reach
-	// its capture loop before the dialler starts.
-	time.Sleep(2 * time.Second)
+
+	for time.Now().Before(deadline) {
+		if _, err := compose(t, file, "exec", "-T", spec.captureSvc, "test", "-s", capturePath); err == nil {
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	log, _ := compose(t, file, "exec", "-T", spec.captureSvc, "cat", logPath)
+	t.Fatalf("tcpdump in %s never opened %s, so nothing would have been captured:\n%s",
+		spec.captureSvc, capturePath, log)
 }
+
+// Paths inside the capture container.
+const (
+	capturePath = "/tmp/capture.pcap"
+	pidPath     = "/tmp/tcpdump.pid"
+	logPath     = "/tmp/tcpdump.log"
+)
 
 func stopTCPDump(t *testing.T, file string, spec captureSpec, dst string) {
 	t.Helper()
 	// SIGINT rather than SIGKILL: tcpdump flushes on the way out.
 	if out, err := compose(t, file, "exec", "-T", spec.captureSvc, "sh", "-c",
-		"kill -INT $(cat /tmp/tcpdump.pid)"); err != nil {
+		"kill -INT $(cat "+pidPath+")"); err != nil {
 		t.Logf("stopping tcpdump: %v\n%s", err, out)
 	}
 	time.Sleep(1 * time.Second)
-	if out, err := compose(t, file, "cp", spec.captureSvc+":/tmp/capture.pcap", dst); err != nil {
-		t.Fatalf("copying the capture out: %v\n%s", err, out)
+	if out, err := compose(t, file, "cp", spec.captureSvc+":"+capturePath, dst); err != nil {
+		log, _ := compose(t, file, "exec", "-T", spec.captureSvc, "cat", logPath)
+		t.Fatalf("copying the capture out: %v\n%s\n--- tcpdump log ---\n%s", err, out, log)
 	}
 }
 
