@@ -29,29 +29,33 @@ whatever comes after this plan is chosen from something written down.
 
 ## What has landed, and what has not
 
-The first branch off this plan (`feat/claims-and-reach`) executed **Part 0,
-items 1, 2, 6 and 10, and H1, H2 and H9** — nine of the twenty-six rows below.
-Item 8 was resolved as a *don't*, which is an outcome rather than an omission.
+The first branch off this plan (`feat/claims-and-reach`, merged) executed
+**Part 0, items 1–7, 10 and 11, and H1, H2, H3a, H5, H9, H10 and H12** — twenty
+of the twenty-six rows below. Item 8 was resolved as a *don't*, which is an
+outcome rather than an omission.
+
+The second (`feat/replay-and-reach`) executes **H8**, and this section is the
+record of what each row cost against what it was predicted to cost.
 
 What remains, and why each stopped where it did:
 
-- **Item 3 (ql2tpd)** and **item 4 (the fixture survey)** are investigations
-  rather than changes, and item 4 should run before Part 2 adds cells that could
-  inherit the same blind spot.
-- **Item 5 (SSH shaping)** came back with a harder answer than the plan
-  predicted, and the prediction is in *Where this plan is probably wrong* below.
-  The vehicle the docs named does not exist, and the fallback is not plumbing
-  either: `internal/sshtun` recovers packet boundaries from the IP length on a
-  byte stream, so filler after a packet is read as the next packet's
-  address-family header. A stock OpenSSH peer tolerates it; veepin's own reader
-  does not. Closing that is a framing decision, and the correction to
-  `doc/traffic-shaping.md` landed without it.
-- **Item 7 (MASQUE)** is unblocked and unstarted.
-- **Item 9 (RFC 9329)**, **item 11 (macOS pf)** and **item 12 (`slog`)** are
-  unstarted; 11 is still gated on somebody running the macOS client on hardware.
-- **The horizon list** past H1, H2 and H9 is unstarted by design. H3 is the one
-  whose gate moved: Go 1.27 supplies `crypto/mldsa` and the floor is now raised,
-  so H3a is reachable in a way it was not when this page was written.
+- **Item 9 (RFC 9329)** is the next capability by default now that item 8 is a
+  *don't*. It brings libreswan in as a new peer in both roles, it is a
+  `dataplane` change rather than a protocol one, and it wants its own branch.
+- **Item 12 (`slog`)** is unstarted, and is the lowest-value row left.
+- **H4 (inner IPv6 beyond IKEv2)** is unstarted and scoped as *do two, not
+  fifteen*.
+- **H6** is gated on a profile nobody has taken since Option 1 landed, and
+  **H7** on a product decision. **H11** has a decision written and no code.
+- **H3b** (ML-DSA in IKEv2's AUTH payload) stays gated on surveying the current
+  IETF document and whether strongSwan 6.x implements it.
+
+Three predictions on this page turned out to be wrong, and each is corrected in
+place rather than deleted: item 3's ql2tpd hypothesis (it is not a duplicate
+`Ns` check), item 5's claim that SSH shaping was plumbing (it is a framing
+decision), and H5's premise that the IPv4-only offload tree was a slow path (it
+is an absent optimisation — `TUNSETOFFLOAD` never negotiates TSO6, so the
+kernel does not produce the super-frame at all).
 
 ## Summary
 
@@ -1167,7 +1171,7 @@ becomes a permanent boundary in `doc/security.md` instead of a horizon item.
 
 ---
 
-## H8. Record the peer, replay it offline
+## H8. Record the peer, replay it offline *(done)*
 
 The interop matrix is the load-bearing evidence in this project — the whole
 argument of `AGENTS.md` rests on it — and it is also the slowest, heaviest thing
@@ -1199,6 +1203,39 @@ have confidence in between runs.
 
 **Cost:** two weeks for the machinery and two or three cells. Then roughly a day
 per cell after.
+
+### What it actually cost, and what it found
+
+Less than predicted, because the pcap reader is smaller than it sounds: the
+classic format's magic doubles as its byte-order mark, and Ethernet/SLL/IPv4/
+IPv6/UDP is about a hundred lines. Two corpora landed rather than three —
+strongSwan and wireguard-go — with the machinery, the checks, the live cells
+that keep them honest, and the fuzz seeds, in
+[`doc/replaying-the-peer.md`](replaying-the-peer.md).
+
+The design answers the objection above rather than warning about it. Each corpus
+carries an exported `Check`, and the *same function* runs against the committed
+corpus offline and against a capture taken seconds ago in the interop shard. The
+offline test says "veepin still agrees with what strongSwan sent in August"; the
+cell says "and strongSwan still sends it".
+
+Two things were learned that this page did not predict.
+
+**The strongest available check is not the same shape for both protocols.** For
+IKEv2 it is an octet-for-octet re-encode of every layer — which proves the two
+*encoders* agree, not merely that veepin is tolerant. For WireGuard it is
+cryptographic: capture the direction where the *peer* sends the initiation, and
+veepin's own Noise responder can be run over it offline until it recovers the
+peer's static public key. Choosing the WireGuard cell by which side sends the
+richer message is the whole reason that check exists.
+
+**An assertion in the plan was over-general and the first capture said so.**
+Rebuilding an `IKE_AUTH` payload chain fails, because `Builder.Add` writes 0
+into the last payload's NextPayload while RFC 7296 §3.14 gives `SK`'s field a
+different job — it names the first payload *inside* the ciphertext. veepin's own
+encoder is right; the check was wrong. It is recorded in the source rather than
+worked around, because "the last payload's NextPayload is zero" is exactly the
+kind of near-universal truth a tidy-up would restore.
 
 ---
 
