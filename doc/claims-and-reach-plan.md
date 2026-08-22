@@ -30,12 +30,13 @@ whatever comes after this plan is chosen from something written down.
 ## What has landed, and what has not
 
 The first branch off this plan (`feat/claims-and-reach`, merged) executed
-**Part 0, items 1–7, 10 and 11, and H1, H2, H3a, H5, H9, H10 and H12** — twenty
-of the twenty-six rows below. Item 8 was resolved as a *don't*, which is an
-outcome rather than an omission.
+**Part 0, items 1–7, 10 and 11, and H1, H2, H3a, H5, H9, H10 and H12** —
+eighteen of the twenty-six rows below, with item 8 resolved as a *don't*, which
+is an outcome rather than an omission.
 
-The second (`feat/replay-and-reach`) executes **H8**, and this section is the
-record of what each row cost against what it was predicted to cost.
+The second (`feat/replay-and-reach`) executes **H8 and H4**, which brings it to
+twenty-one accounted for and five outstanding. This section is the record of
+what each row cost against what it was predicted to cost.
 
 What remains, and why each stopped where it did:
 
