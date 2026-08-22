@@ -43,8 +43,8 @@ What remains, and why each stopped where it did:
   *don't*. It brings libreswan in as a new peer in both roles, it is a
   `dataplane` change rather than a protocol one, and it wants its own branch.
 - **Item 12 (`slog`)** is unstarted, and is the lowest-value row left.
-- **H4 (inner IPv6 beyond IKEv2)** is unstarted and scoped as *do two, not
-  fifteen*.
+- **H4 (inner IPv6 beyond IKEv2)** did its two — WireGuard and OpenVPN. Whether
+  the other thirteen follow is now a decision with evidence behind it.
 - **H6** is gated on a profile nobody has taken since Option 1 landed, and
   **H7** on a product decision. **H11** has a decision written and no code.
 - **H3b** (ML-DSA in IKEv2's AUTH payload) stays gated on surveying the current
@@ -1070,7 +1070,7 @@ the kind of thing a VPN that cares about fingerprinting eventually looks at.
 
 ---
 
-## H4. Inner IPv6 reaches one protocol of sixteen
+## H4. Inner IPv6 reaches one protocol of sixteen *(two more done)*
 
 ```sh
 grep -rn 'Pool6\|AddrPool6' --include=*.go . | grep -v dataplane/ | grep -v _test
@@ -1106,6 +1106,39 @@ would establish the pattern and the interop shape. Whether the other thirteen
 follow is then a decision with evidence behind it.
 
 **Cost:** a week for those two, honestly. Unknown for the rest, deliberately.
+
+### What the two cost, and what they found
+
+Both landed. `AddrPool6` has three consumers now, not one. Two findings, and
+neither was the work itself.
+
+**WireGuard's client was not missing v6 — it was discarding it.** wg-quick's
+Address line is a list, and the client parsed the whole list, validated every
+entry, and then kept `addrs[0]`. `Address = 10.0.0.2/24, fd00::2/64` came up
+IPv4-only with the v6 address parsed, checked and thrown away, and nothing
+logged. The server half was the predicted shape of gap, and its evidence was
+already committed: the v6 interop cell's entrypoint added the server's own
+address by hand, with a comment saying only the v4 half was installed. Both
+sides now read a list by what each entry *is* rather than by its position, and
+refuse two addresses of one family instead of silently dropping one.
+
+**The OpenVPN cell could not fail, and only sabotage showed it.** Written the
+obvious way — the OpenVPN client pings the server's `fd00:8::1` — it passed in
+thirteen seconds with the two `ifconfig-ipv6` arguments deliberately swapped,
+because a client that configured the *server's* address as its own answers that
+ping from its own interface without a packet crossing anything. Reversed, so the
+server pings the client's derived address, it requires every part of the feature
+at once and the same sabotage now fails it. This is item 4's finding again, in a
+cell written after item 4: **the direction of a ping is an assertion, and a
+target the pinging host might already hold is not one.**
+
+One thing was found and deliberately *not* fixed: `openvpn/server.go` has no
+teardown path for an established client at all — no address release, no
+`RemoveTunnel`, no removal from the client map. That is why this server's v6
+addresses are derived from its v4 ones rather than drawn from a second pool: a
+second allocator would be a second thing to leak. Fixing the lifecycle needs a
+liveness notion for a UDP client (OpenVPN's own `ping-restart` implies one) and
+belongs on its own branch.
 
 ---
 
