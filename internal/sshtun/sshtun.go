@@ -71,6 +71,32 @@ func Encode(ipPacket []byte) []byte {
 	return out
 }
 
+// EncodePadded is Encode with zero filler appended, so the framed result reaches
+// at least minTotal octets. A minTotal at or below the framed length pads
+// nothing, which is what Encode passes.
+//
+// The filler is a whole number of 4-octet words, which is what lets ReadPacket
+// recognise it: the address-family header is 00 00 00 02 or 00 00 00 0a, so a
+// zero word can only be filler. The filler is rounded DOWN to a word rather than
+// up, because the shaper's target is an MTU and overshooting it would be the one
+// direction that costs something.
+//
+// It is inert to a stock OpenSSH peer for the usual reason: OpenSSH writes each
+// channel message to its tun device in one call, and the kernel's IP stack
+// delimits the real packet by the inner header's Total Length. The filler is
+// never seen by anything above IP.
+func EncodePadded(ipPacket []byte, minTotal int) []byte {
+	frame := Encode(ipPacket)
+	if frame == nil {
+		return nil
+	}
+	fill := ((minTotal - len(frame)) / headerLen) * headerLen
+	if fill <= 0 {
+		return frame
+	}
+	return append(frame, make([]byte, fill)...)
+}
+
 // Decode strips the address-family header from a channel packet, returning the
 // raw IP packet. A frame too short to hold the header reports ok=false.
 func Decode(frame []byte) (ipPacket []byte, ok bool) {
@@ -88,11 +114,35 @@ var ErrMalformed = errors.New("sshtun: malformed packet")
 // channel, so packet boundaries are recovered from the IP length field rather
 // than relying on SSH message boundaries: the 4-octet family header is skipped,
 // then the IP total length delimits the packet.
+//
+// # Why the header is skipped a word at a time
+//
+// Shaping (dataplane/shape.go) appends zero filler after a packet, and on a byte
+// stream that filler has to be distinguishable from the next packet's header or
+// the framing desynchronises. It is, and cheaply: the family header is
+// 00 00 00 02 or 00 00 00 0a, so a whole zero word can only be filler. Reading
+// 4-octet words and discarding the zero ones lands exactly on the header, and
+// the unshaped case still costs one read.
+//
+// This is why the filler is a whole number of 4-octet words (see EncodePadded).
+// A ragged tail would need the reader to hunt for the non-zero octet inside a
+// word, which is more code for no benefit -- the shaper's target is an MTU, and
+// three octets either side of it changes nothing.
 func ReadPacket(r io.Reader) ([]byte, error) {
 	var af [headerLen]byte
-	if _, err := io.ReadFull(r, af[:]); err != nil {
-		return nil, err
+	for {
+		if _, err := io.ReadFull(r, af[:]); err != nil {
+			return nil, err
+		}
+		if af != [headerLen]byte{} {
+			break
+		}
+		// An all-zero word is shaping filler. Keep going.
 	}
+	// The family itself is not validated beyond being non-zero: Decode does not
+	// check it either, and a peer that sends a family we do not recognise is
+	// caught by the version nibble below, which is what actually determines how
+	// the packet is framed.
 	var first [1]byte
 	if _, err := io.ReadFull(r, first[:]); err != nil {
 		return nil, err

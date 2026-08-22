@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeGSOTUN feeds the pump a queue of vnet-framed reads and captures what the
@@ -246,4 +247,55 @@ func (f *fakeGSOTUN) vnetWrites() [][]byte {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([][]byte(nil), f.vnetWr...)
+}
+
+// vnetGSOTCPv6 is virtio's TSO6 type. It is deliberately NOT a constant in
+// offload_linux.go: nothing there may treat it as handled, and defining it
+// beside the negotiated types is the first step towards something doing so.
+const vnetGSOTCPv6 = 0x04
+
+// TestPumpVnetDropsUnnegotiatedGSOTypes is the guard on the tree's IPv4-only
+// offload scope, and it protects a change nobody would make on purpose.
+//
+// TUNSETOFFLOAD negotiates TUN_F_CSUM|TUN_F_TSO4, so the kernel never hands up
+// a TSO6 super-frame -- inner IPv6 arrives as ordinary packets and takes the
+// same path it took before GSO existed. That is an absent optimisation rather
+// than a slow path, and it is correct as it stands.
+//
+// What it is not safe against is somebody adding TUN_F_TSO6 to the ioctl
+// because "we carry inner v6 now" without writing the v6 segmenter. The kernel
+// would then send super-frames this code cannot cut, and the failure would be
+// corrupted traffic rather than an error. This asserts the drop, so that change
+// fails a test instead.
+func TestPumpVnetDropsUnnegotiatedGSOTypes(t *testing.T) {
+	// A v6 super-frame's bytes do not matter: it must be dropped on the gsoType
+	// before anything looks at them.
+	super := make([]byte, 200)
+	super[0] = 0x60 // IPv6 version nibble
+	tun := newFakeGSOTUN(vnetFrame(virtioNetHdr{gsoType: vnetGSOTCPv6, gsoSize: 1000, hdrLen: 60}, super))
+	defer close(tun.closed)
+
+	var mu sync.Mutex
+	var sent int
+	pump := NewPump(tun, func(pkt []byte, to *net.UDPAddr) {
+		mu.Lock()
+		sent++
+		mu.Unlock()
+	}, SPIDemux, nil)
+	pump.SetBatchSender(func(pkts [][]byte, to *net.UDPAddr) {
+		mu.Lock()
+		sent += len(pkts)
+		mu.Unlock()
+	})
+	pump.AddTunnel(&prefixTunnel{peer: &net.UDPAddr{IP: net.IPv4(203, 0, 113, 9), Port: 4500}})
+	go pump.Run()
+
+	// Nothing should ever come out. Give the pump long enough to have done so.
+	time.Sleep(100 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if sent != 0 {
+		t.Fatalf("%d packet(s) emerged from an unnegotiated TSO6 super-frame; the pump either "+
+			"segmented it with the IPv4 cutter or forwarded it whole, and both corrupt traffic", sent)
+	}
 }

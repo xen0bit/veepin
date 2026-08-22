@@ -148,16 +148,35 @@ its own, so a dead peer is indistinguishable from an idle one. HELLO makes
 silence mean something, and `Session.Probe` reports the control connection's idle
 time when one is running.
 
-**The control connection is not interop-verified.** `tests/interop/ql2tpd/`
-and `compose.l2tpv3-keepalive.yml` build a peer and the exchange runs, but
-ql2tpd never clears its own retransmit queue on our ACK and eventually declares
-the tunnel down — even though a packet capture shows our ACK carrying the Nr its
-own `processAckQueue` should accept. veepin's messages are demonstrably
-well-formed (ql2tpd parses our HELLOs and acknowledges each one, advancing its
-Nr), so the fault is not obviously ours, but it is not understood well enough to
-assert on. Until it is, the control connection is covered by **unit tests only**
-— which by this repo's own standard means it is not proven correct. The
-reproduction is `go test -tags interop -run TestPendingQl2tpdKeepalive`.
+**The control connection is not interop-verified, and now the reason is known.**
+`tests/interop/ql2tpd/` and `compose.l2tpv3-keepalive.yml` build a peer and the
+exchange runs, but ql2tpd wedges and eventually declares the tunnel down. The
+cause is upstream, in two lines of go-l2tp v0.1.8, and veepin's messages are
+correct.
+
+Our ACK carries `Ns` = the next sequence number we will use, which is what
+RFC 3931 §3.1 requires of a message that consumes no sequence number — so that
+`Ns` is *ahead* of the peer's `Nr`. go-l2tp's `msgIsInSequence`
+(`seqCompare(s.nr, msg.ns()) == 0`) and `msgIsStale`
+(`seqCompare(msg.ns(), s.nr) == -1`) between them classify such a message as
+neither, so `dequeueRxMessage` never returns it and it sits at the head of
+`rxQueue` forever. The line above it — `m := xport.rxQueue[0]` inside a loop
+over `i` — means nothing behind a stuck head is ever inspected either, so every
+later message piles up, `Nr` stops advancing, and the tunnel dies on the retry
+limit. It is order-dependent, which is why it first looked intermittent.
+
+**There is nothing conforming to change here.** Lowering our `Ns` would
+misstate the next sequence number to every correct peer, and sending a HELLO
+where the RFC calls for an ACK would consume a sequence number that must not be
+consumed. `TestAckCarriesTheNextSequenceNumber` in `control_test.go` pins the
+behaviour precisely so a future attempt to "fix" the cell cannot quietly make
+veepin wrong instead.
+
+So the control connection stays covered by **unit tests plus the kernel
+data-path cells** — which by this repo's own standard means the control plane is
+not proven against a foreign implementation, because no foreign implementation
+currently can prove it. The reproduction, with the packet capture and the line
+numbers, is `go test -tags interop -run TestPendingQl2tpdKeepalive`.
 
 Two details that a v2 implementation gets wrong when carried over:
 

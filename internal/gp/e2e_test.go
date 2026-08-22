@@ -81,6 +81,7 @@ func ipv4(src, dst net.IP, payload string) []byte {
 // httptest's handler would take a path no real client takes.
 type harness struct {
 	srv       *Server
+	pool      *dataplane.AddrPool
 	serverTUN *fakeTUN
 	gateway   net.IP
 	hc        *http.Client
@@ -110,7 +111,7 @@ func newHarness(t *testing.T, cfg ServerConfig, esp bool) *harness {
 		t.Fatal(err)
 	}
 
-	h := &harness{srv: srv, serverTUN: serverTUN, gateway: gateway}
+	h := &harness{srv: srv, pool: pool, serverTUN: serverTUN, gateway: gateway}
 	if esp {
 		udp, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 		if err != nil {
@@ -542,25 +543,67 @@ func TestGetConfigRequiresASession(t *testing.T) {
 
 // TestSessionReleasesItsAddress: a tunnel that ends must return its address, or a
 // gateway leaks its pool one reconnect at a time.
+//
+// The readiness signal is the address, not the client count, and the difference
+// is a real race rather than pedantry. teardown deletes the link from s.links --
+// which is what Clients() counts -- and only then calls release, which returns
+// the address to the pool. Waiting on Clients() == 0 and logging in immediately
+// therefore raced the release, and on a loaded runner lost: the next login was
+// handed 10.50.0.3 and the test failed claiming an address had leaked when it
+// was merely still in flight.
+//
+// That ordering in teardown is deliberate and stays: releasing the address while
+// the old link is still registered under it would let a new client allocate an
+// address whose s.links entry is somebody else's.
 func TestSessionReleasesItsAddress(t *testing.T) {
 	h := newHarness(t, ServerConfig{}, false)
 	info, cfg := mustLogin(t, h)
 	c := h.dialSSL(t, info, cfg, newFakeTUN())
 	_ = c.Close()
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if h.srv.Clients() == 0 {
-			// The same address must come back on the next login.
-			_, next := mustLogin(t, h)
-			if !next.AssignedIP.Equal(cfg.AssignedIP) {
-				t.Errorf("the next client got %v, want the released %v", next.AssignedIP, cfg.AssignedIP)
-			}
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	if !h.waitForRelease(cfg.AssignedIP, 2*time.Second) {
+		t.Fatalf("%v never came back to the pool after the client closed its tunnel", cfg.AssignedIP)
 	}
-	t.Error("the link was still registered after the client closed it")
+	// And it is the address the next client is actually handed, which is the
+	// claim -- a pool that took the address back but never reissued it would
+	// leak just as effectively.
+	_, next := mustLogin(t, h)
+	if !next.AssignedIP.Equal(cfg.AssignedIP) {
+		t.Errorf("the next client got %v, want the released %v", next.AssignedIP, cfg.AssignedIP)
+	}
+}
+
+// waitForRelease reports whether ip is back in the pool within d.
+//
+// It probes by allocating and putting back what it did not want, because
+// dataplane.AddrPool has no "is this free" query and adding one for a test
+// would put a method on the production surface that only a test calls. Every
+// probe is returned, so the pool is left exactly as it was found.
+func (h *harness) waitForRelease(ip net.IP, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		var taken []net.IP
+		found := false
+		for range 8 {
+			got, err := h.pool.Allocate()
+			if err != nil {
+				break
+			}
+			taken = append(taken, got)
+			if got.Equal(ip) {
+				found = true
+				break
+			}
+		}
+		for _, t := range taken {
+			h.pool.Release(t)
+		}
+		if found {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return false
 }
 
 // TestLogoutEndsTheSession proves the logout endpoint actually tears down, so a

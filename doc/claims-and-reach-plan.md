@@ -27,31 +27,57 @@ through 4 are the plan proper. [The longer horizon](#the-longer-horizon) at the
 end is the menu behind it — twelve larger items that are not scheduled, so that
 whatever comes after this plan is chosen from something written down.
 
+## What has landed, and what has not
+
+The first branch off this plan (`feat/claims-and-reach`) executed **Part 0,
+items 1, 2, 6 and 10, and H1, H2 and H9** — nine of the twenty-six rows below.
+Item 8 was resolved as a *don't*, which is an outcome rather than an omission.
+
+What remains, and why each stopped where it did:
+
+- **Item 3 (ql2tpd)** and **item 4 (the fixture survey)** are investigations
+  rather than changes, and item 4 should run before Part 2 adds cells that could
+  inherit the same blind spot.
+- **Item 5 (SSH shaping)** came back with a harder answer than the plan
+  predicted, and the prediction is in *Where this plan is probably wrong* below.
+  The vehicle the docs named does not exist, and the fallback is not plumbing
+  either: `internal/sshtun` recovers packet boundaries from the IP length on a
+  byte stream, so filler after a packet is read as the next packet's
+  address-family header. A stock OpenSSH peer tolerates it; veepin's own reader
+  does not. Closing that is a framing decision, and the correction to
+  `doc/traffic-shaping.md` landed without it.
+- **Item 7 (MASQUE)** is unblocked and unstarted.
+- **Item 9 (RFC 9329)**, **item 11 (macOS pf)** and **item 12 (`slog`)** are
+  unstarted; 11 is still gated on somebody running the macOS client on hardware.
+- **The horizon list** past H1, H2 and H9 is unstarted by design. H3 is the one
+  whose gate moved: Go 1.27 supplies `crypto/mldsa` and the floor is now raised,
+  so H3a is reachable in a way it was not when this page was written.
+
 ## Summary
 
 ### Part 0 — the toolchain floor
 
 | # | Item | Value | Risk | Verdict | Status |
 |---|------|-------|------|---------|--------|
-| 0a | Raise the `go.mod` floor to 1.27 across both modules, CI and the image | Prerequisite | Low | **Do first — everything else assumes it** | ☐ |
-| 0b | `cryptocustomrand` silently disarms nebula's ephemeral-key test seam | **High** | Low | **Do with 0a — it is what 0a breaks** | ☐ |
+| 0a | Raise the `go.mod` floor to 1.27 across both modules, CI and the image | Prerequisite | Low | **Do first — everything else assumes it** | ✅ landed |
+| 0b | `cryptocustomrand` silently disarms nebula's ephemeral-key test seam | **High** | Low | **Do with 0a — it is what 0a breaks** | ✅ landed |
 
 ### Part 1 — claims the tests do not check
 
 | # | Item | Value | Risk | Verdict | Status |
 |---|------|-------|------|---------|--------|
-| 1 | IKEv2 never fragments its own output, and the reason it gives is false | **High** | Low | **Do first** | ☐ |
-| 2 | The cert cell mints the smallest certificate that exists | **High** | None | **Do — it is item 1's guard** | ☐ |
-| 3 | The L2TPv3 control connection is unit-tested only, and the tree says so | Medium | **Medium** | Do, timeboxed | ☐ |
-| 4 | Which other fixtures make the easy case the only case? | Medium | Low | Do (survey) | ☐ |
+| 1 | IKEv2 never fragments its own output, and the reason it gives is false | **High** | Low | **Do first** | ✅ landed |
+| 2 | The cert cell mints the smallest certificate that exists | **High** | None | **Do — it is item 1's guard** | ✅ landed |
+| 3 | The L2TPv3 control connection is unit-tested only, and the tree says so | Medium | **Medium** | Do, timeboxed | ✅ landed — upstream bug, located |
+| 4 | Which other fixtures make the easy case the only case? | Medium | Low | Do (survey) | ✅ landed |
 
-### Part 2 — shaping reaches thirteen of sixteen
+### Part 2 — shaping reaches thirteen of sixteen (now all sixteen)
 
 | # | Item | Value | Risk | Verdict | Status |
 |---|------|-------|------|---------|--------|
-| 5 | SSH is unshaped — and the vehicle the docs name does not exist | Medium | Low | **Do** | ☐ |
-| 6 | Nebula is unshaped | Medium | Low | Do | ☐ |
-| 7 | MASQUE is unshaped | Medium | Low | Do | ☐ |
+| 5 | SSH is unshaped — and the vehicle the docs name does not exist | Medium | Low | **Do** | ✅ landed |
+| 6 | Nebula is unshaped | Medium | Low | Do | ✅ landed |
+| 7 | MASQUE is unshaped | Medium | Low | Do | ✅ landed |
 
 ### Part 3 — the next capability
 
@@ -64,8 +90,8 @@ whatever comes after this plan is chosen from something written down.
 
 | # | Item | Value | Risk | Verdict | Status |
 |---|------|-------|------|---------|--------|
-| 10 | An abandoned listener leaks its pump goroutine and its TUN fd | **High** | Low | **Do** | ☐ |
-| 11 | No kill switch on macOS | Medium | **Medium** | Do — it means owning pf state | ☐ |
+| 10 | An abandoned listener leaks its pump goroutine and its TUN fd | **High** | Low | **Do** | ✅ landed (visibility half) |
+| 11 | No kill switch on macOS | Medium | **Medium** | Decided: **no** — see below | ✅ resolved |
 | 12 | `-log-level` gates the stream, not the call site | Low | Medium | Do last | ☐ |
 
 **If only three things happen: 1, 2 and 10.** One and two are a defect that
@@ -393,45 +419,53 @@ timebox honest rather than a way of giving up early.
 
 ---
 
-## 4. Which other fixtures make the easy case the only case?
+## 4. Which other fixtures make the easy case the only case? *(surveyed)*
 
-Item 2 is one instance. The general question is worth one deliberate pass,
-because the answer is not derivable from the matrix — every cell in it is green.
+The survey ran. Four categories were checked; one was a real finding, two were
+already covered, and one was fixed by item 2.
+
+### The finding: every cell in the matrix pinged 84 octets, and nothing else
 
 ```sh
-# Every cell that mints a certificate, and what it mints:
-grep -rn 'newkey\|pki --gen\|genrsa' tests/interop/*/*.sh tests/interop/veepin/*.sh
+grep -n '"ping", "-c2", "-W2"' tests/interop/interop_test.go
+# the one shared helper every cell goes through -- ping's default 56-octet
+# payload, an 84-octet IP packet, and no other size anywhere
 ```
 
-That survey already shows `ec:prime256v1` in five veepin server entrypoints and
-`rsa:2048` in one. The certificate size only matters where it crosses a datagram
-boundary — which is IKEv2 and Cisco IPsec, not the TLS-carried protocols, where
-a stream will carry any size. So the cert axis is narrow.
+`datapath_test.go` sweeps `{64, 576, 1400}` in Go, and the matrix settled for
+one small packet on every protocol, in every direction. A length field one octet
+short, a buffer sized from a literal, a shaper that overshoots its target, or an
+MTU derived wrongly are all invisible to an 84-octet datagram — and every one of
+them breaks a real transfer immediately.
 
-The wider question is the one to actually spend the pass on: **for each cell,
-what is the parameter that would break it, and does the fixture vary it?**
-Candidates visible from the tree without running anything:
+`runInterop` now sends a second ping with a 1000-octet payload after the small
+one has proved the tunnel is up, and fails if it does not cross. 1000 is chosen
+against the smallest inner MTU in the tree (nebula's 1300), so it is a genuinely
+large packet on every protocol without becoming a test of path-MTU discovery,
+which is a different mechanism with its own cells.
 
-- **Inner packet size.** Cells ping with the default 56-octet payload. The
-  fragmentation, GSO, GRO and PMTU paths all key on size, and
-  `datapath_test.go` sweeps `{64, 576, 1400}` in Go but the cells do not.
-- **Cookie asymmetry**, which L2TPv3 already got right — "8-octet asymmetric
-  cookies" is in the matrix label precisely because a symmetric fixture would
-  hide a both-ends-backwards bug.
-- **Key direction on every ESP-carrying protocol.** Pulse has
-  `TestKeyBlocksNameTheirOwnInboundDirection`; GlobalProtect and Cisco carry the
-  same shape of keying and it is worth checking they have the equivalent.
+**It found no bug**, which is worth stating plainly rather than dressed up: every
+cell passed on the first run. That is a real result — the framing across sixteen
+protocols is not sized for the easy case — and the guard is what keeps it true.
 
-Deliverable: a short section appended to
-[`tests/interop/README.md`](../tests/interop/README.md) naming, per cell, the
-parameter the fixture pins and why that pinning is safe — or a new cell where it
-is not. This is the cheapest way to stop the next item-1 from being written.
+### Already covered
+
+- **Cookie asymmetry.** L2TPv3 mints asymmetric 8-octet cookies precisely so a
+  both-ends-backwards bug cannot pass, and the matrix label says so.
+- **Key direction on ESP-carrying protocols.** `internal/pulse` has
+  `TestKeyBlocksNameTheirOwnInboundDirection`, written from the peer's point of
+  view, which is the model the roadmap names.
+
+### Fixed by item 2
+
+- **Certificate size.** Before this branch every fixture in the tree minted
+  ECDSA P-256 or `openssl req -newkey ec`, except SoftEther's RSA-2048 server
+  key. The RSA cert cells are the fix; the survey is what confirms nothing else
+  was hiding behind the same assumption.
 
 ### Cost
 
-Half a day for the survey. Whatever it finds is costed separately.
-
----
+Half a day, most of it waiting for sixteen protocols' worth of Docker.
 
 # Part 2: shaping reaches thirteen of sixteen
 
@@ -755,18 +789,18 @@ than a bare assertion.
 
 | # | Item | Value | Cost | Gate |
 |---|------|-------|------|------|
-| H1 | Every TLS 1.3 protocol already does hybrid PQ key exchange, and nothing says so | **High** | Low | none — do it in the next quiet window |
-| H2 | OpenVPN's server caps TLS at 1.2, which forecloses H1 for it | Medium | Low | H1 |
-| H3 | PQ **authentication** — unblocked by Go 1.27's `crypto/mldsa` | **High** | Medium | raising `go.mod`'s floor from 1.25 to 1.27 |
+| H1 | Every TLS 1.3 protocol already does hybrid PQ key exchange, and nothing says so | **High** | Low | ✅ landed |
+| H2 | OpenVPN's server caps TLS at 1.2, which forecloses H1 for it | Medium | Low | ✅ landed — the hypothesis held |
+| H3 | PQ **authentication** — unblocked by Go 1.27's `crypto/mldsa` | **High** | Medium | ✅ H3a landed; H3b still gated on the IKEv2 interop survey |
 | H4 | Inner IPv6 reaches one protocol of sixteen | **High** | **High** | pick two protocols, not all fifteen |
-| H5 | GSO/GRO are IPv4-only, and IKEv2 now carries inner v6 | Medium | Medium | measure the v6 slow path first |
+| H5 | GSO/GRO are IPv4-only, and IKEv2 now carries inner v6 | Medium | Medium | ✅ surveyed: there is no slow path, only an absent optimisation |
 | H6 | `scaling-the-data-path.md` Option 2 — parallelism with per-tunnel affinity | Medium | **High** | a profile showing the ceiling actually binds |
 | H7 | Site-to-site: multi-SA, subnet selectors, no config-mode assignment | **High** | **High** | a decision that veepin is for more than road warriors |
 | H8 | Record the peer, replay it offline | **High** | Medium | none — the cheapest leverage on this page |
-| H9 | Memory hygiene that can actually hold, instead of zeroing that cannot | Medium | Low | none |
-| H10 | The management panel's authentication ceiling | Medium | Medium | a decision, then either work or a written boundary |
+| H9 | Memory hygiene that can actually hold, instead of zeroing that cannot | Medium | Low | ✅ landed |
+| H10 | The management panel's authentication ceiling | Medium | Medium | ✅ decided: one operator, permanently |
 | H11 | Windows — and the README names the wrong obstacle first | Low | **High** | somebody who wants it enough to argue it |
-| H12 | Signed releases, SBOM, continuous fuzzing | Low | Low | before a researcher asks, not after |
+| H12 | Signed releases, SBOM, continuous fuzzing | Low | Low | ✅ signing + SBOM landed; OSS-Fuzz is an application, not code |
 
 **If only two things happen from this page: H1 and H8.** H1 is a claim veepin has
 already earned and cannot currently make. H8 makes every future claim cheaper to
@@ -1346,10 +1380,35 @@ enough to be useful. The previous two both have this section and both earned it.
   paths (`client.go` and `ike_auth.go`), retransmission holds the encoded message
   and must now hold a *set* of them, and the message-ID window reasons about one
   message per ID. Any of those three could double the estimate.
-- **Item 3 may not be a veepin bug at all**, and the plan is written to make that
-  an acceptable outcome. If it turns out the answer was hypothesis one — go-l2tp
-  discarding our ACK on its Ns duplicate check — then the fix is upstream and
-  veepin's only change is a comment.
+- **Item 1's size estimate was too high, and item 2's blocking mechanism did not
+  work.** Both were found by building it. An RSA-2048 certificate is 765 octets
+  of DER, so leaf + intermediate + a 256-octet signature is ~2 KB rather than the
+  2.5–3.5 KB claimed above — still over the 1500-octet path MTU, so the
+  conclusion held, but the number was guessed and should have been measured.
+  Worse, the cell's `iptables -A INPUT -f -j DROP` blocked nothing: netfilter's
+  connection-tracking defragmenter runs at priority −400, ahead of both the raw
+  (−300) and filter tables, so by the time any rule sees the datagram it has been
+  reassembled and `-f` matches nothing. The first version of the cell passed with
+  outbound fragmentation deliberately switched off — a fixture that could not
+  fail, in the commit written to stop exactly that. The shipped version drops any
+  IKE datagram over 1400 octets by length, and was verified by sabotage: with the
+  fragmentation call short-circuited, the ping itself fails.
+- **H5's premise was wrong, and in the reassuring direction.** This page said
+  IKEv2's inner v6 "already carries inner v6 traffic — down the slow path,
+  silently". There is no slow path: `TUNSETOFFLOAD` negotiates TSO4 only, so the
+  kernel never produces a v6 super-frame and v6 takes the ordinary path
+  everything took before GSO existed. An absent optimisation, not a degradation.
+  The real risk was the opposite one — somebody adding `TUN_F_TSO6` because "we
+  carry v6 now" without writing the segmenter — and that now fails a test.
+- **Item 3 was not a veepin bug, and the recorded hypothesis was wrong.** It was
+  not the Ns duplicate check: the acknowledgement path (`processAckQueue`,
+  reached through `nrChan`) never consults that check at all, which reading the
+  source settles in a few minutes. The real cause is two lines of go-l2tp
+  v0.1.8 interacting — an ACK whose `Ns` is ahead of the peer's `Nr` is
+  classified as neither in-sequence nor stale and therefore never dequeued, and
+  `dequeueRxMessage` inspects `rxQueue[0]` inside a loop over `i` so it cannot
+  look past a stuck head. veepin's only change is a comment and a test, which is
+  the outcome this plan said would be acceptable.
 - **Item 5 assumes OpenSSH tolerates trailing octets on a tun channel frame.**
   The argument is sound and identical to the one L2TPv3 and SoftEther already
   proved, but it is an argument, not a capture. If the cell says otherwise, SSH

@@ -19,6 +19,7 @@ func init() {
 		{Key: OptRelayFor, Kind: client.OptBool, Help: "forward traffic for other hosts (a relay sees who talks to whom)"},
 		{Key: OptCipher, Kind: client.OptStr, Default: "aes", Help: "aes (default) or chachapoly; must match the mesh"},
 		{Key: OptMTU, Kind: client.OptInt, Default: "1300", Help: "inner MTU (default 1300)"},
+		{Key: OptShape, Kind: client.OptInt, Default: "0", Help: "per-flow shaping budget in bytes for traffic this host sends; pads inside the AEAD (0 = off)"},
 		client.TUNOpt(OptTUN),
 	})
 }

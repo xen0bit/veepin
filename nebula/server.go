@@ -33,6 +33,7 @@ func init() {
 		{Key: OptStaticHosts, Kind: client.OptStr, Help: "peer locations: 10.42.0.1=192.0.2.10:4242[,...];..."},
 		{Key: OptCipher, Kind: client.OptStr, Help: "aes (default) or chachapoly; must match the mesh"},
 		{Key: OptMTU, Kind: client.OptInt, Default: "1300", Help: "inner MTU (default 1300)"},
+		{Key: OptShape, Kind: client.OptInt, Default: "0", Help: "per-flow shaping budget in bytes for traffic this host sends; pads inside the AEAD (0 = off)"},
 		client.TUNOpt(OptTUN),
 	})
 }

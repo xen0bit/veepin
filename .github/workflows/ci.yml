@@ -29,7 +29,12 @@ jobs:
       # the better side of the deal.
       fail-fast: true
       matrix:
-        go: ["1.25", "1.x"] # pinned + latest, so we catch upcoming-toolchain breakage
+        # Pinned + latest, so we catch upcoming-toolchain breakage. Note that
+        # the two legs resolve to the SAME release until 1.28 ships: go.mod's
+        # floor is 1.27 (crypto/mldsa), so the pin cannot sit a release behind
+        # the way it used to. That is temporary and self-correcting -- do not
+        # "fix" it by lowering the pin, which would only fail the vet step.
+        go: ["1.27", "1.x"]
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -38,6 +43,15 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: ${{ matrix.go }}
+          # check-latest is load-bearing for the "1.x" leg, not a nicety.
+          # setup-go resolves "1.x" against actions/go-versions, a manifest that
+          # lags go.dev by days -- the same lag the govulncheck job below has a
+          # paragraph about. With go.mod's floor at 1.27 and the manifest still
+          # topping out at 1.26.6, "1.x" resolved to a toolchain older than the
+          # module requires and the leg failed before running a single test.
+          # Fetching from go.dev when the version is not in the manifest is what
+          # keeps "latest" meaning latest.
+          check-latest: true
           cache: true
 
       - name: Verify go.mod is tidy
@@ -75,7 +89,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: "1.25"
+          go-version: "1.27"
           cache: true
 
       - name: gofmt
@@ -98,7 +112,14 @@ jobs:
           # change; matches the v2 schema in .golangci.yml. The action version
           # moved for the Node 24 runtime, not for the linter -- this pin is
           # what keeps the lint behaviour identical across that bump.
-          version: v2.12.2
+          #
+          # Moved 2.12.2 -> 2.13.1 with the go.mod floor. This is NOT optional
+          # and not a routine bump: golangci-lint refuses outright to lint a
+          # module whose language version exceeds the Go it was built with --
+          # "the Go language version (go1.26) used to build golangci-lint is
+          # lower than the targeted Go version (1.27.0)" -- so the 1.27 floor
+          # requires a linter built with 1.27. 2.13.1 is the first one.
+          version: v2.13.1
 
   govulncheck:
     name: govulncheck
@@ -126,7 +147,12 @@ jobs:
           # advisory lands. That is a visible, one-line chore; the alternative is
           # a job that goes red on somebody else's schedule and teaches everyone
           # to ignore it.
-          go-version: "1.26.6"
+          #
+          # It also has to keep up with go.mod's floor, which is a second reason
+          # to bump it and one that fails loudly rather than quietly: GOTOOLCHAIN
+          # is local here, so a pin older than the floor cannot even load the
+          # packages -- "go.mod requires go >= 1.27.0 (running go 1.26.6)".
+          go-version: "1.27.0"
           # Fetches from go.dev when the version is not in the manifest, which
           # is exactly the case this pin exists for.
           check-latest: true
@@ -153,7 +179,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: "1.25"
+          go-version: "1.27"
           cache: true
 
       # Every protocol parser here reads attacker-controlled bytes before

@@ -46,6 +46,9 @@ type ServerConfig struct {
 
 	// TUNName is the desired TUN interface name; empty lets the kernel pick.
 	TUNName string
+	// Shape is the per-flow downstream shaping budget in bytes; zero disables
+	// shaping, which is the behaviour from before it existed.
+	Shape int
 	// Logger receives progress logs; nil discards them.
 	Logger *log.Logger
 }
@@ -74,6 +77,11 @@ type Server struct {
 	listenAddr *net.TCPAddr
 	tun        *dataplane.TUN
 	listener   net.Listener
+
+	// shaper pads outbound frames so the inner traffic's size pattern does not
+	// survive the tunnel. Owned by the TUN reader, the only caller of write.
+	shaper     *dataplane.Shaper
+	shapedOnce sync.Once
 
 	mu      sync.Mutex
 	clients map[uint32]*sshClient // keyed by the client's learned inner address
@@ -125,8 +133,13 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("ssh: open TUN: %w", err)
 	}
 
+	var shaper *dataplane.Shaper
+	if cfg.Shape > 0 {
+		shaper = dataplane.NewShaper(dataplane.ShapeConfig{Bytes: cfg.Shape})
+	}
 	return &Server{
 		sshCfg:     sshCfg,
+		shaper:     shaper,
 		pool:       pool,
 		gateway:    gateway,
 		network:    pool.Network(),
@@ -301,6 +314,20 @@ func (c *sshClient) write(ipPacket []byte) {
 	if frame == nil {
 		return
 	}
+	// Shaping appends zero filler, which ReadPacket skips a word at a time and a
+	// stock OpenSSH peer never sees: it writes the channel message to its tun in
+	// one call and the kernel delimits the real packet by Total Length.
+	if s := c.srv.shaper; s != nil {
+		if target := s.Target(ipPacket, client.DefaultTunnelMTU); target > len(ipPacket) {
+			// Said out loud once: a ping passes just as happily on a shaper
+			// that quietly did nothing, so the shaped cell requires this line.
+			c.srv.shapedOnce.Do(func() {
+				c.srv.logger.Printf("ssh: shaping outbound packets to %d octets (first: %d -> %d)",
+					client.DefaultTunnelMTU, len(ipPacket), target)
+			})
+			frame = sshtun.EncodePadded(ipPacket, target)
+		}
+	}
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	_, _ = c.ch.Write(frame)
@@ -395,6 +422,7 @@ const (
 	OptServerUsers          = "users-file"
 	OptServerAuthorizedKeys = "authorized-keys"
 	OptServerTUN            = "tun"
+	OptServerShape          = "shape"
 )
 
 func init() {
@@ -409,6 +437,7 @@ func init() {
 		{Key: OptServerPassword, Flag: "pass", Kind: client.OptStr, Secret: true, Help: "the user's password"},
 		{Key: OptServerUsers, Kind: client.OptFilePath, Secret: true, Help: "path to a file of username:secret lines, for more than one user; the secret may be a bcrypt verifier"},
 		{Key: OptServerAuthorizedKeys, Kind: client.OptFilePath, Help: "path to an authorized_keys file (public-key auth)"},
+		{Key: OptServerShape, Kind: client.OptInt, Default: "0", Help: "per-flow downstream shaping budget in bytes; appends filler the peer trims by the inner IP length (0 = off)"},
 		client.TUNOpt(OptServerTUN),
 	})
 }
@@ -421,6 +450,13 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 		TUNName:  opts[OptServerTUN],
 		Users:    map[string]string{},
 		Logger:   log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds),
+	}
+	if v := opts[OptServerShape]; v != "" {
+		sh, cerr := strconv.Atoi(v)
+		if cerr != nil || sh < 0 {
+			return nil, fmt.Errorf("ssh: invalid shape %q", v)
+		}
+		cfg.Shape = sh
 	}
 	var err error
 	if cfg.HostKey, err = os.ReadFile(opts[OptServerHostKey]); err != nil {

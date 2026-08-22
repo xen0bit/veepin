@@ -1,0 +1,47 @@
+# Reference OpenSSH client (ssh -w) -> veepin SSH server, WITH SHAPING ON.
+#
+# compose.ssh-server.yml with -shape, and the point is what a real `ssh -w` does
+# with filler it was never told about. An SSH channel is a byte stream with no
+# packet delimiter, which is why this took a framing change rather than a
+# padding call: veepin's own reader recovers boundaries from the IP length, so
+# trailing filler would be read as the next packet's address-family header. It
+# now skips whole zero words, which the header (00 00 00 02 / 00 00 00 0a) can
+# never be.
+#
+# OpenSSH needs none of that. It writes each channel message to its tun in one
+# call and the kernel delimits the real packet by Total Length. This cell is the
+# check on that claim, and it is the only way to make it.
+#
+# The veepin responder accepts the tun@openssh.com forwarding channel and its
+# address-family packet framing from a real OpenSSH client it shares no code
+# with. The client pings 10.200.0.1 (the veepin server's tunnel gateway).
+name: veepin-interop-ssh-server-shaped
+
+services:
+  veepin-ssh-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    volumes:
+      - ./ssh/keys:/keys:ro
+      - ./veepin/ssh-server-entrypoint.sh:/entrypoint.sh:ro
+    environment:
+      # 16 KB per flow: enough to cover a TLS handshake's whole distinctive
+      # flight, which is what the fingerprint keys on.
+      SHAPE: "16384"
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  ssh-client:
+    build:
+      context: ssh-client
+    image: interop-ssh-client
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-ssh-server]
+    environment:
+      SERVER: "veepin-ssh-server"
+    volumes:
+      - ./ssh/keys:/keys:ro

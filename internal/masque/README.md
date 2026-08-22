@@ -62,3 +62,20 @@ ordering the tunnelled traffic never asked for.
   substrate adds `FuzzConsumeVarint`, `FuzzParseSettings` and
   `FuzzDecodeFieldSection`. All eight are in the fuzz job's target list, and a
   test fails if that list and these packages ever disagree.
+- **Shaping pads inside the DATAGRAM capsule's value, not after it.** RFC 9484's
+  context-0 payload is "context ID, then an IP packet" with no length of its
+  own, so a receiver hands everything after the context ID to its TUN and the
+  kernel's IP stack delimits the real packet by the inner header's Total Length.
+  `DatagramEncoder.EncodePadded` grows the capsule's length field to cover the
+  filler — a padder that grew the value without the length would leave the peer
+  resynchronising on the wrong octet, which looks like a corrupt tunnel rather
+  than a padding bug, and `TestPaddedCapsuleLengthFieldCoversTheFiller` is two
+  capsules back to back precisely so the second only parses if the first's
+  length was right.
+
+  The obvious alternative — a filler capsule of an unregistered type, which
+  RFC 9297 requires receivers to skip — was rejected. It would rest the whole
+  mechanism on the peer honouring a MUST, where trailing octets rest on
+  behaviour every IP stack already has. `compose.masque-server-shaped.yml`
+  proves aioquic accepts and trims the padding having been told nothing about
+  it.

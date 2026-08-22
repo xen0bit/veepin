@@ -287,10 +287,48 @@ Ordered by value, not by ease:
    than an open question: see [`verifying-shaping.md`](verifying-shaping.md). It
    is the highest-value item on this list by a distance, because until it is done
    the feature is off and everything else here is dormant.
-2. **The protocols still unshaped**: SSH, MASQUE and Nebula. Each has a
-   plausible vehicle (`SSH_MSG_IGNORE` exists for exactly this, a MASQUE capsule
-   type can be unregistered-and-skipped, Nebula's payload is length-delimited),
-   so this is mostly plumbing rather than design.
+2. **Every protocol is shaped now**, and the three that were outstanding each
+   answered a different question.
+
+   **MASQUE** did not need the vehicle this document proposed. The suggestion
+   was a filler capsule of an unregistered type, which RFC 9297 requires
+   receivers to skip. That would have tested aioquic's compliance with a MUST;
+   what shipped pads *inside* the DATAGRAM capsule's value, because RFC 9484's
+   context-0 payload is "context ID, then an IP packet" with no length of its
+   own — so the receiver hands everything after the context ID to its TUN and
+   the kernel delimits by Total Length, exactly as everything else here relies
+   on. It works against a receiver that skips unknown capsules and one that does
+   not, which is a strictly weaker requirement on the peer.
+
+   **Nebula** forced the placement rather than offering a choice. Its 16-octet
+   header is passed to the AEAD as additional data, so octets appended after the
+   tag are unauthenticated and a conforming receiver rejects the datagram
+   instead of trimming it. The filler goes inside the sealed payload.
+
+   **SSH was the one this document was wrong about, twice.** The claim here used
+   to be that "`SSH_MSG_IGNORE` exists for exactly this". The message exists in
+   the protocol; it is not reachable through `x/crypto/ssh`'s public surface —
+   `msgIgnore = 2` is unexported, there is no raw-packet write, and
+   `Conn.SendRequest` sends a global request (message 80) instead. Same shape of
+   rejection as the RFC 9221 MASQUE datagram finding in `protocol-roadmap.md`,
+   and recorded rather than deleted because the next reader would otherwise
+   spend the same afternoon on it.
+
+   The correction after that was also wrong in the opposite direction: trailing
+   filler was called "mostly plumbing", and it was not. An SSH channel is a byte
+   stream with no packet delimiter, so `internal/sshtun`'s reader recovers
+   boundaries from the IP length — which means filler after a packet is read as
+   the *next* packet's address-family header, and the stream desynchronises from
+   that point on. The symptom is a corrupt tunnel rather than a padding bug, and
+   it only shows up on the second packet.
+
+   The fix is a framing property rather than a protocol change: the family
+   header is `00 00 00 02` or `00 00 00 0a`, so a whole zero word can only be
+   filler. `ReadPacket` reads 4-octet words and discards the zero ones, which
+   costs the unshaped case nothing and is why `EncodePadded` pads by whole
+   words. A stock OpenSSH peer needs none of it — it writes each channel message
+   to its tun in one call and the kernel trims — and
+   `compose.ssh-server-shaped.yml` is what turned that argument into evidence.
 
    SoftEther was on this list and is not any more. It confirmed the "mostly
    plumbing" reading — the padding is trailing filler on the Ethernet frame,

@@ -69,8 +69,24 @@ polled against a wake eventfd, so a `Close` waiting on its packet pump unblocks
 instead of hanging on an idle tunnel. But `Close` can still stall on any other
 blocking path a protocol owns (a wedged control connection, a peer that never
 answers), and past the bound the listener is logged and abandoned, which
-**leaks its pump goroutine and TUN fd until the process exits**. Repeatedly
-restarting a genuinely wedged listener accumulates both.
+**leaks its pump goroutine and TUN fd until that listener's `Close` finally
+returns** — or until the process exits, if it never does. Repeatedly restarting
+a genuinely wedged listener accumulates both.
+
+That is still a leak, and it is not one this package can close: the blocking
+path belongs to whichever protocol owns it. What this package does is stop the
+leak being invisible. `Manager.Abandoned` reports a gauge (how many right now)
+and a cumulative counter (how many ever), `/api/metrics` exports both as
+`veepin_listeners_abandoned` and `veepin_listeners_abandoned_total`, and a
+reaper keeps watching each abandoned teardown so a `Close` that eventually
+returns brings the gauge back down while the counter keeps the record. Before
+this the only trace was a log line, and a fleet accumulating a descriptor per
+restart had nothing an operator could alert on.
+
+Both counters are atomics rather than fields under `Manager.mu`, and that is a
+correctness constraint rather than a performance one: `stopListenerLocked` runs
+with `mu` held, so touching it from the abandonment path deadlocks the manager —
+which `TestAWedgedCloseDoesNotFreezeTheFleet` catches immediately, and did.
 
 **A rebuild is a gap in service.** Close, construct, bind again. Clients of that
 listener are disconnected and must re-handshake. There is no draining and no

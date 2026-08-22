@@ -79,6 +79,21 @@ real protocol; see [The example protocol](#the-example-protocol).
 | IKE/ESP ciphers | AES-GCM-16 (AEAD, RFC 5282), ChaCha20-Poly1305 (AEAD, RFC 7634), AES-CBC + HMAC-SHA2 (encrypt-then-MAC) |
 | Integrity | HMAC-SHA1-96, HMAC-SHA2-256-128/384-192/512-256 |
 
+**Post-quantum key exchange is on by default nearly everywhere**, and in two
+independent ways. IKEv2 negotiates ML-KEM-768 over RFC 9370 + RFC 9242 with
+`-pq`, verified against strongSwan in both directions. And every TLS 1.3 path in
+the tree is hybrid X25519MLKEM768 without asking, because Go's `crypto/tls` has
+led its defaults with it since Go 1.24 and veepin pins `CurvePreferences`
+nowhere — a guard test enforces that it stays that way. That covers MASQUE and
+the OpenVPN server unconditionally, and AnyConnect, Fortinet, GlobalProtect,
+Ivanti, SSTP, SoftEther and the OpenVPN client whenever the peer speaks TLS 1.3.
+**Authentication can be post-quantum too**, as of Go 1.27: point a server at an
+ML-DSA (FIPS 204) certificate and key and both halves of the handshake are
+post-quantum — key exchange and signature — with no dependency outside the
+standard library. It is opt-in because an ML-DSA certificate is only useful
+against a peer that accepts one. See [`doc/security.md`](doc/security.md) for
+what each half does and does not protect.
+
 AES from the standard library; ChaCha20-Poly1305 from `x/crypto` (the same AEAD
 WireGuard already pulls in). ChaCha20-Poly1305 for IKEv2/ESP shares AES-GCM-16's
 exact framing — a 4-octet implicit salt, an 8-octet explicit IV and a 16-octet
@@ -252,13 +267,39 @@ The package ships a systemd template unit — drop arguments in
 `/usr/share/doc/veepin/veepin.conf.example`); it grants the daemon the
 capabilities it needs, so no root shell or setcap step.
 
+### Verifying a release
+
+Each GitHub release carries `checksums.txt`, a cosign signature over it, and a
+CycloneDX SBOM per binary. The signature is **keyless**: it is bound to this
+repository's release workflow through GitHub's OIDC identity, so there is no
+long-lived signing key to trust, and verification checks *which workflow built
+the artifact* rather than *who holds a key*.
+
+```sh
+cosign verify-blob checksums.txt \
+  --certificate checksums.txt.pem \
+  --signature checksums.txt.sig \
+  --certificate-identity-regexp 'https://github[.]com/xen0bit/veepin/[.]github/workflows/release[.]yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+sha256sum -c checksums.txt --ignore-missing
+```
+
+One signature over the checksum file rather than one per artifact: the checksums
+already cover every artifact, so verifying the signature and then the checksums
+gives the same guarantee.
+
+The SBOM is short — `golang.org/x/{crypto,net,sys,text}` and the standard
+library — which is the point of publishing it. The dependency claim at the top
+of this file is then something a scanner can check rather than a sentence you
+have to take on trust.
+
 `.deb`/`.rpm`/`.apk` packages and plain tarballs for every version are on
 [GitHub Releases](https://github.com/xen0bit/veepin/releases)
 (`apt install ./veepin_<ver>_linux_<arch>.deb` works directly).
 
 ## Build
 
-Requires Go 1.21+ (developed against Go 1.26).
+Requires Go 1.27+ (`crypto/mldsa`; developed against Go 1.27).
 
 ```sh
 go build ./...
@@ -476,6 +517,25 @@ Above `info` the informational stream is suppressed. That is the whole of what
 the level can mean while the tree logs through `*log.Logger`, which has no
 per-call level — and it is useful rather than half-implemented because a fatal
 error returns to `main` and reaches stderr directly, never through the logger.
+
+### Process hardening
+
+`serve` takes two Linux-only switches for the boundary
+[`doc/security.md`](doc/security.md) opens by naming — the one it refuses to
+defend by zeroing key material, because Go's collector makes that a gesture
+rather than a guarantee:
+
+- `-lock-memory` — `mlockall`, so no page reaches swap and key material cannot
+  be recovered from a swap file afterwards. Needs `CAP_IPC_LOCK` or
+  `RLIMIT_MEMLOCK` headroom.
+- `-no-core-dumps` — `prctl(PR_SET_DUMPABLE, 0)`, so a crash writes no core file
+  carrying live session keys and a same-uid process cannot `ptrace` in.
+
+Both are off by default because each trades something real, and both **abort the
+server if refused** rather than warning and carrying on. A hardening switch that
+silently does nothing is worse than no switch: the appearance invites confidence
+the process has not earned. Neither reduces what a debugger with
+`CAP_SYS_PTRACE`, a hypervisor, or code execution in the process can reach.
 
 ### Embedding the client
 
@@ -717,9 +777,10 @@ each a localized extension point, not a structural rework:
   child and the message-ID window accepts only the next expected request. IKEv2
   *does* implement MOBIKE (RFC 4555 `UPDATE_SA_ADDRESSES`, so a roaming peer
   survives an address change without re-handshaking), IKE fragmentation
-  reassembly (RFC 7383 — it negotiates and reassembles inbound SKF fragments but
-  never fragments its own, always-small output) and the RFC 7296 §2.6 cookie
-  exchange; every server bounds unauthenticated work through `dataplane.Gate`.
+  (RFC 7383 — it negotiates support, reassembles inbound SKF fragments, and
+  fragments its own output above 1280 octets, which certificate authentication
+  needs: an RSA chain puts IKE_AUTH near 2 KB in both directions) and the
+  RFC 7296 §2.6 cookie exchange; every server bounds unauthenticated work through `dataplane.Gate`.
 - **Client liveness and SA rekey are unified across protocols.** A
   cross-protocol monitor (`client.Prober`, applied automatically by
   `client.Dial`) detects a dead peer and tears the tunnel down for a clean
@@ -754,15 +815,15 @@ each a localized extension point, not a structural rework:
   [USENIX Security '24](https://www.usenix.org/conference/usenixsecurity24/presentation/xue-fingerprinting),
   which byte-level obfuscation does not address. `veepin serve <protocol> -shape
   <bytes>` pads the first N bytes of each inner flow out to the tunnel MTU on
-  thirteen of the sixteen protocols — RFC 4303 §2.7 TFC padding for ESP (IKEv2,
+  all sixteen protocols — RFC 4303 §2.7 TFC padding for ESP (IKEv2,
   Cisco IPsec, GlobalProtect, Ivanti), trailing octets for WireGuard and
   AmneziaWG, the RFC 1661 §5.1 PPP Information field for SSTP, Fortinet and
   L2TP/IPsec, the length-delimited data payload for AnyConnect and OpenVPN, and
   trailing filler on the IP-bearing frames of an L2TPv3 pseudowire or a
-  SoftEther layer-2 segment. The three still unshaped are SSH, MASQUE and
-  Nebula; each has a plausible vehicle and none has been plumbed, which
-  [`doc/traffic-shaping.md`](doc/traffic-shaping.md) records as work outstanding
-  rather than a design boundary. All are inert to a conforming receiver, which delimits the real
+  SoftEther layer-2 segment, trailing filler on an SSH tunnel channel, and —
+  inside the sealed or length-covered payload, because neither has room after
+  it — a Nebula transport message and a MASQUE DATAGRAM capsule. All are inert
+  to a conforming receiver, which delimits the real
   packet by the inner IP header, so **stock clients benefit unmodified**; and
   because the attack targets handshakes, the cost is per-flow rather than
   per-byte, leaving bulk throughput untouched. It does not shape packet counts

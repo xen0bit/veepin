@@ -145,9 +145,9 @@ and the fix belongs in `primaryNetworkService`.
 
 - **The kill switch.** `-kill-switch` refuses on macOS, naming why: the Linux
   implementation needs blackhole routes with per-route metrics so it can be
-  armed while the tunnel is healthy, and the BSD table has no metrics. The
-  honest macOS answer is a `pf` anchor, which means owning firewall state on the
-  user's host.
+  armed while the tunnel is healthy, and the BSD table has no metrics. See
+  [Doing it yourself with pf](#doing-it-yourself-with-pf) below — the protection
+  is available, it just has to be yours rather than veepin's.
 - **The layer-2 protocols.** `softether` and `l2tpv3` need a TAP device, and
   macOS has none in-kernel. `OpenTAP` says so rather than failing obscurely.
 - **GSO.** A Linux offload with no utun equivalent. `GSO()` is false and the
@@ -157,6 +157,61 @@ and the fix belongs in `primaryNetworkService`.
   shared with the client — but `internal/hostnet` shells out to `iptables` and
   `sysctl` with Linux spellings, so NAT setup will not work. Serving from a Mac
   is not a goal; dialling from one is.
+
+## Doing it yourself with pf
+
+A kill switch on macOS is a `pf` ruleset, and veepin will not install one. The
+reason is specific rather than squeamish: `pfctl -a veepin -f -` loads rules
+into an anchor happily and pf never evaluates them, because an anchor is only
+consulted if the **active ruleset references it** — and the stock
+`/etc/pf.conf` hooks only `com.apple/*`. Making it work means editing
+`/etc/pf.conf` permanently, or replacing your whole ruleset for the life of the
+tunnel and restoring it afterwards. Either one is veepin owning your host's
+firewall, and the second fails in the wrong direction: a crash leaves the anchor
+referenced and empty, so traffic flows and you believe you are protected.
+
+If you want it, own it. Add one line to `/etc/pf.conf`, after the existing
+`anchor` lines:
+
+```
+anchor "veepin"
+```
+
+Then, with the tunnel's interface and your server's address in hand:
+
+```sh
+# TUN is the utun veepin reported; SERVER is the OUTER address it dialled
+# (client.Result.Gateway), not an address inside the tunnel.
+sudo pfctl -a veepin -f - <<EOF
+block drop out all
+pass out quick on lo0 all
+pass out quick on $TUN all
+pass out quick proto udp to $SERVER
+EOF
+sudo pfctl -E          # note the token it prints
+```
+
+To take it down, flush the anchor and release the reference count you took —
+`-X` rather than `-d`, so pf stays enabled if something else was using it:
+
+```sh
+sudo pfctl -a veepin -F rules
+sudo pfctl -X <token>
+```
+
+Two things to get right, both of which are the same mistakes the Linux
+implementation exists to avoid:
+
+- **`$SERVER` is the outer address**, the one on the underlying network. Putting
+  a tunnel-internal address there fences the tunnel out of its own transport and
+  nothing connects.
+- **Load the rules before you connect, not after.** Arming afterwards leaves
+  however long the handshake takes as plaintext, which is the window the whole
+  mechanism exists to close.
+
+Adapt the `pass out quick proto udp` line to your protocol's transport — `tcp`
+for SSTP, SSH, AnyConnect and Fortinet; `udp` for IKEv2, WireGuard, MASQUE,
+Nebula and L2TP.
 
 ## Reporting
 

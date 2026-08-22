@@ -1,0 +1,51 @@
+# Direction B with RSA-2048 certificate auth and IP fragmentation blocked: a
+# strongSwan initiator authenticates to `veepin serve ikev2` with a certificate
+# chain, and the veepin RESPONDER must RFC 7383 fragment its own IKE_AUTH to
+# answer.
+#
+# The responder is a separate code path from the initiator -- ike_auth.go rather
+# than client.go -- and it had the same missing outbound size check, so a veepin
+# server could not answer a strongSwan client with an RSA CA. No cell covered
+# certificate auth in this direction at all before this one.
+#
+# The strongSwan container mints the PKI (it has `pki`; the veepin image does
+# not) and publishes the server's chain and key into the shared volume.
+name: veepin-interop-b-cert-rsa
+
+volumes:
+  pki:
+
+services:
+  veepin-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    sysctls:
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+      net.ipv4.ip_forward: "1"
+    environment:
+      SERVER_ID: "vpn.example.com"
+      POOL: "10.10.10.0/24"
+    volumes:
+      - ./veepin/server-entrypoint-cert-rsa.sh:/entrypoint.sh:ro
+      - pki:/pki
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  strongswan-client:
+    build:
+      context: strongswan
+    image: interop-strongswan
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+    depends_on: [veepin-server]
+    volumes:
+      - ./strongswan/swanctl-client-cert-rsa.conf:/etc/swanctl/swanctl.conf:ro
+      - ./strongswan/client-entrypoint-cert-rsa.sh:/entrypoint.sh:ro
+      - pki:/pki
+    command: ["/bin/sh", "/entrypoint.sh"]

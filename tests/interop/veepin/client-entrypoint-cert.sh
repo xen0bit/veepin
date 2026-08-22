@@ -16,7 +16,11 @@ while [ ! -f "$PKI/ready" ] || [ ! -f "$PKI/client-key.pem" ]; do
     sleep 1
 done
 
-echo "veepin-client: connecting to $SERVER as $CLIENT_ID with a certificate (server-id=$SERVER_ID)"
+# CLIENT_CERT lets a cell hand over a chain file (leaf + intermediate) instead
+# of the lone leaf. The RSA cell does; the ECDSA one leaves it unset.
+CERT="${CLIENT_CERT:-$PKI/client-cert.pem}"
+
+echo "veepin-client: connecting to $SERVER as $CLIENT_ID with $CERT (server-id=$SERVER_ID)"
 
 i=1
 while [ "$i" -le 30 ]; do
@@ -25,7 +29,7 @@ while [ "$i" -le 30 ]; do
         -port "${PORT:-500}" \
         -id "$CLIENT_ID" \
         -server-id "$SERVER_ID" \
-        -cert "$PKI/client-cert.pem" \
+        -cert "$CERT" \
         -key "$PKI/client-key.pem" \
         -ca "$PKI/ca-cert.pem" \
         -tun tun0 \

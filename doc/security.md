@@ -15,10 +15,36 @@ wipes keys while leaving them in memory anyway — worse than not doing it, beca
 the appearance invites confidence the implementation has not earned.
 
 The honest consequence: **veepin does not claim protection against an attacker
-who can read process memory.** An adversary with a core dump, a debugger, swap
-access, or code execution in the process recovers live session keys. Defend that
-boundary at the layer that can actually hold it — process isolation, disabled
-core dumps, encrypted swap — not by hoping the language cooperated.
+who can read process memory.** An adversary with a debugger, or code execution
+in the process, recovers live session keys. Defend that boundary at the layer
+that can actually hold it, not by hoping the language cooperated.
+
+Two of those layers the process can take itself, and `veepin serve` now offers
+both. They are off by default because each trades something real:
+
+- **`-lock-memory`** — `mlockall(MCL_CURRENT|MCL_FUTURE)`. No page of the
+  process reaches swap, so key material cannot be recovered from a swap
+  partition or file afterwards. The cost is that the whole resident set becomes
+  unswappable, which on a memory-constrained host trades an availability risk
+  for a confidentiality gain. It needs `CAP_IPC_LOCK` or `RLIMIT_MEMLOCK`
+  headroom (`LimitMEMLOCK=infinity` in a systemd unit).
+- **`-no-core-dumps`** — `prctl(PR_SET_DUMPABLE, 0)`. A crash writes no core
+  file carrying live session keys, and a same-uid process cannot `ptrace` in.
+  The cost is that `/proc/self` becomes root-owned, which a deployment reading
+  its own `/proc` entries for monitoring needs to know.
+
+**Both fail loudly rather than silently.** A refused `mlockall` aborts the
+server; it does not warn and continue. A hardening switch that quietly does
+nothing is worse than no switch at all, for exactly the reason given above about
+fake key wiping — the appearance invites confidence the process has not earned.
+For the same reason, a partial application is never reported: asking for both
+and getting one is an error, not a success with a caveat.
+
+What remains uncovered, and is not reduced by either: a debugger with
+`CAP_SYS_PTRACE`, a hypervisor, a kernel exploit, or anything with code
+execution in the process. See [`internal/harden`](../internal/harden). Both are
+Linux-only, and on other platforms requesting either is an error rather than a
+no-op.
 
 ## Throughput is bounded by one core per direction
 
@@ -167,6 +193,61 @@ Two things this does NOT protect:
 The ML-KEM implementation uses the Go standard library's `crypto/mlkem`, which
 is a dependency-free path (no new module beyond the stdlib). The IANA group ID
 for ML-KEM-768 in IKEv2 is 36.
+
+
+## Every TLS 1.3 protocol has a post-quantum key exchange, and its authentication is classical
+
+Post-quantum key exchange in this tree is not only IKEv2's. Go's `crypto/tls`
+has led its default `CurvePreferences` with **X25519MLKEM768** (CurveID 4588)
+since Go 1.24, and veepin pins `CurvePreferences` nowhere. So every TLS 1.3
+handshake here is hybrid — Curve25519 and ML-KEM-768 both, with the derived
+secret at least as strong as the stronger half.
+
+Concretely:
+
+- **MASQUE is post-quantum unconditionally.** All three of its `tls.Config`s are
+  TLS 1.3-only.
+- **OpenVPN's server is too, as of the `SessionTicketsDisabled` change.** It was
+  the one exception: capped at TLS 1.2 because TLS 1.3's post-handshake
+  `NewSessionTicket` stalled clients on OpenVPN's half-duplex control channel,
+  and only TLS 1.3 carries a `key_share`. Suppressing the tickets removes the
+  cause instead of the version.
+- **AnyConnect, Fortinet, GlobalProtect, Ivanti, SSTP, SoftEther and the OpenVPN
+  client** are hybrid whenever the peer negotiates TLS 1.3, which every current
+  one does. Their floor is TLS 1.2 for vendor compatibility, and at 1.2 the key
+  exchange is classical.
+
+Three things this does **not** cover, and each is a real boundary:
+
+- **Authentication is classical by default, and no longer has to be.** The same
+  limit [post-quantum IKEv2 has](#post-quantum-ikev2-protects-the-key-exchange-not-the-authentication):
+  a certificate signed with RSA or ECDSA leaves an adversary attacking the
+  authentication *live* rather than retroactively unaffected.
+
+  Go 1.27's `crypto/mldsa` closes it, inside the dependency policy and with no
+  new module. `crypto/x509` mints, marshals and verifies ML-DSA certificates,
+  `crypto/tls` offers `MLDSA44/65/87` as TLS 1.3 signature schemes, and veepin's
+  credential paths carry them without any protocol work — they load PEM and hand
+  it to `tls.X509KeyPair`, which is the whole of what is needed.
+  `TestAFullyPostQuantumHandshake` pins both halves at once (ML-KEM key exchange
+  and an ML-DSA signature), and `TestServerAcceptsMLDSACredentials` does it
+  through a real facade with **mutual** authentication, so both signatures on
+  the connection are post-quantum.
+
+  **It is opt-in and it is not the default**, for one reason: an ML-DSA
+  certificate is only useful against a peer that accepts one, and most deployed
+  clients do not yet. Point a veepin server at an ML-DSA certificate and key and
+  the handshake is post-quantum end to end; point it at an RSA one and it is
+  hybrid on the key exchange and classical on the signature, as before.
+- **The DTLS data channels are not.** `internal/dtls` is a from-scratch DTLS 1.2
+  with two fixed suites and no post-quantum path at all, so AnyConnect's and
+  Fortinet's *data* channels stay classical even when their control channels do
+  not.
+- **A protocol that ever pins `CurvePreferences` silently drops out of this
+  list.** The handshake still succeeds; it is just classical again.
+  `TestNoTLSConfigPinsCurvePreferences` is what stops that happening in a commit
+  about something else, and `TestGoDefaultsStillNegotiateMLKEM` is what stops the
+  guard from outliving the default it assumes.
 
 
 ## SoftEther is layer 2, and shares a broadcast domain between clients
@@ -389,6 +470,31 @@ Two smaller notes on the same file:
   asks for it twice, since with nothing on screen to check against, a typo is
   not a visible error but a login that never succeeds. A password arriving on
   a pipe is read once and is not echoed by anything.
+
+## The management plane is for one operator on one host, permanently
+
+This is a decision, recorded so it stops looking like an omission somebody will
+eventually "fix" by adding a login form.
+
+The management plane is designed for the person who is already root on the box:
+a bearer token in a `0600` root-only file, a panel with no login, and a
+localhost bind plus a `Host` check as the boundary. Every one of those is
+correct for a single operator with shell access, and every one of them is a
+hard ceiling on anything else.
+
+**veepin is not going to grow a multi-operator management plane.** The pieces
+for one are in the tree — `internal/userdb`, `internal/otp`, `internal/profile`
+— but they exist for the *VPN's* users, not for its administrators, and reusing
+them here would change what the security boundary is. Real authentication means
+the localhost bind stops being what protects the panel, which in turn means
+every handler, the audit log, and the `Host` check all need to be re-reasoned
+about against a hostile network peer rather than a trusted one. That is a
+different project with a different threat model, not a feature.
+
+If more than one person needs to administer a veepin host, the supported answer
+is the one that already works and that this design assumes: give them shell
+access, or put an authenticating reverse proxy in front of the API. Both put the
+multi-user problem where there are mature tools for it.
 
 ## The management plane binds to localhost; do not bind it to a routable interface
 

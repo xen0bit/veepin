@@ -1,0 +1,54 @@
+# Independent aioquic CONNECT-IP client -> veepin MASQUE proxy, WITH SHAPING ON.
+#
+# compose.masque-server.yml with -shape, and the point is what aioquic does with
+# padding it was never told about. veepin pads each inner packet out to the
+# inner MTU inside the DATAGRAM capsule's value; RFC 9484's context-0 payload is
+# "context ID, then an IP packet" with no length of its own, so a receiver hands
+# everything after the context ID to its TUN and the kernel's IP stack delimits
+# the real packet by the inner header's Total Length. If that reasoning is wrong
+# the ping fails, which is the only way to find out.
+#
+# This is deliberately NOT the filler-capsule-of-an-unknown-type approach the
+# docs used to suggest. That tests aioquic's compliance with an RFC 9297 MUST;
+# this tests behaviour every IP stack already has, and works against a receiver
+# that skips unknown capsules and one that does not.
+#
+# The mirror of compose.masque.yml: here veepin is the proxy and the foreign
+# aioquic implementation is the client. It exercises veepin's server-side
+# Extended CONNECT handling, address assignment and capsule relay against a stack
+# that shares none of veepin's code.
+#
+# Data-path check: the aioquic client pings 10.32.0.1, the veepin proxy's gateway.
+name: veepin-interop-masque-server-shaped
+
+services:
+  veepin-masque-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    environment:
+      POOL: "10.32.0.0/24"
+      # 16 KB per flow: enough to cover a TLS handshake's whole distinctive
+      # flight, which is what the fingerprint keys on.
+      SHAPE: "16384"
+    volumes:
+      - ./veepin/masque-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  aioquic-masque-client:
+    build:
+      context: masque
+    image: interop-masque
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-masque-server]
+    environment:
+      SERVER: "veepin-masque-server"
+    volumes:
+      - ./masque/client-entrypoint.sh:/entrypoint.sh:ro
+    command: ["/bin/sh", "/entrypoint.sh"]

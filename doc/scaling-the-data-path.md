@@ -10,7 +10,9 @@ kernel hands the pump TCP super-frames, which segment in userspace
 (offload_linux.go) and egress as one batched send; and inbound bulk TCP
 coalesces back into super-frames written to the TUN once (GRO, gro_linux.go) —
 both wired in IKEv2, WireGuard, and OpenVPN, server and client. Not built:
-TSO6/USO (IPv4-only tree) and everything under Option 2. Written while
+TSO6/USO and everything under Option 2. **"IPv4-only tree" was the reason given for TSO6 and it stopped being true** when IKEv2 started assigning an `INTERNAL_IP6_ADDRESS` by default — but the conclusion survives the premise, and the correction is worth having precisely because it looks like a regression and is not. `TUNSETOFFLOAD` negotiates `TUN_F_CSUM|TUN_F_TSO4`, so the kernel never produces a v6 super-frame: inner IPv6 arrives as ordinary packets and takes the path everything took before GSO existed. That is an **absent optimisation, not a slow path** — there is no cliff to measure and nothing is silently degraded.
+
+What would be unsafe is adding `TUN_F_TSO6` to the ioctl without writing the v6 segmenter, because the kernel would then send super-frames `segmentTSO4` cannot cut and the failure mode is corrupted traffic rather than an error. `TestPumpVnetDropsUnnegotiatedGSOTypes` asserts the drop so that change fails a test instead. Building TSO6 properly is still open, and still gated on a measurement of what GSO buys that nobody has taken for v6. Written while
 sharpening the
 [security boundary](security.md#throughput-is-bounded-by-one-core-per-direction)
 that states the current ceiling. It captures which protocols the ceiling actually

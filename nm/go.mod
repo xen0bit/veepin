@@ -1,6 +1,6 @@
 module github.com/xen0bit/veepin/nm
 
-go 1.25.0
+go 1.27.0
 
 require (
 	github.com/godbus/dbus/v5 v5.1.0

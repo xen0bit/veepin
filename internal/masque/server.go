@@ -42,6 +42,11 @@ type ServerConfig struct {
 	// Gate bounds unauthenticated work. Nil installs one with the package
 	// defaults; an unbounded server is not a supported configuration.
 	Gate *dataplane.Gate
+	// Shape is the per-flow downstream shaping budget in bytes; zero disables
+	// shaping, which is the behaviour from before it existed. The filler goes
+	// inside the DATAGRAM capsule's value, after the inner packet -- see
+	// DatagramEncoder.EncodePadded.
+	Shape int
 }
 
 // peer is one established client.
@@ -64,9 +69,16 @@ type Server struct {
 	cfg  ServerConfig
 	log  *log.Logger
 
+	// shaper pads outbound inner packets so the inner traffic's size pattern
+	// does not survive encapsulation. Owned by tunLoop, the only writer, the
+	// same contract every other shaper in the tree carries.
+	shaper *dataplane.Shaper
+
 	mu     sync.Mutex
 	peers  map[netip.Addr]*peer
 	closed bool
+
+	shapedOnce sync.Once
 
 	done chan struct{}
 	wg   sync.WaitGroup
@@ -85,14 +97,19 @@ func NewServer(end *quic.Endpoint, tun tunDevice, cfg ServerConfig) (*Server, er
 	if gate == nil {
 		gate = dataplane.NewGate(dataplane.AdmissionConfig{})
 	}
+	var shaper *dataplane.Shaper
+	if cfg.Shape > 0 {
+		shaper = dataplane.NewShaper(dataplane.ShapeConfig{Bytes: cfg.Shape})
+	}
 	return &Server{
-		end:   end,
-		tun:   tun,
-		gate:  gate,
-		cfg:   cfg,
-		log:   logger,
-		peers: map[netip.Addr]*peer{},
-		done:  make(chan struct{}),
+		end:    end,
+		tun:    tun,
+		gate:   gate,
+		cfg:    cfg,
+		log:    logger,
+		shaper: shaper,
+		peers:  map[netip.Addr]*peer{},
+		done:   make(chan struct{}),
 	}, nil
 }
 
@@ -331,7 +348,21 @@ func (s *Server) serveConnectUDP(remote *net.UDPAddr, h3conn *http3.Conn, rs *ht
 			if err != nil {
 				return
 			}
-			capsule := enc.Encode(buf[:n])
+			pkt := buf[:n]
+			capsule := enc.Encode(pkt)
+			if s.shaper != nil {
+				if target := s.shaper.Target(pkt, s.cfg.MTU); target > n {
+					// Said out loud once. A ping proves nothing about whether
+					// shaping happened -- it passes just as happily on a shaper
+					// that quietly did nothing -- so the shaped interop cell
+					// requires this line as well as the ping.
+					s.shapedOnce.Do(func() {
+						s.log.Printf("masque: shaping outbound packets to %d octets (first: %d -> %d)",
+							s.cfg.MTU, n, target)
+					})
+					capsule = enc.EncodePadded(pkt, target)
+				}
+			}
 			writeMu.Lock()
 			_, err = rs.Write(capsule)
 			writeMu.Unlock()
@@ -388,7 +419,21 @@ func (s *Server) tunLoop() {
 			// No client owns this destination; nothing to deliver it to.
 			continue
 		}
-		capsule := enc.Encode(buf[:n])
+		pkt := buf[:n]
+		capsule := enc.Encode(pkt)
+		if s.shaper != nil {
+			if target := s.shaper.Target(pkt, s.cfg.MTU); target > n {
+				// Said out loud once. A ping proves nothing about whether
+				// shaping happened -- it passes just as happily on a shaper
+				// that quietly did nothing -- so the shaped interop cell
+				// requires this line as well as the ping.
+				s.shapedOnce.Do(func() {
+					s.log.Printf("masque: shaping outbound packets to %d octets (first: %d -> %d)",
+						s.cfg.MTU, n, target)
+				})
+				capsule = enc.EncodePadded(pkt, target)
+			}
+		}
 
 		p.writeMu.Lock()
 		_, err = p.rs.Write(capsule)

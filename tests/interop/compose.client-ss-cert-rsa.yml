@@ -1,0 +1,50 @@
+# Direction A with RSA-2048 certificate auth and IP fragmentation blocked: veepin
+# client (ikev2) -> strongSwan responder, both authenticating with RSA-2048
+# certificates chaining through an intermediate to a shared root.
+#
+# This is compose.client-ss-cert.yml's cell with the fixture's blind spot
+# removed. That one mints ECDSA P-256, the smallest certificate that exists, so
+# its IKE_AUTH fits one datagram and a client that never fragments passes it --
+# which is exactly what hid the fact that veepin never fragmented its output.
+# Here the chain puts IKE_AUTH at 2.5-3.5 KB and the strongSwan side drops every
+# non-first IP fragment, so the handshake completes only if RFC 7383
+# fragmentation is actually used. The test requires the client's fragmentation
+# log line as well as the ping, because a ping alone cannot tell the difference.
+name: veepin-interop-a-cert-rsa
+
+volumes:
+  pki:
+
+services:
+  strongswan-server:
+    build:
+      context: strongswan
+    image: interop-strongswan
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+      net.ipv4.ip_forward: "1"
+    volumes:
+      - ./strongswan/swanctl-server-cert-rsa.conf:/etc/swanctl/swanctl.conf:ro
+      - ./strongswan/server-entrypoint-cert-rsa.sh:/entrypoint.sh:ro
+      - pki:/pki
+    command: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [strongswan-server]
+    environment:
+      SERVER: "strongswan-server"
+      CLIENT_ID: "client.example.com"
+      SERVER_ID: "vpn.example.com"
+      CLIENT_CERT: "/pki/client-chain.pem"
+    volumes:
+      - ./veepin/client-entrypoint-cert.sh:/entrypoint.sh:ro
+      - pki:/pki
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

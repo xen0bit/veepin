@@ -34,6 +34,7 @@ func init() {
 		{Key: OptServerPort, Kind: client.OptInt, Default: "443", Help: "UDP port to listen on (default 443)"},
 		{Key: OptServerPool, Kind: client.OptCIDR, Default: "10.30.0.0/24", Help: "internal address pool handed to clients (default 10.30.0.0/24)"},
 		{Key: OptServerMTU, Kind: client.OptInt, Default: "1350", Help: "inner MTU offered to clients (default 1350)"},
+		{Key: OptServerShape, Kind: client.OptInt, Default: "0", Help: "per-flow downstream shaping budget in bytes; pads inside the DATAGRAM capsule (0 = off)"},
 		client.TUNOpt(OptServerTUN),
 	})
 }
@@ -48,6 +49,7 @@ const (
 	OptServerCert   = "cert"   // TLS certificate PEM (required)
 	OptServerKey    = "key"    // TLS private key PEM (required)
 	OptServerMTU    = "mtu"    // inner MTU
+	OptServerShape  = "shape"  // per-flow downstream shaping budget in bytes (0 = off)
 	OptServerTUN    = "tun"    // TUN interface name
 )
 
@@ -66,6 +68,8 @@ type ServerConfig struct {
 	MTU int
 	// TUNName is the interface to open.
 	TUNName string
+	// Shape is the per-flow downstream shaping budget in bytes; zero is off.
+	Shape int
 	// Logger receives progress messages.
 	Logger *log.Logger
 }
@@ -161,6 +165,7 @@ func (s *Server) ListenAndServe() error {
 	engine, err := imasque.NewServer(end, s.tun, imasque.ServerConfig{
 		Pool:   s.pool,
 		MTU:    s.serverMTU(),
+		Shape:  s.cfg.Shape,
 		Logger: logger,
 	})
 	if err != nil {
@@ -245,6 +250,13 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 			return nil, fmt.Errorf("masque: invalid mtu %q", v)
 		}
 		cfg.MTU = m
+	}
+	if v := opts[OptServerShape]; v != "" {
+		sh, err := strconv.Atoi(v)
+		if err != nil || sh < 0 {
+			return nil, fmt.Errorf("masque: invalid shape %q", v)
+		}
+		cfg.Shape = sh
 	}
 
 	var err error

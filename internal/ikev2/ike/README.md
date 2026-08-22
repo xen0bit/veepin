@@ -12,7 +12,7 @@ auth), and produces [`esp`](../esp) SAs for the data path.
 - [RFC 3947](https://www.rfc-editor.org/rfc/rfc3947) / [RFC 3948](https://www.rfc-editor.org/rfc/rfc3948) — NAT-T detection and UDP-encapsulated ESP.
 - [RFC 7296 §3.15](https://www.rfc-editor.org/rfc/rfc7296#section-3.15) — Configuration payload (address assignment).
 - [RFC 4555](https://www.rfc-editor.org/rfc/rfc4555) — MOBIKE (address agility for a roaming peer).
-- [RFC 7383](https://www.rfc-editor.org/rfc/rfc7383) — IKEv2 fragmentation (inbound SKF reassembly).
+- [RFC 7383](https://www.rfc-editor.org/rfc/rfc7383) — IKEv2 fragmentation (SKF, both directions).
 - [RFC 7427](https://www.rfc-editor.org/rfc/rfc7427) — IKEv2 signature authentication (the Digital Signature AUTH method 14).
 
 ## Handshake and SA lifecycle
@@ -127,18 +127,35 @@ stateDiagram-v2
   whether the server agreed. This mirrors kernel/strongSwan behaviour, so a
   native macOS/Windows IKEv2 client keeps its tunnel across a network change
   rather than re-handshaking.
-- **IKE fragmentation (RFC 7383) is reassemble-only.** Both ends advertise
-  `IKE_FRAGMENTATION_SUPPORTED` in `IKE_SA_INIT`; once negotiated, a peer may
-  deliver a large protected message (a certificate-bearing `IKE_AUTH`, or a peer
-  set to `fragmentation=force`) as independently encrypted-and-authenticated
-  `SKF` fragments, which `fragReassembler` verifies one at a time and stitches
-  back into the original inner-payload chain. veepin *never fragments its own
-  output* — its PSK/EAP messages are always small — which RFC 7383 §2.5.1
-  explicitly permits. Reassembly is bounded (`maxFragments`,
-  `maxReassembledBytes`, a TTL) since it buffers peer-supplied state; duplicate
-  and out-of-order fragments are handled. The `SK`/`SKF` decrypt and RFC 7296
-  de-padding are shared (`openSK`/`stripRFC7296Pad`), so a fragment opens exactly
-  like a whole message minus the reassembly.
+- **IKE fragmentation (RFC 7383) runs in both directions.** Both ends advertise
+  `IKE_FRAGMENTATION_SUPPORTED` in `IKE_SA_INIT`; once negotiated, either side
+  may deliver a large protected message as independently
+  encrypted-and-authenticated `SKF` fragments. Inbound, `fragReassembler`
+  verifies them one at a time and stitches the inner-payload chain back
+  together. Outbound, `sealMaybeFragment` is the single choke point every
+  protected message goes through — client and server — and it splits anything
+  over `fragmentThreshold` (1280 octets, strongSwan's and libreswan's default,
+  and the IPv6 minimum MTU) when the peer advertised support.
+
+  This used to read "veepin *never fragments its own output* — its PSK/EAP
+  messages are always small." That premise died when certificate authentication
+  landed: both roles emit a full chain in `IKE_AUTH`, and an RSA-2048 leaf plus
+  an intermediate plus a 256-octet signature puts the message near 2 KB, over
+  the 1500-octet path MTU. Nothing caught it because the cert interop cell mints
+  ECDSA P-256, the smallest certificate that exists, so its `IKE_AUTH` fits in
+  one datagram. `compose.client-ss-cert-rsa.yml` and
+  `compose.server-ss-cert-rsa.yml` are the cells that can fail: RSA chains, and
+  a netfilter rule on the peer that refuses any IKE datagram over 1400 octets.
+
+  Sending unfragmented while advertising support is still legal (RFC 7383
+  §2.5.1), and a peer that never advertised support still gets one whole
+  datagram however large it is — there is nothing else legal to send it.
+  Reassembly is bounded (`maxFragments`, `maxReassembledBytes`, a TTL) since it
+  buffers peer-supplied state, and the encoder refuses to emit more fragments
+  than the reassembler would accept. Duplicate and out-of-order fragments are
+  handled. The `SK`/`SKF` seal and decrypt and the RFC 7296 padding are shared
+  (`sealSK`/`openSK`/`stripRFC7296Pad`), so a fragment is built and opened
+  exactly like a whole message minus the reassembly.
 - **Client liveness and Child SA rekey ride the post-handshake control channel.**
   Once the data path owns the socket, the client can no longer read IKE responses
   inline, so `Attach` switches it to a delivered-inbox mode and the data-path

@@ -70,23 +70,25 @@ var interopMatrix = []interopRow{
 		Client: interopCell{Tests: []string{
 			"TestInteropVeepinClientStrongswanServer",
 			"TestInteropVeepinClientStrongswanServerCert",
+			"TestInteropVeepinClientStrongswanServerCertRSA",
 			"TestInteropVeepinClientStrongswanServerChaCha20",
 			"TestInteropVeepinClientStrongswanServerIPv6",
 			"TestInteropVeepinClientStrongswanServerV6Underlay",
 			"TestInteropVeepinClientStrongswanServerPQ",
 			"TestInteropVeepinClientStrongswanIPTFS",
 			"TestInteropIPTFSConstantRate",
-		}, Label: "strongSwan (PSK + pubkey, AES-GCM + ChaCha20, dual-stack, v6 underlay, ML-KEM-768, IP-TFS incl. constant-rate)"},
+		}, Label: "strongSwan (PSK + pubkey ECDSA/RSA, RFC 7383 frag, AES-GCM + ChaCha20, dual-stack, v6 underlay, ML-KEM-768, IP-TFS incl. constant-rate)"},
 		Server: interopCell{Tests: []string{
 			"TestInteropStrongswanClientVeepinServer",
 			"TestInteropStrongswanClientVeepinServerEAP",
 			"TestInteropStrongswanClientVeepinServerFragmented",
+			"TestInteropStrongswanClientVeepinServerCertRSA",
 			"TestInteropStrongswanClientVeepinServerV6Underlay",
 			"TestInteropStrongswanClientVeepinServerIPv6",
 			"TestInteropStrongswanClientVeepinServerShaped",
 			"TestInteropStrongswanClientVeepinServerPQ",
 			"TestInteropStrongswanClientVeepinServerIPTFS",
-		}, Label: "strongSwan (+ EAP-MSCHAPv2, RFC 7383 frag, dual-stack, v6 underlay, TFC-padded, ML-KEM-768, IP-TFS)"},
+		}, Label: "strongSwan (+ EAP-MSCHAPv2, pubkey RSA, RFC 7383 frag both ways, dual-stack, v6 underlay, TFC-padded, ML-KEM-768, IP-TFS)"},
 		Self: interopCell{Tests: []string{
 			"TestInteropSelf",
 			"TestInteropIKEv2ChildRekey",
@@ -135,8 +137,9 @@ var interopMatrix = []interopRow{
 	{
 		Protocol: "SSH",
 		Client:   interopCell{Tests: []string{"TestInteropVeepinClientSSHServer"}, Label: "`sshd` (PermitTunnel)"},
-		Server:   interopCell{Tests: []string{"TestInteropSSHClientVeepinServer"}, Label: "`ssh -w`"},
-		Self:     interopCell{Tests: []string{"TestInteropSSHSelf"}},
+		Server: interopCell{Tests: []string{"TestInteropSSHClientVeepinServer",
+			"TestInteropSSHClientVeepinServerShaped"}, Label: "`ssh -w`"},
+		Self: interopCell{Tests: []string{"TestInteropSSHSelf"}},
 	},
 	{
 		Protocol: "L2TP/IPsec",
@@ -159,8 +162,9 @@ var interopMatrix = []interopRow{
 	},
 	{
 		Protocol: "Nebula",
-		Client:   interopCell{Tests: []string{"TestInteropVeepinNebulaHostReferenceLighthouse"}, Label: "`nebula` (lighthouse)"},
-		Server:   interopCell{Tests: []string{"TestInteropNebulaHostVeepinLighthouse"}, Label: "`nebula` (host)"},
+		Client: interopCell{Tests: []string{"TestInteropVeepinNebulaHostReferenceLighthouse",
+			"TestInteropVeepinNebulaShaped"}, Label: "`nebula` (lighthouse, shaped)"},
+		Server: interopCell{Tests: []string{"TestInteropNebulaHostVeepinLighthouse"}, Label: "`nebula` (host)"},
 		Self: interopCell{
 			Tests: []string{"TestInteropNebulaSelf", "TestInteropNebulaRelay"},
 			Label: "(via lighthouse; relayed with the direct path blocked)",
@@ -169,8 +173,9 @@ var interopMatrix = []interopRow{
 	{
 		Protocol: "MASQUE-IP",
 		Client:   interopCell{Tests: []string{"TestInteropVeepinMasqueClientAioquicProxy"}, Label: "aioquic CONNECT-IP"},
-		Server:   interopCell{Tests: []string{"TestInteropAioquicClientVeepinProxy"}, Label: "aioquic CONNECT-IP"},
-		Self:     interopCell{Tests: []string{"TestInteropMasqueSelf"}},
+		Server: interopCell{Tests: []string{"TestInteropAioquicClientVeepinProxy",
+			"TestInteropAioquicClientVeepinProxyShaped"}, Label: "aioquic CONNECT-IP"},
+		Self: interopCell{Tests: []string{"TestInteropMasqueSelf"}},
 	},
 	{
 		Protocol: "MASQUE-UDP",

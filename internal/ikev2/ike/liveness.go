@@ -68,11 +68,11 @@ func (c *Client) SendDPD(ctx context.Context) error {
 	}
 
 	msgID := c.sendMsgID
-	pkt, err := c.seal(payload.INFORMATIONAL, msgID, payload.NoNextPayload, nil)
+	pkts, err := c.seal(payload.INFORMATIONAL, msgID, payload.NoNextPayload, nil)
 	if err != nil {
 		return err
 	}
-	if err := c.writeIKE(pkt); err != nil {
+	if err := c.writeIKEAll(pkts); err != nil {
 		return err
 	}
 	// The response is an empty (but encrypted) INFORMATIONAL: recvInnersFrom

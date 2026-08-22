@@ -183,6 +183,38 @@ func TestInteropVeepinClientStrongswanServerCert(t *testing.T) {
 	runInterop(t, "compose.client-ss-cert.yml", "veepin-client", "10.20.30.254")
 }
 
+// TestInteropVeepinClientStrongswanServerCertRSA is the cell above with the
+// fixture's blind spot removed. That one mints ECDSA P-256 -- the smallest
+// certificate there is -- so its IKE_AUTH fits in one datagram, which is why it
+// passed for as long as veepin never fragmented its own output. Here the chain
+// is RSA-2048 leaf + intermediate, putting IKE_AUTH at 2.5-3.5 KB, and the
+// strongSwan side drops every non-first IP fragment.
+//
+// The required log line is the whole point. A ping passes just as happily if
+// the message somehow got through unfragmented, and "the handshake worked" is
+// exactly the evidence that hid the original defect. Requiring the client to
+// SAY it fragmented is what makes this a test of the code rather than of the
+// network.
+func TestInteropVeepinClientStrongswanServerCertRSA(t *testing.T) {
+	runInteropRequiringLog(t, "compose.client-ss-cert-rsa.yml", "veepin-client", "10.20.30.254",
+		"fragmenting request into")
+}
+
+// TestInteropStrongswanClientVeepinServerCertRSA is the responder half, and it
+// covers two gaps at once: no cell tested certificate authentication in
+// Direction B at all, and the veepin server's IKE_AUTH builder (ike_auth.go)
+// had the same missing outbound size check the client's did. A veepin server
+// therefore could not answer a strongSwan client whose CA issues RSA.
+//
+// The strongSwan initiator drops non-first IP fragments, so its ping succeeds
+// only if the veepin RESPONDER fragmented. The log line is required from the
+// server for the same reason as above.
+func TestInteropStrongswanClientVeepinServerCertRSA(t *testing.T) {
+	runInteropRequiringLogFrom(t, "compose.server-ss-cert-rsa.yml",
+		"strongswan-client", "veepin-server", "10.10.10.1",
+		"fragmenting")
+}
+
 // TestInteropVeepinClientStrongswanServerIPv6 is Direction A dual-stack: the
 // strongSwan responder assigns both an IPv4 and an IPv6 virtual address and
 // offers v4+v6 traffic selectors, and the veepin client pings a strongSwan-side
@@ -497,6 +529,32 @@ func TestInteropSSHSelf(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(keyDir) })
 	runInteropBench(t, "compose.ssh-self.yml", "veepin-ssh-client", "veepin-ssh-server", "10.200.0.1")
+}
+
+// TestInteropSSHClientVeepinServerShaped is the cell that makes SSH's shaping
+// mean something, and the one that decides a framing question a unit test
+// cannot.
+//
+// An SSH channel is a byte stream with no packet delimiter, so veepin's reader
+// recovers boundaries from the IP length -- which means trailing filler would
+// be read as the next packet's address-family header. ReadPacket now skips
+// whole zero words, which a header (00 00 00 02 / 00 00 00 0a) can never be.
+// A real `ssh -w` needs none of that: it writes each channel message to its tun
+// in one call and the kernel delimits the packet by Total Length.
+//
+// That last sentence is an argument until this cell runs. The log line is
+// required as well as the ping, because a ping passes just as happily on a
+// shaper that did nothing.
+func TestInteropSSHClientVeepinServerShaped(t *testing.T) {
+	requireDocker(t)
+	keyDir := filepath.Join("ssh", "keys")
+	if err := generateSSHKeys(keyDir); err != nil {
+		t.Fatalf("generate SSH keys: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(keyDir) })
+	runInteropRequiringLogFrom(t, "compose.ssh-server-shaped.yml",
+		"ssh-client", "veepin-ssh-server", "10.200.0.1",
+		"shaping outbound packets to")
 }
 
 // TestInteropSSHClientVeepinServer is the reverse direction: a real OpenSSH
@@ -830,6 +888,25 @@ func TestInteropVeepinNebulaHostReferenceLighthouse(t *testing.T) {
 	runInteropBench(t, "compose.nebula.yml", "veepin-nebula", "nebula-host", "10.42.0.1")
 }
 
+// TestInteropVeepinNebulaShaped is the cell that makes nebula's shaping mean
+// something. veepin pads each inner packet out to the interface MTU inside the
+// AEAD plaintext, and the reference slackhq/nebula daemon is told nothing about
+// it: it decrypts, writes the plaintext to its TUN, and the kernel delimits the
+// real packet by the inner IP header's Total Length.
+//
+// A veepin-to-veepin cell would prove only that our padder and our trimmer
+// agree, which is the failure this matrix exists to distrust. The claim is
+// about a receiver we did not write.
+func TestInteropVeepinNebulaShaped(t *testing.T) {
+	// The log line is required, not decorative. A ping passes just as happily
+	// on a shaper that quietly did nothing -- the same silent-fallback trap
+	// runInteropRequiringLog exists for elsewhere in this file -- so the cell
+	// has to demand that padding actually happened as well as that the peer
+	// tolerated it.
+	runInteropRequiringLog(t, "compose.nebula-shaped.yml", "veepin-nebula", "10.42.0.1",
+		"shaping outbound packets to")
+}
+
 // TestInteropNebulaHostVeepinLighthouse is the mirror, and the direction that
 // proves veepin's responder and its lighthouse: the reference daemon reports
 // its location to a veepin lighthouse, queries it, and handshakes against
@@ -885,6 +962,22 @@ func TestInteropVeepinMasqueClientAioquicProxy(t *testing.T) {
 // stream the foreign client has to parse.
 func TestInteropAioquicClientVeepinProxy(t *testing.T) {
 	runInteropBench(t, "compose.masque-server.yml", "aioquic-masque-client", "veepin-masque-server", "10.32.0.1")
+}
+
+// TestInteropAioquicClientVeepinProxyShaped is the cell that makes MASQUE's
+// shaping mean something. veepin pads each inner packet out to the inner MTU
+// inside the DATAGRAM capsule's value, and aioquic is told nothing about it:
+// RFC 9484's context-0 payload carries no length of its own, so the receiver
+// hands everything after the context ID to its TUN and the kernel delimits the
+// real packet by the inner IP header's Total Length.
+//
+// The log line is required as well as the ping. A ping passes just as happily
+// on a shaper that quietly did nothing, which is the whole failure mode the
+// -shape work exists to avoid claiming.
+func TestInteropAioquicClientVeepinProxyShaped(t *testing.T) {
+	runInteropRequiringLogFrom(t, "compose.masque-server-shaped.yml",
+		"aioquic-masque-client", "veepin-masque-server", "10.32.0.1",
+		"shaping outbound packets to")
 }
 
 // TestInteropMasqueSelf is the veepin<->veepin sanity check over real QUIC. Its
@@ -1419,7 +1512,49 @@ func runInterop(t *testing.T, composeFile, pingSvc string, targets ...string) {
 			t.Fatalf("cross-tunnel ping %s -> %s never succeeded within %s:\n%s",
 				pingSvc, target, pingDeadline, last)
 		}
+		pingLarge(t, composeFile, pingSvc, target)
 	}
+}
+
+// largePingPayload is the ICMP payload of the second ping every cell now sends,
+// after the small one has proved the tunnel is up.
+//
+// Every cell in this matrix used to ping with ping's default 56-octet payload
+// and nothing else, which made the easy case the only case across the whole
+// matrix. datapath_test.go sweeps {64, 576, 1400} in Go, but a length field one
+// octet short, a buffer sized from a literal, a shaper that overshoots its
+// target, or an MTU derived wrongly are all invisible to an 84-octet datagram
+// and all of them break a real transfer immediately.
+//
+// 1000 is chosen against the smallest inner MTU in the tree -- nebula's 1300 --
+// so it is a genuinely large packet on every protocol without becoming a test
+// of path-MTU discovery, which is a different mechanism with its own cells. It
+// is twelve times the packet the matrix used to settle for.
+const largePingPayload = 1000
+
+// pingLarge sends the large ping and fails if it does not cross.
+//
+// It is a fatal check rather than a warning: a tunnel that carries 84 octets and
+// not 1028 is broken for every real use, and reporting that as a pass is exactly
+// the shape of false green this matrix exists to catch. It retries, because the
+// small ping succeeding does not mean every route and NAT rule has settled.
+func pingLarge(t *testing.T, composeFile, pingSvc, target string) {
+	t.Helper()
+	deadline := time.Now().Add(pingDeadline)
+	var last string
+	for time.Now().Before(deadline) {
+		out, err := compose(t, composeFile, "exec", "-T", pingSvc,
+			"ping", "-c2", "-W2", "-s", strconv.Itoa(largePingPayload), target)
+		if err == nil && strings.Contains(out, "0% packet loss") {
+			t.Logf("%s pinged %s with a %d-octet payload", pingSvc, target, largePingPayload)
+			return
+		}
+		last = out
+		time.Sleep(3 * time.Second)
+	}
+	t.Fatalf("%s -> %s carries a small ping but not a %d-octet one within %s; "+
+		"something in the framing, the buffers or the MTU is sized for the easy case:\n%s",
+		pingSvc, target, largePingPayload, pingDeadline, last)
 }
 
 // benchWarmup lets an iperf3 server settle before the client connects.

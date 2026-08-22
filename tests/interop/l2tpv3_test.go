@@ -65,25 +65,66 @@ func TestInteropL2TPv3Self(t *testing.T) {
 // deliberately not named TestInterop* so it joins no CI shard and reports no
 // result; run it by hand with -run TestPendingQl2tpdKeepalive.
 //
-// What was observed, from a tcpdump on the ql2tpd side (2026-07-29, go-l2tp
-// v0.1.8):
+// # What it is
 //
-//	ql2tpd -> veepin  ccid=1100 ns=0 nr=0  HELLO
-//	veepin -> ql2tpd  ccid=2200 ns=0 nr=1  ACK      <- correct: nr=1 acks ns=0
-//	ql2tpd -> veepin  ccid=1100 ns=0 nr=0  HELLO    <- retransmit anyway
-//	... x3, then "transmit of avpMsgTypeHello failed after 3 retry attempts"
+// go-l2tp v0.1.8 wedges its receive queue on a conforming L2TPv3 ACK, and the
+// cause is now located rather than guessed at. It is upstream, in two lines,
+// and veepin's messages are correct.
 //
-// veepin's messages are well-formed and ql2tpd parses them: when veepin also
-// sends HELLOs, ql2tpd acknowledges each one and advances its Nr (1, 2, 3). It
-// is only ql2tpd's own retransmit queue that never clears, even though our Nr
-// should satisfy its processAckQueue (seqCompare(nr=1, ns=0) > 0).
+// # The bytes
 //
-// So the exchange is not yet understood well enough to assert on. Until it is,
-// veepin's quiescent control connection is covered by unit tests only, and
-// internal/l2tpv3/README.md says so rather than implying an interop guarantee
-// this cell does not provide.
+// Captured with tcpdump inside the ql2tpd container (CCID identifies the
+// sender: RFC 3931 puts the RECIPIENT's Control Connection ID in the header, so
+// CCID=2200 is addressed to ql2tpd and therefore came from veepin):
+//
+//	veepin -> ql2tpd   ccid=2200 ns=1 nr=1  HELLO
+//	ql2tpd -> veepin   ccid=1100 ns=1 nr=2  ACK
+//	ql2tpd -> veepin   ccid=1100 ns=0 nr=2  HELLO
+//	veepin -> ql2tpd   ccid=2200 ns=2 nr=1  ACK    <- correct: nr=1 acks ns=0
+//	... ql2tpd retransmits its ns=0 HELLO three times and gives up with
+//	    "transmit of avpMsgTypeHello failed after 3 retry attempts"
+//
+// # Why it wedges
+//
+// veepin's ACK carries Ns = the next sequence number it will use, which is what
+// RFC 3931 section 3.1 requires of a message that consumes no sequence number.
+// That Ns is therefore AHEAD of ql2tpd's Nr. Two upstream lines then interact:
+//
+//	transport.go:187  msgIsInSequence: seqCompare(s.nr, msg.ns()) == 0
+//	transport.go:194  msgIsStale:      seqCompare(msg.ns(), s.nr) == -1
+//
+// A message whose Ns is ahead of Nr is neither in sequence nor stale, so
+// dequeueRxMessage never returns it -- and it stays at the head of rxQueue
+// forever. The second line is what makes that fatal rather than merely untidy:
+//
+//	transport.go:420  m := xport.rxQueue[0]   // inside `for i := ...`
+//
+// The loop indexes with i but always inspects element 0, so it cannot look past
+// a stuck head. Every later message piles up behind the ACK, Nr never advances,
+// nothing is ever acknowledged again, and the tunnel dies on the retry limit.
+//
+// It is order-dependent, which is why the first reading of this looked
+// intermittent: if ql2tpd happens to process a HELLO before the ACK, its Nr
+// catches up and the ACK is merely in sequence.
+//
+// # Why veepin does not work around it
+//
+// There is nothing conforming to change. Sending the ACK with a lower Ns would
+// misstate the next sequence number, and sending a HELLO in place of an ACK
+// would put a message that consumes a sequence number where the RFC calls for
+// one that does not. The earlier hypothesis recorded here -- that go-l2tp ran a
+// duplicate check on Ns before its acknowledgement handling -- was disproven by
+// reading the source: the ack path (processAckQueue, reached through nrChan)
+// never consults the duplicate check at all.
+//
+// So veepin's quiescent control connection stays covered by unit tests plus the
+// kernel data-path cells, and internal/l2tpv3/README.md says so rather than
+// implying an interop guarantee no available peer can give.
+// TestAckCarriesTheNextSequenceNumber in internal/l2tpv3 pins the behaviour
+// this depends on, so a future "fix" cannot quietly make veepin wrong in order
+// to make this peer happy.
 func TestPendingQl2tpdKeepalive(t *testing.T) {
-	t.Skip("reproduction only: ql2tpd does not clear its retransmit queue on our ACK; see the comment above")
+	t.Skip("reproduction only: go-l2tp v0.1.8 wedges its rxQueue on a conforming ACK; see the comment above")
 }
 
 // requireL2TPModules skips a cell when the host kernel cannot provide an L2TP
