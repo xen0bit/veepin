@@ -397,8 +397,30 @@ func TestInteropVeepinClientWireguardServer(t *testing.T) {
 // the old v4-only check deliberately restored -- a green cell asserting nothing,
 // which is the exact failure mode the matrix exists to avoid and which only
 // re-breaking the code on purpose revealed.
+//
+// It now proves a second thing. The entrypoint used to add the server's own v6
+// address to tun0 by hand, with a comment saying only the v4 half of the
+// config's Address line was installed -- so the cell was testing cryptokey
+// routing over a host somebody else had configured. veepin implements
+// client.DualStackServer now, `-setup-nat` installs the address and v6
+// forwarding, and the script touches no `ip -6` at all. A regression there
+// stops this ping.
 func TestInteropWireguardClientVeepinServerV6(t *testing.T) {
 	runInterop(t, "compose.wireguard-v6.yml", "wg-client", "fd00:10:10::1")
+}
+
+// TestInteropVeepinClientWireguardServerV6 is the client-direction mirror: a
+// dual-stack tunnel where wireguard-go owns the host configuration and veepin
+// has to report the v6 half of its own address.
+//
+// It tests a different thing from the server cell above, which is why both
+// exist. That one covers inbound cryptokey routing and the server's own address
+// on the host; this one covers client.Result. The client parsed the whole
+// Address line, validated every entry, and kept only the first -- so a
+// dual-stack invocation came up IPv4-only with nothing logged, and
+// dataplane.AddrPool6's single consumer in the tree stayed single.
+func TestInteropVeepinClientWireguardServerV6(t *testing.T) {
+	runInterop(t, "compose.wireguard-client-v6.yml", "veepin-wg-client", "fd00:10:10::1")
 }
 
 func TestInteropWireguardClientVeepinServer(t *testing.T) {
@@ -612,6 +634,35 @@ func TestInteropOpenVPNClientVeepinServer(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
 	runInteropBench(t, "compose.openvpn-server.yml", "openvpn-client", "veepin-ovpn-server", "10.8.0.1")
+}
+
+// TestInteropOpenVPNClientVeepinServerV6 is the same cell with a dual-stack
+// tunnel: the veepin server pushes ifconfig-ipv6 beside ifconfig, and a stock
+// OpenVPN client configures its v6 address entirely from what arrives. The
+// client config asks for nothing v6-specific, so a malformed option or a prefix
+// the client rejects leaves it IPv4-only.
+//
+// **The ping goes server -> client, and the direction is the whole test.** The
+// obvious cell -- client pings the server's fd00:8::1 -- passes with the two
+// ifconfig-ipv6 arguments swapped, because a client that configured the
+// server's address as its own answers that ping from its own interface without
+// a packet crossing anything. It was written that way first and the swap was
+// deliberately introduced to check; it passed in 13 seconds.
+//
+// Pinging the *client's* derived address from the server cannot be satisfied
+// that way. It requires the client to hold fd00:8::2 and not fd00:8::1, the
+// server to hold fd00:8::1 (installed by -setup-nat through
+// client.DualStackServer, with nothing in the entrypoint touching `ip -6`), and
+// the v6 half of the data path to carry the request and the reply. One ping,
+// and every part of the feature is in it.
+func TestInteropOpenVPNClientVeepinServerV6(t *testing.T) {
+	requireDocker(t)
+	pkiDir := filepath.Join("openvpn", "pki")
+	if err := generateOpenVPNPKI(pkiDir); err != nil {
+		t.Fatalf("generate PKI: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
+	runInterop(t, "compose.openvpn-server-v6.yml", "veepin-ovpn-server", "fd00:8::2")
 }
 
 // TestInteropOpenVPNClientVeepinServerShaped is the same cell with downstream

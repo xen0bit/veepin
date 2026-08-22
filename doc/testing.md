@@ -6,6 +6,13 @@ suite (build tag `interop`), whose harness — compose files, entrypoints, and h
 each cell is wired — is documented in
 [`tests/interop/README.md`](../tests/interop/README.md).
 
+Two of those cells are also *recorded*: their peer traffic is committed as a
+golden corpus and replayed offline by the ordinary `go test ./...`, so a
+regression against a real strongSwan or a real wireguard-go fails in
+milliseconds on a laptop instead of in a fifteen-minute Docker shard. See
+[`doc/replaying-the-peer.md`](replaying-the-peer.md) — including why a recording
+is never allowed to stand in for the live cell.
+
 ## Per-package highlights
 
 - `internal/ikev2/ike` — `TestEndToEndHandshake` (full IKE_SA_INIT + IKE_AUTH +
@@ -29,6 +36,10 @@ each cell is wired — is documented in
   from key length) selects the ESP algorithm.
 - `internal/ikev2/esp` — ESP round trips and anti-replay.
 - `internal/ikev2/payload` — header/payload/SA/TS/CP codec round trips.
+- `internal/capture/goldens` — recorded strongSwan and wireguard-go traffic,
+  replayed offline: every IKE message re-encoded octet for octet, and veepin's
+  Noise responder run over a real wireguard-go initiation until it recovers the
+  peer's static public key.
 
 ## Interoperability matrix notes
 

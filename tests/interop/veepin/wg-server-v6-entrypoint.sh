@@ -7,17 +7,20 @@
 # that runs (verifySource is true on the server and false on the client), so
 # this is the direction the cell has to be in.
 #
-# The v6 address is added to the TUN by hand: the server's own address comes
-# from the config's Address line, and only its v4 half is installed by
-# -setup-nat today. Adding it here keeps the cell about cryptokey routing
-# rather than about address installation.
+# The v6 address used to be added here by hand, with a comment explaining that
+# only the v4 half of the config's Address line was installed by -setup-nat.
+# That comment was an accurate description of a gap, and closing it is what this
+# cell now proves: the config names both families, veepin implements
+# client.DualStackServer, and internal/hostnet puts the address on the interface
+# along with v6 forwarding. Nothing below touches `ip -6`, and if that changed
+# the ping would stop.
 set -u
 
 mkdir -p /etc/wireguard
 cat > /etc/wireguard/wg0.conf <<CONF
 [Interface]
 PrivateKey = ${SERVER_PRIVATE}
-Address = ${SERVER_TUN_IP}/24
+Address = ${SERVER_TUN_IP}/24, ${SERVER_TUN_IP6}/64
 ListenPort = 51820
 
 [Peer]
@@ -26,21 +29,5 @@ PresharedKey = ${PSK}
 AllowedIPs = ${CLIENT_TUN_IP}/32, ${CLIENT_TUN_IP6}/128
 CONF
 
-echo "veepin-wg-server: serving on :51820, inner ${SERVER_TUN_IP6}"
-veepin serve wireguard -config /etc/wireguard/wg0.conf -tun tun0 -setup-nat &
-VEEPIN_PID=$!
-
-for _ in $(seq 1 60); do
-    if ip link show tun0 >/dev/null 2>&1; then break; fi
-    sleep 0.5
-done
-if ! ip link show tun0 >/dev/null 2>&1; then
-    echo "veepin-wg-server: tun0 never appeared" >&2
-    exit 1
-fi
-
-ip -6 addr add "${SERVER_TUN_IP6}/64" dev tun0
-ip -6 route replace "${CLIENT_TUN_IP6}/128" dev tun0
-echo "veepin-wg-server: tun0 has ${SERVER_TUN_IP6}"
-
-wait $VEEPIN_PID
+echo "veepin-wg-server: serving on :51820, inner ${SERVER_TUN_IP} + ${SERVER_TUN_IP6}"
+exec veepin serve wireguard -config /etc/wireguard/wg0.conf -tun tun0 -setup-nat

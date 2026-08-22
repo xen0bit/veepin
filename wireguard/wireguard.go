@@ -143,7 +143,8 @@ func (d dialer) Dial(ctx context.Context) (client.Session, client.Result, error)
 type resolved struct {
 	noiseCfg   noise.Config
 	endpoint   *net.UDPAddr
-	address    netip.Prefix   // our first tunnel address
+	address    netip.Prefix   // our tunnel address
+	address6   netip.Prefix   // our tunnel IPv6 address; zero when there is none
 	allowedIPs []netip.Prefix // routed to the peer
 	dns        []net.IP
 	mtu        int
@@ -211,11 +212,17 @@ func (c *Config) resolve() (*resolved, error) {
 		r.rekey = time.Duration(c.RekeySeconds) * time.Second
 	}
 
+	// wg-quick's Address line is a list, and a dual-stack interface writes both
+	// families on it. Taking addrs[0] and dropping the rest meant a config
+	// naming `10.0.0.2/24, fd00::2/64` came up IPv4-only with nothing said —
+	// the v6 address was parsed, validated, and thrown away.
 	addrs, err := prefixes(c.Address)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", OptAddress, err)
 	}
-	r.address = addrs[0]
+	if r.address, r.address6, err = splitPrefixFamilies(addrs); err != nil {
+		return nil, fmt.Errorf("%s: %w", OptAddress, err)
+	}
 
 	r.allowedIPs, err = prefixes(peer.AllowedIPs)
 	if err != nil {
@@ -335,15 +342,21 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	go s.rekeyLoop()
 
 	out := client.Result{
-		TUNName:    tun.Name(),
-		AssignedIP: net.IP(r.address.Addr().AsSlice()),
-		Netmask:    prefixNetmask(r.address),
-		Gateway:    r.endpoint.IP,
-		DNS:        r.dns,
-		MTU:        r.mtu,
+		TUNName: tun.Name(),
+		Gateway: r.endpoint.IP,
+		DNS:     r.dns,
+		MTU:     r.mtu,
 	}
-	logger.Printf("wireguard: tunnel up on %s, internal IP %s, peer %s",
-		out.TUNName, out.AssignedIP, r.endpoint)
+	if r.address.IsValid() {
+		out.AssignedIP = net.IP(r.address.Addr().AsSlice())
+		out.Netmask = prefixNetmask(r.address)
+	}
+	if r.address6.IsValid() {
+		out.AssignedIP6 = net.IP(r.address6.Addr().AsSlice())
+		out.Prefix6 = r.address6.Bits()
+	}
+	logger.Printf("wireguard: tunnel up on %s, internal IP %s%s, peer %s",
+		out.TUNName, addrOrNone(out.AssignedIP), also(out.AssignedIP6), r.endpoint)
 	return s, out, nil
 }
 
@@ -799,6 +812,46 @@ func decodeKey(s, name string) ([32]byte, error) {
 
 // prefixNetmask returns the IPv4 netmask of a prefix as a net.IP, for the
 // Result the client router applies.
+// splitPrefixFamilies sorts a wg-quick Address list into its IPv4 and IPv6
+// entry. Either may be absent — a v6-only tunnel is legitimate — but a second
+// address of the same family is an error rather than a silent choice, because
+// the caller installs exactly one per family and quietly ignoring the rest is
+// how a config that looks right stops working.
+func splitPrefixFamilies(addrs []netip.Prefix) (v4, v6 netip.Prefix, err error) {
+	for _, a := range addrs {
+		slot := &v6
+		family := "IPv6"
+		if a.Addr().Is4() {
+			slot, family = &v4, "IPv4"
+		}
+		if slot.IsValid() {
+			return netip.Prefix{}, netip.Prefix{},
+				fmt.Errorf("two %s addresses (%s and %s); an interface takes one per family", family, *slot, a)
+		}
+		*slot = a
+	}
+	if !v4.IsValid() && !v6.IsValid() {
+		return netip.Prefix{}, netip.Prefix{}, errors.New("no address")
+	}
+	return v4, v6, nil
+}
+
+// addrOrNone and also render the two families for one log line without
+// printing "<nil>" for the half a single-stack tunnel does not have.
+func addrOrNone(ip net.IP) string {
+	if ip == nil {
+		return "none"
+	}
+	return ip.String()
+}
+
+func also(ip net.IP) string {
+	if ip == nil {
+		return ""
+	}
+	return " + " + ip.String()
+}
+
 func prefixNetmask(p netip.Prefix) net.IP {
 	return net.IP(net.CIDRMask(p.Bits(), p.Addr().BitLen()))
 }

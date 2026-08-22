@@ -304,9 +304,14 @@ type pushConfig struct {
 	localIP net.IP
 	netmask net.IP
 	gateway net.IP
-	peerID  uint32
-	mtu     int
-	cipher  string // the data cipher the server negotiated, if it pushed one
+	// localIP6 and prefix6 come from a pushed ifconfig-ipv6. They are the zero
+	// values on an IPv4-only tunnel, which is every server that does not push
+	// the option.
+	localIP6 net.IP
+	prefix6  int
+	peerID   uint32
+	mtu      int
+	cipher   string // the data cipher the server negotiated, if it pushed one
 	// ping is how often the server said it will send a keepalive, and
 	// pingRestart how long it said a peer should wait before giving up. Both
 	// are zero when the server pushed neither, which is the case in which this
@@ -343,6 +348,26 @@ func parsePush(reply string) (*pushConfig, error) {
 					p.gateway = second
 					p.netmask = net.IPv4(255, 255, 255, 255)
 				}
+			}
+		case "ifconfig-ipv6":
+			// `ifconfig-ipv6 <local>/<bits> <remote>`. The local half is ours;
+			// the remote half is the server's own address, which the caller
+			// does not need -- the connected route the prefix creates already
+			// reaches it, exactly as the v4 half works.
+			if len(fields) >= 2 {
+				addr, bits, found := strings.Cut(fields[1], "/")
+				ip := net.ParseIP(addr)
+				if ip == nil || ip.To4() != nil {
+					return nil, fmt.Errorf("server pushed a bad ifconfig-ipv6 address %q", fields[1])
+				}
+				n := 64
+				if found {
+					var err error
+					if n, err = strconv.Atoi(bits); err != nil || n < 0 || n > 128 {
+						return nil, fmt.Errorf("server pushed a bad ifconfig-ipv6 prefix %q", fields[1])
+					}
+				}
+				p.localIP6, p.prefix6 = ip, n
 			}
 		case "route-gateway":
 			if len(fields) >= 2 {

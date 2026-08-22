@@ -54,6 +54,34 @@ lines to run by hand. Each client is assigned the next free pool address and a
 peer-id, and inbound data packets are demuxed by that peer-id. It is verified in
 Docker against both a real `openvpn` client and the veepin client.
 
+### A dual-stack tunnel
+
+`-pool6` adds an IPv6 prefix, and every client is then pushed `ifconfig-ipv6`
+beside `ifconfig`:
+
+```sh
+sudo ./veepin serve openvpn -ca ca.crt -cert server.crt -key server.key \
+  -pool 10.8.0.0/24 -pool6 fd00:8::/64 -setup-nat -wan eth0
+```
+
+A client's v6 address is **derived** from its v4 one — the v4 address's offset
+within `-pool`, added to the prefix's base, so `10.8.0.2` becomes `fd00:8::2`.
+That is a deliberate departure from OpenVPN's own `--ifconfig-ipv6-pool`, and
+the reason is lifecycle rather than taste: this server has one allocator and no
+path that releases from it (a UDP client simply stops answering), so a second
+allocator would be a second thing to leak and a second thing to desynchronise
+from the first. Derivation is one-to-one with the v4 assignment by
+construction, needs no release, and makes the mapping legible.
+
+`-setup-nat` installs the server's own `fd00:8::1` on the interface along with
+v6 forwarding and the `ip6tables` rules, the same way it does the v4 half.
+
+A stock `openvpn --client` needs no configuration for any of this: `ifconfig-ipv6`
+is a pushed option, so the client's v6 address comes entirely from the server.
+The interop cell pings the *client's* derived address from the server, which is
+the only direction that proves anything — see the note in
+`tests/interop/interop_test.go`.
+
 ### Protecting the control channel
 
 The server accepts the same `--tls-crypt` and `--tls-auth` static-key wrappings
