@@ -99,7 +99,12 @@ func runCapture(t *testing.T, spec captureSpec) {
 	}
 	file := golden.Cell
 
-	if out, err := compose(t, file, "up", "--build", "-d", spec.captureSvc); err != nil {
+	// Build every image first, so the second `up` below has nothing left to
+	// build. That is not tidiness: see startedContainer.
+	if out, err := compose(t, file, "build"); err != nil {
+		t.Fatalf("compose build: %v\n%s", err, out)
+	}
+	if out, err := compose(t, file, "up", "-d", spec.captureSvc); err != nil {
 		t.Fatalf("compose up %s: %v\n%s", spec.captureSvc, err, out)
 	}
 	t.Cleanup(func() {
@@ -114,12 +119,24 @@ func runCapture(t *testing.T, spec captureSpec) {
 	// tcpdump must be recording before the first handshake message, so start it
 	// while only the listener is up and nothing has dialled yet.
 	startTCPDump(t, file, spec)
+	before := startedContainer(t, file, spec.captureSvc)
 
-	if out, err := compose(t, file, "up", "--build", "-d", spec.dialSvc); err != nil {
+	// --no-deps and --no-recreate are what keep the capture alive. The dialler
+	// depends on the capture service, so a plain `up` reaches for it too, and a
+	// `--build` here rebuilt its image and recreated the container -- taking
+	// tcpdump, its pid file and the half-written capture with it. That failed
+	// only on CI, where the image was not already built, and it failed as three
+	// missing files a minute later rather than as anything naming the cause.
+	if out, err := compose(t, file, "up", "-d", "--no-deps", "--no-recreate", spec.dialSvc); err != nil {
 		t.Fatalf("compose up %s: %v\n%s", spec.dialSvc, err, out)
 	}
 	if !waitPing(t, file, spec.pingSvc, spec.target) {
 		t.Fatalf("the tunnel never came up, so the capture holds a failed handshake")
+	}
+	if after := startedContainer(t, file, spec.captureSvc); after != before {
+		t.Fatalf("%s was recreated while the capture was running (%s -> %s); "+
+			"everything tcpdump wrote went with the old container",
+			spec.captureSvc, short(before), short(after))
 	}
 
 	pcapFile := filepath.Join(t.TempDir(), spec.name+".pcap")
@@ -235,6 +252,32 @@ func stopTCPDump(t *testing.T, file string, spec captureSpec, dst string) {
 		log, _ := compose(t, file, "exec", "-T", spec.captureSvc, "cat", logPath)
 		t.Fatalf("copying the capture out: %v\n%s\n--- tcpdump log ---\n%s", err, out, log)
 	}
+}
+
+// startedContainer is the capture service's container ID.
+//
+// It is read before and after the dialler starts because a recreated container
+// is the one failure in this flow that leaves no trace of itself: tcpdump, its
+// pid file and everything it had written simply cease to exist, and the next
+// three commands each fail for a reason that does not name the cause.
+func startedContainer(t *testing.T, file, svc string) string {
+	t.Helper()
+	out, err := compose(t, file, "ps", "-q", svc)
+	if err != nil {
+		t.Fatalf("compose ps %s: %v\n%s", svc, err, out)
+	}
+	id := strings.TrimSpace(out)
+	if id == "" {
+		t.Fatalf("%s has no running container", svc)
+	}
+	return id
+}
+
+func short(id string) string {
+	if len(id) > 12 {
+		return id[:12]
+	}
+	return id
 }
 
 // writeCorpus rewrites the committed corpus. It writes into the source tree, so
