@@ -47,7 +47,7 @@ wire detail, caveats and API surface.
 
 | Protocol | Authentication | Data path | Verified against | Docs |
 |----------|----------------|-----------|------------------|------|
-| **IKEv2/ESP** | PSK, EAP-MSCHAPv2, X.509 certificate (RFC 7427) | ESP-in-UDP, RFC 4303 (NAT-T, dual-stack v4/v6 CP address assignment, RFC 9347 AGGFRAG) | strongSwan | [ikev2](internal/ikev2/ike/README.md) |
+| **IKEv2/ESP** | PSK, EAP-MSCHAPv2, X.509 certificate (RFC 7427) | ESP-in-UDP, RFC 4303 (NAT-T, dual-stack v4/v6 CP address assignment, RFC 9347 AGGFRAG, RFC 8229/9329 over TCP) | strongSwan, libreswan | [ikev2](internal/ikev2/ike/README.md) |
 | **WireGuard** | Noise_IKpsk2 static keys | ChaCha20-Poly1305, cryptokey routing (both families), client rekey | wireguard-go | [wireguard](internal/wireguard/) |
 | **OpenVPN** | mutual TLS certificates | AES-256-GCM / -CBC; plain, `tls-auth`, `tls-crypt` (both roles) | `openvpn` | [openvpn](internal/openvpn/) |
 | **SSTP** | MS-CHAPv2 over PPP | PPP/IPCP over TLS, SHA-256 crypto binding | SoftEther, `sstpc`/pppd | [sstp](internal/sstp/wire/README.md) |
@@ -789,6 +789,16 @@ each a localized extension point, not a structural rework:
   fragments its own output above 1280 octets, which certificate authentication
   needs: an RSA chain puts IKE_AUTH near 2 KB in both directions) and the
   RFC 7296 §2.6 cookie exchange; every server bounds unauthenticated work through `dataplane.Gate`.
+- **IPsec through a network that blocks UDP.** `-tcp` carries IKE *and* ESP over
+  one length-prefixed TCP connection (RFC 8229, updated by RFC 9329), verified
+  against libreswan in both roles — the only open-source implementation of
+  either. On the server it is **additive**: the UDP sockets stay bound and a
+  peer is answered on whichever transport it arrived on, so turning it on cannot
+  break an existing deployment. On the client `-port` then names the TCP port
+  and defaults to 4500, so a network permitting only 443 outbound needs one
+  flag. It is a worse transport than UDP wherever UDP works — a datagram
+  protocol on a reliable ordered stream blocks head-of-line — and
+  [`doc/security.md`](doc/security.md) says what it does and does not buy.
 - **Client liveness and SA rekey are unified across protocols.** A
   cross-protocol monitor (`client.Prober`, applied automatically by
   `client.Dial`) detects a dead peer and tears the tunnel down for a clean

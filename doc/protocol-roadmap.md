@@ -19,7 +19,7 @@ least interesting.
 | 1 | **L2TPv3 Ethernet pseudowire** (RFC 3931 + 4719) *(landed — static)* | **New row** | **Layer 2**, actually delivered — the gap SoftEther left open | Medium-high | **Yes** — the Linux kernel, both directions |
 | 2 | **IP-TFS / AGGFRAG** (RFC 9347) *(partly landed)* | IKEv2 option | **Constant-rate traffic-flow confidentiality** — shapes packet *counts and timing*, which `dataplane/shape.go` explicitly does not | Medium | Partly — strongSwan 6.0.2+ does aggregation; **nobody open-source does the constant-rate half** |
 | 3 | **Nebula relays** *(landed)* | Nebula option | Relay fallback when hole punching fails | Low | Yes — `nebula`, already pinned and green |
-| 4 | **RFC 9329** (TCP encapsulation of IKE and IPsec) | IKEv2 option | IPsec through a UDP-hostile network; brings **libreswan** in as a new peer | ~~Low~~ **Medium-high** — see the re-survey | Yes — libreswan 4.0+, both roles |
+| 4 | **RFC 9329** (TCP encapsulation of IKE and IPsec) *(landed)* | IKEv2 option | IPsec through a UDP-hostile network; brings **libreswan** in as a new peer | ~~Low~~ ~~**Medium-high**~~ — both estimates were wrong; see the re-survey | Yes — libreswan 5.2, both roles |
 | 5 | **Rosenpass** | WireGuard option | PQ handshake feeding WireGuard's PSK | Medium | Yes — Rust reference implementation |
 | 6 | Juniper NC / Array / F5 | New rows | Nothing structural | Low | Client only |
 | — | **Tailscale** (ts2021 / DISCO / DERP) | — | Coordinated mesh with relay fallback | Very high | **No — fails the "both roles" rule** |
@@ -540,7 +540,16 @@ anything.
 
 ---
 
-# 4. RFC 9329 — TCP encapsulation, an IKEv2 option
+# 4. RFC 9329 — TCP encapsulation, an IKEv2 option *(landed)*
+
+> **Landed as `-tcp` on both roles.** Read the two estimates below and then
+> [what actually happened](#what-actually-happened) — the re-survey corrected the
+> original estimate upwards, and was itself wrong in the same direction. The
+> `dataplane` change it warned about never happened, because
+> `dataplane.Sender`'s `*net.UDPAddr` is passed *to* the sender and not used by
+> it. See `doc/claims-and-reach-plan.md` item 9 for the full record, including
+> the three defects the plain libreswan-over-UDP cell found before a line of TCP
+> was written.
 
 ## Honest position
 
@@ -636,6 +645,32 @@ New peer image `tests/interop/libreswan/` — `FROM alpine:3.20` plus
 `compose.ikev2-tcp-fallback.yml` with UDP blocked by an iptables rule in the
 peer container. The fallback cell **must** use `runInteropRequiringLog` — a
 fallback cell that silently used UDP is the textbook false green.
+
+## What actually happened
+
+Four corrections, kept here rather than in a rewrite:
+
+- **`dataplane` is untouched.** `Sender`'s address parameter is passed to the
+  sender, not used by it — the connected UDP socket already ignores it, and a
+  stream ignores it for the same reason. The batching carried over too: a GSO
+  burst becomes one `Write` carrying several frames.
+- **`transport` did not become an interface.** One `transport` owns both
+  carriers, keyed by a map from peer address to stream; `sendIKE`, `sendESP` and
+  `sendESPBatch` consult it and fall through to UDP. That makes the TCP listener
+  **additive** — the UDP sockets stay bound, a peer is answered on whatever it
+  arrived on, and `-tcp` cannot break an existing deployment. An either/or
+  interface could not have done that.
+- **`Reliable() bool` was unnecessary.** veepin has no IKE retransmit timer to
+  suppress; the client relies on its reconnect loop.
+- **The image is `alpine:3.22`.** 3.20 does carry libreswan 5.0 as this page
+  predicted, but 5.0's `addconn` segfaults on musl on a config file containing
+  nothing but `config setup`.
+
+The fallback cell in the table below became a `enable-tcp=yes` cell with
+outbound UDP dropped in iptables. libreswan reaches its own fallback only after
+its IKE retransmit sequence times out — about a minute — and what that would
+test is libreswan's timer, not veepin's responder. The end state and the
+assertion are the same, a minute cheaper on the matrix's slowest shard.
 
 Land a plain libreswan-over-UDP cell first, proving the peer image works at all,
 before asserting anything about TCP. Debugging a new peer and a new transport at
@@ -743,8 +778,8 @@ before expecting CI.
    in; **the strongSwan cell is not**, so this is not yet proven.
 5. **IP-TFS constant-rate** — not started. This is the half that makes the
    feature worth having; until it lands, `-iptfs` buys framing, not confidentiality.
-6. **RFC 9329** — plus a plain libreswan-over-UDP cell first, proving the new
-   peer image before asserting anything about TCP.
+6. ~~**RFC 9329**~~ — landed, and the plain libreswan-over-UDP cell first was
+   the advice that paid: it found three responder defects before any TCP existed.
 7. **Nebula relays** — independent of all of the above, and the smallest useful
    thing on this page if a short slot opens up.
 
@@ -781,5 +816,5 @@ Each of these exists because a passing ping would otherwise prove nothing:
 | L2TPv3 cookies | **Asymmetric 8-octet cookies**, so a both-ends-backwards direction bug cannot pass |
 | IP-TFS (all) | `runInteropRequiringLog` naming AGGFRAG as negotiated — silent fallback to plain ESP pings perfectly |
 | IP-TFS constant-rate | Packet timing and size **independent of offered load**, idle versus saturated |
-| RFC 9329 fallback | UDP blocked by iptables, with a log line proving TCP carried the session |
+| RFC 9329 (both) *(landed)* | UDP **removed**, not merely unused: `--no-listen-udp` on the peer in one direction, outbound UDP 500/4500 dropped by iptables in the other — plus a log line proving TCP carried the session |
 | Nebula relays | Direct UDP blocked, with a log line **naming the relay host** |

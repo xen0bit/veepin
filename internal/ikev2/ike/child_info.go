@@ -179,7 +179,7 @@ func (s *Server) handleCreateChildSA(sa *IKESA, hdr payload.Header, inners []pay
 	b.Add(payload.TypeTSi, false, tsiPay.Body)
 	b.Add(payload.TypeTSr, false, tsrPay.Body)
 
-	child.UDPEncap = sa.NAT.natDetected() || sa.OnPort4500
+	child.UDPEncap = s.udpEncap(sa, remote)
 	child.ClientIP = sa.ClientIP
 	child.ClientIP6 = sa.ClientIP6
 	child.PeerAddr = remote

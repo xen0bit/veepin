@@ -212,10 +212,10 @@ func TestKEMRejectsAnUnnegotiatedGroup(t *testing.T) {
 // that omits the transform is as if it had proposed NONE. That must be a quiet
 // "no", not an error, or every ordinary peer fails to negotiate.
 func TestSelectADDKEIgnoresAProposalWithout(t *testing.T) {
-	if _, ok := SelectADDKE(DefaultIKEProposal()); ok {
+	if _, ok := SelectADDKE(DefaultIKEProposals()[0]); ok {
 		t.Fatal("the default proposal has no ADDKE transform but SelectADDKE claimed one")
 	}
-	p := DefaultIKEProposal()
+	p := DefaultIKEProposals()[0]
 	p.Transforms = append(p.Transforms,
 		payload.Transform{Type: payload.TransformADDKE1, ID: payload.MLKEM768})
 	group, ok := SelectADDKE(p)
@@ -227,7 +227,7 @@ func TestSelectADDKEIgnoresAProposalWithout(t *testing.T) {
 // TestSelectADDKERejectsUnsupportedMethods: a peer proposing ML-KEM-1024 must
 // get NONE rather than an accepted transform we cannot honour.
 func TestSelectADDKERejectsUnsupportedMethods(t *testing.T) {
-	p := DefaultIKEProposal()
+	p := DefaultIKEProposals()[0]
 	p.Transforms = append(p.Transforms,
 		payload.Transform{Type: payload.TransformADDKE1, ID: payload.MLKEM1024})
 	if _, ok := SelectADDKE(p); ok {

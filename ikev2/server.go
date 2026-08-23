@@ -62,6 +62,13 @@ type ServerConfig struct {
 	KeyFile      string
 	ClientCAFile string
 
+	// TCP additionally accepts RFC 8229/9329 TCP-encapsulated IKE and ESP on TCP
+	// port 4500, for clients whose network blocks UDP. It is additive: the UDP
+	// sockets stay bound and every existing peer is unaffected, so a peer
+	// reaches the server on whichever transport its network allows and is
+	// answered on the same one.
+	TCP bool
+
 	// Shape enables downstream traffic shaping: how much padded output each
 	// inner flow is given before shaping stops for that flow, so it bounds what
 	// shaping costs. A flow gets Shape/MTU padded packets whatever sizes it
@@ -198,20 +205,29 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		ClientCAs:  clientCAs,
 		IPTFS:      cfg.IPTFS,
 		IPTFSRate:  cfg.IPTFSRate,
+		TCP:        cfg.TCP,
 		Logger:     logger,
-		AssignAddr: func() (ike.Assignment, error) {
-			ip, aerr := pool.Allocate()
-			if aerr != nil {
-				return ike.Assignment{}, aerr
+		AssignAddr: func(want ike.AddressRequest) (ike.Assignment, error) {
+			var a ike.Assignment
+			if want.IP4 {
+				ip, aerr := pool.Allocate()
+				if aerr != nil {
+					return ike.Assignment{}, aerr
+				}
+				a.IP4, a.Netmask, a.DNS = ip, pool.Netmask(), cfg.DNS
 			}
-			a := ike.Assignment{IP4: ip, Netmask: pool.Netmask(), DNS: cfg.DNS}
-			// Dual-stack: hand out an IPv6 address too. A v6 exhaustion is
+			// Dual-stack, but only when the client asked: an unrequested IPv6
+			// lease is legal, breaks libreswan, and leaks an address per
+			// IPv4-only client. See ike.AddressRequest. A v6 exhaustion stays
 			// non-fatal — the client still gets a working IPv4-only tunnel.
-			if ip6, a6err := pool6.Allocate(); a6err == nil {
-				a.IP6 = net.IP(ip6.AsSlice())
-				a.Prefix6 = pool6.Bits()
-			} else {
-				logger.Printf("ikev2: IPv6 assignment skipped: %v", a6err)
+			if want.IP6 {
+				if ip6, a6err := pool6.Allocate(); a6err == nil {
+					a.IP6 = net.IP(ip6.AsSlice())
+					a.Prefix6 = pool6.Bits()
+					a.DNS = cfg.DNS
+				} else {
+					logger.Printf("ikev2: IPv6 assignment skipped: %v", a6err)
+				}
 			}
 			return a, nil
 		},
@@ -344,6 +360,9 @@ const (
 	// many bytes per second whether or not anyone is using it, so the operator
 	// has to name what they will spend.
 	OptServerIPTFSRate = "iptfs-rate"
+	// OptServerTCP additionally accepts RFC 8229/9329 TCP encapsulation on TCP
+	// 4500. Additive, not a mode: UDP keeps working.
+	OptServerTCP = "tcp"
 )
 
 func init() {
@@ -364,6 +383,7 @@ func init() {
 		client.ShapeOpt(OptServerShape, "downstream"),
 		{Key: OptServerIPTFS, Kind: client.OptBool, Help: "permit AGGFRAG / IP-TFS (RFC 9347) for clients that request it"},
 		{Key: OptServerIPTFSRate, Kind: client.OptInt, Default: "0", Help: "constant-rate IP-TFS transmission in bytes/sec on AGGFRAG SAs; 0 = aggregation only. Costs this bandwidth continuously, idle or not"},
+		{Key: OptServerTCP, Kind: client.OptBool, Help: "also accept TCP-encapsulated IKE and ESP (RFC 8229/9329) on TCP 4500, for clients whose network blocks UDP"},
 	})
 }
 
@@ -382,6 +402,7 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 		CertFile:     opts[OptServerCert],
 		KeyFile:      opts[OptServerKey],
 		ClientCAFile: opts[OptServerClientCA],
+		TCP:          opts[OptServerTCP] == "true",
 		Logger:       log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds),
 	}
 	if cfg.ListenIP == "" {

@@ -22,56 +22,103 @@ type Suite struct {
 	Integ  *cryptoutil.Integrity // nil for AEAD
 }
 
-// DefaultIKEProposal returns the proposal this server offers/accepts for the
-// IKE SA. Order signals preference. AEAD suites are listed first.
-// DefaultIKEProposal returns the proposal this server offers/accepts for the
-// IKE SA. Transforms are ordered by preference: AEAD ciphers first (AES-GCM,
-// fastest and integrity-combined), then AES-CBC for older clients; SHA2 PRFs;
-// and elliptic-curve DH groups before MODP-2048 (which is ~75x slower per the
-// benchmarks). Offering both 128- and 256-bit AES lets a client negotiate the
+// DefaultIKEProposals returns the proposals this endpoint offers for the IKE
+// SA, in preference order.
+//
+// Two proposals, not one, and the split is not cosmetic. RFC 5282 section 8:
+// an AEAD cipher carries its own integrity, so a proposal naming one "MUST
+// either not include an Integrity Algorithm transform, or include it with the
+// value NONE". A single proposal listing AES-GCM, ChaCha20-Poly1305 *and*
+// AES-CBC cannot say what it means -- a proposal is one set of transforms from
+// which the peer picks one of each type, AES-CBC needs HMAC-SHA2-256-128, and
+// AES-GCM needs nothing. veepin sent exactly that: one proposal, four ciphers,
+// one INTEG transform reading HMAC_SHA2_256_128 that was true of only one of
+// them.
+//
+// strongSwan accepts it, which is why no cell in the matrix ever noticed.
+// libreswan refuses it outright, and is right to:
+//
+//	no local proposal matches remote proposals 1:IKE:ENCR=AES_GCM_16_256;...;
+//	  INTEG=HMAC_SHA2_256_128;DH=CURVE25519;...
+//	responding to IKE_SA_INIT message (ID 0) with unencrypted notification
+//	  NO_PROPOSAL_CHOSEN
+//
+// Split, each proposal says something true: proposal 1 is the AEAD suites with
+// no integrity transform at all, proposal 2 is AES-CBC with the integrity
+// transform it requires. Within each, order signals preference -- AES-GCM
+// first (fastest where the CPU has AES-NI), then ChaCha20-Poly1305; SHA2 PRFs;
+// elliptic-curve DH groups before MODP-2048, which is ~75x slower per the
+// benchmarks. Offering both 128- and 256-bit AES lets a peer negotiate the
 // faster 128-bit variant when its policy allows.
-func DefaultIKEProposal() payload.Proposal {
-	return payload.Proposal{
-		Num:      1,
-		Protocol: payload.ProtoIKE,
-		Transforms: []payload.Transform{
-			{Type: payload.TransformENCR, ID: payload.ENCR_AES_GCM_16, KeyLen: 256},
-			{Type: payload.TransformENCR, ID: payload.ENCR_AES_GCM_16, KeyLen: 128},
-			// ChaCha20-Poly1305 (RFC 7634) carries no key-length attribute (the
-			// key is always 256-bit), hence KeyLen 0. Offered after AES-GCM, which
-			// is faster where the CPU has AES-NI, and ahead of AES-CBC.
-			{Type: payload.TransformENCR, ID: payload.ENCR_CHACHA20_P},
-			{Type: payload.TransformENCR, ID: payload.ENCR_AES_CBC, KeyLen: 256},
-			{Type: payload.TransformPRF, ID: payload.PRF_HMAC_SHA2_256},
-			{Type: payload.TransformPRF, ID: payload.PRF_HMAC_SHA2_384},
-			{Type: payload.TransformPRF, ID: payload.PRF_HMAC_SHA2_512},
-			{Type: payload.TransformINTEG, ID: payload.AUTH_HMAC_SHA2_256_128},
-			{Type: payload.TransformDH, ID: payload.DH_CURVE25519},
-			{Type: payload.TransformDH, ID: payload.DH_ECP_256},
-			{Type: payload.TransformDH, ID: payload.DH_ECP_384},
-			{Type: payload.TransformDH, ID: payload.DH_MODP_2048},
+func DefaultIKEProposals() []payload.Proposal {
+	return []payload.Proposal{
+		{
+			Num:      1,
+			Protocol: payload.ProtoIKE,
+			Transforms: []payload.Transform{
+				{Type: payload.TransformENCR, ID: payload.ENCR_AES_GCM_16, KeyLen: 256},
+				{Type: payload.TransformENCR, ID: payload.ENCR_AES_GCM_16, KeyLen: 128},
+				// ChaCha20-Poly1305 (RFC 7634) carries no key-length attribute
+				// (the key is always 256-bit), hence KeyLen 0.
+				{Type: payload.TransformENCR, ID: payload.ENCR_CHACHA20_P},
+				{Type: payload.TransformPRF, ID: payload.PRF_HMAC_SHA2_256},
+				{Type: payload.TransformPRF, ID: payload.PRF_HMAC_SHA2_384},
+				{Type: payload.TransformPRF, ID: payload.PRF_HMAC_SHA2_512},
+				{Type: payload.TransformDH, ID: payload.DH_CURVE25519},
+				{Type: payload.TransformDH, ID: payload.DH_ECP_256},
+				{Type: payload.TransformDH, ID: payload.DH_ECP_384},
+				{Type: payload.TransformDH, ID: payload.DH_MODP_2048},
+			},
+		},
+		{
+			Num:      2,
+			Protocol: payload.ProtoIKE,
+			Transforms: []payload.Transform{
+				{Type: payload.TransformENCR, ID: payload.ENCR_AES_CBC, KeyLen: 256},
+				{Type: payload.TransformPRF, ID: payload.PRF_HMAC_SHA2_256},
+				{Type: payload.TransformPRF, ID: payload.PRF_HMAC_SHA2_384},
+				{Type: payload.TransformPRF, ID: payload.PRF_HMAC_SHA2_512},
+				{Type: payload.TransformINTEG, ID: payload.AUTH_HMAC_SHA2_256_128},
+				{Type: payload.TransformDH, ID: payload.DH_CURVE25519},
+				{Type: payload.TransformDH, ID: payload.DH_ECP_256},
+				{Type: payload.TransformDH, ID: payload.DH_ECP_384},
+				{Type: payload.TransformDH, ID: payload.DH_MODP_2048},
+			},
 		},
 	}
 }
 
-// DefaultESPProposal returns the Child SA (ESP) proposal offered/accepted.
-// DefaultESPProposal returns the Child SA (ESP) proposal offered/accepted.
-// AES-GCM is offered first (dramatically faster than AES-CBC+HMAC on the data
-// path — see the benchmarks), in both 256- and 128-bit variants, with AES-CBC
-// as a fallback for older clients.
-func DefaultESPProposal(spi []byte) payload.Proposal {
-	return payload.Proposal{
-		Num:      1,
-		Protocol: payload.ProtoESP,
-		SPI:      spi,
-		Transforms: []payload.Transform{
-			{Type: payload.TransformENCR, ID: payload.ENCR_AES_GCM_16, KeyLen: 256},
-			{Type: payload.TransformENCR, ID: payload.ENCR_AES_GCM_16, KeyLen: 128},
-			// ChaCha20-Poly1305 (RFC 7634): AEAD, no key-length attribute.
-			{Type: payload.TransformENCR, ID: payload.ENCR_CHACHA20_P},
-			{Type: payload.TransformENCR, ID: payload.ENCR_AES_CBC, KeyLen: 256},
-			{Type: payload.TransformINTEG, ID: payload.AUTH_HMAC_SHA2_256_128},
-			{Type: payload.TransformESN, ID: payload.ESN_NONE},
+// DefaultESPProposals returns the Child SA (ESP) proposals offered, split on
+// the same AEAD boundary and for the same reason as [DefaultIKEProposals] --
+// RFC 5282 section 8 governs the Child SA's transforms too, and libreswan's
+// `esp=aes_gcm256` likewise resolves to AES_GCM_16_256 with integrity NONE.
+//
+// AES-GCM is offered first: dramatically faster than AES-CBC+HMAC on the data
+// path, per the benchmarks. Both proposals carry the same SPI -- it names our
+// inbound SA, not the suite, so it does not vary with which one the peer picks.
+func DefaultESPProposals(spi []byte) []payload.Proposal {
+	return []payload.Proposal{
+		{
+			Num:      1,
+			Protocol: payload.ProtoESP,
+			SPI:      spi,
+			Transforms: []payload.Transform{
+				{Type: payload.TransformENCR, ID: payload.ENCR_AES_GCM_16, KeyLen: 256},
+				{Type: payload.TransformENCR, ID: payload.ENCR_AES_GCM_16, KeyLen: 128},
+				// ChaCha20-Poly1305 (RFC 7634): AEAD, no key-length attribute.
+				{Type: payload.TransformENCR, ID: payload.ENCR_CHACHA20_P},
+				{Type: payload.TransformESN, ID: payload.ESN_NONE},
+			},
+		},
+		{
+			Num:      2,
+			Protocol: payload.ProtoESP,
+			SPI:      spi,
+			Transforms: []payload.Transform{
+				{Type: payload.TransformENCR, ID: payload.ENCR_AES_CBC, KeyLen: 256},
+				{Type: payload.TransformINTEG, ID: payload.AUTH_HMAC_SHA2_256_128},
+				{Type: payload.TransformESN, ID: payload.ESN_NONE},
+			},
 		},
 	}
 }

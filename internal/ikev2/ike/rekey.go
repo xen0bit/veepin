@@ -53,7 +53,7 @@ func (c *Client) RekeyChild(ctx context.Context) (newRes *ClientResult, oldInSPI
 		Protocol: payload.ProtoESP, Type: payload.RekeySA, SPI: u32BE(oldOutSPI),
 	}))
 	b.Add(payload.TypeSA, false, payload.MarshalSA(payload.SAPayload{
-		Proposals: []payload.Proposal{DefaultESPProposal(u32BE(newInSPI))},
+		Proposals: DefaultESPProposals(u32BE(newInSPI)),
 	}))
 	b.Add(payload.TypeNonce, false, payload.MarshalNonce(ni))
 	b.Add(payload.TypeTSi, false, payload.MarshalTS(tsAll))
@@ -169,10 +169,12 @@ func (c *Client) RekeyIKE(ctx context.Context) error {
 	ni := mustNonce(32)
 	newSPIi := newIKESPI()
 
-	prop := DefaultIKEProposal()
-	prop.SPI = u64BE(newSPIi)
+	props := DefaultIKEProposals()
+	for i := range props {
+		props[i].SPI = u64BE(newSPIi)
+	}
 	b := payload.NewBuilder()
-	b.Add(payload.TypeSA, false, payload.MarshalSA(payload.SAPayload{Proposals: []payload.Proposal{prop}}))
+	b.Add(payload.TypeSA, false, payload.MarshalSA(payload.SAPayload{Proposals: props}))
 	b.Add(payload.TypeNonce, false, payload.MarshalNonce(ni))
 	b.Add(payload.TypeKE, false, payload.MarshalKE(payload.KEPayload{Group: c.suite.DHID, KeyData: pub}))
 

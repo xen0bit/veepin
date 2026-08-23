@@ -81,7 +81,7 @@ func BenchmarkFullHandshakePSK(b *testing.B) {
 		LocalID:  FQDNIdentity("vpn.example"),
 		PublicIP: net.ParseIP("127.0.0.1"),
 		Logger:   log.New(io.Discard, "", 0),
-		AssignAddr: func() (Assignment, error) {
+		AssignAddr: func(AddressRequest) (Assignment, error) {
 			return Assignment{IP4: net.IPv4(10, 0, 0, 2), Netmask: net.IPv4(255, 255, 255, 0)}, nil
 		},
 	}

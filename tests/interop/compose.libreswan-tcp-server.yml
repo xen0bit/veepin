@@ -1,0 +1,49 @@
+# Direction B over RFC 8229/9329: a libreswan initiator with `enable-tcp=yes`
+# reaches `veepin serve ikev2 -tcp` on a network with no UDP.
+#
+# The client container drops its own outbound UDP 500 and 4500 in iptables, and
+# that rule is the assertion. The veepin server keeps its UDP sockets bound --
+# the TCP listener is additive, not a mode -- so without the rule a passing ping
+# would say nothing about which carrier moved it.
+#
+# Data-path check: the libreswan client pings 10.10.10.1 (the veepin server's
+# TUN gateway) through the tunnel.
+name: veepin-interop-libreswan-tcp-b
+
+services:
+  veepin-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    sysctls:
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+      net.ipv4.ip_forward: "1"
+    environment:
+      PSK: "interop-test-psk"
+      SERVER_ID: "vpn.example.com"
+      POOL: "10.10.10.0/24"
+      TCP: "true"
+    volumes:
+      - ./veepin/server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  libreswan-client:
+    build:
+      context: libreswan
+    image: interop-libreswan
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+    depends_on: [veepin-server]
+    environment:
+      BLOCK_UDP: "yes"
+    volumes:
+      - ./libreswan/ipsec-client-tcp.conf:/etc/ipsec.conf:ro
+      - ./libreswan/ipsec.secrets:/etc/ipsec.secrets:ro
+      - ./libreswan/client-entrypoint.sh:/entrypoint.sh:ro
+    command: ["/bin/sh", "/entrypoint.sh"]

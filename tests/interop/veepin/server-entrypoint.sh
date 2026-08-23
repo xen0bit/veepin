@@ -7,6 +7,10 @@
 # dual-stack). PUBLIC overrides the advertised address (NAT detection); it
 # defaults to the container's first address, which is IPv4.
 #
+# TCP additionally accepts RFC 8229/9329 TCP-encapsulated IKE and ESP on TCP
+# 4500. It is additive, so the UDP cells are unaffected by a server that has it
+# on -- which is what the fallback cell relies on.
+#
 # SHAPE is the per-flow downstream shaping budget in bytes (0, the default, is
 # off). A non-zero value makes the server pad outbound ESP with RFC 4303 §2.7
 # TFC padding, which the peer must tolerate — that is what the shaped cell
@@ -37,6 +41,7 @@ set -- \
     -tun tun0 \
     -shape "$SHAPE" \
     -iptfs="${IPTFS:-false}" \
+    -tcp="${TCP:-false}" \
     -setup-nat
 # `if` rather than `[ ... ] && ...`: under `set -e` a false test makes the whole
 # AND-list the script's last status and kills it, so the v4-only cells would die

@@ -271,7 +271,7 @@ func TestServerReassemblesFragmentedAuth(t *testing.T) {
 	}))
 	b.Add(payload.TypeCP, false, payload.MarshalCP(cpReq))
 	b.Add(payload.TypeSA, false, payload.MarshalSA(payload.SAPayload{
-		Proposals: []payload.Proposal{DefaultESPProposal(u32BE(it.childOutSPI))},
+		Proposals: DefaultESPProposals(u32BE(it.childOutSPI)),
 	}))
 	b.Add(payload.TypeTSi, false, payload.MarshalTS(tsAll))
 	b.Add(payload.TypeTSr, false, payload.MarshalTS(tsAll))

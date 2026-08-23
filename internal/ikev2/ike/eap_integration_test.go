@@ -32,7 +32,7 @@ func TestEAPMSCHAPv2Flow(t *testing.T) {
 		Logger:         log.New(io.Discard, "", 0),
 		EAPCredentials: func(u string) (string, bool) { p, ok := users[u]; return p, ok },
 		EAPServerName:  "vpn.example",
-		AssignAddr: func() (Assignment, error) {
+		AssignAddr: func(AddressRequest) (Assignment, error) {
 			return Assignment{IP4: net.IPv4(10, 9, 8, 7), Netmask: net.IPv4(255, 255, 255, 0)}, nil
 		},
 		OnChildSA: func(sa *IKESA, c *ChildSA) { established <- c },
@@ -65,7 +65,7 @@ func TestEAPMSCHAPv2Flow(t *testing.T) {
 	b := payload.NewBuilder()
 	b.Add(payload.TypeIDi, false, idBody)
 	b.Add(payload.TypeCP, false, payload.MarshalCP(cpReq))
-	b.Add(payload.TypeSA, false, payload.MarshalSA(payload.SAPayload{Proposals: []payload.Proposal{DefaultESPProposal(espSPI)}}))
+	b.Add(payload.TypeSA, false, payload.MarshalSA(payload.SAPayload{Proposals: DefaultESPProposals(espSPI)}))
 	b.Add(payload.TypeTSi, false, payload.MarshalTS(tsAll))
 	b.Add(payload.TypeTSr, false, payload.MarshalTS(tsAll))
 	it.send(it.buildEnc(payload.IKE_AUTH, 1, b.FirstType(), b.Bytes()))
@@ -206,7 +206,7 @@ func TestEAPWrongPassword(t *testing.T) {
 	b := payload.NewBuilder()
 	b.Add(payload.TypeIDi, false, idBody)
 	tsAll := payload.TSPayload{Selectors: []payload.TrafficSelector{allTrafficV4()}}
-	b.Add(payload.TypeSA, false, payload.MarshalSA(payload.SAPayload{Proposals: []payload.Proposal{DefaultESPProposal(u32BE(newChildSPI()))}}))
+	b.Add(payload.TypeSA, false, payload.MarshalSA(payload.SAPayload{Proposals: DefaultESPProposals(u32BE(newChildSPI()))}))
 	b.Add(payload.TypeTSi, false, payload.MarshalTS(tsAll))
 	b.Add(payload.TypeTSr, false, payload.MarshalTS(tsAll))
 	it.send(it.buildEnc(payload.IKE_AUTH, 1, b.FirstType(), b.Bytes()))

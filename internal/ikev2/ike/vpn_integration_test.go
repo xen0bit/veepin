@@ -65,7 +65,7 @@ func TestFullVPNFlow(t *testing.T) {
 		LocalID:  FQDNIdentity("vpn.example"),
 		PublicIP: net.ParseIP("127.0.0.1"),
 		Logger:   log.New(io.Discard, "", 0),
-		AssignAddr: func() (Assignment, error) {
+		AssignAddr: func(AddressRequest) (Assignment, error) {
 			ip, aerr := pool.Allocate()
 			return Assignment{IP4: ip, Netmask: pool.Netmask(), DNS: []net.IP{net.ParseIP("1.1.1.1")}}, aerr
 		},

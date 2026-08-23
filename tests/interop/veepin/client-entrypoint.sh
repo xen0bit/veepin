@@ -7,7 +7,10 @@
 # ready yet the connect fails fast, so we retry until it comes up.
 set -u
 
-echo "veepin-client: connecting to $SERVER:${PORT:-500} as $CLIENT_ID (server-id=$SERVER_ID)"
+# TCP carries IKE and ESP over one connection (RFC 8229/9329) instead of UDP; the
+# port then names the TCP port rather than the port-500 phase, which is why the
+# TCP cells set PORT=4500.
+echo "veepin-client: connecting to $SERVER:${PORT:-500} as $CLIENT_ID (server-id=$SERVER_ID, tcp=${TCP:-false})"
 
 i=1
 while [ "$i" -le 30 ]; do
@@ -23,6 +26,7 @@ while [ "$i" -le 30 ]; do
         -post-quantum="${POST_QUANTUM:-false}" \
         -iptfs="${IPTFS:-false}" \
         -iptfs-rate "${IPTFS_RATE:-0}" \
+        -tcp="${TCP:-false}" \
         -full-tunnel=false
     echo "veepin-client: attempt $i failed; retrying in 2s"
     i=$((i + 1))

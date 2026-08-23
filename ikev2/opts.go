@@ -11,7 +11,7 @@ import "github.com/xen0bit/veepin/client"
 func init() {
 	client.RegisterClientOpts("ikev2", []client.OptSpec{
 		{Key: OptGateway, Flag: "server", Kind: client.OptStr, Required: true, Help: "VPN server host or IP"},
-		{Key: OptPort, Kind: client.OptInt, Default: "500", Help: "server IKE port (default 500)"},
+		{Key: OptPort, Kind: client.OptInt, Default: "500", Help: "server IKE port (default 500) — with -tcp this is the TCP port instead, 4500 unless set"},
 		{Key: OptPSK, Kind: client.OptStr, Secret: true, Help: "pre-shared key"},
 		{Key: OptLocalID, Flag: "id", Kind: client.OptStr, Required: true, Help: "local identity presented to the server"},
 		{Key: OptServerID, Kind: client.OptStr, Help: "expected server identity (verified if set)"},
@@ -26,6 +26,7 @@ func init() {
 		{Key: OptPQ, Kind: client.OptBool, Help: "offer ML-KEM-768 as an additional key exchange (RFC 9370)"},
 		{Key: OptIPTFS, Kind: client.OptBool, Help: "enable AGGFRAG aggregation and fragmentation (RFC 9347)"},
 		{Key: OptIPTFSRate, Kind: client.OptInt, Default: "0", Help: "constant-rate IP-TFS transmission in bytes/sec; 0 = aggregation only"},
+		{Key: OptTCP, Kind: client.OptBool, Help: "carry IKE and ESP over one TCP connection (RFC 8229/9329) instead of UDP"},
 		client.TUNOpt(OptTUNName),
 	})
 }

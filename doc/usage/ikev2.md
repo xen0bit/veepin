@@ -156,6 +156,71 @@ actually observes, after echoing the client's `COOKIE2` return-routability
 probe. The veepin client initiates the same move through `Client.Roam` when its
 local address changes.
 
+## TCP encapsulation (RFC 8229, updated by RFC 9329)
+
+Some networks pass TCP and drop UDP — captive hotel and airline Wi-Fi, corporate
+guest networks, a few mobile carriers. IPsec is UDP, so on those networks it
+simply does not come up. RFC 8229 answers that by putting IKE **and** ESP on one
+TCP connection to port 4500, each message length-prefixed, with the six ASCII
+octets `IKETCP` sent once by whoever opened the connection.
+
+Server — additive, not a mode:
+
+```sh
+sudo ./veepin serve ikev2 -tcp -psk 'a-strong-preshared-key' -id vpn.example.com
+```
+
+The UDP sockets stay bound. Every existing client keeps working exactly as
+before and a client reaching the server over TCP is answered over TCP, so this
+is safe to turn on everywhere rather than something to switch between. The
+banner says which are live:
+
+```
+ikev2: listening on 0.0.0.0 (IKE :500, NAT-T/ESP :4500, TCP :4500)
+```
+
+Client:
+
+```sh
+sudo ./veepin connect ikev2 -tcp -server vpn.example.com     -psk 'a-strong-preshared-key' -id roadwarrior
+```
+
+Three things change with `-tcp`, and each follows from the stream:
+
+- **`-port` names the TCP port, and defaults to 4500.** RFC 8229 §3 has no
+  port-500 phase and no NAT-T float — the exchange is on one port from the first
+  octet — so the flag has nothing else to mean. On a network that permits only
+  443 outbound, `-port 443` is the whole configuration change.
+- **MOBIKE is not negotiated.** The TCP connection *is* the address binding. An
+  address change breaks it, and the answer is to reconnect rather than to send
+  `UPDATE_SA_ADDRESSES` over a socket that no longer exists.
+- **There is no fallback to UDP.** `-tcp` means use TCP. The deployments this
+  exists for are the ones where UDP does not work, so a client that quietly
+  dropped back to UDP would report a tunnel that cannot carry anything.
+  Choosing between them is the caller's job, not a hidden retry.
+
+Everything else is unchanged: the same PSK/EAP/certificate authentication, the
+same suites, the same shaping, the same rekey timers.
+
+**Use it only where UDP does not work.** A datagram protocol on a reliable
+ordered stream blocks head-of-line, the frame lengths still expose the packet
+sizes, and the `IKETCP` prefix is trivially distinguishable from TLS. See
+[`doc/security.md`](../security.md) for the full statement.
+
+Interoperability is with **libreswan**, which is the only open-source
+implementation of either role (strongSwan implements none of it):
+
+```
+conn vpn
+    enable-tcp=yes          # or fallback: try UDP, then TCP
+    tcp-remoteport=4500
+```
+
+Both directions are in the interop matrix, and each cell removes UDP rather than
+merely not using it — the responder cell runs pluto with `--no-listen-udp`, the
+initiator cell drops outbound UDP 500 and 4500 in iptables. A TCP cell against a
+peer that also answers UDP passes either way and proves nothing.
+
 ## IKE fragmentation (RFC 7383)
 
 When both ends advertise `IKE_FRAGMENTATION_SUPPORTED` in `IKE_SA_INIT` (veepin

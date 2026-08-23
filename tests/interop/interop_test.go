@@ -110,6 +110,69 @@ func TestInteropVeepinClientStrongswanServerChaCha20(t *testing.T) {
 	runInterop(t, "compose.client-ss-chacha.yml", "veepin-client", "10.20.30.254")
 }
 
+// TestInteropVeepinClientLibreswanServer is Direction A against libreswan, the
+// second IKEv2 peer in the matrix and the only open-source implementation of
+// RFC 8229/9329 TCP encapsulation.
+//
+// It is here in its plain-UDP form first, deliberately: a new peer and a new
+// transport debugged at once is how a day disappears. That decision paid for
+// itself immediately -- this cell alone found three defects that sixteen months
+// of strongSwan cells could not, because strongSwan is lenient about all three:
+// an IKE proposal mixing AEAD and block ciphers beside one integrity transform
+// (NO_PROPOSAL_CHOSEN), an unrequested IPv6 lease, and a responder echoing the
+// initiator's placeholder TSi instead of narrowing it to the address it had
+// just assigned (TS_UNACCEPTABLE, twice over).
+// No throughput measurement: the IKEv2 row's three numbers already come from
+// the strongSwan cells, which are listed first in the manifest and so are the
+// ones the table reads. A second iperf3 run would cost the matrix's slowest
+// shard another minute and change nothing in the README.
+func TestInteropVeepinClientLibreswanServer(t *testing.T) {
+	runInterop(t, "compose.libreswan.yml", "veepin-client", "10.20.30.254")
+}
+
+// TestInteropLibreswanClientVeepinServer is Direction B: a libreswan initiator
+// tunnels to `veepin serve ikev2` and pings its TUN gateway.
+//
+// This is the half that found the config-mode defects. libreswan asks for
+// INTERNAL_IP4_ADDRESS only and puts its own OUTER address in the TSi
+// placeholder, where strongSwan asks for both families and proposes
+// 0.0.0.0/0 -- so strongSwan's placeholder happens to contain whatever it is
+// leased and libreswan's overlaps nothing.
+func TestInteropLibreswanClientVeepinServer(t *testing.T) {
+	runInterop(t, "compose.libreswan-server.yml", "libreswan-client", "10.10.10.1")
+}
+
+// TestInteropVeepinClientLibreswanServerTCP is RFC 8229/9329 in the client
+// direction: `veepin connect ikev2 -tcp` carries IKE and ESP over one TCP
+// connection to a libreswan responder that is not listening on UDP at all.
+//
+// The peer's `--no-listen-udp` is what makes this a test rather than a claim. A
+// TCP cell run against a peer that also speaks UDP passes either way and says
+// nothing about which carrier moved the packets — the exact false green this
+// matrix exists to catch. With no UDP socket on the responder there is nothing
+// for a fallback to land on. The log assertion is the second half: it catches
+// the case where the cell is misconfigured and veepin dialled UDP to a port
+// that happened to answer.
+func TestInteropVeepinClientLibreswanServerTCP(t *testing.T) {
+	runInteropRequiringLog(t, "compose.libreswan-tcp.yml", "veepin-client", "10.20.30.254",
+		"IKE and ESP ride one RFC 8229 TCP stream")
+}
+
+// TestInteropLibreswanClientVeepinServerTCP is the responder direction: a
+// libreswan initiator with `enable-tcp=yes` reaches `veepin serve ikev2 -tcp`
+// from a container whose outbound UDP 500 and 4500 are dropped.
+//
+// veepin's TCP listener is additive — the UDP sockets stay bound, which is what
+// makes turning it on safe — so the cell has to take UDP away itself. The
+// `udpencap=false` line is what proves the server agrees: ESP on a stream is
+// length-prefixed, not UDP-encapsulated, and a server that reported otherwise
+// would be telling an operator the wrong thing about a working tunnel.
+func TestInteropLibreswanClientVeepinServerTCP(t *testing.T) {
+	runInteropRequiringLogFrom(t, "compose.libreswan-tcp-server.yml", "libreswan-client",
+		"veepin-server", "10.10.10.1",
+		"IKE :500, NAT-T/ESP :4500, TCP :4500", "udpencap=false")
+}
+
 // TestInteropVeepinClientAmneziaWGServer is the client direction against the
 // real amneziawg-go: veepin's initiator must produce datagrams an implementation
 // it shares no code with recognises as AmneziaWG, and complete a Noise IK

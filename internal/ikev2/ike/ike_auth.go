@@ -347,7 +347,14 @@ func (s *Server) finishIKEAuth(sa *IKESA, hdr payload.Header, inners []payload.R
 		b.Add(payload.TypeSA, false, payload.MarshalSA(payload.SAPayload{
 			Proposals: []payload.Proposal{acceptedESP},
 		}))
-		b.Add(payload.TypeTSi, false, tsiPay.Body)
+		// TSi is narrowed to the address config mode just handed out, not echoed
+		// back as the initiator proposed it. See narrowTSiToAssignment.
+		tsiBody := tsiPay.Body
+		if narrowed, ok := narrowTSiToAssignment(respChild.TSi, sa); ok {
+			respChild.TSi = narrowed
+			tsiBody = payload.MarshalTS(narrowed)
+		}
+		b.Add(payload.TypeTSi, false, tsiBody)
 		b.Add(payload.TypeTSr, false, tsrPay.Body)
 		// USE_AGGFRAG (RFC 9347 section 3.1) is only agreed when BOTH peers send
 		// it, so the echo is what turns it on. Echoing unconditionally would put
@@ -380,7 +387,7 @@ func (s *Server) finishIKEAuth(sa *IKESA, hdr payload.Header, inners []payload.R
 	sa.RecvMsgID = hdr.MessageID + 1
 
 	if respChild != nil {
-		respChild.UDPEncap = sa.NAT.natDetected() || sa.OnPort4500
+		respChild.UDPEncap = s.udpEncap(sa, remote)
 		respChild.ClientIP = sa.ClientIP
 		respChild.ClientIP6 = sa.ClientIP6
 		respChild.PeerAddr = remote
@@ -402,13 +409,102 @@ func (s *Server) finishIKEAuth(sa *IKESA, hdr payload.Header, inners []payload.R
 	}
 }
 
+// narrowTSiToAssignment rewrites the initiator's proposed TSi to name exactly
+// the address(es) config mode assigned it, and reports whether it changed
+// anything.
+//
+// RFC 7296 section 2.19 gives the worked example, and it is the whole rule:
+//
+//	CP(CFG_REQUEST) = INTERNAL_ADDRESS()
+//	TSi = (0, 0-65535, 0.0.0.0-255.255.255.255)   <- initiator, before it knows
+//	...
+//	CP(CFG_REPLY) = INTERNAL_ADDRESS(192.0.2.202)
+//	TSi = (0, 0-65535, 192.0.2.202-192.0.2.202)   <- responder, narrowed
+//
+// An initiator asking for an address cannot put that address in the TSi of the
+// same message, so what it sends is a placeholder: strongSwan sends 0.0.0.0/0,
+// libreswan sends its own OUTER address. Echoing that back is not an answer.
+// strongSwan accepts the echo -- 0.0.0.0/0 contains the lease, so its own
+// narrowing still finds an overlap -- and veepin's client never inspected TSi
+// at all, so both halves agreed and neither was right. libreswan installs the
+// lease, re-narrows, finds 10.10.10.4/32 has no overlap with the 172.21.0.3/32
+// it proposed, and answers TS_UNACCEPTABLE.
+//
+// The initiator's selector of each family is kept as the template so its
+// protocol and port constraints survive; only the address range moves. A family
+// the initiator did not offer a selector for gets none invented for it, and a
+// family we assigned no address for is left exactly as proposed.
+func narrowTSiToAssignment(tsi payload.TSPayload, sa *IKESA) (payload.TSPayload, bool) {
+	if sa.ClientIP == nil && sa.ClientIP6 == nil {
+		return tsi, false
+	}
+	var out []payload.TrafficSelector
+	for _, want := range []struct {
+		addr net.IP
+		typ  payload.TSType
+	}{
+		{sa.ClientIP, payload.TSIPv4AddrRange},
+		{sa.ClientIP6, payload.TSIPv6AddrRange},
+	} {
+		if want.addr == nil {
+			continue
+		}
+		for _, sel := range tsi.Selectors {
+			if sel.Type != want.typ {
+				continue
+			}
+			sel.StartAddr = want.addr
+			sel.EndAddr = want.addr
+			out = append(out, sel)
+			break
+		}
+	}
+	if len(out) == 0 {
+		return tsi, false
+	}
+	// Families we assigned nothing for keep whatever the initiator proposed;
+	// dropping them would narrow a dual-stack request to half a tunnel.
+	for _, sel := range tsi.Selectors {
+		if (sel.Type == payload.TSIPv4AddrRange && sa.ClientIP != nil) ||
+			(sel.Type == payload.TSIPv6AddrRange && sa.ClientIP6 != nil) {
+			continue
+		}
+		out = append(out, sel)
+	}
+	return payload.TSPayload{Selectors: out}, true
+}
+
+// requestedFamilies reads a CFG_REQUEST for the address families it names.
+//
+// A request naming neither is treated as asking for IPv4. RFC 7296 section
+// 3.15.2 obliges a responder to "recognize a field of type INTERNAL_IP4_ADDRESS
+// or INTERNAL_IP6_ADDRESS" and return an address "of the requested type", and
+// says nothing about a request that names no type at all -- but a peer that
+// sends a CP payload is asking to be given an address, and every peer this has
+// been run against that asks for one asks for IPv4.
+func requestedFamilies(req payload.CPPayload) AddressRequest {
+	var want AddressRequest
+	for _, attr := range req.Attrs {
+		switch attr.Type {
+		case payload.CFGInternalIP4Address:
+			want.IP4 = true
+		case payload.CFGInternalIP6Address:
+			want.IP6 = true
+		}
+	}
+	if !want.IP4 && !want.IP6 {
+		want.IP4 = true
+	}
+	return want
+}
+
 // buildCPReply allocates an internal address and builds a CFG_REPLY.
 func (s *Server) buildCPReply(sa *IKESA, cpPay *payload.RawPayload) *payload.CPPayload {
 	req, err := payload.ParseCP(cpPay.Body)
 	if err != nil || req.Type != payload.CFGRequest {
 		return nil
 	}
-	a, err := s.cfg.AssignAddr()
+	a, err := s.cfg.AssignAddr(requestedFamilies(req))
 	if err != nil || (a.IP4 == nil && a.IP6 == nil) {
 		s.log.Printf("ikev2: address assignment failed: %v", err)
 		return nil

@@ -1,0 +1,47 @@
+# Direction A: veepin client (ikev2) -> libreswan responder, over plain UDP.
+#
+# libreswan enters the harness here and nowhere else changes: same PSK, same
+# identities, same one negotiable common suite as the strongSwan cells, so a
+# failure is the peer and not the configuration. The TCP-encapsulation cells
+# build on this one, which is why it lands first -- a new peer and a new
+# transport debugged simultaneously is how a day disappears.
+#
+# Data-path check: the client pings 10.20.30.254 (a libreswan-side address
+# inside the tunnel).
+name: veepin-interop-libreswan
+
+services:
+  libreswan-server:
+    build:
+      context: libreswan
+    image: interop-libreswan
+    cap_add: [NET_ADMIN]
+    # rp_filter must be 0 or the kernel drops XFRM-decrypted packets (their
+    # inner source arrives on the "wrong" interface); the same requirement the
+    # strongSwan cells carry, for the same reason.
+    sysctls:
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+      net.ipv4.ip_forward: "1"
+    volumes:
+      - ./libreswan/ipsec-server.conf:/etc/ipsec.conf:ro
+      - ./libreswan/ipsec.secrets:/etc/ipsec.secrets:ro
+      - ./libreswan/server-entrypoint.sh:/entrypoint.sh:ro
+    command: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [libreswan-server]
+    environment:
+      SERVER: "libreswan-server"
+      PSK: "interop-test-psk"
+      CLIENT_ID: "client.example.com"
+      SERVER_ID: "vpn.example.com"
+    volumes:
+      - ./veepin/client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

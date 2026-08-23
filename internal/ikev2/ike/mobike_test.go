@@ -44,7 +44,7 @@ func mobikeServer(t *testing.T) (p500, p4500 int, srv *Server, dp *capturingData
 		LocalID:  FQDNIdentity("vpn.example"),
 		PublicIP: net.ParseIP("127.0.0.1"),
 		Logger:   log.New(io.Discard, "", 0),
-		AssignAddr: func() (Assignment, error) {
+		AssignAddr: func(AddressRequest) (Assignment, error) {
 			return Assignment{IP4: net.IPv4(10, 9, 9, 9), Netmask: net.IPv4(255, 255, 255, 0)}, nil
 		},
 		DataPath: dp,
@@ -104,7 +104,7 @@ func (it *initiator) doAuthMobike(t *testing.T) bool {
 	}))
 	b.Add(payload.TypeCP, false, payload.MarshalCP(cpReq))
 	b.Add(payload.TypeSA, false, payload.MarshalSA(payload.SAPayload{
-		Proposals: []payload.Proposal{DefaultESPProposal(u32BE(it.childOutSPI))},
+		Proposals: DefaultESPProposals(u32BE(it.childOutSPI)),
 	}))
 	b.Add(payload.TypeTSi, false, payload.MarshalTS(tsAll))
 	b.Add(payload.TypeTSr, false, payload.MarshalTS(tsAll))

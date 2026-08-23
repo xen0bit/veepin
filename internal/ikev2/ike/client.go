@@ -78,6 +78,12 @@ type ClientConfig struct {
 	// means aggregation-only.
 	IPTFSRate int
 
+	// TCP carries IKE and ESP over one TCP connection to the NAT-T port instead
+	// of UDP (RFC 8229, updated by RFC 9329), for a network that blocks UDP.
+	// There is no port-500 phase and no NAT-T float: the whole exchange is on
+	// the stream from the first octet. See tcpstream.go.
+	TCP bool
+
 	Logger *log.Logger
 }
 
@@ -122,6 +128,9 @@ type Client struct {
 	cfg  ClientConfig
 	log  *log.Logger
 	conn *net.UDPConn
+	// tcp is set instead of conn when cfg.TCP is on. The two are exclusive:
+	// exactly one of them carries this SA, and every accessor below picks.
+	tcp *TCPStream
 
 	spiI, spiR uint64
 	suite      Suite
@@ -216,33 +225,16 @@ func NewClient(cfg ClientConfig) *Client {
 // Connect performs IKE_SA_INIT and IKE_AUTH (PSK or EAP), returning the
 // negotiated configuration and Child SA on success.
 func (c *Client) Connect() (*ClientResult, error) {
-	// JoinHostPort brackets an IPv6 literal, which a bare "%s:%d" would render
-	// ambiguously (e.g. fd00::10:500).
-	raddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(c.cfg.ServerHost, strconv.Itoa(c.cfg.ServerPort)))
-	if err != nil {
-		return nil, fmt.Errorf("resolve server: %w", err)
+	if err := c.dial(); err != nil {
+		return nil, err
 	}
-	conn, err := net.DialUDP("udp", nil, raddr)
-	if err != nil {
-		return nil, fmt.Errorf("dial server: %w", err)
-	}
-	// Publish the socket under the lock so a concurrent Close (used to abort an
-	// in-flight handshake) observes it, and abort if Close already fired.
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		conn.Close()
-		return nil, fmt.Errorf("client closed")
-	}
-	c.conn = conn
-	c.mu.Unlock()
-	if err := c.conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
-		c.conn.Close()
+	if err := c.setReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		c.closeConn()
 		return nil, fmt.Errorf("set read deadline: %w", err)
 	}
 
 	if err := c.saInit(); err != nil {
-		c.conn.Close()
+		c.closeConn()
 		return nil, fmt.Errorf("IKE_SA_INIT: %w", err)
 	}
 	c.log.Printf("ikev2 client: IKE_SA_INIT complete")
@@ -262,14 +254,16 @@ func (c *Client) Connect() (*ClientResult, error) {
 	// exchange left on 500 keeps the responder's SA pinned to the pre-float
 	// port: strongSwan then sends return ESP to a socket we have already closed
 	// and the tunnel comes up but carries nothing in that direction.
-	if err := c.floatToNATT(); err != nil {
-		c.Close()
-		return nil, fmt.Errorf("NAT-T float: %w", err)
+	if !c.cfg.TCP {
+		if err := c.floatToNATT(); err != nil {
+			c.Close()
+			return nil, fmt.Errorf("NAT-T float: %w", err)
+		}
 	}
 
 	if c.addkeGroup != 0 {
 		if err := c.sendIntermediateExchange(); err != nil {
-			c.conn.Close()
+			c.closeConn()
 			return nil, fmt.Errorf("IKE_INTERMEDIATE: %w", err)
 		}
 		c.log.Printf("ikev2 client: IKE_INTERMEDIATE complete (ML-KEM-768)")
@@ -279,29 +273,116 @@ func (c *Client) Connect() (*ClientResult, error) {
 	switch {
 	case c.cfg.EAPUsername != "":
 		if err := c.authEAP(); err != nil {
-			c.conn.Close()
+			c.closeConn()
 			return nil, fmt.Errorf("IKE_AUTH (EAP): %w", err)
 		}
 	case c.cfg.ClientCert != nil:
 		if c.certCred == nil {
-			c.conn.Close()
+			c.closeConn()
 			return nil, fmt.Errorf("IKE_AUTH (cert): client certificate is invalid")
 		}
 		if err := c.authCert(); err != nil {
-			c.conn.Close()
+			c.closeConn()
 			return nil, fmt.Errorf("IKE_AUTH (cert): %w", err)
 		}
 	default:
 		if err := c.authPSK(); err != nil {
-			c.conn.Close()
+			c.closeConn()
 			return nil, fmt.Errorf("IKE_AUTH (PSK): %w", err)
 		}
 	}
 	c.log.Printf("ikev2 client: authenticated, assigned %v", c.result.AssignedIP)
 	// Clear the handshake read deadline; the data path (which now shares this
-	// socket via DataConn) does its own blocking reads.
-	_ = c.conn.SetReadDeadline(time.Time{})
+	// socket via DataConn, or this stream via DataStream) does its own blocking
+	// reads.
+	_ = c.setReadDeadline(time.Time{})
 	return c.result, nil
+}
+
+// dial opens the transport this SA will run on and publishes it under the lock,
+// so a concurrent Close (used to abort an in-flight handshake) observes it.
+//
+// The two transports differ in more than the socket type. UDP starts on port
+// 500 and floats to 4500 after IKE_SA_INIT; TCP is on 4500 from the first
+// octet, because RFC 8229 section 3 has no port-500 phase and nothing to float.
+func (c *Client) dial() error {
+	var (
+		conn *net.UDPConn
+		tcp  *TCPStream
+		err  error
+	)
+	if c.cfg.TCP {
+		tcp, err = dialTCPStream(c.cfg.ServerHost, c.cfg.NATTPort, tcpDialTimeout)
+		if err != nil {
+			return fmt.Errorf("dial server (tcp): %w", err)
+		}
+	} else {
+		// JoinHostPort brackets an IPv6 literal, which a bare "%s:%d" would
+		// render ambiguously (e.g. fd00::10:500).
+		raddr, rerr := net.ResolveUDPAddr("udp", net.JoinHostPort(c.cfg.ServerHost, strconv.Itoa(c.cfg.ServerPort)))
+		if rerr != nil {
+			return fmt.Errorf("resolve server: %w", rerr)
+		}
+		if conn, err = net.DialUDP("udp", nil, raddr); err != nil {
+			return fmt.Errorf("dial server: %w", err)
+		}
+	}
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		if conn != nil {
+			conn.Close()
+		}
+		if tcp != nil {
+			tcp.Close()
+		}
+		return fmt.Errorf("client closed")
+	}
+	c.conn, c.tcp = conn, tcp
+	// on4500 is deliberately left false for TCP. It gates the non-ESP marker on
+	// the UDP write path only; appendTCPIKE writes the marker itself, because on
+	// a stream it is present from the very first message rather than appearing
+	// after a float.
+	c.mu.Unlock()
+	return nil
+}
+
+// tcpDialTimeout bounds the TCP connect. It matches the handshake read deadline
+// below: a responder that will not answer within ten seconds is not going to.
+const tcpDialTimeout = 10 * time.Second
+
+// setReadDeadline, closeConn, localAddr and remoteAddr are the four places the
+// rest of the client touches its transport as something other than "write a
+// message" or "read a message". Each picks between the socket and the stream.
+func (c *Client) setReadDeadline(t time.Time) error {
+	if c.tcp != nil {
+		return c.tcp.SetReadDeadline(t)
+	}
+	return c.conn.SetReadDeadline(t)
+}
+
+func (c *Client) closeConn() {
+	if c.tcp != nil {
+		c.tcp.Close()
+		return
+	}
+	if c.conn != nil {
+		c.conn.Close()
+	}
+}
+
+func (c *Client) localAddr() *net.UDPAddr {
+	if c.tcp != nil {
+		return udpAddrOf(c.tcp.LocalAddr())
+	}
+	return c.conn.LocalAddr().(*net.UDPAddr)
+}
+
+func (c *Client) remoteAddr() *net.UDPAddr {
+	if c.tcp != nil {
+		return udpAddrOf(c.tcp.RemoteAddr())
+	}
+	return c.conn.RemoteAddr().(*net.UDPAddr)
 }
 
 // floatToNATT switches the IKE socket to the server's NAT-T port (4500) after
@@ -309,7 +390,7 @@ func (c *Client) Connect() (*ClientResult, error) {
 // the peer's current source address), so IKE_AUTH and the ESP data path share
 // one socket on 4500.
 func (c *Client) floatToNATT() error {
-	srv := c.conn.RemoteAddr().(*net.UDPAddr)
+	srv := c.remoteAddr()
 	nconn, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: srv.IP, Port: c.cfg.NATTPort})
 	if err != nil {
 		return err
@@ -335,6 +416,9 @@ func (c *Client) floatToNATT() error {
 // writeIKE sends one IKE message, prefixing the 4-byte non-ESP marker once the
 // socket has floated to 4500 (so the peer's ESP demux can tell IKE from ESP).
 func (c *Client) writeIKE(pkt []byte) error {
+	if c.tcp != nil {
+		return c.tcp.WriteIKE(pkt)
+	}
 	if c.on4500 {
 		framed := make([]byte, 4+len(pkt))
 		copy(framed[4:], pkt)
@@ -361,8 +445,14 @@ func (c *Client) writeIKEAll(pkts [][]byte) error {
 }
 
 // DataConn returns the IKE socket (floated to 4500) for the data path to share
-// for ESP. Ownership stays with the Client; Close closes it.
+// for ESP, or nil when this SA runs over TCP. Ownership stays with the Client;
+// Close closes it.
 func (c *Client) DataConn() *net.UDPConn { return c.conn }
+
+// DataStream returns the RFC 8229 stream for the data path to share for ESP, or
+// nil when this SA runs over UDP. Exactly one of DataConn and DataStream is
+// non-nil, and which one is what the caller branches its data path on.
+func (c *Client) DataStream() *TCPStream { return c.tcp }
 
 // --- IKE_SA_INIT ---
 
@@ -379,20 +469,24 @@ func (c *Client) saInit() error {
 	}
 	c.ni = mustNonce(32)
 
-	prop := DefaultIKEProposal()
+	props := DefaultIKEProposals()
 	if c.cfg.PostQuantum {
 		// RFC 9370: ML-KEM-768 as the first (and only) additional key exchange,
 		// alongside the classical group above. Hybrid by construction — the
 		// classical DH still runs, so this cannot be worse than not offering it.
-		prop.Transforms = append(prop.Transforms,
-			payload.Transform{Type: payload.TransformADDKE1, ID: payload.MLKEM768})
+		// Every proposal carries it: the responder may pick any of them, and one
+		// that omitted the transform would silently drop back to classical-only.
+		for i := range props {
+			props[i].Transforms = append(props[i].Transforms,
+				payload.Transform{Type: payload.TransformADDKE1, ID: payload.MLKEM768})
+		}
 	}
 
 	b := payload.NewBuilder()
-	b.Add(payload.TypeSA, false, payload.MarshalSA(payload.SAPayload{Proposals: []payload.Proposal{prop}}))
+	b.Add(payload.TypeSA, false, payload.MarshalSA(payload.SAPayload{Proposals: props}))
 	b.Add(payload.TypeKE, false, payload.MarshalKE(payload.KEPayload{Group: payload.DH_CURVE25519, KeyData: pub}))
 	b.Add(payload.TypeNonce, false, payload.MarshalNonce(c.ni))
-	local := c.conn.LocalAddr().(*net.UDPAddr)
+	local := c.localAddr()
 	b.Add(payload.TypeNotify, false, payload.MarshalNotify(payload.NotifyPayload{
 		Protocol: payload.ProtoNone, Type: payload.NATDetectionSourceIP,
 		Data: natDetectionHash(c.spiI, 0, local.IP, uint16(local.Port)),
@@ -598,10 +692,12 @@ func (c *Client) buildCertAuthInner(idBody []byte, method payload.AuthMethod, au
 	}))
 	b.Add(payload.TypeAUTH, false, payload.MarshalAuth(payload.AuthPayload{Method: method, Data: authData}))
 	b.Add(payload.TypeCP, false, payload.MarshalCP(cpReq))
-	b.Add(payload.TypeSA, false, payload.MarshalSA(payload.SAPayload{Proposals: []payload.Proposal{DefaultESPProposal(u32BE(childOutSPI))}}))
+	b.Add(payload.TypeSA, false, payload.MarshalSA(payload.SAPayload{Proposals: DefaultESPProposals(u32BE(childOutSPI))}))
 	b.Add(payload.TypeTSi, false, payload.MarshalTS(tsAll))
 	b.Add(payload.TypeTSr, false, payload.MarshalTS(tsAll))
-	addMobikeSupported(b)
+	if c.tcp == nil {
+		addMobikeSupported(b)
+	}
 	return b, childOutSPI
 }
 
@@ -773,12 +869,15 @@ func (c *Client) buildAuthInner(idBody []byte, auth *payload.AuthPayload) (*payl
 		b.Add(payload.TypeAUTH, false, payload.MarshalAuth(*auth))
 	}
 	b.Add(payload.TypeCP, false, payload.MarshalCP(cpReq))
-	b.Add(payload.TypeSA, false, payload.MarshalSA(payload.SAPayload{Proposals: []payload.Proposal{DefaultESPProposal(u32BE(childOutSPI))}}))
+	b.Add(payload.TypeSA, false, payload.MarshalSA(payload.SAPayload{Proposals: DefaultESPProposals(u32BE(childOutSPI))}))
 	b.Add(payload.TypeTSi, false, payload.MarshalTS(tsAll))
 	b.Add(payload.TypeTSr, false, payload.MarshalTS(tsAll))
 	// Advertise MOBIKE (RFC 4555) so the server permits us to relocate this SA's
-	// addresses later without a full re-handshake.
-	addMobikeSupported(b)
+	// addresses later without a full re-handshake. Not over TCP: the stream is
+	// the binding, so there is no address to relocate without reconnecting.
+	if c.tcp == nil {
+		addMobikeSupported(b)
+	}
 	if c.cfg.IPTFS {
 		// USE_AGGFRAG (RFC 9347 section 3.1). Both peers must send it; if the
 		// responder does not echo it the Child SA carries ordinary inner IP
@@ -962,10 +1061,13 @@ func (c *Client) applyAuthResult(inners []payload.RawPayload, childOutSPI uint32
 		res.IntegKeyIn = take(integLen)
 	}
 
-	// Server ESP endpoint: the NAT-T port the socket floated to (4500 in prod).
-	srv := c.conn.RemoteAddr().(*net.UDPAddr)
+	// Server ESP endpoint: the NAT-T port the socket floated to (4500 in prod),
+	// or the stream's remote end. Over TCP the address is identity rather than
+	// a destination -- the stream is where ESP goes -- and ESP is
+	// length-prefixed on it rather than UDP-encapsulated.
+	srv := c.remoteAddr()
 	res.ServerAddr = &net.UDPAddr{IP: srv.IP, Port: srv.Port}
-	res.UDPEncap = true
+	res.UDPEncap = c.tcp == nil
 
 	c.result = res
 	return nil
@@ -975,10 +1077,14 @@ func (c *Client) applyAuthResult(inners []payload.RawPayload, childOutSPI uint32
 
 // MobikeEnabled reports whether MOBIKE was negotiated, i.e. whether Roam may be
 // called. It is valid only after a successful Connect.
+// MOBIKE is never enabled over TCP: the connection IS the address binding, so
+// there is nothing to update -- an address change breaks the stream, and the
+// answer is to reconnect rather than to send UPDATE_SA_ADDRESSES over a socket
+// that no longer exists.
 func (c *Client) MobikeEnabled() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.mobike
+	return c.mobike && c.tcp == nil
 }
 
 // Roam relocates the IKE SA and its Child SAs to a fresh local address after
@@ -1001,11 +1107,15 @@ func (c *Client) Roam() error {
 		c.mu.Unlock()
 		return fmt.Errorf("client closed")
 	}
+	if c.tcp != nil {
+		c.mu.Unlock()
+		return fmt.Errorf("ike: MOBIKE does not apply over TCP: the connection is the address binding, so a move needs a reconnect")
+	}
 	if !c.mobike {
 		c.mu.Unlock()
 		return fmt.Errorf("ike: MOBIKE was not negotiated")
 	}
-	srv := c.conn.RemoteAddr().(*net.UDPAddr)
+	srv := c.remoteAddr()
 	c.mu.Unlock()
 
 	// New socket from a fresh local port to the same server (a NAT-T responder
@@ -1046,7 +1156,7 @@ func (c *Client) Roam() error {
 // sendUpdateSAAddresses performs the UPDATE_SA_ADDRESSES exchange over the
 // (already-swapped) new socket and verifies the responder echoed our COOKIE2.
 func (c *Client) sendUpdateSAAddresses(srv *net.UDPAddr) error {
-	local := c.conn.LocalAddr().(*net.UDPAddr)
+	local := c.localAddr()
 	cookie2 := mustNonce(16)
 
 	b := payload.NewBuilder()
@@ -1196,6 +1306,9 @@ func findInnerNotifyError(inners []payload.RawPayload) uint16 {
 // readMessage reads one UDP datagram, stripping the 4-byte non-ESP marker if
 // present (NAT-T on port 4500).
 func (c *Client) readMessage() ([]byte, error) {
+	if c.tcp != nil {
+		return c.tcp.ReadIKE()
+	}
 	buf := make([]byte, 65535)
 	n, err := c.conn.Read(buf)
 	if err != nil {
@@ -1219,6 +1332,9 @@ func (c *Client) Close() error {
 		return nil
 	}
 	c.closed = true
+	if c.tcp != nil {
+		return c.tcp.Close()
+	}
 	if c.conn != nil {
 		return c.conn.Close()
 	}

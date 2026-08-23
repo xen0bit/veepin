@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strconv"
 	"sync"
 
 	"github.com/xen0bit/veepin/dataplane"
@@ -55,11 +56,19 @@ type Config struct {
 	// NAT; setting it improves accuracy.
 	PublicIP net.IP
 
+	// TCP additionally listens for RFC 8229/9329 TCP-encapsulated IKE and ESP on
+	// Port4500. It is additive: the UDP sockets stay bound, so a peer reaches
+	// this server on whichever transport its network allows and is answered on
+	// the same one. That is libreswan's `enable-tcp=fallback` without a mode to
+	// choose.
+	TCP bool
+
 	// AssignAddr, if set, is called during IKE_AUTH to allocate internal tunnel
-	// address(es) for a connecting client (CP config mode). It may return an IPv4
-	// address, an IPv6 address, or both (dual-stack); a zero Assignment means no
-	// address is assigned (the Child SA is still created).
-	AssignAddr func() (Assignment, error)
+	// address(es) for a connecting client (CP config mode). It is told which
+	// families the initiator's CFG_REQUEST actually named and must allocate only
+	// those; a zero Assignment means no address is assigned (the Child SA is
+	// still created).
+	AssignAddr func(AddressRequest) (Assignment, error)
 	// ReleaseAddr, if set, reclaims the assignment when the SA is torn down.
 	ReleaseAddr func(Assignment)
 
@@ -183,8 +192,20 @@ func NewServer(cfg Config) (*Server, error) {
 		onESP:      s.handleESP,
 		onESPBatch: s.handleESPBatch,
 	}
-	s.log.Printf("ikev2: listening on %s (IKE :%d, NAT-T/ESP :%d)",
-		cfg.ListenIP, cfg.Port500, cfg.Port4500)
+	if cfg.TCP {
+		// Bound here rather than in ListenAndServe for the same reason the UDP
+		// sockets are: a returned server is already listening, so a bind error
+		// reaches the caller instead of a client.
+		ln, lerr := net.Listen("tcp", net.JoinHostPort(cfg.ListenIP, strconv.Itoa(cfg.Port4500)))
+		if lerr != nil {
+			c500.Close()
+			c4500.Close()
+			return nil, fmt.Errorf("ike: bind tcp :%d: %w", cfg.Port4500, lerr)
+		}
+		s.tr.tcpLn = ln
+	}
+	s.log.Printf("ikev2: listening on %s (IKE :%d, NAT-T/ESP :%d%s)",
+		cfg.ListenIP, cfg.Port500, cfg.Port4500, tcpNote(cfg.TCP, cfg.Port4500))
 	return s, nil
 }
 
@@ -192,6 +213,28 @@ func NewServer(cfg Config) (*Server, error) {
 // Configuration Payload. Any field may be zero: an IPv4-only server fills IP4 +
 // Netmask, a dual-stack server fills IP6 + Prefix6 as well, and DNS may carry
 // resolvers of either family.
+// AddressRequest names the address families an initiator's CFG_REQUEST asked
+// for, so the responder allocates those and no others.
+//
+// It exists because "allocate both, always" is legal and still breaks a peer.
+// RFC 7296 section 2.19 permits the responder to "send other attributes that
+// were not included in CP(CFG_REQUEST)", so veepin handing an IPv6 lease to a
+// client that asked only for IPv4 violates nothing -- and libreswan, which asks
+// only for INTERNAL_IP4_ADDRESS, took the address it never requested, built its
+// child selectors from it, and then rejected the responder's echo of its own
+// traffic selectors:
+//
+//	selectors: fd00:10:10::2/128 -> 10.10.10.0/24
+//	CHILD SA failed: TS_UNACCEPTABLE
+//
+// strongSwan asks for both families, so no cell in the matrix could see it. The
+// same over-assignment also leaked one IPv6 lease per IPv4-only client for as
+// long as the server ran.
+type AddressRequest struct {
+	IP4 bool
+	IP6 bool
+}
+
 type Assignment struct {
 	IP4     net.IP // assigned internal IPv4 address, or nil
 	Netmask net.IP // IPv4 netmask for IP4
@@ -313,15 +356,48 @@ func (s *Server) SendESP(esp []byte, to *net.UDPAddr) {
 }
 
 // SendESPBatch transmits a burst of encapsulated ESP datagrams for one peer —
-// one sendmmsg on the NAT-T socket. It matches the pump's batch-sender
-// signature; the GSO egress path produces the bursts.
+// one sendmmsg on the NAT-T socket, or one write of several frames on a TCP
+// stream. It matches the pump's batch-sender signature; the GSO egress path
+// produces the bursts.
 func (s *Server) SendESPBatch(esp [][]byte, to *net.UDPAddr) {
 	if s.tr == nil || to == nil {
 		return
 	}
-	if _, err := s.tr.conn4500.WriteBatch(esp, to); err != nil {
+	if err := s.tr.sendESPBatch(esp, to); err != nil {
 		s.log.Printf("ikev2: ESP batch send error: %v", err)
 	}
+}
+
+// liveStreams reports how many RFC 8229 streams the server currently holds. It
+// is the cheapest way for a test to tell a TCP-encapsulated session from one
+// that quietly fell back to the UDP sockets, which stay bound either way.
+func (s *Server) liveStreams() int {
+	if s.tr == nil {
+		return 0
+	}
+	s.tr.smu.RLock()
+	defer s.tr.smu.RUnlock()
+	return len(s.tr.streams)
+}
+
+// udpEncap reports whether a Child SA's ESP will be UDP-encapsulated. Over a
+// TCP stream it never is -- ESP is length-prefixed on the same connection -- and
+// saying otherwise puts "udpencap=true" in the line an operator reads to find
+// out which transport carried the session.
+func (s *Server) udpEncap(sa *IKESA, remote *net.UDPAddr) bool {
+	if s.tr != nil && s.tr.stream(remote) != nil {
+		return false
+	}
+	return sa.NAT.natDetected() || sa.OnPort4500
+}
+
+// tcpNote renders the TCP half of the listening banner, so an operator can see
+// from one line whether RFC 8229 encapsulation is actually accepted.
+func tcpNote(on bool, port int) string {
+	if !on {
+		return ""
+	}
+	return fmt.Sprintf(", TCP :%d", port)
 }
 
 // send transmits an IKE message to a peer on the correct port.

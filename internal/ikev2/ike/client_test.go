@@ -26,7 +26,7 @@ func startTestServer(t *testing.T, eapUsers map[string]string) (p500, p4500 int,
 		LocalID:  FQDNIdentity("vpn.example"),
 		PublicIP: net.ParseIP("127.0.0.1"),
 		Logger:   log.New(io.Discard, "", 0),
-		AssignAddr: func() (Assignment, error) {
+		AssignAddr: func(AddressRequest) (Assignment, error) {
 			return Assignment{
 				IP4:     net.IPv4(10, 8, 8, 8),
 				Netmask: net.IPv4(255, 255, 255, 0),
