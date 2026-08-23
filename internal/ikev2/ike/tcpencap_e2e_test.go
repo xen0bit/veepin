@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -227,5 +228,38 @@ func TestAStreamThatDoesNotBeginWithIKETCPIsDropped(t *testing.T) {
 	}
 	if n := srv.liveStreams(); n != 0 {
 		t.Errorf("responder registered %d stream(s) for a peer that sent no prefix", n)
+	}
+}
+
+// TestMOBIKEIsRefusedOverTCP: the connection is the address binding, so there is
+// no address to relocate without reconnecting. veepin does not advertise
+// MOBIKE_SUPPORTED over TCP, so the negotiated flag would already be false — but
+// a caller that reached Roam anyway must get an explanation rather than a
+// re-dial that quietly abandons the stream the SA lives on.
+func TestMOBIKEIsRefusedOverTCP(t *testing.T) {
+	p500, p4500, srv, _ := startTCPTestServer(t)
+	defer srv.Close()
+
+	client := NewClient(ClientConfig{
+		ServerHost: "127.0.0.1", ServerPort: p500, NATTPort: p4500,
+		TCP:     true,
+		PSK:     []byte("test-psk"),
+		LocalID: FQDNIdentity("client.example"),
+		Logger:  log.New(io.Discard, "", 0),
+	})
+	if _, err := client.Connect(); err != nil {
+		t.Fatalf("connect over TCP: %v", err)
+	}
+	defer client.Close()
+
+	if client.MobikeEnabled() {
+		t.Error("MobikeEnabled reported true for a TCP session")
+	}
+	err := client.Roam()
+	if err == nil {
+		t.Fatal("Roam succeeded over TCP; it must refuse rather than re-dial")
+	}
+	if !strings.Contains(err.Error(), "TCP") {
+		t.Errorf("Roam refused with %q, which does not say why", err)
 	}
 }

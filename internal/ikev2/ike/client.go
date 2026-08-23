@@ -339,9 +339,10 @@ func (c *Client) dial() error {
 		return fmt.Errorf("client closed")
 	}
 	c.conn, c.tcp = conn, tcp
-	// Over TCP the non-ESP marker is present from the very first message rather
-	// than appearing after a float, so the flag that gates it is set here.
-	c.on4500 = c.cfg.TCP
+	// on4500 is deliberately left false for TCP. It gates the non-ESP marker on
+	// the UDP write path only; appendTCPIKE writes the marker itself, because on
+	// a stream it is present from the very first message rather than appearing
+	// after a float.
 	c.mu.Unlock()
 	return nil
 }
@@ -1105,6 +1106,10 @@ func (c *Client) Roam() error {
 	if c.closed {
 		c.mu.Unlock()
 		return fmt.Errorf("client closed")
+	}
+	if c.tcp != nil {
+		c.mu.Unlock()
+		return fmt.Errorf("ike: MOBIKE does not apply over TCP: the connection is the address binding, so a move needs a reconnect")
 	}
 	if !c.mobike {
 		c.mu.Unlock()
