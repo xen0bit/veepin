@@ -206,7 +206,7 @@ func (t *transport) serve(handleIKE func(pkt []byte, from *net.UDPAddr, on4500 b
 					}
 					continue
 				}
-				go t.serveStream(c, handleIKE, closing)
+				go t.serveStream(c, handleIKE)
 			}
 		}()
 	}
@@ -224,7 +224,7 @@ func (t *transport) serve(handleIKE func(pkt []byte, from *net.UDPAddr, on4500 b
 // in the other: a responder that waits for a prefix it will not be sent
 // deadlocks, and one that sends its own corrupts the first frame the originator
 // reads.
-func (t *transport) serveStream(c net.Conn, handleIKE func(pkt []byte, from *net.UDPAddr, on4500 bool), closing func() bool) {
+func (t *transport) serveStream(c net.Conn, handleIKE func(pkt []byte, from *net.UDPAddr, on4500 bool)) {
 	if tc, ok := c.(*net.TCPConn); ok {
 		// Nagle would hold a small IKE message waiting for more to send, which
 		// on a request/response control exchange means waiting for the answer to
@@ -243,9 +243,20 @@ func (t *transport) serveStream(c net.Conn, handleIKE func(pkt []byte, from *net
 	t.addStream(key, st)
 	defer t.removeStream(key)
 
+	// One-element batch, hoisted. The ESP path is the hot loop, and a fresh
+	// [][]byte per packet would be exactly the per-packet allocation the
+	// datagram side is careful not to make. Nothing retains either slice past
+	// the handler call.
+	one := make([][]byte, 1)
+	oneFrom := []*net.UDPAddr{from}
+
 	for {
 		pkt, isIKE, err := st.ReadFrame()
 		if err != nil {
+			// Either the peer went away or transport.close() closed the stream;
+			// neither needs a closing() check, which would take the server's
+			// lock once per packet to answer a question a failed read already
+			// answers.
 			return
 		}
 		if isIKE {
@@ -263,12 +274,10 @@ func (t *transport) serveStream(c net.Conn, handleIKE func(pkt []byte, from *net
 		// returning, exactly as the UDP batch path relies on.
 		switch {
 		case t.onESPBatch != nil:
-			t.onESPBatch([][]byte{pkt}, []*net.UDPAddr{from})
+			one[0] = pkt
+			t.onESPBatch(one, oneFrom)
 		case t.onESP != nil:
 			t.onESP(pkt, from)
-		}
-		if closing() {
-			return
 		}
 	}
 }
