@@ -202,6 +202,11 @@ Three things change with `-tcp`, and each follows from the stream:
 Everything else is unchanged: the same PSK/EAP/certificate authentication, the
 same suites, the same shaping, the same rekey timers.
 
+**Use it only where UDP does not work.** A datagram protocol on a reliable
+ordered stream blocks head-of-line, the frame lengths still expose the packet
+sizes, and the `IKETCP` prefix is trivially distinguishable from TLS. See
+[`doc/security.md`](../security.md) for the full statement.
+
 Interoperability is with **libreswan**, which is the only open-source
 implementation of either role (strongSwan implements none of it):
 

@@ -163,6 +163,37 @@ for. It is a performance boundary, not a security or correctness one, and it is
 confined to MASQUE; the moment `x/net/quic` gains datagram support the transport
 swaps under an unchanged data path.
 
+## IKEv2 over TCP costs reliability where reliability is not wanted
+
+`-tcp` (RFC 8229, updated by RFC 9329) exists for one reason: a network that
+passes TCP and drops UDP. On such a network it is the difference between a
+tunnel and no tunnel, which is why it is here. On any other network it is a
+worse transport than UDP, in three specific ways an operator should choose
+knowingly.
+
+**Head-of-line blocking, the same pathology MASQUE has above.** ESP is a
+datagram protocol carried on a reliable ordered stream: one lost segment stalls
+every inner packet behind it while TCP retransmits, and inner TCP then
+retransmits on top of that. Do not turn `-tcp` on for a client whose UDP works.
+
+**A stream does not hide packet boundaries.** Each frame carries its own 16-bit
+length, so an observer counting bytes on the connection sees the same size
+sequence they would have seen as datagrams. Anything `doc/traffic-shaping.md`
+says about what padding does and does not hide applies unchanged; TCP
+encapsulation is not itself an obfuscation.
+
+**It is distinguishable from TLS on inspection.** The stream opens with the six
+ASCII octets `IKETCP` and then length-prefixed IKE, which does not resemble a
+TLS ClientHello. `-tcp` defeats a network that blocks UDP by port or protocol,
+not one doing protocol identification — for the latter the answer is one of the
+TLS-carried protocols in this tree, not this.
+
+What is *not* weakened: ESP replay protection is unchanged. TCP delivers in
+order, but a rekey or a reconnect can still replay, so the sliding window stays
+exactly as it is on UDP. Authentication, the negotiated suites and the key
+schedule are untouched — this is the carrier, not the cryptography. MOBIKE is
+refused rather than degraded, because the connection is the address binding.
+
 ## Post-quantum IKEv2 protects the key exchange, not the authentication
 
 Hybrid PQ IKEv2 (RFC 9370, RFC 9242, and RFC-ietf-ipsecme-ikev2-mlkem) layers
