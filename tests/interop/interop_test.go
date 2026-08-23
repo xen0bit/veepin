@@ -110,6 +110,38 @@ func TestInteropVeepinClientStrongswanServerChaCha20(t *testing.T) {
 	runInterop(t, "compose.client-ss-chacha.yml", "veepin-client", "10.20.30.254")
 }
 
+// TestInteropVeepinClientLibreswanServer is Direction A against libreswan, the
+// second IKEv2 peer in the matrix and the only open-source implementation of
+// RFC 8229/9329 TCP encapsulation.
+//
+// It is here in its plain-UDP form first, deliberately: a new peer and a new
+// transport debugged at once is how a day disappears. That decision paid for
+// itself immediately -- this cell alone found three defects that sixteen months
+// of strongSwan cells could not, because strongSwan is lenient about all three:
+// an IKE proposal mixing AEAD and block ciphers beside one integrity transform
+// (NO_PROPOSAL_CHOSEN), an unrequested IPv6 lease, and a responder echoing the
+// initiator's placeholder TSi instead of narrowing it to the address it had
+// just assigned (TS_UNACCEPTABLE, twice over).
+// No throughput measurement: the IKEv2 row's three numbers already come from
+// the strongSwan cells, which are listed first in the manifest and so are the
+// ones the table reads. A second iperf3 run would cost the matrix's slowest
+// shard another minute and change nothing in the README.
+func TestInteropVeepinClientLibreswanServer(t *testing.T) {
+	runInterop(t, "compose.libreswan.yml", "veepin-client", "10.20.30.254")
+}
+
+// TestInteropLibreswanClientVeepinServer is Direction B: a libreswan initiator
+// tunnels to `veepin serve ikev2` and pings its TUN gateway.
+//
+// This is the half that found the config-mode defects. libreswan asks for
+// INTERNAL_IP4_ADDRESS only and puts its own OUTER address in the TSi
+// placeholder, where strongSwan asks for both families and proposes
+// 0.0.0.0/0 -- so strongSwan's placeholder happens to contain whatever it is
+// leased and libreswan's overlaps nothing.
+func TestInteropLibreswanClientVeepinServer(t *testing.T) {
+	runInterop(t, "compose.libreswan-server.yml", "libreswan-client", "10.10.10.1")
+}
+
 // TestInteropVeepinClientAmneziaWGServer is the client direction against the
 // real amneziawg-go: veepin's initiator must produce datagrams an implementation
 // it shares no code with recognises as AmneziaWG, and complete a Noise IK

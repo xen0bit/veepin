@@ -78,7 +78,8 @@ var interopMatrix = []interopRow{
 			"TestInteropVeepinClientStrongswanIPTFS",
 			"TestInteropIPTFSConstantRate",
 			"TestInteropIKEv2CorpusStillMatchesTheLivePeer",
-		}, Label: "strongSwan (PSK + pubkey ECDSA/RSA, RFC 7383 frag, AES-GCM + ChaCha20, dual-stack, v6 underlay, ML-KEM-768, IP-TFS incl. constant-rate, recorded)"},
+			"TestInteropVeepinClientLibreswanServer",
+		}, Label: "strongSwan (PSK + pubkey ECDSA/RSA, RFC 7383 frag, AES-GCM + ChaCha20, dual-stack, v6 underlay, ML-KEM-768, IP-TFS incl. constant-rate, recorded) + libreswan"},
 		Server: interopCell{Tests: []string{
 			"TestInteropStrongswanClientVeepinServer",
 			"TestInteropStrongswanClientVeepinServerEAP",
@@ -89,7 +90,8 @@ var interopMatrix = []interopRow{
 			"TestInteropStrongswanClientVeepinServerShaped",
 			"TestInteropStrongswanClientVeepinServerPQ",
 			"TestInteropStrongswanClientVeepinServerIPTFS",
-		}, Label: "strongSwan (+ EAP-MSCHAPv2, pubkey RSA, RFC 7383 frag both ways, dual-stack, v6 underlay, TFC-padded, ML-KEM-768, IP-TFS)"},
+			"TestInteropLibreswanClientVeepinServer",
+		}, Label: "strongSwan (+ EAP-MSCHAPv2, pubkey RSA, RFC 7383 frag both ways, dual-stack, v6 underlay, TFC-padded, ML-KEM-768, IP-TFS) + libreswan"},
 		Self: interopCell{Tests: []string{
 			"TestInteropSelf",
 			"TestInteropIKEv2ChildRekey",
