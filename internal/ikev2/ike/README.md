@@ -61,7 +61,7 @@ stateDiagram-v2
   `DeriveChildKeys(...)`, `AuthOctets(...)`, `PSKAuth(...)`. `SAKeys` holds
   `SK_d/ai/ar/ei/er/pi/pr`.
 - **Suite selection** — `SelectIKESuite`, `SelectESPSuite`,
-  `DefaultIKEProposal`, `DefaultESPProposal`, `Suite`, `ESPSuite`.
+  `DefaultIKEProposals`, `DefaultESPProposals`, `Suite`, `ESPSuite`.
 - **Child SA / data path** — `ChildSA`, `BuildESPSA(*ChildSA) (*esp.SA, error)`;
   `DataPath` interface with `PumpDataPath`/`NewPumpDataPath` wiring the SA to
   [`dataplane`](../../../dataplane).
@@ -182,3 +182,30 @@ stateDiagram-v2
   `exchMu`, so the whole make-before-break sequence is atomic against every
   other initiator exchange. The `SAState` diagram's `ESTABLISHED -> ESTABLISHED`
   self-loop now covers this rotation too, not just a MOBIKE address update.
+- **Config mode answers what was asked, and narrows the selectors it answers
+  with.** Three things a second peer refuses that the first one tolerated, all
+  found by the libreswan cells and none visible to strongSwan:
+
+  - The default proposals are **two, split on the AEAD boundary**
+    (`DefaultIKEProposals`, `DefaultESPProposals`). A proposal is one set of
+    transforms from which the peer picks one of each type, so a single proposal
+    listing AES-GCM, ChaCha20-Poly1305 *and* AES-CBC beside one
+    HMAC-SHA2-256-128 says something untrue of three of the four. RFC 5282 §8
+    requires an AEAD cipher's proposal to carry no integrity transform (or
+    NONE); libreswan answers `NO_PROPOSAL_CHOSEN` and strongSwan does not.
+  - **`AddressRequest` is honoured.** The CFG_REPLY carries an address only for
+    the families the CFG_REQUEST named. Sending more is legal — RFC 7296 §2.19
+    permits "other attributes that were not included in CP(CFG_REQUEST)" — and
+    it still broke libreswan, which asks for IPv4 only, took the IPv6 lease
+    anyway and built its child selectors from it. It also leaked one `pool6`
+    address per IPv4-only client.
+  - **TSi is narrowed to the assignment, not echoed.** RFC 7296 §2.19's worked
+    example returns `TSi = (0, 0-65535, 192.0.2.202-192.0.2.202)` — the address
+    just leased — because the initiator could not name it in the request. The
+    echo is only *accidentally* right against a peer whose placeholder happens
+    to contain its lease: strongSwan proposes `0.0.0.0/0`, libreswan proposes
+    its own **outer** address, which overlaps nothing.
+
+  All three were mutually-consistent bugs of the dangerous class: veepin's own
+  client never inspected TSi, and asked for both families itself, so the
+  veepin↔veepin cell agreed with every one of them.

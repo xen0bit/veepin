@@ -199,19 +199,27 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		IPTFS:      cfg.IPTFS,
 		IPTFSRate:  cfg.IPTFSRate,
 		Logger:     logger,
-		AssignAddr: func() (ike.Assignment, error) {
-			ip, aerr := pool.Allocate()
-			if aerr != nil {
-				return ike.Assignment{}, aerr
+		AssignAddr: func(want ike.AddressRequest) (ike.Assignment, error) {
+			var a ike.Assignment
+			if want.IP4 {
+				ip, aerr := pool.Allocate()
+				if aerr != nil {
+					return ike.Assignment{}, aerr
+				}
+				a.IP4, a.Netmask, a.DNS = ip, pool.Netmask(), cfg.DNS
 			}
-			a := ike.Assignment{IP4: ip, Netmask: pool.Netmask(), DNS: cfg.DNS}
-			// Dual-stack: hand out an IPv6 address too. A v6 exhaustion is
+			// Dual-stack, but only when the client asked: an unrequested IPv6
+			// lease is legal, breaks libreswan, and leaks an address per
+			// IPv4-only client. See ike.AddressRequest. A v6 exhaustion stays
 			// non-fatal — the client still gets a working IPv4-only tunnel.
-			if ip6, a6err := pool6.Allocate(); a6err == nil {
-				a.IP6 = net.IP(ip6.AsSlice())
-				a.Prefix6 = pool6.Bits()
-			} else {
-				logger.Printf("ikev2: IPv6 assignment skipped: %v", a6err)
+			if want.IP6 {
+				if ip6, a6err := pool6.Allocate(); a6err == nil {
+					a.IP6 = net.IP(ip6.AsSlice())
+					a.Prefix6 = pool6.Bits()
+					a.DNS = cfg.DNS
+				} else {
+					logger.Printf("ikev2: IPv6 assignment skipped: %v", a6err)
+				}
 			}
 			return a, nil
 		},

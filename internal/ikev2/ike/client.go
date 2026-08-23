@@ -379,17 +379,21 @@ func (c *Client) saInit() error {
 	}
 	c.ni = mustNonce(32)
 
-	prop := DefaultIKEProposal()
+	props := DefaultIKEProposals()
 	if c.cfg.PostQuantum {
 		// RFC 9370: ML-KEM-768 as the first (and only) additional key exchange,
 		// alongside the classical group above. Hybrid by construction — the
 		// classical DH still runs, so this cannot be worse than not offering it.
-		prop.Transforms = append(prop.Transforms,
-			payload.Transform{Type: payload.TransformADDKE1, ID: payload.MLKEM768})
+		// Every proposal carries it: the responder may pick any of them, and one
+		// that omitted the transform would silently drop back to classical-only.
+		for i := range props {
+			props[i].Transforms = append(props[i].Transforms,
+				payload.Transform{Type: payload.TransformADDKE1, ID: payload.MLKEM768})
+		}
 	}
 
 	b := payload.NewBuilder()
-	b.Add(payload.TypeSA, false, payload.MarshalSA(payload.SAPayload{Proposals: []payload.Proposal{prop}}))
+	b.Add(payload.TypeSA, false, payload.MarshalSA(payload.SAPayload{Proposals: props}))
 	b.Add(payload.TypeKE, false, payload.MarshalKE(payload.KEPayload{Group: payload.DH_CURVE25519, KeyData: pub}))
 	b.Add(payload.TypeNonce, false, payload.MarshalNonce(c.ni))
 	local := c.conn.LocalAddr().(*net.UDPAddr)
@@ -598,7 +602,7 @@ func (c *Client) buildCertAuthInner(idBody []byte, method payload.AuthMethod, au
 	}))
 	b.Add(payload.TypeAUTH, false, payload.MarshalAuth(payload.AuthPayload{Method: method, Data: authData}))
 	b.Add(payload.TypeCP, false, payload.MarshalCP(cpReq))
-	b.Add(payload.TypeSA, false, payload.MarshalSA(payload.SAPayload{Proposals: []payload.Proposal{DefaultESPProposal(u32BE(childOutSPI))}}))
+	b.Add(payload.TypeSA, false, payload.MarshalSA(payload.SAPayload{Proposals: DefaultESPProposals(u32BE(childOutSPI))}))
 	b.Add(payload.TypeTSi, false, payload.MarshalTS(tsAll))
 	b.Add(payload.TypeTSr, false, payload.MarshalTS(tsAll))
 	addMobikeSupported(b)
@@ -773,7 +777,7 @@ func (c *Client) buildAuthInner(idBody []byte, auth *payload.AuthPayload) (*payl
 		b.Add(payload.TypeAUTH, false, payload.MarshalAuth(*auth))
 	}
 	b.Add(payload.TypeCP, false, payload.MarshalCP(cpReq))
-	b.Add(payload.TypeSA, false, payload.MarshalSA(payload.SAPayload{Proposals: []payload.Proposal{DefaultESPProposal(u32BE(childOutSPI))}}))
+	b.Add(payload.TypeSA, false, payload.MarshalSA(payload.SAPayload{Proposals: DefaultESPProposals(u32BE(childOutSPI))}))
 	b.Add(payload.TypeTSi, false, payload.MarshalTS(tsAll))
 	b.Add(payload.TypeTSr, false, payload.MarshalTS(tsAll))
 	// Advertise MOBIKE (RFC 4555) so the server permits us to relocate this SA's

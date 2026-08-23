@@ -89,7 +89,7 @@ func TestEndToEndHandshakeDualStack(t *testing.T) {
 		PSK:     psk,
 		LocalID: FQDNIdentity("responder.test"),
 		Logger:  log.New(io.Discard, "", 0),
-		AssignAddr: func() (Assignment, error) {
+		AssignAddr: func(AddressRequest) (Assignment, error) {
 			return Assignment{
 				IP4:     wantV4,
 				Netmask: net.IPv4(255, 255, 255, 0),
@@ -292,12 +292,12 @@ func (it *initiator) doSAInit() {
 	}
 	it.ni = randomNonce(32)
 
-	prop := DefaultIKEProposal()
+	props := DefaultIKEProposals()
 	if it.ikeProposal != nil {
-		prop = *it.ikeProposal
+		props = []payload.Proposal{*it.ikeProposal}
 	}
 	b := payload.NewBuilder()
-	b.Add(payload.TypeSA, false, payload.MarshalSA(payload.SAPayload{Proposals: []payload.Proposal{prop}}))
+	b.Add(payload.TypeSA, false, payload.MarshalSA(payload.SAPayload{Proposals: props}))
 	b.Add(payload.TypeKE, false, payload.MarshalKE(payload.KEPayload{Group: payload.DH_CURVE25519, KeyData: pub}))
 	b.Add(payload.TypeNonce, false, payload.MarshalNonce(it.ni))
 	// NAT detection payloads (as a real client behind NAT would send). We fake
@@ -390,14 +390,14 @@ func (it *initiator) doAuth() {
 	b.Add(payload.TypeAUTH, false, payload.MarshalAuth(payload.AuthPayload{
 		Method: payload.AuthSharedKeyMIC, Data: authData,
 	}))
-	espProp := DefaultESPProposal(espSPI)
+	espProps := DefaultESPProposals(espSPI)
 	if it.espProposal != nil {
-		espProp = *it.espProposal
-		espProp.SPI = espSPI
+		espProps = []payload.Proposal{*it.espProposal}
+		espProps[0].SPI = espSPI
 	}
 	b.Add(payload.TypeCP, false, payload.MarshalCP(cpReq))
 	b.Add(payload.TypeSA, false, payload.MarshalSA(payload.SAPayload{
-		Proposals: []payload.Proposal{espProp},
+		Proposals: espProps,
 	}))
 	b.Add(payload.TypeTSi, false, payload.MarshalTS(tsAll))
 	b.Add(payload.TypeTSr, false, payload.MarshalTS(tsAll))

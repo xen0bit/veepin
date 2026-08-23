@@ -26,7 +26,7 @@ func certAuthServer(t *testing.T, ca *testCA, serverKey crypto.Signer) (p500, p4
 		ClientCAs:  ca.pool,
 		PublicIP:   net.ParseIP("127.0.0.1"),
 		Logger:     log.New(io.Discard, "", 0),
-		AssignAddr: func() (Assignment, error) {
+		AssignAddr: func(AddressRequest) (Assignment, error) {
 			return Assignment{IP4: net.IPv4(10, 9, 9, 9), Netmask: net.IPv4(255, 255, 255, 0)}, nil
 		},
 		DataPath: dp,

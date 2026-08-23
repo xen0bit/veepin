@@ -56,10 +56,11 @@ type Config struct {
 	PublicIP net.IP
 
 	// AssignAddr, if set, is called during IKE_AUTH to allocate internal tunnel
-	// address(es) for a connecting client (CP config mode). It may return an IPv4
-	// address, an IPv6 address, or both (dual-stack); a zero Assignment means no
-	// address is assigned (the Child SA is still created).
-	AssignAddr func() (Assignment, error)
+	// address(es) for a connecting client (CP config mode). It is told which
+	// families the initiator's CFG_REQUEST actually named and must allocate only
+	// those; a zero Assignment means no address is assigned (the Child SA is
+	// still created).
+	AssignAddr func(AddressRequest) (Assignment, error)
 	// ReleaseAddr, if set, reclaims the assignment when the SA is torn down.
 	ReleaseAddr func(Assignment)
 
@@ -192,6 +193,28 @@ func NewServer(cfg Config) (*Server, error) {
 // Configuration Payload. Any field may be zero: an IPv4-only server fills IP4 +
 // Netmask, a dual-stack server fills IP6 + Prefix6 as well, and DNS may carry
 // resolvers of either family.
+// AddressRequest names the address families an initiator's CFG_REQUEST asked
+// for, so the responder allocates those and no others.
+//
+// It exists because "allocate both, always" is legal and still breaks a peer.
+// RFC 7296 section 2.19 permits the responder to "send other attributes that
+// were not included in CP(CFG_REQUEST)", so veepin handing an IPv6 lease to a
+// client that asked only for IPv4 violates nothing -- and libreswan, which asks
+// only for INTERNAL_IP4_ADDRESS, took the address it never requested, built its
+// child selectors from it, and then rejected the responder's echo of its own
+// traffic selectors:
+//
+//	selectors: fd00:10:10::2/128 -> 10.10.10.0/24
+//	CHILD SA failed: TS_UNACCEPTABLE
+//
+// strongSwan asks for both families, so no cell in the matrix could see it. The
+// same over-assignment also leaked one IPv6 lease per IPv4-only client for as
+// long as the server ran.
+type AddressRequest struct {
+	IP4 bool
+	IP6 bool
+}
+
 type Assignment struct {
 	IP4     net.IP // assigned internal IPv4 address, or nil
 	Netmask net.IP // IPv4 netmask for IP4
