@@ -142,6 +142,37 @@ func TestInteropLibreswanClientVeepinServer(t *testing.T) {
 	runInterop(t, "compose.libreswan-server.yml", "libreswan-client", "10.10.10.1")
 }
 
+// TestInteropVeepinClientLibreswanServerTCP is RFC 8229/9329 in the client
+// direction: `veepin connect ikev2 -tcp` carries IKE and ESP over one TCP
+// connection to a libreswan responder that is not listening on UDP at all.
+//
+// The peer's `--no-listen-udp` is what makes this a test rather than a claim. A
+// TCP cell run against a peer that also speaks UDP passes either way and says
+// nothing about which carrier moved the packets — the exact false green this
+// matrix exists to catch. With no UDP socket on the responder there is nothing
+// for a fallback to land on. The log assertion is the second half: it catches
+// the case where the cell is misconfigured and veepin dialled UDP to a port
+// that happened to answer.
+func TestInteropVeepinClientLibreswanServerTCP(t *testing.T) {
+	runInteropRequiringLog(t, "compose.libreswan-tcp.yml", "veepin-client", "10.20.30.254",
+		"IKE and ESP ride one RFC 8229 TCP stream")
+}
+
+// TestInteropLibreswanClientVeepinServerTCP is the responder direction: a
+// libreswan initiator with `enable-tcp=yes` reaches `veepin serve ikev2 -tcp`
+// from a container whose outbound UDP 500 and 4500 are dropped.
+//
+// veepin's TCP listener is additive — the UDP sockets stay bound, which is what
+// makes turning it on safe — so the cell has to take UDP away itself. The
+// `udpencap=false` line is what proves the server agrees: ESP on a stream is
+// length-prefixed, not UDP-encapsulated, and a server that reported otherwise
+// would be telling an operator the wrong thing about a working tunnel.
+func TestInteropLibreswanClientVeepinServerTCP(t *testing.T) {
+	runInteropRequiringLogFrom(t, "compose.libreswan-tcp-server.yml", "libreswan-client",
+		"veepin-server", "10.10.10.1",
+		"IKE :500, NAT-T/ESP :4500, TCP :4500", "udpencap=false")
+}
+
 // TestInteropVeepinClientAmneziaWGServer is the client direction against the
 // real amneziawg-go: veepin's initiator must produce datagrams an implementation
 // it shares no code with recognises as AmneziaWG, and complete a Noise IK

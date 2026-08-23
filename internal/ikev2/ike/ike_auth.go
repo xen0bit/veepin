@@ -387,7 +387,7 @@ func (s *Server) finishIKEAuth(sa *IKESA, hdr payload.Header, inners []payload.R
 	sa.RecvMsgID = hdr.MessageID + 1
 
 	if respChild != nil {
-		respChild.UDPEncap = sa.NAT.natDetected() || sa.OnPort4500
+		respChild.UDPEncap = s.udpEncap(sa, remote)
 		respChild.ClientIP = sa.ClientIP
 		respChild.ClientIP6 = sa.ClientIP6
 		respChild.PeerAddr = remote

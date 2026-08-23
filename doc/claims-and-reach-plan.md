@@ -35,14 +35,14 @@ eighteen of the twenty-six rows below, with item 8 resolved as a *don't*, which
 is an outcome rather than an omission.
 
 The second (`feat/replay-and-reach`) executes **H8 and H4**, which brings it to
-twenty-one accounted for and five outstanding. This section is the record of
+twenty-one accounted for.
+
+The third (`feat/ikev2-over-tcp`) executes **item 9**, which brings it to
+twenty-two accounted for and four outstanding. This section is the record of
 what each row cost against what it was predicted to cost.
 
 What remains, and why each stopped where it did:
 
-- **Item 9 (RFC 9329)** is the next capability by default now that item 8 is a
-  *don't*. It brings libreswan in as a new peer in both roles, it is a
-  `dataplane` change rather than a protocol one, and it wants its own branch.
 - **Item 12 (`slog`)** is unstarted, and is the lowest-value row left.
 - **H4 (inner IPv6 beyond IKEv2)** did its two — WireGuard and OpenVPN. Whether
   the other thirteen follow is now a decision with evidence behind it.
@@ -89,7 +89,7 @@ kernel does not produce the super-frame at all).
 | # | Item | Value | Risk | Verdict | Status |
 |---|------|-------|------|---------|--------|
 | 8 | Rosenpass — PQ keys for WireGuard | Medium | **Blocked** | **Don't — its own plan says so, and the escape hatch already landed** | ☐ |
-| 9 | RFC 9329 — TCP encapsulation of IKE and IPsec | Medium | **High** | **Do — it is the next capability by default** | ☐ |
+| 9 | RFC 9329 — TCP encapsulation of IKE and IPsec | Medium | **High** | **Do — it is the next capability by default** | ✅ landed |
 
 ### Part 4 — operability hardening
 
@@ -639,7 +639,7 @@ half the gap and leaves only McEliece. Worth a re-read of the spec once a year
 rather than a watch — and it does nothing about the static KEM, which is the
 half that carries authenticity.
 
-## 9. RFC 9329 — TCP encapsulation *(the next capability, knowing what it is)*
+## 9. RFC 9329 — TCP encapsulation *(done)*
 
 The roadmap's re-survey (`protocol-roadmap.md:564`) already did the work of
 disproving its own estimate, and it should be read before this is started rather
@@ -668,6 +668,83 @@ estimate budgeted for.
 
 Do it after Rosenpass, and land **a plain libreswan-over-UDP cell first** — a
 new peer and a new transport debugged simultaneously is how a day disappears.
+
+### What it actually cost, and what it found
+
+The advice about landing the plain cell first was the most valuable sentence on
+this page. **The plain libreswan-over-UDP cell found three defects in veepin's
+responder before a line of TCP was written**, and all three had been on the wire
+since IKEv2 landed:
+
+| What | Why no cell saw it |
+|---|---|
+| The IKE and ESP proposals mixed AEAD and block ciphers beside one INTEG transform | strongSwan negotiates with it; libreswan answers `NO_PROPOSAL_CHOSEN`. RFC 5282 §8 is on libreswan's side |
+| Config mode handed out an IPv6 lease nobody requested | strongSwan asks for both families, so it never noticed. libreswan asks for IPv4 only, took the lease, and failed its own Child SA `TS_UNACCEPTABLE`. It also leaked one `pool6` address per IPv4-only client |
+| TSi was echoed back rather than narrowed to the assigned address | RFC 7296 §2.19's worked example answers with the lease. The echo is only *accidentally* right against a peer whose placeholder contains its lease — strongSwan proposes `0.0.0.0/0`, libreswan proposes its own **outer** address |
+
+Every one is the mutually-consistent class: veepin's own client asks for both
+families and never inspects TSi, so the self-cell agreed with all three. This is
+the clearest evidence yet for [the interop matrix earning its
+keep](../AGENTS.md) — a second peer, in one afternoon, found more than a year of
+the first one.
+
+### The estimate was wrong in the expensive direction and in the cheap one
+
+**The `dataplane` change never happened.** The re-survey's central claim — that
+`dataplane.Sender` taking a `*net.UDPAddr` forces either a stream-shaped pump or
+a second data path — is false, and the reason is in the type itself:
+
+```go
+type Sender func(pkt []byte, to *net.UDPAddr)
+```
+
+The address is *passed to* the sender, not used by it. On the connected UDP
+socket the client already ignores it; on a stream the stream is the destination,
+so it is ignored for the same reason. `dataplane` is untouched by this branch.
+The batching did carry over too, by a different route: a GSO burst becomes one
+`Write` carrying several frames, which is a stream's `sendmmsg`.
+
+What the estimate got right is that the initiator had no seam. It has one now —
+`Client.DataStream()` where a UDP client gets `Client.DataConn()`, exactly one
+non-nil — and the facade branches on which.
+
+**The responder needed no interface either, and is better for it.** The roadmap
+proposed making `transport` an interface with `udpTransport` and `tcpTransport`
+implementations. What landed instead is one `transport` that owns both, keyed by
+a map from peer address to stream: `sendIKE`, `sendESP` and `sendESPBatch`
+consult it and fall through to UDP. That is strictly more capable than the
+either/or an interface would give — **the TCP listener is additive**, the UDP
+sockets stay bound, and a peer is answered on whatever it arrived on. libreswan's
+`enable-tcp=fallback` works against it without veepin having a mode to choose,
+and turning `-tcp` on cannot break an existing deployment.
+
+**`Reliable() bool` was unnecessary**: veepin has no IKE retransmit timer at all
+(the client relies on its reconnect loop), so there was nothing to suppress.
+
+**The peer image is `alpine:3.22`, not the 3.20 this page costed.** 3.20 does
+carry libreswan 5.0 as predicted — but 5.0's `addconn` segfaults on musl before
+reading a single connection, on a config containing nothing but `config setup`.
+Nothing loads, pluto answers nothing, and it reads as veepin failing to
+interoperate.
+
+### The two cells both remove UDP rather than merely not using it
+
+A TCP cell run against a peer that also answers UDP passes either way. Both do
+better than a log line:
+
+- The client-direction cell starts pluto with `--no-listen-udp`. `ss -lnup`
+  inside the peer shows no UDP socket at all, so there is nothing for a fallback
+  to land on.
+- The responder-direction cell drops outbound UDP 500 and 4500 in the libreswan
+  container's own iptables, because veepin's TCP listener is additive and its UDP
+  sockets stay bound.
+
+Both also assert a log line, and the second one has teeth: with the iptables rule
+removed and libreswan set back to UDP, the tunnel comes up, the ping passes, and
+the cell **fails** on `udpencap=false` after 79 seconds. That is the guard
+working, and it is why `Server.udpEncap` consults the stream registry instead of
+reporting `sa.OnPort4500` — a TCP session logging `udpencap=true` would be
+telling an operator the wrong thing about a working tunnel.
 
 ---
 

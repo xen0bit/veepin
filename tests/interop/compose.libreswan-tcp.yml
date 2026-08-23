@@ -1,0 +1,51 @@
+# Direction A over RFC 8229/9329: `veepin connect ikev2 -tcp` -> a libreswan
+# responder listening on TCP 4500 and NOT on UDP at all.
+#
+# The peer's `--no-listen-udp` is the assertion. A TCP cell run against a peer
+# that also speaks UDP is the textbook false green: the ping passes either way
+# and says nothing about which carrier moved it. With no UDP socket on the
+# responder there is nothing for a fallback to land on, so a successful
+# cross-tunnel ping can only have crossed the TCP stream.
+#
+# Data-path check: the client pings 10.20.30.254 (a libreswan-side address
+# inside the tunnel).
+name: veepin-interop-libreswan-tcp
+
+services:
+  libreswan-server:
+    build:
+      context: libreswan
+    image: interop-libreswan
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+      net.ipv4.ip_forward: "1"
+    environment:
+      TCP: "yes"
+      UDP: "no"
+    volumes:
+      - ./libreswan/ipsec-server-tcp.conf:/etc/ipsec.conf:ro
+      - ./libreswan/ipsec.secrets:/etc/ipsec.secrets:ro
+      - ./libreswan/server-entrypoint.sh:/entrypoint.sh:ro
+    command: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [libreswan-server]
+    environment:
+      SERVER: "libreswan-server"
+      # With -tcp the port names the TCP port; there is no port-500 phase.
+      PORT: "4500"
+      TCP: "true"
+      PSK: "interop-test-psk"
+      CLIENT_ID: "client.example.com"
+      SERVER_ID: "vpn.example.com"
+    volumes:
+      - ./veepin/client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

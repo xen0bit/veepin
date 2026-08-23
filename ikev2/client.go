@@ -98,6 +98,18 @@ type Config struct {
 	// this often. Zero uses defaultIKERekeyInterval; negative disables it.
 	IKERekeyInterval time.Duration
 
+	// TCP carries IKE and ESP over one TCP connection instead of UDP (RFC 8229,
+	// updated by RFC 9329), for a network that blocks UDP. RFC 8229 section 3
+	// has no port-500 phase, so Port names the TCP port directly and defaults
+	// to 4500 — the one knob that changes meaning, and the useful one, since a
+	// network that blocks UDP often only permits 443.
+	//
+	// It is "use TCP", not "prefer TCP": there is no fallback to UDP, because
+	// the deployments this exists for are exactly the ones where UDP does not
+	// work, and a silent fallback there is a tunnel that cannot come up
+	// pretending it might.
+	TCP bool
+
 	// Shape enables shaping of this client's *upstream* traffic: how much padded
 	// output each inner flow is given before shaping stops for that flow, so it
 	// bounds what shaping costs. Zero, the default, disables it.
@@ -123,6 +135,11 @@ const defaultRekeyInterval = time.Hour
 // mirrors the common strongSwan default of a few hours.
 const defaultIKERekeyInterval = 4 * time.Hour
 
+// defaultNATTPort is the port RFC 3948 NAT-T floats to and the one RFC 8229
+// TCP encapsulation uses from the first octet. It is named here because the
+// TCP path has no other port to speak of.
+const defaultNATTPort = 4500
+
 // Option keys accepted by client.Dial(ctx, "ikev2", opts). They match the
 // NetworkManager plugin's connection settings, which is why the parsed names are
 // hyphenated rather than Go-cased.
@@ -144,6 +161,7 @@ const (
 	OptPQ        = "post-quantum" // offer ML-KEM-768 as an additional key exchange
 	OptIPTFS     = "iptfs"        // enable AGGFRAG (IP-TFS) aggregation (RFC 9347)
 	OptIPTFSRate = "iptfs-rate"   // constant-rate IP-TFS in bytes/sec; 0 = aggregation only
+	OptTCP       = "tcp"          // carry IKE and ESP over TCP (RFC 8229/9329) instead of UDP
 )
 
 // parseOptions turns string-keyed options into a Dialer. It is what the registry
@@ -162,6 +180,7 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 		CAFile:      opts[OptCA],
 		PostQuantum: opts[OptPQ] == "true",
 		IPTFS:       opts[OptIPTFS] == "true",
+		TCP:         opts[OptTCP] == "true",
 		// Without this the engine's log goes nowhere: Dial discards a nil
 		// Logger, so every line internal/ikev2/ike writes -- AGGFRAG
 		// negotiated or declined, a rekey, a MOBIKE roam, a certificate
@@ -250,6 +269,18 @@ func (cfg Config) validate() error {
 	return nil
 }
 
+// nattPort is the port ESP (and, over TCP, the whole exchange) runs on.
+//
+// Over UDP it is fixed at 4500: RFC 3948 defines the float and Config.Port
+// names the port-500 phase, which is a different thing. Over TCP there is no
+// float and no port-500 phase, so Config.Port names this port instead.
+func nattPort(cfg Config) int {
+	if cfg.TCP && cfg.Port != 0 {
+		return cfg.Port
+	}
+	return defaultNATTPort
+}
+
 // dialer adapts a Config to client.Dialer.
 type dialer struct{ cfg Config }
 
@@ -275,6 +306,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	ikeCfg := ike.ClientConfig{
 		ServerHost:  cfg.Server,
 		ServerPort:  cfg.Port,
+		NATTPort:    nattPort(cfg),
 		PSK:         []byte(cfg.PSK),
 		LocalID:     parseIdentity(cfg.LocalID),
 		EAPUsername: cfg.EAPUser,
@@ -282,6 +314,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 		PostQuantum: cfg.PostQuantum,
 		IPTFS:       cfg.IPTFS,
 		IPTFSRate:   cfg.IPTFSRate,
+		TCP:         cfg.TCP,
 		Logger:      logger,
 	}
 	if cfg.ServerID != "" {
@@ -337,33 +370,75 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 		return fail(fmt.Errorf("ikev2: build tunnel: %w", err))
 	}
 
-	// 4. ESP shares the IKE socket (already floated to NAT-T port 4500), so ESP
-	// and IKE leave from one source port — the standards-compliant NAT-T layout a
-	// responder relies on to route return ESP back to us.
-	dataConn := c.DataConn()
+	// 4. ESP shares the IKE transport. Over UDP that is the IKE socket (already
+	// floated to NAT-T port 4500), so ESP and IKE leave from one source port —
+	// the standards-compliant NAT-T layout a responder relies on to route return
+	// ESP back to us. Over TCP (RFC 8229/9329) it is the one stream, carrying
+	// both length-prefixed. Exactly one of DataConn and DataStream is non-nil.
+	stream := c.DataStream()
+	if stream != nil {
+		// Named in the log because it is the one thing a ping cannot tell you.
+		// A tunnel that quietly came up over UDP pings exactly as well as one
+		// that used the stream, and the whole point of this transport is the
+		// network where the first is impossible.
+		logger.Printf("ikev2: IKE and ESP ride one RFC 8229 TCP stream to %s", stream.RemoteAddr())
+	}
 
 	s := &session{
 		ike:          c,
 		tun:          tun,
 		logger:       logger,
 		tunnel:       tunnel,
+		stream:       stream,
 		childInSPI:   res.InboundSPI,
 		done:         make(chan struct{}),
 		stopKA:       make(chan struct{}),
 		stopRekey:    make(chan struct{}),
 		stopIKERekey: make(chan struct{}),
 	}
-	// The ESP socket is held behind an atomic so MOBIKE Roam can swap it under
-	// the running data path (see session.Roam).
-	s.conn.Store(dataConn)
-	s.sendBC.Store(dataplane.NewBatchConn(dataConn))
 
-	// The socket is connected to the server, so the destination is implicit.
-	send := func(esp []byte, _ *net.UDPAddr) {
-		if _, werr := s.conn.Load().Write(esp); werr != nil && !s.roaming.Load() {
-			logger.Printf("ikev2: ESP send error: %v", werr)
+	var (
+		send      dataplane.Sender
+		batchSend func(pkts [][]byte, to *net.UDPAddr)
+	)
+	if stream != nil {
+		// The stream is the destination, so the peer address the pump passes is
+		// ignored — as it is on the connected UDP socket below, for the same
+		// reason.
+		send = func(esp []byte, _ *net.UDPAddr) {
+			if werr := stream.WriteESP(esp); werr != nil && !s.closing.Load() {
+				logger.Printf("ikev2: ESP send error: %v", werr)
+			}
+		}
+		// A stream has no datagram boundary to preserve, so a GSO burst becomes
+		// ONE write carrying several frames — the stream's answer to sendmmsg,
+		// and the reason the batch sender is wired here rather than dropped.
+		batchSend = func(pkts [][]byte, _ *net.UDPAddr) {
+			if werr := stream.WriteESPBatch(pkts); werr != nil && !s.closing.Load() {
+				logger.Printf("ikev2: ESP batch send error: %v", werr)
+			}
+		}
+	} else {
+		dataConn := c.DataConn()
+		// The ESP socket is held behind an atomic so MOBIKE Roam can swap it
+		// under the running data path (see session.Roam).
+		s.conn.Store(dataConn)
+		s.sendBC.Store(dataplane.NewBatchConn(dataConn))
+		// The socket is connected to the server, so the destination is implicit.
+		send = func(esp []byte, _ *net.UDPAddr) {
+			if _, werr := s.conn.Load().Write(esp); werr != nil && !s.roaming.Load() {
+				logger.Printf("ikev2: ESP send error: %v", werr)
+			}
+		}
+		// GSO bursts flush with one sendmmsg on the connected socket, via the
+		// swappable BatchConn.
+		batchSend = func(pkts [][]byte, _ *net.UDPAddr) {
+			if _, werr := s.sendBC.Load().WriteBatch(pkts, nil); werr != nil && !s.roaming.Load() {
+				logger.Printf("ikev2: ESP batch send error: %v", werr)
+			}
 		}
 	}
+
 	// The tunnel reports 0.0.0.0/0 as its route, so everything leaving the TUN is
 	// routed to the server; no separate default-route call is needed.
 	pump := dataplane.NewPump(tun, send, dataplane.SPIDemux, logger)
@@ -371,101 +446,31 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 		pump.SetShaper(dataplane.NewShaper(dataplane.ShapeConfig{Bytes: cfg.Shape}))
 		logger.Printf("ikev2: upstream shaping on, %d bytes per flow", cfg.Shape)
 	}
-	// GSO bursts flush with one sendmmsg on the connected socket, via the
-	// swappable BatchConn.
-	pump.SetBatchSender(func(pkts [][]byte, _ *net.UDPAddr) {
-		if _, werr := s.sendBC.Load().WriteBatch(pkts, nil); werr != nil && !s.roaming.Load() {
-			logger.Printf("ikev2: ESP batch send error: %v", werr)
-		}
-	})
+	pump.SetBatchSender(batchSend)
 	pump.AddTunnel(tunnel)
 	s.pump = pump
 	go pump.Run()
 
-	// Inbound read loop on the shared socket. Exits when the socket is closed
-	// (on Close, via ike.Close()). A 4-zero-octet prefix marks a non-ESP datagram
-	// (NAT keepalive, or any late IKE) — skip it; everything else is ESP. Reads
-	// are batched (dataplane.BatchConn over the connected socket): one recvmmsg
-	// drains up to readBatch datagrams under load and blocks like a plain read
-	// when idle.
-	go func() {
-		defer close(s.done)
-		const readBatch = 16
-		bufs := make([][]byte, readBatch)
-		for i := range bufs {
-			bufs[i] = make([]byte, 65535)
-		}
-		sizes := make([]int, readBatch)
-		esps := make([][]byte, 0, readBatch)
-		// bc wraps the current socket; it is rebuilt whenever a MOBIKE Roam
-		// swaps the socket (s.conn changes).
-		var bc *dataplane.BatchConn
-		var bcConn *net.UDPConn
-		for {
-			if conn := s.conn.Load(); conn != bcConn {
-				bc = dataplane.NewBatchConn(conn)
-				bcConn = conn
-			}
-			n, rerr := bc.ReadBatch(bufs, sizes)
-			esps = esps[:0]
-			for i := range n {
-				pkt := bufs[i][:sizes[i]]
-				if len(pkt) >= 4 && pkt[0] == 0 && pkt[1] == 0 && pkt[2] == 0 && pkt[3] == 0 {
-					// Non-ESP: a NAT keepalive (single 0xFF, too short) or an IKE
-					// control message (DPD response, rekey, peer delete). Hand any
-					// IKE message to the control channel; drop keepalives. Copied
-					// out because the exchange may outlive this batch's buffer.
-					if len(pkt) > 4 {
-						ike := make([]byte, len(pkt)-4)
-						copy(ike, pkt[4:])
-						s.ike.Deliver(ike)
-					}
-					continue
-				}
-				// Collected without a copy: the whole batch goes to the pump
-				// at once so inbound TCP can coalesce (GRO); the pump decrypts
-				// in place and writes the TUN before returning — bufs[i] is
-				// not touched again until the next ReadBatch. Connected
-				// socket: the source is implicitly the server (froms nil).
-				esps = append(esps, pkt)
-			}
-			if len(esps) > 0 {
-				pump.HandleInboundBatch(esps, nil)
-			}
-			if rerr != nil {
-				if s.closing.Load() {
+	if stream != nil {
+		go s.readStream(pump)
+	} else {
+		go s.readSocket(pump)
+		// NAT keepalive: a single 0xFF byte every 20s holds the NAT binding
+		// (RFC 3948). There is no such thing over TCP — the connection is the
+		// binding, and the kernel's own TCP keepalive holds it.
+		go func() {
+			t := time.NewTicker(20 * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-s.stopKA:
 					return
+				case <-t.C:
+					_, _ = s.conn.Load().Write([]byte{0xff})
 				}
-				// A read error during a Roam is the old socket being closed as
-				// the SA relocates. Wait for the new socket to be published,
-				// then keep reading it rather than tearing the session down.
-				if s.roaming.Load() {
-					for s.roaming.Load() && !s.closing.Load() {
-						time.Sleep(time.Millisecond)
-					}
-					if s.closing.Load() {
-						return
-					}
-					continue
-				}
-				return
 			}
-		}
-	}()
-
-	// NAT keepalive: a single 0xFF byte every 20s holds the NAT binding (RFC 3948).
-	go func() {
-		t := time.NewTicker(20 * time.Second)
-		defer t.Stop()
-		for {
-			select {
-			case <-s.stopKA:
-				return
-			case <-t.C:
-				_, _ = s.conn.Load().Write([]byte{0xff})
-			}
-		}
-	}()
+		}()
+	}
 
 	// Proactive Child SA rekey: replace the ESP SA before its soft lifetime so a
 	// long-lived tunnel never lets its data SA expire.
@@ -545,6 +550,11 @@ type session struct {
 	// owned by ike, and Close closes the current one via ike.Close().
 	conn   atomic.Pointer[net.UDPConn]
 	sendBC atomic.Pointer[dataplane.BatchConn]
+	// stream is the RFC 8229/9329 TCP transport when this SA runs over TCP, and
+	// nil otherwise. It is not atomic because nothing swaps it: MOBIKE does not
+	// apply to a stream — the connection IS the address binding, so an address
+	// change breaks it and the answer is to reconnect.
+	stream *ike.TCPStream
 	logger *log.Logger
 
 	roamMu  sync.Mutex  // serializes Roam
@@ -564,6 +574,108 @@ type session struct {
 	stopKA       chan struct{} // stops the NAT-keepalive goroutine
 	stopRekey    chan struct{} // stops the proactive Child-SA-rekey goroutine
 	stopIKERekey chan struct{} // stops the proactive IKE-SA-rekey goroutine
+}
+
+// readSocket is the inbound loop for a UDP-transported SA: ESP and any late IKE
+// arrive on the shared NAT-T socket. It exits when the socket is closed (on
+// Close, via ike.Close()). A 4-zero-octet prefix marks a non-ESP datagram (NAT
+// keepalive, or IKE); everything else is ESP. Reads are batched
+// (dataplane.BatchConn over the connected socket): one recvmmsg drains up to
+// readBatch datagrams under load and blocks like a plain read when idle.
+func (s *session) readSocket(pump *dataplane.Pump) {
+	defer close(s.done)
+	const readBatch = 16
+	bufs := make([][]byte, readBatch)
+	for i := range bufs {
+		bufs[i] = make([]byte, 65535)
+	}
+	sizes := make([]int, readBatch)
+	esps := make([][]byte, 0, readBatch)
+	// bc wraps the current socket; it is rebuilt whenever a MOBIKE Roam swaps
+	// the socket (s.conn changes).
+	var bc *dataplane.BatchConn
+	var bcConn *net.UDPConn
+	for {
+		if conn := s.conn.Load(); conn != bcConn {
+			bc = dataplane.NewBatchConn(conn)
+			bcConn = conn
+		}
+		n, rerr := bc.ReadBatch(bufs, sizes)
+		esps = esps[:0]
+		for i := range n {
+			pkt := bufs[i][:sizes[i]]
+			if len(pkt) >= 4 && pkt[0] == 0 && pkt[1] == 0 && pkt[2] == 0 && pkt[3] == 0 {
+				// Non-ESP: a NAT keepalive (single 0xFF, too short) or an IKE
+				// control message (DPD response, rekey, peer delete). Hand any
+				// IKE message to the control channel; drop keepalives. Copied
+				// out because the exchange may outlive this batch's buffer.
+				if len(pkt) > 4 {
+					ike := make([]byte, len(pkt)-4)
+					copy(ike, pkt[4:])
+					s.ike.Deliver(ike)
+				}
+				continue
+			}
+			// Collected without a copy: the whole batch goes to the pump at
+			// once so inbound TCP can coalesce (GRO); the pump decrypts in
+			// place and writes the TUN before returning — bufs[i] is not
+			// touched again until the next ReadBatch. Connected socket: the
+			// source is implicitly the server (froms nil).
+			esps = append(esps, pkt)
+		}
+		if len(esps) > 0 {
+			pump.HandleInboundBatch(esps, nil)
+		}
+		if rerr != nil {
+			if s.closing.Load() {
+				return
+			}
+			// A read error during a Roam is the old socket being closed as the
+			// SA relocates. Wait for the new socket to be published, then keep
+			// reading it rather than tearing the session down.
+			if s.roaming.Load() {
+				for s.roaming.Load() && !s.closing.Load() {
+					time.Sleep(time.Millisecond)
+				}
+				if s.closing.Load() {
+					return
+				}
+				continue
+			}
+			return
+		}
+	}
+}
+
+// readStream is the inbound loop for a TCP-transported SA (RFC 8229/9329): one
+// frame at a time off the one stream, IKE or ESP by the non-ESP marker.
+//
+// There is no batching to do and none to miss. Batching on the UDP path saves
+// syscalls per DATAGRAM; a stream has already coalesced whatever the network
+// delivered together into one read inside the framer, so a frame loop over a
+// buffered reader is the same win by a different route. The frame borrows the
+// reader's buffer and is valid only until the next call — HandleInbound
+// decrypts in place and writes the TUN before returning, which is the same
+// contract the UDP batch above relies on.
+func (s *session) readStream(pump *dataplane.Pump) {
+	defer close(s.done)
+	for {
+		pkt, isIKE, err := s.stream.ReadFrame()
+		if err != nil {
+			if !s.closing.Load() {
+				s.logger.Printf("ikev2: TCP stream read: %v", err)
+			}
+			return
+		}
+		if isIKE {
+			// Copied out because the exchange may outlive the frame buffer.
+			msg := make([]byte, len(pkt))
+			copy(msg, pkt)
+			s.ike.Deliver(msg)
+			continue
+		}
+		pump.HandleInbound(pkt, nil)
+	}
 }
 
 // Roam relocates the tunnel to a fresh local address after the client's network

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strconv"
 	"sync"
 
 	"github.com/xen0bit/veepin/dataplane"
@@ -54,6 +55,13 @@ type Config struct {
 	// for NAT detection hashes. If nil, detection still works but may over-report
 	// NAT; setting it improves accuracy.
 	PublicIP net.IP
+
+	// TCP additionally listens for RFC 8229/9329 TCP-encapsulated IKE and ESP on
+	// Port4500. It is additive: the UDP sockets stay bound, so a peer reaches
+	// this server on whichever transport its network allows and is answered on
+	// the same one. That is libreswan's `enable-tcp=fallback` without a mode to
+	// choose.
+	TCP bool
 
 	// AssignAddr, if set, is called during IKE_AUTH to allocate internal tunnel
 	// address(es) for a connecting client (CP config mode). It is told which
@@ -184,8 +192,20 @@ func NewServer(cfg Config) (*Server, error) {
 		onESP:      s.handleESP,
 		onESPBatch: s.handleESPBatch,
 	}
-	s.log.Printf("ikev2: listening on %s (IKE :%d, NAT-T/ESP :%d)",
-		cfg.ListenIP, cfg.Port500, cfg.Port4500)
+	if cfg.TCP {
+		// Bound here rather than in ListenAndServe for the same reason the UDP
+		// sockets are: a returned server is already listening, so a bind error
+		// reaches the caller instead of a client.
+		ln, lerr := net.Listen("tcp", net.JoinHostPort(cfg.ListenIP, strconv.Itoa(cfg.Port4500)))
+		if lerr != nil {
+			c500.Close()
+			c4500.Close()
+			return nil, fmt.Errorf("ike: bind tcp :%d: %w", cfg.Port4500, lerr)
+		}
+		s.tr.tcpLn = ln
+	}
+	s.log.Printf("ikev2: listening on %s (IKE :%d, NAT-T/ESP :%d%s)",
+		cfg.ListenIP, cfg.Port500, cfg.Port4500, tcpNote(cfg.TCP, cfg.Port4500))
 	return s, nil
 }
 
@@ -336,15 +356,48 @@ func (s *Server) SendESP(esp []byte, to *net.UDPAddr) {
 }
 
 // SendESPBatch transmits a burst of encapsulated ESP datagrams for one peer —
-// one sendmmsg on the NAT-T socket. It matches the pump's batch-sender
-// signature; the GSO egress path produces the bursts.
+// one sendmmsg on the NAT-T socket, or one write of several frames on a TCP
+// stream. It matches the pump's batch-sender signature; the GSO egress path
+// produces the bursts.
 func (s *Server) SendESPBatch(esp [][]byte, to *net.UDPAddr) {
 	if s.tr == nil || to == nil {
 		return
 	}
-	if _, err := s.tr.conn4500.WriteBatch(esp, to); err != nil {
+	if err := s.tr.sendESPBatch(esp, to); err != nil {
 		s.log.Printf("ikev2: ESP batch send error: %v", err)
 	}
+}
+
+// liveStreams reports how many RFC 8229 streams the server currently holds. It
+// is the cheapest way for a test to tell a TCP-encapsulated session from one
+// that quietly fell back to the UDP sockets, which stay bound either way.
+func (s *Server) liveStreams() int {
+	if s.tr == nil {
+		return 0
+	}
+	s.tr.smu.RLock()
+	defer s.tr.smu.RUnlock()
+	return len(s.tr.streams)
+}
+
+// udpEncap reports whether a Child SA's ESP will be UDP-encapsulated. Over a
+// TCP stream it never is -- ESP is length-prefixed on the same connection -- and
+// saying otherwise puts "udpencap=true" in the line an operator reads to find
+// out which transport carried the session.
+func (s *Server) udpEncap(sa *IKESA, remote *net.UDPAddr) bool {
+	if s.tr != nil && s.tr.stream(remote) != nil {
+		return false
+	}
+	return sa.NAT.natDetected() || sa.OnPort4500
+}
+
+// tcpNote renders the TCP half of the listening banner, so an operator can see
+// from one line whether RFC 8229 encapsulation is actually accepted.
+func tcpNote(on bool, port int) string {
+	if !on {
+		return ""
+	}
+	return fmt.Sprintf(", TCP :%d", port)
 }
 
 // send transmits an IKE message to a peer on the correct port.

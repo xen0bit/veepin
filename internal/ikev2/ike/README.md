@@ -209,3 +209,29 @@ stateDiagram-v2
   All three were mutually-consistent bugs of the dangerous class: veepin's own
   client never inspected TSi, and asked for both families itself, so the
   veepin↔veepin cell agreed with every one of them.
+- **TCP encapsulation (RFC 8229, updated by RFC 9329) is a transport, not a
+  mode.** `tcpframe.go` is the codec — a 16-bit length that **counts itself**,
+  the six ASCII octets `IKETCP` sent once by the TCP originator and never by the
+  responder, and the same 4-octet non-ESP marker that separates IKE from ESP on
+  UDP 4500. `tcpstream.go` is the connection around it, in both roles.
+
+  The initiator sets `ClientConfig.TCP` and gets `Client.DataStream()` where a
+  UDP client gets `Client.DataConn()`; exactly one is non-nil, and that is what
+  the facade branches its data path on. There is no port-500 phase and no NAT-T
+  float — RFC 8229 §3 is on one port from the first octet — and MOBIKE is not
+  negotiated at all, because the connection *is* the address binding.
+
+  The responder's `Config.TCP` adds a listener **beside** the UDP sockets rather
+  than instead of them, and `transport` keeps a map from peer address to stream.
+  `sendIKE`/`sendESP`/`sendESPBatch` consult it and fall through to UDP, so
+  nothing above `transport.go` knows which carrier an SA arrived on — which is
+  also what makes libreswan's `enable-tcp=fallback` work without veepin having a
+  mode to choose.
+
+  Two things a stream needs that a datagram socket does not: every write takes a
+  mutex (two interleaved writes do not lose a packet as they would on UDP, they
+  desynchronise the frame boundary permanently), and a GSO burst goes out as ONE
+  write carrying several frames — the stream's answer to `sendmmsg`.
+
+  ESP replay protection is unchanged. TCP delivers in order, but a rekey or a
+  reconnect can still replay, so the window stays.

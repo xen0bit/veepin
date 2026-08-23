@@ -8,6 +8,15 @@
 # a silent fallback).
 set -eu
 
+# BLOCK_UDP is what turns the fallback cell from a claim into a test. libreswan
+# will happily use UDP when UDP works, so a `enable-tcp=fallback` cell run
+# without this passes on UDP and proves nothing about TCP at all.
+if [ "${BLOCK_UDP:-no}" = "yes" ]; then
+    iptables -A OUTPUT -p udp --dport 500 -j DROP
+    iptables -A OUTPUT -p udp --dport 4500 -j DROP
+    echo "libreswan-client: outbound UDP 500/4500 dropped; only TCP can carry this session"
+fi
+
 ipsec initnss >/dev/null 2>&1 || true
 
 echo "libreswan-client: tcp=${TCP:-no}; starting pluto"
