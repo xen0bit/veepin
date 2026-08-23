@@ -77,7 +77,8 @@ var interopMatrix = []interopRow{
 			"TestInteropVeepinClientStrongswanServerPQ",
 			"TestInteropVeepinClientStrongswanIPTFS",
 			"TestInteropIPTFSConstantRate",
-		}, Label: "strongSwan (PSK + pubkey ECDSA/RSA, RFC 7383 frag, AES-GCM + ChaCha20, dual-stack, v6 underlay, ML-KEM-768, IP-TFS incl. constant-rate)"},
+			"TestInteropIKEv2CorpusStillMatchesTheLivePeer",
+		}, Label: "strongSwan (PSK + pubkey ECDSA/RSA, RFC 7383 frag, AES-GCM + ChaCha20, dual-stack, v6 underlay, ML-KEM-768, IP-TFS incl. constant-rate, recorded)"},
 		Server: interopCell{Tests: []string{
 			"TestInteropStrongswanClientVeepinServer",
 			"TestInteropStrongswanClientVeepinServerEAP",
@@ -98,12 +99,16 @@ var interopMatrix = []interopRow{
 	},
 	{
 		Protocol: "WireGuard",
-		Client:   interopCell{Tests: []string{"TestInteropVeepinClientWireguardServer"}, Label: "wireguard-go"},
+		Client: interopCell{Tests: []string{
+			"TestInteropVeepinClientWireguardServer",
+			"TestInteropVeepinClientWireguardServerV6",
+		}, Label: "wireguard-go (+ IPv6 inner)"},
 		Server: interopCell{Tests: []string{
 			"TestInteropWireguardClientVeepinServer",
 			"TestInteropWireguardClientVeepinServerShaped",
 			"TestInteropWireguardClientVeepinServerV6",
-		}, Label: "wireguard-go (+ padded, IPv6 inner)"},
+			"TestInteropWireguardCorpusStillMatchesTheLivePeer",
+		}, Label: "wireguard-go (+ padded, IPv6 inner, recorded)"},
 		Self: interopCell{Tests: []string{"TestInteropWireguardSelf", "TestInteropWireguardRekey"}},
 	},
 	{
@@ -119,7 +124,8 @@ var interopMatrix = []interopRow{
 			"TestInteropOpenVPNClientVeepinServerTLSAuth",
 			"TestInteropOpenVPNClientVeepinServerTLSCrypt",
 			"TestInteropOpenVPNClientVeepinServerShaped",
-		}, Label: "`openvpn` (+ tls-auth, tls-crypt, padded)"},
+			"TestInteropOpenVPNClientVeepinServerV6",
+		}, Label: "`openvpn` (+ tls-auth, tls-crypt, padded, IPv6 inner)"},
 		Self: interopCell{Tests: []string{"TestInteropOpenVPNSelf"}},
 	},
 	{

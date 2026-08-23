@@ -2,6 +2,8 @@ package openvpn
 
 import (
 	"context"
+	"net"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -247,5 +249,111 @@ func TestLivenessConfigDoesNotAddAMinuteToTheServersDeadline(t *testing.T) {
 	if cfg.Interval <= 0 || cfg.Interval > s.deadline {
 		t.Errorf("Interval = %v, want a positive value no larger than the %v deadline",
 			cfg.Interval, s.deadline)
+	}
+}
+
+// A dual-stack server pushes ifconfig-ipv6 beside ifconfig, and the client has
+// to keep both. Until it did, dataplane.AddrPool6 had one consumer in the tree
+// and OpenVPN carried half the internet for a client on a v6-only network.
+func TestParsePushKeepsTheIPv6Assignment(t *testing.T) {
+	p, err := parsePush("PUSH_REPLY,route-gateway 10.8.0.1,topology subnet," +
+		"ifconfig 10.8.0.2 255.255.255.0,ifconfig-ipv6 fd00:8::2/64 fd00:8::1," +
+		"route-ipv6-gateway fd00:8::1,peer-id 3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.localIP.String(); got != "10.8.0.2" {
+		t.Errorf("localIP = %s", got)
+	}
+	if got := p.localIP6.String(); got != "fd00:8::2" {
+		t.Errorf("localIP6 = %s, want the local half of ifconfig-ipv6", got)
+	}
+	if p.prefix6 != 64 {
+		t.Errorf("prefix6 = %d, want 64", p.prefix6)
+	}
+}
+
+// The argument order of ifconfig-ipv6 is local-then-remote, the opposite way
+// round from --ifconfig on the command line. Taking the second field would
+// configure the *server's* address on the client's own interface, which looks
+// like a routing problem and is not one.
+func TestParsePushTakesTheLocalHalfOfIfconfigIPv6(t *testing.T) {
+	p, err := parsePush("PUSH_REPLY,ifconfig 10.8.0.2 255.255.255.0," +
+		"ifconfig-ipv6 fd00:8::2/64 fd00:8::1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.localIP6.Equal(net.ParseIP("fd00:8::1")) {
+		t.Fatal("the client took the server's address as its own")
+	}
+}
+
+// An IPv4-only server pushes no ifconfig-ipv6, and the client must come up
+// rather than inventing a v6 address or refusing.
+func TestParsePushWithoutIPv6LeavesTheV6HalfEmpty(t *testing.T) {
+	p, err := parsePush("PUSH_REPLY,ifconfig 10.8.0.2 255.255.255.0,peer-id 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.localIP6 != nil || p.prefix6 != 0 {
+		t.Fatalf("v6 half is %v/%d on an IPv4-only push", p.localIP6, p.prefix6)
+	}
+}
+
+// A malformed ifconfig-ipv6 is an error rather than a silently IPv4-only
+// tunnel: a server that meant to assign v6 and failed is a configuration
+// problem the operator has to see, and a client that quietly dropped it would
+// be the same silent-discard bug the WireGuard client had.
+func TestParsePushRejectsAMalformedIfconfigIPv6(t *testing.T) {
+	for _, bad := range []string{
+		"ifconfig-ipv6 not-an-address/64 fd00:8::1",
+		"ifconfig-ipv6 10.8.0.2/64 fd00:8::1",
+		"ifconfig-ipv6 fd00:8::2/300 fd00:8::1",
+		"ifconfig-ipv6 fd00:8::2/-1 fd00:8::1",
+	} {
+		if _, err := parsePush("PUSH_REPLY,ifconfig 10.8.0.2 255.255.255.0," + bad); err == nil {
+			t.Errorf("%q was accepted", bad)
+		}
+	}
+}
+
+// The derivation is what stands in for a second address pool, so it has to be
+// injective over the whole v4 pool -- two clients on one v6 address is a
+// routing bug that presents as packet loss.
+func TestTheIPv6DerivationIsOneToOneOverThePool(t *testing.T) {
+	_, network, err := net.ParseCIDR("10.8.0.0/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := netip.MustParsePrefix("fd00:8::/64")
+	seen := map[netip.Addr]net.IP{}
+	for i := range 256 {
+		ip := net.IPv4(10, 8, 0, byte(i)).To4()
+		got, err := derive6(prefix, network, ip)
+		if err != nil {
+			t.Fatalf("%s: %v", ip, err)
+		}
+		if prev, dup := seen[got]; dup {
+			t.Fatalf("%s and %s both map to %s", prev, ip, got)
+		}
+		seen[got] = ip
+	}
+	if got, err := derive6(prefix, network, net.IPv4(10, 8, 0, 2).To4()); err != nil || got.String() != "fd00:8::2" {
+		t.Fatalf("10.8.0.2 -> %s (%v), want fd00:8::2", got, err)
+	}
+}
+
+// A prefix too small for the pool would wrap two clients onto one address, so
+// it is refused at construction rather than discovered as packet loss.
+func TestAPrefixTooSmallForThePoolIsRefused(t *testing.T) {
+	_, network, err := net.ParseCIDR("10.8.0.0/16")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := prefix6Fits(netip.MustParsePrefix("fd00:8::/126"), network); err == nil {
+		t.Fatal("a /126 was accepted for a /16 pool")
+	}
+	if err := prefix6Fits(netip.MustParsePrefix("fd00:8::/64"), network); err != nil {
+		t.Fatalf("a /64 was refused for a /16 pool: %v", err)
 	}
 }

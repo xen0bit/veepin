@@ -36,6 +36,16 @@ type ServerConfig struct {
 	// "10.10.0.1/24" (required). Its host is the gateway; its network is used
 	// for routing and NAT.
 	Address string
+	// Address6 is the same for the IPv6 half, e.g. "fd00:10::1/64". Empty
+	// leaves the tunnel IPv4-only.
+	//
+	// WireGuard assigns nothing: a peer's tunnel address is its AllowedIPs,
+	// configured at both ends. So this is only the server's *own* address —
+	// which is exactly what was missing, because without it the interface has
+	// no v6 address, the kernel installs no connected route for the v6 prefix,
+	// and the server cannot answer a ping to an address its peers are
+	// configured to reach it at.
+	Address6 string
 	// MTU is the inner-interface MTU (0 uses the default).
 	MTU int
 
@@ -83,6 +93,7 @@ const (
 	OptServerListenIP         = "listen"             // local IP to bind the UDP socket on
 	OptServerListenPort       = "listen-port"        // UDP port to listen on (default 51820)
 	OptServerAddress          = "address"            // server tunnel address, CIDR
+	OptServerAddress6         = "address6"           // server tunnel IPv6 address, CIDR (dual-stack)
 	OptServerMTU              = "mtu"                // inner MTU
 	OptServerTUN              = "tun"                // TUN interface name (empty = kernel picks)
 	OptServerPeerPublicKey    = "peer-public-key"    // a single peer's static public key, base64
@@ -106,6 +117,7 @@ func init() {
 		{Key: OptServerListenIP, Kind: client.OptStr, Default: "0.0.0.0", Help: "local IP to bind the UDP socket on (default 0.0.0.0)"},
 		{Key: OptServerListenPort, Kind: client.OptInt, Default: "51820", Help: "UDP port to listen on (default 51820)"},
 		{Key: OptServerAddress, Kind: client.OptCIDR, Help: "server tunnel address in CIDR form (required unless in -config)"},
+		{Key: OptServerAddress6, Kind: client.OptCIDR, Help: "server tunnel IPv6 address in CIDR form, for a dual-stack tunnel"},
 		{Key: OptServerMTU, Kind: client.OptInt, Default: "1420", Help: "inner MTU (default 1420)"},
 		client.TUNOpt(OptServerTUN),
 		{Key: OptServerPeerPublicKey, Kind: client.OptStr, Help: "a single peer's static public key, base64"},
@@ -139,6 +151,9 @@ func ServerConfigFromOptions(opts map[string]string) (ServerConfig, error) {
 	}
 	if v := opts[OptServerPrivateKey]; v != "" {
 		sc.PrivateKey = v
+	}
+	if v := opts[OptServerAddress6]; v != "" {
+		sc.Address6 = v
 	}
 	if v := opts[OptServerAddress]; v != "" {
 		sc.Address = v
@@ -207,10 +222,19 @@ func ServerConfigFromFile(cfg *Config) (ServerConfig, error) {
 	if len(cfg.Address) == 0 {
 		return ServerConfig{}, fmt.Errorf("%s is required", OptAddress)
 	}
+	// wg-quick's Address line is a list, and a dual-stack interface writes both
+	// families on it. Taking Address[0] read a v4-then-v6 config as IPv4-only
+	// and a v6-then-v4 one as a broken IPv4 server, so the family decides which
+	// field it lands in rather than the order.
+	v4, v6, err := splitAddressFamilies(cfg.Address)
+	if err != nil {
+		return ServerConfig{}, err
+	}
 	sc := ServerConfig{
 		PrivateKey: cfg.PrivateKey,
 		ListenPort: cfg.ListenPort,
-		Address:    cfg.Address[0],
+		Address:    v4,
+		Address6:   v6,
 		MTU:        cfg.MTU,
 		TUNName:    cfg.TUNName,
 		Logger:     cfg.Logger,
@@ -248,7 +272,13 @@ type Server struct {
 	shape       int // per-flow downstream shaping budget; 0 disables it
 	gateway     net.IP
 	network     *net.IPNet
-	obfCfg      ObfuscationConfig // AmneziaWG wire obfuscation (zero = stock)
+	// gateway6/network6 are the IPv6 half, zero when Address6 was empty. They
+	// are netip because that is what client.DualStackServer takes, and
+	// netip.Prefix has a zero value a caller can test where a nil *net.IPNet
+	// reads as an absent field and a bug equally well.
+	gateway6 netip.Addr
+	network6 netip.Prefix
+	obfCfg   ObfuscationConfig // AmneziaWG wire obfuscation (zero = stock)
 
 	logger *log.Logger
 	tun    *dataplane.TUN
@@ -284,6 +314,18 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("wireguard: %s: %w", OptAddress, err)
 	}
+	if gwAddr.To4() == nil {
+		return nil, fmt.Errorf("wireguard: %s %q is IPv6; the v6 half goes in %s",
+			OptServerAddress, cfg.Address, OptServerAddress6)
+	}
+	var gw6 netip.Addr
+	var net6 netip.Prefix
+	if cfg.Address6 != "" {
+		gw6, net6, err = parsePrefix6(cfg.Address6)
+		if err != nil {
+			return nil, fmt.Errorf("wireguard: %s: %w", OptServerAddress6, err)
+		}
+	}
 	if len(cfg.Peers) == 0 {
 		return nil, errors.New("wireguard: a server needs at least one peer")
 	}
@@ -317,6 +359,8 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		shape:       cfg.Shape,
 		gateway:     gwAddr,
 		network:     network,
+		gateway6:    gw6,
+		network6:    net6,
 		logger:      logger,
 		tun:         tun,
 		gate:        dataplane.NewGate(dataplane.AdmissionConfig{}),
@@ -365,6 +409,33 @@ func (s *Server) Gateway() net.IP { return s.gateway }
 
 // Network is the tunnel subnet, for routing and NAT rules.
 func (s *Server) Network() *net.IPNet { return s.network }
+
+// Gateway6 is the server's own tunnel-side IPv6 address, or the zero Addr when
+// the server was configured without one.
+//
+// It and Network6 implement client.DualStackServer, which is what carries the
+// v6 half through to internal/hostnet: the interface address, forwarding, and
+// the ip6tables MASQUERADE and FORWARD rules.
+//
+// Until this existed, `veepin serve wireguard` could carry inner IPv6 and could
+// not be *reached* over it. Cryptokey routing admitted v6 (that was fixed with
+// its own cell), AllowedIPs parsed and stored v6 prefixes, and the data path
+// moved v6 packets — but the server's own address never reached the interface,
+// so the interop cell had to add it by hand from the entrypoint script with a
+// comment saying why. That comment was the accurate description of a gap, and
+// this is the gap closed.
+func (s *Server) Gateway6() netip.Addr { return s.gateway6 }
+
+// Network6 is the tunnel's IPv6 subnet, for routing and NAT rules. See
+// Gateway6.
+func (s *Server) Network6() netip.Prefix { return s.network6 }
+
+// Server implements client.DualStackServer, which is how cmd/veepin and the
+// supervisor find the v6 half without client.Server having to carry a pair of
+// methods every IPv4-only facade would answer nothing to. Asserted here so
+// renaming either method is a compile error rather than a listener that
+// silently stops configuring v6.
+var _ client.DualStackServer = (*Server)(nil)
 
 // MTU is the recommended inner-interface MTU.
 func (s *Server) MTU() int { return s.mtu }
@@ -636,6 +707,46 @@ func parseCIDR(s string) (net.IP, *net.IPNet, error) {
 		ip = v4
 	}
 	return ip, network, nil
+}
+
+// splitAddressFamilies sorts a wg-quick Address list into its first IPv4 and
+// first IPv6 entry. A second address of either family is an error rather than a
+// silent choice: the server installs exactly one address per family, and
+// quietly ignoring the rest is how a config that looks right stops working.
+func splitAddressFamilies(addrs []string) (v4, v6 string, err error) {
+	for _, a := range addrs {
+		ip, _, perr := net.ParseCIDR(a)
+		if perr != nil {
+			return "", "", fmt.Errorf("%s %q: %w", OptAddress, a, perr)
+		}
+		slot := &v6
+		if ip.To4() != nil {
+			slot = &v4
+		}
+		if *slot != "" {
+			return "", "", fmt.Errorf("%s names two addresses of the same family (%q and %q); "+
+				"a server installs one per family", OptAddress, *slot, a)
+		}
+		*slot = a
+	}
+	if v4 == "" {
+		return "", "", fmt.Errorf("%s names no IPv4 address", OptAddress)
+	}
+	return v4, v6, nil
+}
+
+// parsePrefix6 parses a v6 CIDR into the host address and its prefix. It
+// rejects a v4 address, which would otherwise produce a v4-mapped netip.Addr
+// that hostnet would hand to `ip -6`.
+func parsePrefix6(s string) (netip.Addr, netip.Prefix, error) {
+	p, err := netip.ParsePrefix(s)
+	if err != nil {
+		return netip.Addr{}, netip.Prefix{}, err
+	}
+	if !p.Addr().Is6() || p.Addr().Is4In6() {
+		return netip.Addr{}, netip.Prefix{}, fmt.Errorf("%q is not an IPv6 address", s)
+	}
+	return p.Addr(), p.Masked(), nil
 }
 
 // shortKey is a base64 key abbreviated for logs — enough to tell peers apart

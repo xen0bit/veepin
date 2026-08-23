@@ -307,15 +307,25 @@ func negotiate(ctx context.Context, cfg *Config, ch *control.Channel, tlsCfg *tl
 		return client.Result{}, nil, 0, err
 	}
 	logger.Printf("openvpn: data channel cipher %s", effectiveCipher)
+	routes := []netip.Prefix{netip.PrefixFrom(netip.IPv4Unspecified(), 0)}
+	if pushed.localIP6 != nil {
+		// The pump's route trie is per-family, so a v4 default route matches no
+		// v6 packet. Without this the interface would carry a v6 address and
+		// drop every packet sent from it, which reads as a routing problem on
+		// the host and is not one.
+		routes = append(routes, netip.PrefixFrom(netip.IPv6Unspecified(), 0))
+	}
 	tun := &tunnel{
 		cipher: dc,
-		routes: []netip.Prefix{netip.PrefixFrom(netip.IPv4Unspecified(), 0)},
+		routes: routes,
 	}
 	tun.peer.Store(endpoint)
 
 	res := client.Result{
-		AssignedIP: pushed.localIP,
-		Netmask:    pushed.netmask,
+		AssignedIP:  pushed.localIP,
+		Netmask:     pushed.netmask,
+		AssignedIP6: pushed.localIP6,
+		Prefix6:     pushed.prefix6,
 		// Gateway is the server's real transport IP: the client router pins a host
 		// route to it via the physical gateway so the encapsulated packets do not
 		// loop back into the tunnel. The pushed route-gateway is the tunnel's

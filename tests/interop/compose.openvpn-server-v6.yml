@@ -1,0 +1,41 @@
+# Reference OpenVPN client -> veepin OpenVPN server, carrying IPv6 inside.
+#
+# The client config asks for nothing v6-specific, which is what makes this a
+# test of veepin's PUSH_REPLY rather than of the fixture: `ifconfig-ipv6` is a
+# pushed option, so a stock OpenVPN client's v6 configuration comes entirely
+# from what the server sent.
+#
+# Data-path check: the *server* pings fd00:8::2, the address the client should
+# have derived. The obvious direction -- client pings the server -- passes with
+# the two ifconfig-ipv6 arguments swapped, because a client holding the server's
+# address answers that ping from its own interface without a packet crossing
+# anything. See the test's comment.
+#
+# The underlay stays IPv4; only the inner family changes.
+name: veepin-interop-openvpn-server-v6
+
+services:
+  veepin-ovpn-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    volumes:
+      - ./openvpn/pki:/pki:ro
+      - ./veepin/openvpn-server-v6-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  openvpn-client:
+    build:
+      context: openvpn
+    image: interop-openvpn
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-ovpn-server]
+    volumes:
+      - ./openvpn/pki:/pki:ro
+      - ./openvpn/client-v6.conf:/client.conf:ro
+      - ./openvpn/client-entrypoint.sh:/client-entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/client-entrypoint.sh"]

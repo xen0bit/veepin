@@ -159,3 +159,71 @@ func TestDefaultMTUMatchesTheProtocolConvention(t *testing.T) {
 		t.Errorf("defaultMTU = %d, want WireGuard's conventional 1420", defaultMTU)
 	}
 }
+
+// The client parsed every address on wg-quick's Address line, validated them,
+// and then kept only the first — so a dual-stack config came up IPv4-only with
+// nothing logged and nothing to notice. dataplane.AddrPool6 had exactly one
+// consumer in the tree; this is one of the two that were missing.
+func TestAClientKeepsTheIPv6AddressItUsedToDiscard(t *testing.T) {
+	c := Config{
+		PrivateKey: b64Key(1),
+		Address:    []string{"10.10.0.2/24", "fd00:10::2/64"},
+		Peers: []Peer{{
+			PublicKey:  b64Key(2),
+			Endpoint:   "203.0.113.1:51820",
+			AllowedIPs: []string{"0.0.0.0/0"},
+		}},
+	}
+	r, err := c.resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := r.address.String(); got != "10.10.0.2/24" {
+		t.Errorf("address = %s", got)
+	}
+	if got := r.address6.String(); got != "fd00:10::2/64" {
+		t.Errorf("address6 = %s, want the v6 entry to survive", got)
+	}
+}
+
+// Order must not decide the family, because wg-quick does not require one.
+func TestTheClientReadsAddressFamiliesByFamilyAndNotByOrder(t *testing.T) {
+	c := Config{
+		PrivateKey: b64Key(1),
+		Address:    []string{"fd00:10::2/64", "10.10.0.2/24"},
+		Peers: []Peer{{
+			PublicKey:  b64Key(2),
+			Endpoint:   "203.0.113.1:51820",
+			AllowedIPs: []string{"0.0.0.0/0"},
+		}},
+	}
+	r, err := c.resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.address.Addr().Is4() || !r.address6.Addr().Is6() {
+		t.Fatalf("families crossed: v4 slot = %s, v6 slot = %s", r.address, r.address6)
+	}
+}
+
+// A second address of one family would be silently dropped, which is how a
+// config that looks right stops working.
+func TestTheClientRefusesTwoAddressesOfOneFamily(t *testing.T) {
+	for _, addrs := range [][]string{
+		{"10.10.0.2/24", "10.10.1.2/24"},
+		{"fd00:10::2/64", "fd00:11::2/64"},
+	} {
+		c := Config{
+			PrivateKey: b64Key(1),
+			Address:    addrs,
+			Peers: []Peer{{
+				PublicKey:  b64Key(2),
+				Endpoint:   "203.0.113.1:51820",
+				AllowedIPs: []string{"0.0.0.0/0"},
+			}},
+		}
+		if _, err := c.resolve(); err == nil {
+			t.Errorf("%v was accepted", addrs)
+		}
+	}
+}

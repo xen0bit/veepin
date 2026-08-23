@@ -3,6 +3,7 @@ package openvpn
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -44,6 +45,19 @@ type ServerConfig struct {
 	// Pool is the internal address pool handed to clients in CIDR form (default
 	// 10.8.0.0/24). Its first host is the server's tunnel address.
 	Pool string
+	// Pool6 is the tunnel's IPv6 prefix in CIDR form, e.g. "fd00:8::/64".
+	// Empty, the default, leaves the tunnel IPv4-only.
+	//
+	// A client's v6 address is *derived* from its v4 one -- the v4 address's
+	// offset within Pool, added to this prefix's base -- rather than drawn from
+	// a second pool. That is a deliberate departure from OpenVPN's own
+	// --ifconfig-ipv6-pool, and the reason is lifecycle rather than taste: this
+	// server has one allocator and no path that ever releases from it (a UDP
+	// client simply stops answering), so a second allocator would be a second
+	// thing to leak and a second thing to desynchronise. Derivation is 1:1 with
+	// the v4 assignment by construction, needs no release, and makes the
+	// mapping legible -- 10.8.0.2 becomes fd00:8::2.
+	Pool6 string
 	// DNS servers pushed to clients.
 	DNS []net.IP
 	// MTU pushed to clients as tun-mtu (0 uses the default).
@@ -169,11 +183,17 @@ type Server struct {
 	newWrapper func() (control.Wrapper, error)
 	pool       *dataplane.AddrPool
 	gateway    net.IP
-	dns        []net.IP
-	mtu        int
-	shape      int
-	logger     *log.Logger
-	gate       *dataplane.Gate
+	// pool6 is the tunnel's IPv6 prefix, zero when the tunnel is IPv4-only, and
+	// gateway6 the server's own address inside it. There is no v6 allocator:
+	// see ServerConfig.Pool6 for why a client's v6 address is derived from its
+	// v4 one instead.
+	pool6    netip.Prefix
+	gateway6 netip.Addr
+	dns      []net.IP
+	mtu      int
+	shape    int
+	logger   *log.Logger
+	gate     *dataplane.Gate
 
 	listenAddr *net.UDPAddr
 	tun        *dataplane.TUN
@@ -214,6 +234,29 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("openvpn: pool: %w", err)
 	}
 
+	var pool6 netip.Prefix
+	var gateway6 netip.Addr
+	if cfg.Pool6 != "" {
+		if pool6, err = netip.ParsePrefix(cfg.Pool6); err != nil {
+			return nil, fmt.Errorf("openvpn: %s: %w", OptServerPool6, err)
+		}
+		if !pool6.Addr().Is6() || pool6.Addr().Is4In6() {
+			return nil, fmt.Errorf("openvpn: %s %q is not an IPv6 prefix", OptServerPool6, cfg.Pool6)
+		}
+		pool6 = pool6.Masked()
+		// Check the prefix against the *largest* address the pool can hand out,
+		// not against the gateway. The gateway is the pool's first host, so
+		// deriving it proves nothing about the client at the far end -- and a
+		// derivation that wrapped would put two clients on one address, which
+		// is a routing bug that looks like packet loss.
+		if err := prefix6Fits(pool6, pool.Network()); err != nil {
+			return nil, fmt.Errorf("openvpn: %s: %w", OptServerPool6, err)
+		}
+		if gateway6, err = derive6(pool6, pool.Network(), gateway); err != nil {
+			return nil, fmt.Errorf("openvpn: %s: %w", OptServerPool6, err)
+		}
+	}
+
 	port := cfg.ListenPort
 	if port == 0 {
 		port = 1194
@@ -248,6 +291,8 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		gate:       dataplane.NewGate(dataplane.AdmissionConfig{}),
 		pool:       pool,
 		gateway:    gateway,
+		pool6:      pool6,
+		gateway6:   gateway6,
 		dns:        cfg.DNS,
 		mtu:        mtu,
 		shape:      cfg.Shape,
@@ -267,6 +312,71 @@ func (s *Server) Gateway() net.IP { return s.gateway }
 
 // Network is the tunnel subnet, for routing and NAT rules.
 func (s *Server) Network() *net.IPNet { return s.pool.Network() }
+
+// Gateway6 is the server's own tunnel-side IPv6 address, or the zero Addr when
+// the server was configured without an IPv6 prefix.
+//
+// It and Network6 implement client.DualStackServer, which carries the v6 half
+// through to internal/hostnet: the interface address, forwarding, and the
+// ip6tables MASQUERADE and FORWARD rules. Without them a client could be pushed
+// a v6 address it could not reach anything with.
+func (s *Server) Gateway6() netip.Addr { return s.gateway6 }
+
+// Network6 is the tunnel's IPv6 prefix, for routing and NAT rules.
+func (s *Server) Network6() netip.Prefix { return s.pool6 }
+
+// Server implements client.DualStackServer. Asserted here so renaming either
+// method is a compile error rather than a listener that silently stops
+// configuring v6.
+var _ client.DualStackServer = (*Server)(nil)
+
+// prefix6Fits reports whether every address the v4 pool can hand out maps to a
+// distinct address inside prefix. A /64 has 64 host bits and a /24 pool needs
+// eight, so this only refuses a deliberately tiny prefix -- where silently
+// wrapping two clients onto one address would be far worse.
+func prefix6Fits(prefix netip.Prefix, network *net.IPNet) error {
+	poolBits, _ := network.Mask.Size()
+	need := 32 - poolBits
+	if host := 128 - prefix.Bits(); host < need {
+		return fmt.Errorf("%s has %d host bits, too few for the %d a %s pool needs",
+			prefix, host, need, network)
+	}
+	return nil
+}
+
+// client6 is the IPv6 address a client holding ip is given, or false when the
+// server has no v6 prefix. A derivation that fails here cannot: NewServer has
+// already proved the prefix has room for every address the pool can hand out.
+func (s *Server) client6(ip net.IP) (netip.Addr, bool) {
+	if !s.pool6.IsValid() {
+		return netip.Addr{}, false
+	}
+	addr, err := derive6(s.pool6, s.pool.Network(), ip)
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return addr, true
+}
+
+// derive6 maps an address inside the v4 pool to its address inside the v6
+// prefix, by adding the v4 address's offset within its network to the prefix's
+// base. 10.8.0.2 in 10.8.0.0/24 under fd00:8::/64 becomes fd00:8::2.
+//
+// The mapping is total and injective over the pool, which is what lets it stand
+// in for a second allocator: two clients cannot collide because their v4
+// addresses cannot, and nothing has to be released because nothing was taken.
+func derive6(prefix netip.Prefix, network *net.IPNet, ip net.IP) (netip.Addr, error) {
+	v4 := ip.To4()
+	base := network.IP.To4()
+	if v4 == nil || base == nil {
+		return netip.Addr{}, fmt.Errorf("%s is not an IPv4 address in %s", ip, network)
+	}
+	offset := binary.BigEndian.Uint32(v4) - binary.BigEndian.Uint32(base)
+
+	addr := prefix.Addr().As16()
+	binary.BigEndian.PutUint32(addr[12:16], binary.BigEndian.Uint32(addr[12:16])+offset)
+	return netip.AddrFrom16(addr), nil
+}
 
 // ListenAndServe binds the UDP socket, starts the data path, and serves clients
 // until Close. It blocks.
@@ -516,10 +626,16 @@ func (s *Server) handshake(cl *serverClient) {
 	_ = cl.ch.SetDeadline(time.Time{})
 
 	ipAddr, _ := netip.AddrFromSlice(ip.To4())
+	routes := []netip.Prefix{netip.PrefixFrom(ipAddr, 32)}
+	if addr6, ok := s.client6(ip); ok {
+		// The pump's route trie is per-family, so a /128 beside the /32 is all
+		// that is needed for outbound v6 to find this client.
+		routes = append(routes, netip.PrefixFrom(addr6, 128))
+	}
 	tun := &serverTunnel{
 		cipher: cipher,
 		peerID: peerID,
-		routes: []netip.Prefix{netip.PrefixFrom(ipAddr, 32)},
+		routes: routes,
 	}
 	tun.peer.Store(cl.addr)
 
@@ -579,6 +695,16 @@ func (s *Server) buildPushReply(ip net.IP, peerID uint32) []byte {
 	b.WriteString(",topology subnet")
 	b.WriteString(",ping 10,ping-restart 60")
 	fmt.Fprintf(&b, ",ifconfig %s %s", ip, s.pool.Netmask())
+	if addr6, ok := s.client6(ip); ok {
+		// RFC-free territory: this is OpenVPN's own option, and its argument
+		// order is the client's address first and the peer's second -- the
+		// opposite way round from --ifconfig on the command line, which names
+		// the local address then the remote. Getting it backwards produces a
+		// client that configures the server's address on its own interface,
+		// which looks like a routing problem and is not one.
+		fmt.Fprintf(&b, ",ifconfig-ipv6 %s/%d %s", addr6, s.pool6.Bits(), s.gateway6)
+		fmt.Fprintf(&b, ",route-ipv6-gateway %s", s.gateway6)
+	}
 	for _, d := range s.dns {
 		fmt.Fprintf(&b, ",dhcp-option DNS %s", d)
 	}
@@ -771,6 +897,7 @@ const (
 	OptServerListenIP   = "listen"
 	OptServerListenPort = "port"
 	OptServerPool       = "pool"
+	OptServerPool6      = "pool6"
 	OptServerDNS        = "dns"
 	OptServerTUN        = "tun"
 	// Control-channel protection, matching the client options of the same name.
@@ -806,6 +933,7 @@ func init() {
 		{Key: OptServerListenIP, Kind: client.OptStr, Default: "0.0.0.0", Help: "local IP to bind the UDP socket on (default 0.0.0.0)"},
 		{Key: OptServerListenPort, Kind: client.OptInt, Default: "1194", Help: "UDP port to listen on (default 1194)"},
 		{Key: OptServerPool, Kind: client.OptCIDR, Default: "10.8.0.0/24", Help: "internal address pool handed to clients (default 10.8.0.0/24)"},
+		{Key: OptServerPool6, Kind: client.OptCIDR, Help: "IPv6 prefix for a dual-stack tunnel, e.g. fd00:8::/64 (empty leaves the tunnel IPv4-only)"},
 		{Key: OptServerDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers pushed to clients"},
 		client.TUNOpt(OptServerTUN),
 		client.ShapeOpt(OptServerShape, "downstream"),
@@ -818,6 +946,7 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 	cfg := ServerConfig{
 		ListenIP: opts[OptServerListenIP],
 		Pool:     opts[OptServerPool],
+		Pool6:    opts[OptServerPool6],
 		TUNName:  opts[OptServerTUN],
 		Logger:   log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds),
 	}
