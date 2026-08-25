@@ -53,6 +53,16 @@ func TestNoTLSConfigPinsCurvePreferences(t *testing.T) {
 	// way; an entry here is a protocol whose key exchange is classical.
 	allowed := map[string]string{}
 
+	// The one sanctioned pin, and it goes the other way. internal/pqpolicy sets
+	// CurvePreferences to raise the floor -- ML-KEM mechanisms only -- which is
+	// the opposite of the loss this guard exists to catch. Sanctioning the
+	// package rather than each facade is what keeps the rule at one exception:
+	// every pq- variant reaches the field through pqpolicy.HardenTLS and nowhere
+	// else, so "veepin does not pin curves, except in the package whose whole
+	// purpose is to raise the floor" stays a sentence with one clause to argue
+	// about. Ten allowed file paths would not.
+	const raisesTheFloor = "internal/pqpolicy"
+
 	fset := token.NewFileSet()
 	var offenders []string
 	err := filepath.WalkDir(".", func(path string, d os.DirEntry, err error) error {
@@ -82,6 +92,9 @@ func TestNoTLSConfigPinsCurvePreferences(t *testing.T) {
 				return true
 			}
 			if _, ok := allowed[path]; ok {
+				return true
+			}
+			if strings.HasPrefix(filepath.ToSlash(path), raisesTheFloor+"/") {
 				return true
 			}
 			offenders = append(offenders, fset.Position(kv.Pos()).String())
