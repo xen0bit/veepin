@@ -48,8 +48,10 @@ What remains, and why each stopped where it did:
   the other thirteen follow is now a decision with evidence behind it.
 - **H6** is gated on a profile nobody has taken since Option 1 landed, and
   **H7** on a product decision. **H11** has a decision written and no code.
-- **H3b** (ML-DSA in IKEv2's AUTH payload) stays gated on surveying the current
-  IETF document and whether strongSwan 6.x implements it.
+- **H3b** (ML-DSA in IKEv2's AUTH payload) has been surveyed and stays gated —
+  but on a release date now rather than an unknown. The draft is through IESG
+  review; strongSwan's ML-DSA authentication is on a branch for 6.1.0 and not in
+  any release.
 
 Three predictions on this page turned out to be wrong, and each is corrected in
 place rather than deleted: item 3's ql2tpd hypothesis (it is not a duplicate
@@ -873,7 +875,7 @@ than a bare assertion.
 |---|------|-------|------|------|
 | H1 | Every TLS 1.3 protocol already does hybrid PQ key exchange, and nothing says so | **High** | Low | ✅ landed |
 | H2 | OpenVPN's server caps TLS at 1.2, which forecloses H1 for it | Medium | Low | ✅ landed — the hypothesis held |
-| H3 | PQ **authentication** — unblocked by Go 1.27's `crypto/mldsa` | **High** | Medium | ✅ H3a landed; H3b still gated on the IKEv2 interop survey |
+| H3 | PQ **authentication** — unblocked by Go 1.27's `crypto/mldsa` | **High** | Medium | ✅ H3a landed; H3b surveyed — gated on strongSwan 6.1.0 |
 | H4 | Inner IPv6 reaches one protocol of sixteen | **High** | **High** | pick two protocols, not all fifteen |
 | H5 | GSO/GRO are IPv4-only, and IKEv2 now carries inner v6 | Medium | Medium | ✅ surveyed: there is no slow path, only an absent optimisation |
 | H6 | `scaling-the-data-path.md` Option 2 — parallelism with per-tunnel affinity | Medium | **High** | a profile showing the ceiling actually binds |
@@ -1029,7 +1031,7 @@ than a veepin↔veepin cell. Expect the answer to be partial — a vendor client
 verifies an ML-DSA chain is a different thing from one that offers the signature
 algorithm — and expect that partial answer to be worth publishing either way.
 
-### H3b. IKEv2 post-quantum authentication is real protocol work
+### H3b. IKEv2 post-quantum authentication is real protocol work *(surveyed)*
 
 This is the one that closes `security.md`'s stated gap, since IKEv2 is where the
 PQ key exchange already lives and the mismatch is therefore sharpest: ML-KEM-768
@@ -1043,6 +1045,48 @@ whether a peer speaks it. **Survey before scoping:** find the current IETF
 document for ML-DSA in IKEv2 auth, and check whether strongSwan 6.x implements
 it. If it does not, this ships with a veepin↔veepin cell as its only evidence —
 the position item 8 was rejected for — and should wait.
+
+#### The survey, taken 2026-08-25
+
+**The specification half is done, and it is the extension point this page
+predicted.** [`draft-ietf-ipsecme-ikev2-pqc-auth`][pqcauth] is at **-12**
+(20 August 2026) and its IESG state is *Approved-announcement sent* — through
+review, heading for an RFC number. It was `-02` when the paragraph above was
+written. Four things it settles:
+
+- **No new AUTH method.** It uses RFC 7427 Digital Signature (method 14) with a
+  DER-encoded `AlgorithmIdentifier`, which is exactly what `certauth.go` already
+  builds and parses. ML-DSA-44/65/87 and twelve SLH-DSA variants get identifiers
+  from [RFC 9881][rfc9881] / RFC 9909 — the same PKIX objects `crypto/x509`
+  already understands.
+- **The "Identity" hash (value 5) must be advertised** in
+  `SIGNATURE_HASH_ALGORITHMS`. ML-DSA hashes the message internally, so no
+  external hash is applied — and `sigHashList` in `certauth.go` currently offers
+  SHA-512/384/256 and nothing else. That is the one wire change with teeth.
+- **Fragmentation is mandatory**, because the signatures and keys do not fit.
+  Item 1 of this plan gave veepin outbound RFC 7383 fragmentation, having been
+  justified by a documentation claim that turned out to be false; it is the
+  prerequisite for this, which nobody knew at the time.
+- Deterministic vs hedged signing is a local choice; verification is
+  mode-agnostic.
+
+**The peer half is not done, and that is still the gate.** strongSwan's latest
+release is **6.0.7** (June 2026), which has ML-KEM key exchange and no ML-DSA
+authentication. The implementation lives on an `ml-dsa` branch targeted at
+**6.1.0**, whose ETA upstream has tied explicitly to this draft finalising —
+which it now has. libreswan, the tree's second IKEv2 peer, has nothing.
+
+**Verdict: unchanged, and for a smaller reason than before.** Today this would
+still ship with a veepin↔veepin cell as its only evidence, which is the position
+item 8 was rejected for. But the gate is no longer "is there a specification and
+does anyone implement it" — it is a release date. When strongSwan 6.1.0 ships,
+this becomes an ordinary protocol row with a real peer, and the scoping is
+already done: `sigHashList` gains the Identity hash, `certauth.go` gains the
+ML-DSA `AlgorithmIdentifier` arm, and `crypto/mldsa` supplies the rest.
+`pqauth_test.go` already proves the Go side end to end for TLS.
+
+[pqcauth]: https://datatracker.ietf.org/doc/draft-ietf-ipsecme-ikev2-pqc-auth/
+[rfc9881]: https://www.rfc-editor.org/rfc/rfc9881.html
 
 ### The prerequisite, measured rather than guessed
 
@@ -1139,7 +1183,9 @@ happened to exist. Item 4's fixture survey should add a question to its list:
 *which test seams depend on runtime behaviour that a toolchain bump can remove?*
 
 **Verdict: no longer "watch." H3a is a week and produces a publishable result
-either way. H3b is gated on the interop survey above, and should stay gated.**
+either way. H3b is gated on the interop survey above, and should stay gated** —
+the survey has since been taken, and the gate is now strongSwan 6.1.0 rather
+than an open question. See [the survey](#the-survey-taken-2026-08-25).
 
 Also worth noting, since the original survey turned it up: `crypto/hpke` is in
 the standard library as of 1.26. Not post-quantum, and nothing in the tree needs
