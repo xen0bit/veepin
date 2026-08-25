@@ -57,10 +57,21 @@ shared across every tunnel rather than being per-client:
   one goroutine and decapsulates every client's ingress in turn.
 
 So the ceiling is roughly one core per direction for the *whole* server, not just
-per tunnel — adding clients does not add parallelism. The crypto is not the limit:
-the `ESPCrypter` is safe to call concurrently and scales linearly with cores
-(`BenchmarkESPDecapParallel`), so it is *parallel-ready* even though the deployed
-path drives it from a single goroutine. The syscalls are batched to raise what
+per tunnel — adding clients does not add parallelism. Measured, that one core is
+17.7 Gbit/s inbound and 14.7 Gbit/s outbound at 1400-byte packets with the
+syscalls removed. The crypto is not the limit: the `ESPCrypter` holds no shared
+state and is safe to call concurrently, so it is *parallel-ready* even though the
+deployed path drives it from a single goroutine.
+
+It is worth being precise about how much that readiness is worth, because it was
+overstated here as "scales linearly with cores." It does not.
+`BenchmarkESPDecapParallel` — an independent SA per goroutine, nothing shared —
+plateaus at **2.4×** the single-core rate and regresses past sixteen threads,
+because the one allocation per packet that the data path's contract permits makes
+the collector the binding constraint before the cipher is. The same benchmark
+under `GOGC=off` reaches 8.8×. So the parallelism is available in the cipher and
+not yet reachable through the allocator; see
+[`doc/scaling-the-data-path.md`](scaling-the-data-path.md#measured-the-profile-option-2-was-gated-on-taken). The syscalls are batched to raise what
 that one core can do — inbound reads drain in `recvmmsg` batches, on
 GSO-capable TUNs one read can carry a TCP super-frame that egresses as one
 batched send, and inbound bulk TCP coalesces back into super-frames written to
@@ -70,6 +81,39 @@ readers (multi-queue TUN outbound, `SO_REUSEPORT` inbound), which brings
 packet-reordering risk and lock contention that nothing here is currently asking
 for — the approach and its costs are sketched in
 [`doc/scaling-the-data-path.md`](scaling-the-data-path.md).
+
+## veepin is a road-warrior VPN on purpose
+
+Every server here assigns a client an address out of a pool and routes to that
+address. That is the shape of the whole tree: `client.Result` describes an
+interface address and the routes to install for it, config mode (or its
+equivalent in fifteen other protocols) hands out the lease, and a tunnel's
+traffic selector narrows to the address that was assigned.
+
+**A site-to-site gateway is a different thing, and veepin is not one.** What that
+would mean concretely, in IKEv2 terms: traffic selectors that are subnets rather
+than one assigned host address, several Child SAs under one IKE SA with
+different selectors, no config mode at all because both ends already have their
+own addressing, and a `client.Result` that describes a route *set* rather than an
+interface address. The last of those is a change to the `client` contract every
+protocol implements, which is why this is a program and not a feature.
+
+This is a decision, not an omission, and it is recorded here so that it is
+answered on purpose rather than by drift. The evidence for it is available if it
+is ever revisited — strongSwan does both roles, so a site-to-site cell would have
+a real peer and would not ship with a veepin↔veepin cell as its only proof. What
+argues against it is that it would be the largest capability in the tree,
+resting on a contract change under sixteen protocols, in service of a deployment
+nobody here has asked for. The README's IKEv2 bullet says "deliberately" for this
+reason.
+
+Two things follow for anyone reading the tree:
+
+- **Do not read a `-pool` as a site-to-site selector.** A server hands out host
+  addresses; it does not route a peer's subnet.
+- **A protocol's traffic-selector narrowing is a road-warrior narrowing.**
+  `TSi` is answered with the assigned lease (RFC 7296 §2.19's worked example),
+  which is correct for a client and wrong for a gateway that owns a subnet.
 
 ## GlobalProtect has no key exchange and no forward secrecy
 

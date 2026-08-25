@@ -499,9 +499,17 @@ routing table has no per-route metrics to arm one safely), the layer-2 protocols
 
 The **server** is Linux only: `internal/hostnet` speaks `iptables` and `sysctl`.
 
-Windows is out of scope. wintun is a DLL, which costs both the "no runtime
-dependencies" and the pure-Go claims; it is a trade worth making only for
-someone who wants it enough to argue it.
+Windows is out of scope, and the reason is not the one this used to give. wintun
+is loaded at runtime through `LoadLibrary`, not linked, so the pure-Go claim
+would survive it — wireguard-go does exactly this on Windows without cgo. What
+is true is the rest: shipping and trusting a signed third-party DLL is a real
+runtime dependency and a real supply-chain surface, and the TUN is only the
+visible half. The other half is `internal/hostnet`, which speaks `iptables` and
+`sysctl` and would need a second backend in `netsh` or WFP.
+
+The reason that outranks all of those: the macOS client compiles, is shipped,
+and has never been run by anyone. Adding a second unverified platform before the
+first one is verified turns two bugs into one indistinguishable failure.
 
 ### Logging
 
@@ -825,8 +833,10 @@ each a localized extension point, not a structural rework:
   binds the family of its `-listen` address (`0.0.0.0` for IPv4 by default, `::`
   for an IPv6/dual-stack socket that serves both). Serving both families
   simultaneously is what the one `::` dual-stack socket provides; separate v4+v6
-  sockets per port are not added. This is one IKE SA per Child, sufficient for
-  road-warrior clients rather than a site-to-site multi-SA gateway.
+  sockets per port are not added. This is one IKE SA per Child, which is
+  **deliberately** road-warrior rather than a site-to-site multi-SA gateway —
+  see [doc/security.md](doc/security.md#veepin-is-a-road-warrior-vpn-on-purpose)
+  for what that forecloses and why the boundary is drawn there.
 - **Downstream flow shaping is opt-in, and covers sizes rather than timing.**
   One inner packet becomes one outer datagram, so the size pattern of an inner
   TLS handshake otherwise survives encapsulation — the fingerprint of

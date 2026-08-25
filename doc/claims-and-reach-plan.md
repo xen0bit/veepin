@@ -876,14 +876,14 @@ than a bare assertion.
 | H1 | Every TLS 1.3 protocol already does hybrid PQ key exchange, and nothing says so | **High** | Low | ✅ landed |
 | H2 | OpenVPN's server caps TLS at 1.2, which forecloses H1 for it | Medium | Low | ✅ landed — the hypothesis held |
 | H3 | PQ **authentication** — unblocked by Go 1.27's `crypto/mldsa` | **High** | Medium | ✅ H3a landed; H3b surveyed — gated on strongSwan 6.1.0 |
-| H4 | Inner IPv6 reaches one protocol of sixteen | **High** | **High** | pick two protocols, not all fifteen |
+| H4 | Inner IPv6 reaches one protocol of sixteen | **High** | **High** | ✅ two done (four reached); the rest is a decision with evidence — see below |
 | H5 | GSO/GRO are IPv4-only, and IKEv2 now carries inner v6 | Medium | Medium | ✅ surveyed: there is no slow path, only an absent optimisation |
-| H6 | `scaling-the-data-path.md` Option 2 — parallelism with per-tunnel affinity | Medium | **High** | a profile showing the ceiling actually binds |
-| H7 | Site-to-site: multi-SA, subnet selectors, no config-mode assignment | **High** | **High** | a decision that veepin is for more than road warriors |
+| H6 | `scaling-the-data-path.md` Option 2 — parallelism with per-tunnel affinity | Medium | **High** | ✅ profiled: the ceiling does not bind, and the allocator caps parallelism at 2.4× — not next |
+| H7 | Site-to-site: multi-SA, subnet selectors, no config-mode assignment | **High** | **High** | ✅ decided: road warriors, on purpose — a boundary in `security.md` |
 | H8 | Record the peer, replay it offline | **High** | Medium | none — the cheapest leverage on this page |
 | H9 | Memory hygiene that can actually hold, instead of zeroing that cannot | Medium | Low | ✅ landed |
 | H10 | The management panel's authentication ceiling | Medium | Medium | ✅ decided: one operator, permanently |
-| H11 | Windows — and the README names the wrong obstacle first | Low | **High** | somebody who wants it enough to argue it |
+| H11 | Windows — and the README names the wrong obstacle first | Low | **High** | ✅ the README now names the right obstacles; still nobody arguing for the port |
 | H12 | Signed releases, SBOM, continuous fuzzing | Low | Low | ✅ signing + SBOM landed; OSS-Fuzz is an application, not code |
 
 **If only two things happen from this page: H1 and H8.** H1 is a claim veepin has
@@ -1327,7 +1327,7 @@ program rather than a task. The afternoon this cost was worth it.
 
 ---
 
-## H7. Site-to-site: multiple SAs, subnet selectors, no config-mode assignment
+## H7. Site-to-site: multiple SAs, subnet selectors, no config-mode assignment *(decided: no)*
 
 The README names this as a boundary in one clause — *"one IKE SA per Child,
 sufficient for road-warrior clients rather than a site-to-site multi-SA
@@ -1349,6 +1349,24 @@ one of the candidates that would ship with a `—†`.
 product question and it should be answered on purpose. If the answer is no, the
 README clause should say "deliberately" rather than "sufficient," and this entry
 becomes a permanent boundary in `doc/security.md` instead of a horizon item.
+
+### Decided: no, and it is written down as a boundary
+
+The answer is **road warriors, on purpose**. The README's IKEv2 bullet now says
+"deliberately" and points at
+[`security.md`](security.md#veepin-is-a-road-warrior-vpn-on-purpose), which
+carries the long form: what a site-to-site gateway would actually require, why
+the `client.Result` contract change under sixteen protocols is what makes it a
+program rather than a feature, and the two things that follow for anyone reading
+the tree (a `-pool` is not a site-to-site selector; traffic-selector narrowing is
+a road-warrior narrowing).
+
+The decision is recorded rather than assumed so that reversing it is a decision
+too. Nothing about it is technically forced — strongSwan does both roles, so the
+evidence would be there — and the case against is that it would be the largest
+capability in the tree, resting on a contract change under every protocol, for a
+deployment nobody has asked for. One word in the README is what it takes to
+reopen.
 
 ---
 
@@ -1475,7 +1493,7 @@ never assumed one.
 
 ---
 
-## H11. Windows — and the README names the wrong obstacle first
+## H11. Windows — and the README names the wrong obstacle first *(README corrected)*
 
 The README's position is *"wintun is a DLL, which costs both the 'no runtime
 dependencies' and the pure-Go claims; it is a trade worth making only for someone
@@ -1496,6 +1514,16 @@ or WFP. That is the expensive part, and the README does not mention it.
 above: the macOS client compiles, is shipped, and *has never been run by anyone*.
 Adding a second unverified platform before verifying the first turns two bugs
 into one indistinguishable failure — the same argument that gates item 11.
+
+### What changed: the README now says this
+
+The port is still not recommended and nobody is arguing for it, so no code
+moved. What was wrong was the *stated* reason — an invitation to argue is worth
+nothing if it misstates the case. README §Platforms no longer claims wintun
+costs the pure-Go property (it does not; it is `LoadLibrary`'d at runtime, as
+wireguard-go does), and names the three obstacles that are real: the DLL as a
+supply-chain surface, `internal/hostnet`'s second backend in `netsh` or WFP, and
+the unverified macOS client that should be verified first.
 
 ---
 
