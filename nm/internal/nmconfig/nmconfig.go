@@ -55,6 +55,7 @@ const (
 	KeyLocalID    = "local-id"
 	KeyServerID   = "server-id"
 	KeyUser       = "user"
+	KeyTCP        = "tcp"         // IKEv2 only: RFC 8229/9329 TCP encapsulation, "true" or absent
 	KeyFullTunnel = "full-tunnel" // "yes"/"no", default "yes"
 	KeyMTU        = "mtu"         // optional inner-interface MTU override
 

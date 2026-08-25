@@ -39,6 +39,11 @@ static const KV ikev2_items[] = {
     { "local-id",  "client.example",  FALSE },
     { "server-id", "vpn.example.com", FALSE },
     { "psk",       "s3cret",          TRUE  },
+    /* The one checkbox field in any protocol's table. It round-trips as the
+     * string "true" because that is what the Go side reads (`opts[key] ==
+     * "true"`); an unchecked box writes nothing at all, which is checked
+     * separately below. */
+    { "tcp",       "true",            FALSE },
 };
 
 static const KV wireguard_items[] = {
@@ -297,6 +302,13 @@ main(int argc, char **argv)
     if (g_strcmp0(protocol, "ikev2") == 0) {
         if (round_trip(plugin, service, protocol, ikev2_items,
                        (int) G_N_ELEMENTS(ikev2_items), "public-key") != 0)
+            return 1;
+        /* Again without the tcp item — it is deliberately last in the fixture —
+         * and this time requiring that the unchecked box wrote no key at all.
+         * "false" would be equivalent today and would become a silent override
+         * the first time the protocol's own default changed. */
+        if (round_trip(plugin, service, protocol, ikev2_items,
+                       (int) G_N_ELEMENTS(ikev2_items) - 1, "tcp") != 0)
             return 1;
     } else if (g_strcmp0(protocol, "wireguard") == 0) {
         if (round_trip(plugin, service, protocol, wireguard_items,

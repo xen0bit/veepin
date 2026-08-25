@@ -381,10 +381,19 @@ with `-DVEEPIN_PROTOCOL="ikev2"` and so on — so the form a user gets is just t
 protocol's fields, with no chooser: they already chose by picking the VPN type.
 The field sets stay data-driven: each protocol is a row in the `protocols` table
 in `veepin-editor.c` listing its fields (label, vpn key, and whether the key is a
-required data item, an optional data item, or a secret), and the widget building,
-validation and (de)serialisation are generic — so adding a protocol is a table
-edit there plus a line in the Makefile's `VEEPIN_PROTOCOLS`, mirroring the
-`requireKeys`/`secretMissing` switches in `nmconfig`. The editor smoke test
+required data item, an optional data item, a secret, or a checkbox), and the
+widget building, validation and (de)serialisation are generic — so adding a
+protocol is a table edit there plus a line in the Makefile's `VEEPIN_PROTOCOLS`,
+mirroring the `requireKeys`/`secretMissing` switches in `nmconfig`.
+
+The checkbox kind (`F_BOOL`) has exactly one user: IKEv2's `tcp`, which turns on
+RFC 8229/9329 encapsulation of IKE and ESP over a single TCP connection. It is a
+GUI field rather than an `nmcli`-only key because of who needs it — the feature
+exists for a network that passes TCP and drops UDP, and the person on one is at a
+desktop with no tunnel and no way to tell why. A checked box writes `tcp=true`;
+an unchecked one writes **nothing**, so the protocol's own default stands rather
+than being overridden with a `false` the plugin invented. Both halves are pinned
+by the smoke test's ikev2 round-trip. The editor smoke test
 (`editor/editor_smoketest.c`, run under `xvfb` in CI) loads each of the ten
 plugins the way NM does and checks it against its own descriptor.
 

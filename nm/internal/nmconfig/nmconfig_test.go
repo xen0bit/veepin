@@ -397,3 +397,44 @@ func TestMissingSecret(t *testing.T) {
 		t.Errorf("password missing: got %q, want vpn", got)
 	}
 }
+
+// TestTCPEncapsulationReachesTheProtocolUntranslated pins the whole reason the
+// editor can offer a checkbox for it: vpn.data keys that are not NM's own pass
+// through to the protocol under the same name, so `tcp` reaches ikev2's option
+// map as the string its parser tests for. Nothing in this package needs a case
+// for it, and this is the test that says so on purpose rather than by omission.
+func TestTCPEncapsulationReachesTheProtocolUntranslated(t *testing.T) {
+	c, err := Parse(settings(
+		map[string]string{
+			KeyGateway: "vpn.example.com",
+			KeyLocalID: "client.example",
+			KeyTCP:     "true",
+		},
+		map[string]string{KeyPSK: "s3cret"},
+	))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if c.Options[KeyTCP] != "true" {
+		t.Errorf("options[%q] = %q, want \"true\"; the checkbox the editor writes does not "+
+			"reach the protocol", KeyTCP, c.Options[KeyTCP])
+	}
+}
+
+// TestAnUncheckedBoxLeavesNoKeyAtAll is the other half. The editor writes
+// nothing for an unchecked box, and an absent key must stay absent rather than
+// arriving as "false" -- an option missing from the map is what lets the
+// protocol's own default stand.
+func TestAnUncheckedBoxLeavesNoKeyAtAll(t *testing.T) {
+	c, err := Parse(settings(
+		map[string]string{KeyGateway: "vpn.example.com", KeyLocalID: "client.example"},
+		map[string]string{KeyPSK: "s3cret"},
+	))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if v, ok := c.Options[KeyTCP]; ok {
+		t.Errorf("options[%q] = %q for a connection that never set it; the protocol's default "+
+			"is being overridden by the plugin", KeyTCP, v)
+	}
+}
