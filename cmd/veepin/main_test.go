@@ -31,8 +31,13 @@ func TestProtocolsAreRegistered(t *testing.T) {
 // TestConnectFlagsCoverRegisteredProtocols keeps the CLI's per-protocol flag
 // sets in step with the registry: a protocol you can dial but cannot pass flags
 // to is unreachable from the command line.
+//
+// It iterates AllProtocols rather than Protocols so that the pq- variants are
+// covered. They carry no OptSpec table of their own -- ClientOptsFor falls back
+// to the base -- and this is what proves that fallback actually reaches the flag
+// generator rather than merely being written down.
 func TestConnectFlagsCoverRegisteredProtocols(t *testing.T) {
-	for _, name := range client.Protocols() {
+	for _, name := range client.AllProtocols() {
 		if _, err := connectFlags(name, newTestFlagSet()); err != nil {
 			t.Errorf("connect has no flags for registered protocol %q: %v", name, err)
 		}

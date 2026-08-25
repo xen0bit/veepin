@@ -193,7 +193,7 @@ func TestChooseSigAlgHonorsPeerHashes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if alg.hashID != payload.HashSHA512 || alg.isRSA {
+	if alg.hashID != payload.HashSHA512 || alg.family != famECDSA {
 		t.Fatalf("chose %+v, want ECDSA/SHA-512", alg)
 	}
 	// No common hash → error.

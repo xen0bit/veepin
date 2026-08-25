@@ -25,6 +25,7 @@ import (
 
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/veepin/internal/pqpolicy"
 	ipulse "github.com/xen0bit/veepin/internal/pulse"
 	"github.com/xen0bit/veepin/internal/vlog"
 )
@@ -67,6 +68,12 @@ type Config struct {
 	// flow is given before shaping stops for that flow. Zero disables it.
 	Shape  int
 	Logger *slog.Logger
+
+	// PostQuantumOnly requires a post-quantum key exchange and ML-DSA
+	// authentication, refusing anything less rather than negotiating down. It is
+	// what the pq-pulse registry name sets; see internal/pqpolicy for the contract
+	// and doc/pq-variants-plan.md for why it is a name rather than a flag.
+	PostQuantumOnly bool
 }
 
 // Session is a running Pulse client.
@@ -101,6 +108,9 @@ func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
 		MinVersion:         tls.VersionTLS12,
 		RootCAs:            cfg.RootCAs,
 		InsecureSkipVerify: cfg.Insecure, //nolint:gosec // guarded by the explicit option below
+	}
+	if cfg.PostQuantumOnly {
+		pqpolicy.HardenTLS(tlsCfg)
 	}
 	if cfg.Insecure {
 		logger.Printf("pulse: WARNING: gateway certificate verification disabled (insecure)")
@@ -209,14 +219,15 @@ func (d dialer) Dial(ctx context.Context) (client.Session, client.Result, error)
 // parseOptions turns registry options into a Config.
 func parseOptions(opts map[string]string) (client.Dialer, error) {
 	cfg := Config{
-		Server:   opts[OptServer],
-		Path:     opts[OptPath],
-		Username: opts[OptUser],
-		Password: opts[OptPassword],
-		Insecure: opts[OptInsecure] == "true",
-		NoESP:    opts[OptNoESP] == "true",
-		TUNName:  opts[OptTUN],
-		Logger:   slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
+		PostQuantumOnly: pqpolicy.Requested(opts),
+		Server:          opts[OptServer],
+		Path:            opts[OptPath],
+		Username:        opts[OptUser],
+		Password:        opts[OptPassword],
+		Insecure:        opts[OptInsecure] == "true",
+		NoESP:           opts[OptNoESP] == "true",
+		TUNName:         opts[OptTUN],
+		Logger:          slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
 	}
 	if cfg.Server == "" {
 		return nil, fmt.Errorf("pulse: server is required")

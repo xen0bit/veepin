@@ -42,8 +42,41 @@ func Generate(name, configDir, genType, optKey string, hostnames []string) (map[
 		return genEd25519(dir, optKey)
 	case "x509-chain":
 		return genChain(dir, hostnames, openVPNSpec)
+	// The pq- forms. The management API selects these when the listener's
+	// protocol is a post-quantum variant, so generating a listener under a pq-
+	// name produces a credential that name will actually accept.
+	case "pq-tls":
+		return genChain(dir, hostnames, pqTLSSpec)
+	case "pq-x509-chain":
+		return genChain(dir, hostnames, pqOpenVPNSpec)
 	default:
 		return nil, fmt.Errorf("keygen: unknown generate type %q", genType)
+	}
+}
+
+// PostQuantumType maps a certificate generator to its ML-DSA counterpart when
+// the listener's protocol is a post-quantum variant, and returns genType
+// unchanged otherwise.
+//
+// It is a mapping rather than a field on OptSpec because a variant declares no
+// OptSpec table at all -- ServerOptsFor falls back to the base, which is what
+// keeps `veepin serve pq-sstp` and `veepin serve sstp` identical on the command
+// line. The protocol name is therefore the only place the difference lives.
+//
+// Generators that mint no certificate (psk, wg-keypair, ed25519-key) pass
+// through: a pre-shared key and a Curve25519 keypair are what they are, and
+// neither has a post-quantum spelling to choose here.
+func PostQuantumType(genType string, postQuantum bool) string {
+	if !postQuantum {
+		return genType
+	}
+	switch genType {
+	case "tls":
+		return "pq-tls"
+	case "x509-chain":
+		return "pq-x509-chain"
+	default:
+		return genType
 	}
 }
 

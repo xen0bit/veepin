@@ -228,3 +228,23 @@ func ParseServerWithBase(base string, opts map[string]string) (Server, error) {
 	}
 	return parse(opts)
 }
+
+// AllVariants lists every registered variant name on either side, sorted and
+// deduplicated. A variant is normally registered for both roles, so this is
+// usually the same list as Variants(); it exists so a guard that means "every
+// variant in the tree" cannot miss one that registered only a server.
+func AllVariants() []string {
+	seen := map[string]bool{}
+	for _, n := range Variants() {
+		seen[n] = true
+	}
+	for _, n := range ServerVariants() {
+		seen[n] = true
+	}
+	out := make([]string, 0, len(seen))
+	for n := range seen {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}

@@ -72,6 +72,14 @@ type ClientConfig struct {
 	// simply proceeds classically.
 	PostQuantum bool
 
+	// PostQuantumAuth additionally requires the responder to authenticate with
+	// an ML-DSA certificate, and refuses an RSA or ECDSA one. It is what the
+	// pq-ikev2 name sets, alongside PostQuantum.
+	//
+	// It says nothing about PSK: a pre-shared key is symmetric and is not broken
+	// by a quantum adversary, which is the premise RFC 8784 rests on.
+	PostQuantumAuth bool
+
 	// IPTFS enables AGGFRAG aggregation and fragmentation (RFC 9347) for the
 	// Child SA. When set, USE_AGGFRAG is advertised in IKE_AUTH.
 	IPTFS bool
@@ -750,6 +758,11 @@ func (c *Client) verifyServerCertAuth(inners []payload.RawPayload) error {
 	}
 	idrBody := idPayloadBody(Identity{Type: idr.Type, Data: idr.Data})
 	octets := AuthOctets(c.suite.PRF, c.saInitResp, c.ni, c.keys.SKpr, idrBody, c.intAuth(c.authMsgID))
+	if c.cfg.PostQuantumAuth {
+		if err := requirePostQuantumKey(leaf.PublicKey); err != nil {
+			return fmt.Errorf("ike: the responder's certificate is not post-quantum: %w", err)
+		}
+	}
 	if err := verifyAuth(leaf.PublicKey, auth.Method, octets, auth.Data); err != nil {
 		return fmt.Errorf("%w: %v", ErrAuthFailed, err)
 	}

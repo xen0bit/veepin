@@ -33,6 +33,7 @@ import (
 
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/veepin/internal/pqpolicy"
 	"github.com/xen0bit/veepin/internal/sshtun"
 	"github.com/xen0bit/veepin/internal/vlog"
 )
@@ -82,6 +83,18 @@ type Config struct {
 
 	TUNName string
 	Logger  *slog.Logger
+
+	// PostQuantumOnly pins the key exchange to mlkem768x25519-sha256 and
+	// refuses a peer that cannot do it. It is what the pq-ssh registry name
+	// sets.
+	//
+	// Key exchange ONLY, and that is a limit of SSH rather than of veepin: SSH
+	// has no post-quantum signature algorithm in any specification or
+	// implementation, so host keys and user keys stay classical. OpenSSH says as
+	// much itself at https://www.openssh.org/pq.html. internal/pqpolicy records
+	// the exemption by name, and TestSSHIsTheOnlyPQAuthException holds that list
+	// at one entry.
+	PostQuantumOnly bool
 }
 
 func (c *Config) validate() error {
@@ -110,6 +123,8 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 		Peer:       opts[OptPeer],
 		PeerUnit:   -1,
 		TUNName:    opts[OptTUNName],
+
+		PostQuantumOnly: pqpolicy.Requested(opts),
 	}
 	if v := opts[OptPort]; v != "" {
 		p, err := strconv.Atoi(v)
@@ -267,12 +282,16 @@ func clientConfig(cfg *Config) (*cryptossh.ClientConfig, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &cryptossh.ClientConfig{
+	sc := &cryptossh.ClientConfig{
 		User:            cfg.User,
 		Auth:            auth,
 		HostKeyCallback: hostKey,
 		Timeout:         dialTimeout,
-	}, nil
+	}
+	if cfg.PostQuantumOnly {
+		sc.KeyExchanges = pqpolicy.SSHKeyExchanges()
+	}
+	return sc, nil
 }
 
 // transportIP returns the SSH server's IP from the established connection, used

@@ -71,6 +71,19 @@ import (
 	_ "github.com/xen0bit/veepin/sstp"
 	_ "github.com/xen0bit/veepin/toy"
 	_ "github.com/xen0bit/veepin/wireguard"
+
+	// The pq- variants: a second registry name per protocol under which the
+	// post-quantum contract is mandatory. See doc/pq-variants-plan.md.
+	_ "github.com/xen0bit/veepin/anyconnect/pq"
+	_ "github.com/xen0bit/veepin/fortinet/pq"
+	_ "github.com/xen0bit/veepin/gp/pq"
+	_ "github.com/xen0bit/veepin/ikev2/pq"
+	_ "github.com/xen0bit/veepin/masque/pq"
+	_ "github.com/xen0bit/veepin/openvpn/pq"
+	_ "github.com/xen0bit/veepin/pulse/pq"
+	_ "github.com/xen0bit/veepin/softether/pq"
+	_ "github.com/xen0bit/veepin/ssh/pq"
+	_ "github.com/xen0bit/veepin/sstp/pq"
 )
 
 func main() {

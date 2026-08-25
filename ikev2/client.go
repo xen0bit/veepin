@@ -34,6 +34,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/ikev2/ike"
+	"github.com/xen0bit/veepin/internal/pqpolicy"
 	"github.com/xen0bit/veepin/internal/vlog"
 )
 
@@ -76,6 +77,11 @@ type Config struct {
 	// the classical group still runs and still contributes. A server that does
 	// not support it is not an error — the handshake proceeds classically.
 	PostQuantum bool
+
+	// PostQuantumOnly additionally requires the responder to authenticate with
+	// an ML-DSA certificate. It is what the pq-ikev2 registry name sets, and it
+	// implies PostQuantum.
+	PostQuantumOnly bool
 
 	// IPTFS enables AGGFRAG aggregation and fragmentation (RFC 9347) for the
 	// Child SA. When set, the client advertises USE_AGGFRAG in IKE_AUTH and
@@ -168,19 +174,20 @@ const (
 // calls for client.Dial(ctx, "ikev2", opts).
 func parseOptions(opts map[string]string) (client.Dialer, error) {
 	cfg := Config{
-		Server:      opts[OptGateway],
-		PSK:         opts[OptPSK],
-		LocalID:     opts[OptLocalID],
-		ServerID:    opts[OptServerID],
-		EAPUser:     opts[OptUser],
-		EAPPassword: opts[OptPassword],
-		TUNName:     opts[OptTUNName],
-		CertFile:    opts[OptCert],
-		KeyFile:     opts[OptKey],
-		CAFile:      opts[OptCA],
-		PostQuantum: opts[OptPQ] == "true",
-		IPTFS:       opts[OptIPTFS] == "true",
-		TCP:         opts[OptTCP] == "true",
+		Server:          opts[OptGateway],
+		PSK:             opts[OptPSK],
+		LocalID:         opts[OptLocalID],
+		ServerID:        opts[OptServerID],
+		EAPUser:         opts[OptUser],
+		EAPPassword:     opts[OptPassword],
+		TUNName:         opts[OptTUNName],
+		CertFile:        opts[OptCert],
+		KeyFile:         opts[OptKey],
+		CAFile:          opts[OptCA],
+		PostQuantum:     opts[OptPQ] == "true" || pqpolicy.Requested(opts),
+		PostQuantumOnly: pqpolicy.Requested(opts),
+		IPTFS:           opts[OptIPTFS] == "true",
+		TCP:             opts[OptTCP] == "true",
 		// Without this the engine's log goes nowhere: Dial discards a nil
 		// Logger, so every line internal/ikev2/ike writes -- AGGFRAG
 		// negotiated or declined, a rekey, a MOBIKE roam, a certificate
@@ -301,18 +308,19 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	logger := vlog.From(cfg.Logger)
 
 	ikeCfg := ike.ClientConfig{
-		ServerHost:  cfg.Server,
-		ServerPort:  cfg.Port,
-		NATTPort:    nattPort(cfg),
-		PSK:         []byte(cfg.PSK),
-		LocalID:     parseIdentity(cfg.LocalID),
-		EAPUsername: cfg.EAPUser,
-		EAPPassword: cfg.EAPPassword,
-		PostQuantum: cfg.PostQuantum,
-		IPTFS:       cfg.IPTFS,
-		IPTFSRate:   cfg.IPTFSRate,
-		TCP:         cfg.TCP,
-		Logger:      logger,
+		ServerHost:      cfg.Server,
+		ServerPort:      cfg.Port,
+		NATTPort:        nattPort(cfg),
+		PSK:             []byte(cfg.PSK),
+		LocalID:         parseIdentity(cfg.LocalID),
+		EAPUsername:     cfg.EAPUser,
+		EAPPassword:     cfg.EAPPassword,
+		PostQuantum:     cfg.PostQuantum || cfg.PostQuantumOnly,
+		PostQuantumAuth: cfg.PostQuantumOnly,
+		IPTFS:           cfg.IPTFS,
+		IPTFSRate:       cfg.IPTFSRate,
+		TCP:             cfg.TCP,
+		Logger:          logger,
 	}
 	if cfg.ServerID != "" {
 		id := parseIdentity(cfg.ServerID)

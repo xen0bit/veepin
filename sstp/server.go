@@ -20,6 +20,7 @@ import (
 	"github.com/xen0bit/veepin/internal/debuglog"
 	"github.com/xen0bit/veepin/internal/mschap"
 	"github.com/xen0bit/veepin/internal/ppp"
+	"github.com/xen0bit/veepin/internal/pqpolicy"
 	"github.com/xen0bit/veepin/internal/sstp/wire"
 	"github.com/xen0bit/veepin/internal/userdb"
 	"github.com/xen0bit/veepin/internal/vlog"
@@ -63,6 +64,13 @@ type ServerConfig struct {
 	TUNName string
 	// Logger receives progress logs; nil discards them.
 	Logger *slog.Logger
+
+	// PostQuantumOnly requires a post-quantum key exchange and ML-DSA
+	// authentication, refusing anything less rather than negotiating down. It is
+	// what the pq-sstp registry name sets; see internal/pqpolicy for the
+	// contract and doc/pq-variants-plan.md for why it is a name rather than a
+	// flag.
+	PostQuantumOnly bool
 }
 
 // handshakeTimeout bounds the TLS/HTTP/SSTP/PPP negotiation before the tunnel is
@@ -123,6 +131,15 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("sstp: server certificate: %w", err)
 	}
 	tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+	if cfg.PostQuantumOnly {
+		// Before the TUN is opened and before anything binds: an operator who
+		// pointed pq-sstp at their existing RSA certificate learns it here,
+		// rather than from a listener that comes up and then refuses everyone.
+		if err := pqpolicy.CheckCredential(cert); err != nil {
+			return nil, err
+		}
+		pqpolicy.HardenTLS(tlsCfg)
+	}
 
 	poolCIDR := cfg.Pool
 	if poolCIDR == "" {
@@ -584,7 +601,9 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 		Pool:     opts[OptServerPool],
 		TUNName:  opts[OptServerTUN],
 		Users:    map[string]string{},
-		Logger:   slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
+
+		PostQuantumOnly: pqpolicy.Requested(opts),
+		Logger:          slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
 	}
 	var err error
 	if cfg.Cert, err = os.ReadFile(opts[OptServerCert]); err != nil {

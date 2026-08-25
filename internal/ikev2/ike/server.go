@@ -57,6 +57,35 @@ type Config struct {
 	// NAT; setting it improves accuracy.
 	PublicIP net.IP
 
+	// RequirePostQuantum refuses any IKE SA whose key exchange is classical
+	// only: the initiator must both propose an ADDKE1 method this server
+	// supports (ML-KEM-768, RFC 9370) and advertise
+	// INTERMEDIATE_EXCHANGE_SUPPORTED, since the exchange that carries it is
+	// the one thing it cannot be done without.
+	//
+	// The default responder ACCEPTS post-quantum opportunistically and completes
+	// classically when the initiator offers nothing -- which is right for
+	// "ikev2" and wrong for "pq-ikev2", where an initiator that simply omits the
+	// transform would otherwise get a classical SA and nothing would object.
+	// This is the whole of what the variant name buys on the key-exchange side.
+	RequirePostQuantum bool
+
+	// RequirePostQuantumAuth additionally refuses classical public-key
+	// authentication: an RSA or ECDSA certificate is rejected and only ML-DSA
+	// (FIPS 204) is accepted.
+	//
+	// PSK authentication is deliberately still permitted. A pre-shared key is
+	// symmetric and is not broken by a quantum adversary -- that is the entire
+	// premise of RFC 8784, which exists to give IKEv2 quantum resistance using
+	// exactly this property. Refusing it would be cargo-culting the word
+	// "post-quantum" rather than applying it.
+	//
+	// EAP-MSCHAPv2 IS refused, and for a reason that has nothing to do with
+	// quantum computers: its own primitives are MD4 and single-DES, which are
+	// broken classically. A name promising maximum assurance should not accept
+	// it.
+	RequirePostQuantumAuth bool
+
 	// TCP additionally listens for RFC 8229/9329 TCP-encapsulated IKE and ESP on
 	// Port4500. It is additive: the UDP sockets stay bound, so a peer reaches
 	// this server on whichever transport its network allows and is answered on

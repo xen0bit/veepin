@@ -29,6 +29,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	engine "github.com/xen0bit/veepin/internal/anyconnect"
+	"github.com/xen0bit/veepin/internal/pqpolicy"
 	"github.com/xen0bit/veepin/internal/vlog"
 )
 
@@ -65,6 +66,12 @@ type Config struct {
 	NoDTLS  bool
 	TUNName string
 	Logger  *slog.Logger
+
+	// PostQuantumOnly requires a post-quantum key exchange and ML-DSA
+	// authentication, refusing anything less rather than negotiating down. It is
+	// what the pq-anyconnect registry name sets; see internal/pqpolicy for the contract
+	// and doc/pq-variants-plan.md for why it is a name rather than a flag.
+	PostQuantumOnly bool
 }
 
 func (c *Config) validate() error {
@@ -81,6 +88,7 @@ func (c *Config) validate() error {
 
 func parseOptions(opts map[string]string) (client.Dialer, error) {
 	cfg := &Config{
+		PostQuantumOnly: pqpolicy.Requested(opts),
 		// Whether the data channel ended up on UDP or fell back to TCP is
 		// operationally significant — it is the difference between a tunnel that
 		// performs and one that does not — so the engine's log is surfaced rather
@@ -123,11 +131,15 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	addr := net.JoinHostPort(cfg.Server, strconv.Itoa(port))
 
 	dialer := &net.Dialer{}
-	conn, err := tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{
+	tlsCfg := &tls.Config{
 		ServerName:         cfg.Server,
 		InsecureSkipVerify: cfg.Insecure, //nolint:gosec // opt-in; documented
 		MinVersion:         tls.VersionTLS12,
-	})
+	}
+	if cfg.PostQuantumOnly {
+		pqpolicy.HardenTLS(tlsCfg)
+	}
+	conn, err := tls.DialWithDialer(dialer, "tcp", addr, tlsCfg)
 	if err != nil {
 		return nil, client.Result{}, fmt.Errorf("anyconnect: connect %s: %w", addr, err)
 	}

@@ -282,6 +282,12 @@ const (
 	HashSHA256 uint16 = 2
 	HashSHA384 uint16 = 3
 	HashSHA512 uint16 = 4
+	// HashIdentity (RFC 9593) means the signature scheme hashes the message
+	// itself, so no external hash is applied before signing. It is what
+	// draft-ietf-ipsecme-ikev2-pqc-auth requires a peer to advertise before
+	// ML-DSA can be selected: ML-DSA is not "sign a SHA-512 digest", it takes
+	// the message. Omit it and a conforming peer will never choose ML-DSA.
+	HashIdentity uint16 = 5
 )
 
 // Traffic-selector types (RFC 7296 section 3.13.1).

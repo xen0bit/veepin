@@ -35,6 +35,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	imasque "github.com/xen0bit/veepin/internal/masque"
+	"github.com/xen0bit/veepin/internal/pqpolicy"
 	"github.com/xen0bit/veepin/internal/vlog"
 	"golang.org/x/net/quic"
 )
@@ -80,6 +81,12 @@ type Config struct {
 	TUNName string
 	// Logger receives progress messages; nil discards them.
 	Logger *slog.Logger
+
+	// PostQuantumOnly requires a post-quantum key exchange and ML-DSA
+	// authentication, refusing anything less rather than negotiating down. It is
+	// what the pq-masque registry name sets; see internal/pqpolicy for the contract
+	// and doc/pq-variants-plan.md for why it is a name rather than a flag.
+	PostQuantumOnly bool
 }
 
 // Session is a running MASQUE client.
@@ -120,6 +127,9 @@ func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
 		InsecureSkipVerify: cfg.Insecure,
 	}
 
+	if cfg.PostQuantumOnly {
+		pqpolicy.HardenTLS(tlsConfig)
+	}
 	end, err := quic.Listen("udp", ":0", &quic.Config{TLSConfig: tlsConfig})
 	if err != nil {
 		return nil, client.Result{}, fmt.Errorf("masque: opening QUIC endpoint: %w", err)
@@ -180,11 +190,12 @@ func (d dialer) Dial(ctx context.Context) (client.Session, client.Result, error)
 // parseOptions turns registry options into a Config.
 func parseOptions(opts map[string]string) (client.Dialer, error) {
 	cfg := Config{
-		Server:    opts[OptServer],
-		Authority: opts[OptAuthority],
-		TUNName:   opts[OptTUN],
-		Insecure:  opts[OptInsecure] == "true",
-		Logger:    slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
+		PostQuantumOnly: pqpolicy.Requested(opts),
+		Server:          opts[OptServer],
+		Authority:       opts[OptAuthority],
+		TUNName:         opts[OptTUN],
+		Insecure:        opts[OptInsecure] == "true",
+		Logger:          slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
 	}
 	if cfg.Server == "" {
 		return nil, fmt.Errorf("masque: server is required")

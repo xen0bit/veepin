@@ -257,7 +257,7 @@ func (s *Server) handleDeleteProfile(w http.ResponseWriter, r *http.Request) {
 // knownClientProtocol reports whether the registry recognises protocol as a
 // dialable client protocol.
 func knownClientProtocol(protocol string) bool {
-	return slices.Contains(client.Protocols(), protocol)
+	return slices.Contains(client.AllProtocols(), protocol)
 }
 
 // redactClientOptions is redactOptions for the client side: it hides the values

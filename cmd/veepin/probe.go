@@ -38,12 +38,12 @@ import (
 func runProbe(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: veepin probe <protocol> [flags]\nprotocols: %s",
-			strings.Join(client.Protocols(), ", "))
+			strings.Join(client.AllProtocols(), ", "))
 	}
 	protocol, args := args[0], args[1:]
 	if !knownProtocol(protocol) {
 		return fmt.Errorf("unknown protocol %q (available: %s)",
-			protocol, strings.Join(client.Protocols(), ", "))
+			protocol, strings.Join(client.AllProtocols(), ", "))
 	}
 	if protocol == "ikev2" {
 		return probe.Run(args)

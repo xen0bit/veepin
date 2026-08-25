@@ -16,6 +16,7 @@ import (
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/ikev2/eap"
 	"github.com/xen0bit/veepin/internal/ikev2/ike"
+	"github.com/xen0bit/veepin/internal/pqpolicy"
 	"github.com/xen0bit/veepin/internal/vlog"
 )
 
@@ -93,6 +94,19 @@ type ServerConfig struct {
 
 	// Logger receives progress logs; nil discards them.
 	Logger *slog.Logger
+
+	// PostQuantumOnly requires a post-quantum key exchange (ML-KEM-768 over
+	// RFC 9370) AND post-quantum authentication, refusing anything less rather
+	// than negotiating down. It is what the pq-ikev2 registry name sets.
+	//
+	// PSK authentication remains available: a pre-shared key is symmetric and is
+	// not broken by a quantum adversary, which is exactly the premise of
+	// RFC 8784. What is refused is classical PUBLIC-KEY authentication -- an RSA
+	// or ECDSA certificate -- and EAP-MSCHAPv2, whose own MD4/single-DES
+	// primitives are broken without needing a quantum computer.
+	//
+	// See internal/pqpolicy and doc/pq-variants-plan.md.
+	PostQuantumOnly bool
 }
 
 // Server is a running IKEv2 responder: the IKE SAs, a TUN device, an address
@@ -192,18 +206,20 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 
 	srv, err := ike.NewServer(ike.Config{
-		ListenIP:   cfg.ListenIP,
-		Port500:    cfg.Port500,
-		Port4500:   cfg.Port4500,
-		PSK:        []byte(cfg.PSK),
-		LocalID:    parseIdentity(cfg.LocalID),
-		PublicIP:   cfg.PublicIP,
-		ServerCert: serverCert,
-		ClientCAs:  clientCAs,
-		IPTFS:      cfg.IPTFS,
-		IPTFSRate:  cfg.IPTFSRate,
-		TCP:        cfg.TCP,
-		Logger:     logger,
+		ListenIP:               cfg.ListenIP,
+		Port500:                cfg.Port500,
+		Port4500:               cfg.Port4500,
+		PSK:                    []byte(cfg.PSK),
+		LocalID:                parseIdentity(cfg.LocalID),
+		PublicIP:               cfg.PublicIP,
+		ServerCert:             serverCert,
+		ClientCAs:              clientCAs,
+		IPTFS:                  cfg.IPTFS,
+		RequirePostQuantum:     cfg.PostQuantumOnly,
+		RequirePostQuantumAuth: cfg.PostQuantumOnly,
+		IPTFSRate:              cfg.IPTFSRate,
+		TCP:                    cfg.TCP,
+		Logger:                 logger,
 		AssignAddr: func(want ike.AddressRequest) (ike.Assignment, error) {
 			var a ike.Assignment
 			if want.IP4 {
@@ -407,18 +423,19 @@ func init() {
 // documents so the registry is usable standalone.
 func parseServerOptions(opts map[string]string) (client.Server, error) {
 	cfg := ServerConfig{
-		ListenIP:     opts[OptServerListen],
-		PSK:          opts[OptServerPSK],
-		LocalID:      opts[OptServerIdentity],
-		Pool:         opts[OptServerPool],
-		Pool6:        opts[OptServerPool6],
-		TUNName:      opts[OptServerTUN],
-		EAPUsers:     opts[OptServerEAPUsers],
-		CertFile:     opts[OptServerCert],
-		KeyFile:      opts[OptServerKey],
-		ClientCAFile: opts[OptServerClientCA],
-		TCP:          opts[OptServerTCP] == "true",
-		Logger:       slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
+		ListenIP:        opts[OptServerListen],
+		PSK:             opts[OptServerPSK],
+		LocalID:         opts[OptServerIdentity],
+		Pool:            opts[OptServerPool],
+		Pool6:           opts[OptServerPool6],
+		TUNName:         opts[OptServerTUN],
+		EAPUsers:        opts[OptServerEAPUsers],
+		CertFile:        opts[OptServerCert],
+		KeyFile:         opts[OptServerKey],
+		ClientCAFile:    opts[OptServerClientCA],
+		TCP:             opts[OptServerTCP] == "true",
+		PostQuantumOnly: pqpolicy.Requested(opts),
+		Logger:          slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
 	}
 	if cfg.ListenIP == "" {
 		cfg.ListenIP = "0.0.0.0"

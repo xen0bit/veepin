@@ -212,7 +212,9 @@ func CheckCredential(cert tls.Certificate) error {
 	}
 	if leaf.PublicKeyAlgorithm != x509.MLDSA {
 		return fmt.Errorf("%w: the certificate holds a %s key, want ML-DSA (FIPS 204). "+
-			"Generate one with `veepin pq-cert`, or use the base protocol without the pq- prefix",
+			"A listener created under a pq- name through the management panel generates "+
+			"one automatically; otherwise mint an ML-DSA certificate, or drop the pq- "+
+			"prefix to use the base protocol",
 			ErrClassicalCredential, leaf.PublicKeyAlgorithm)
 	}
 	return nil

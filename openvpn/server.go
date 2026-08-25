@@ -23,6 +23,7 @@ import (
 	"github.com/xen0bit/veepin/internal/openvpn/keys"
 	"github.com/xen0bit/veepin/internal/openvpn/tlswrap"
 	"github.com/xen0bit/veepin/internal/openvpn/wire"
+	"github.com/xen0bit/veepin/internal/pqpolicy"
 	"github.com/xen0bit/veepin/internal/vlog"
 )
 
@@ -109,6 +110,12 @@ type ServerConfig struct {
 
 	// Logger receives progress logs; nil discards them.
 	Logger *slog.Logger
+
+	// PostQuantumOnly requires a post-quantum key exchange and ML-DSA
+	// authentication, refusing anything less rather than negotiating down. It is
+	// what the pq-openvpn registry name sets; see internal/pqpolicy for the contract
+	// and doc/pq-variants-plan.md for why it is a name rather than a flag.
+	PostQuantumOnly bool
 }
 
 func (c *ServerConfig) validate() error {
@@ -1028,11 +1035,12 @@ func init() {
 // CA/cert/key from the paths given.
 func parseServerOptions(opts map[string]string) (client.Server, error) {
 	cfg := ServerConfig{
-		ListenIP: opts[OptServerListenIP],
-		Pool:     opts[OptServerPool],
-		Pool6:    opts[OptServerPool6],
-		TUNName:  opts[OptServerTUN],
-		Logger:   slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
+		PostQuantumOnly: pqpolicy.Requested(opts),
+		ListenIP:        opts[OptServerListenIP],
+		Pool:            opts[OptServerPool],
+		Pool6:           opts[OptServerPool6],
+		TUNName:         opts[OptServerTUN],
+		Logger:          slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
 	}
 	var err error
 	if cfg.CA, err = readFileOpt(opts[OptServerCA]); err != nil {
