@@ -1338,3 +1338,152 @@ func TestAbandonedGoroutineAndFDReturnToBaseline(t *testing.T) {
 		}
 	}
 }
+
+// leakyServer is a wedged listener that holds something real. Its Close blocks
+// forever like wedgedServer's, but it also owns a descriptor with a goroutine
+// parked on it -- the shape of every server here, where a packet pump sits in a
+// read on the TUN fd. Abandon closes the descriptor, which is what dataplane's
+// TUN.Close does to unpark the pump.
+type leakyServer struct {
+	fakeServer
+	release  chan struct{}
+	r, w     *os.File
+	exited   chan struct{}
+	abandons atomic.Int64
+}
+
+func newLeakyServer(t *testing.T, name string, release chan struct{}) *leakyServer {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	s := &leakyServer{
+		fakeServer: fakeServer{name: name, tun: "tun0", serveCh: make(chan struct{})},
+		release:    release,
+		r:          r,
+		w:          w,
+		exited:     make(chan struct{}),
+	}
+	// The parked reader: it returns only when the descriptor is closed, exactly
+	// as the packet pump returns only when the TUN is.
+	go func() {
+		defer close(s.exited)
+		var buf [1]byte
+		_, _ = s.r.Read(buf[:])
+	}()
+	return s
+}
+
+func (s *leakyServer) Close() error {
+	<-s.release
+	return nil
+}
+
+// Abandon implements client.AbandonableServer: descriptors back, no waiting,
+// and no lock the blocked Close could be holding.
+func (s *leakyServer) Abandon() {
+	s.abandons.Add(1)
+	s.r.Close()
+	s.w.Close()
+}
+
+var _ client.AbandonableServer = (*leakyServer)(nil)
+
+// TestAbandonmentReleasesTheDescriptorsWhileCloseIsStillWedged is the assertion
+// the whole AbandonableServer seam exists for, and it is deliberately stronger
+// than TestAbandonedGoroutineAndFDReturnToBaseline above: that one lets the
+// wedged Close finish first, which proves only that a *slow* listener cleans up
+// eventually. This one never lets Close return at all.
+//
+// Before Abandon existed, a listener the supervisor gave up on kept its pump
+// goroutine and its TUN fd until the process exited. A fleet restarting a
+// genuinely wedged listener on a timer accumulated one of each per attempt, and
+// the only trace was a log line.
+func TestAbandonmentReleasesTheDescriptorsWhileCloseIsStillWedged(t *testing.T) {
+	dir := t.TempDir()
+	writeCfg(t, dir, "site-a", "wireguard")
+	// Never closed during the test: Close stays wedged for its whole duration,
+	// so nothing here can be explained by the teardown eventually completing.
+	release := make(chan struct{})
+
+	var built *leakyServer
+	mgr := NewManager(dir, testLogger(t),
+		func(protocol string, opts map[string]string) (client.Server, error) {
+			built = newLeakyServer(t, opts["__name"], release)
+			return built, nil
+		})
+	if err := mgr.Apply(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-built.exited:
+		t.Fatal("the parked reader exited before anything was stopped")
+	default:
+	}
+
+	if err := mgr.Stop("site-a"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if n := built.abandons.Load(); n != 1 {
+		t.Fatalf("Abandon called %d times, want 1; the supervisor did not take the "+
+			"descriptors back when Close overran", n)
+	}
+
+	select {
+	case <-built.exited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the abandoned listener's goroutine is still parked on its descriptor " +
+			"while Close is wedged — this is the leak, and it is back")
+	}
+
+	// And Close really is still blocked, so none of the above came from an
+	// orderly teardown.
+	if built.isClosed() {
+		t.Error("the wedged Close returned after all; this test proved nothing")
+	}
+	close(release)
+}
+
+// TestAServerWithoutAbandonIsStillAbandoned keeps the optional half of the
+// interface honest. An implementation outside this tree that does not implement
+// it must still be given up on rather than freezing the fleet -- it just keeps
+// leaking, which is what the log line says.
+func TestAServerWithoutAbandonIsStillAbandoned(t *testing.T) {
+	dir := t.TempDir()
+	writeCfg(t, dir, "site-a", "wireguard")
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+
+	mgr := NewManager(dir, testLogger(t),
+		func(protocol string, opts map[string]string) (client.Server, error) {
+			// wedgedServer deliberately does not implement AbandonableServer.
+			return &wedgedServer{
+				fakeServer: fakeServer{name: opts["__name"], tun: "tun0", serveCh: make(chan struct{})},
+				release:    release,
+			}, nil
+		})
+	if err := mgr.Apply(); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Stop("site-a"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if cur, total := mgr.Abandoned(); cur != 1 || total != 1 {
+		t.Errorf("Abandoned() = (%d, %d), want (1, 1): a server without Abandon must still "+
+			"be abandoned, not waited for", cur, total)
+	}
+}
+
+// TestWedgedServerDoesNotImplementAbandonable pins what the test above rests
+// on. If wedgedServer ever gains an Abandon -- by growing one, or by fakeServer
+// growing one it embeds -- that test silently stops covering the branch it was
+// written for.
+func TestWedgedServerDoesNotImplementAbandonable(t *testing.T) {
+	var s client.Server = &wedgedServer{}
+	if _, ok := s.(client.AbandonableServer); ok {
+		t.Error("wedgedServer implements client.AbandonableServer; the no-Abandon branch of " +
+			"stopListenerLocked now has no test")
+	}
+}

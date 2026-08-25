@@ -58,6 +58,46 @@ type DualStackServer interface {
 	Network6() netip.Prefix
 }
 
+// AbandonableServer is an optional Server capability: a server that can release
+// the file descriptors it holds without waiting for anything.
+//
+// It exists for one situation, and it is worth stating precisely because the
+// method is otherwise indistinguishable from Close. The supervisor bounds how
+// long it will wait for a listener's Close (internal/supervisor, stopGrace):
+// past that bound it stops waiting, because a Close that never returns would
+// otherwise freeze every other listener's status behind it. The listener is then
+// abandoned -- and until this interface existed, abandoning it leaked its packet
+// pump goroutine and its TUN fd for the life of the process, so a fleet
+// restarting a wedged listener on a timer accumulated one of each per attempt.
+//
+// Abandon is the escape hatch: it closes the descriptors directly, on a path
+// that takes no lock the wedged Close could be holding and waits for nothing.
+// Closing the TUN is what does the work -- dataplane holds it non-blocking and
+// polls it against a wake eventfd, so closing it unparks the pump's read and the
+// goroutine returns -- and the fd follows the goroutine.
+//
+// Three requirements, all of which the supervisor relies on:
+//
+//   - It must not block. It is called after Close has already overrun its
+//     deadline; a second thing to wait for is no better than the first.
+//   - It must be safe to call concurrently with an in-flight Close, and safe if
+//     that Close later completes. Both end up closing the same descriptors, so
+//     both must tolerate having lost the race.
+//   - It is a last resort, never a substitute for Close. It abandons state
+//     rather than unwinding it: sessions are not told, host networking is not
+//     torn down, and nothing is flushed.
+//
+// It is optional in the type system and required in practice: every server in
+// this repository owns a TUN, and TestEveryRegisteredServerCanBeAbandoned in the
+// root package asserts every registered one implements this. Optional is for
+// implementations outside the tree, which keep working without it -- at the cost
+// of the leak this closes.
+type AbandonableServer interface {
+	Server
+	// Abandon releases the descriptors this server holds, without waiting.
+	Abandon()
+}
+
 // ServerParseFunc turns a protocol's string-keyed options into a constructed
 // (not yet listening) Server, reporting an error for missing or malformed values.
 // It is the server-side counterpart of ParseFunc.

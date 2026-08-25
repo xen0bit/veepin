@@ -78,6 +78,7 @@ round trip:
 | `autherr_test.go` — `TestEveryProtocolJudgingACredentialReportsErrAuth` | every facade declaring a `Secret` client option references `client.ErrAuth`/`client.WrapAuth`, or is named in `noCredentialJudged` with the reason its `Dial` judges no credential |
 | `docs_test.go` — `TestEveryOptConstIsDescribedByAnOptSpec` | every `Opt*` const a facade declares is named as a `Key` in one of its two OptSpec tables |
 | `internal/livingreadme/interop_test.go` | every test named in the matrix exists, and every `TestInterop*` is in the matrix — **a test absent from the matrix runs in no CI shard and therefore never runs** |
+| `abandon_test.go` — `TestEveryRegisteredServerCanBeAbandoned` | every facade registering a server asserts `client.AbandonableServer` on its own `*Server`, so a listener the supervisor gives up waiting for still gives its TUN fd and pump goroutine back |
 | `nm/cmd/.../TestAllSupportedProtocolsRegistered` | `nmconfig.SupportedProtocols` and the service's blank imports agree |
 | `tests/e2e/harness/registry_test.go` | the Playwright harness blank-imports every facade, so the panel it serves has the same registry the real binary does |
 

@@ -68,20 +68,30 @@ it. The original cause is fixed: `dataplane`'s TUN fd is held non-blocking and
 polled against a wake eventfd, so a `Close` waiting on its packet pump unblocks
 instead of hanging on an idle tunnel. But `Close` can still stall on any other
 blocking path a protocol owns (a wedged control connection, a peer that never
-answers), and past the bound the listener is logged and abandoned, which
-**leaks its pump goroutine and TUN fd until that listener's `Close` finally
-returns** — or until the process exits, if it never does. Repeatedly restarting
-a genuinely wedged listener accumulates both.
+answers), and past the bound the listener is logged and abandoned.
 
-That is still a leak, and it is not one this package can close: the blocking
-path belongs to whichever protocol owns it. What this package does is stop the
-leak being invisible. `Manager.Abandoned` reports a gauge (how many right now)
-and a cumulative counter (how many ever), `/api/metrics` exports both as
-`veepin_listeners_abandoned` and `veepin_listeners_abandoned_total`, and a
-reaper keeps watching each abandoned teardown so a `Close` that eventually
-returns brings the gauge back down while the counter keeps the record. Before
-this the only trace was a log line, and a fleet accumulating a descriptor per
-restart had nothing an operator could alert on.
+**Abandoning it no longer costs a goroutine and a descriptor.** It used to: the
+pump goroutine and the TUN fd stayed held until that `Close` finally returned,
+or until the process exited if it never did, so restarting a genuinely wedged
+listener accumulated one of each per attempt. `client.AbandonableServer` closes
+that. Every server here owns a TUN, closing a TUN unparks the pump's read, and
+`Abandon` closes it directly — taking no lock the wedged `Close` could be
+holding and waiting for nothing, which is the whole reason it is a separate
+method and not `Close` called twice. The descriptor goes back, the goroutine
+follows it out, and the wedged `Close` is left wedged.
+
+What stays abandoned is **state**, not resources: sessions are not told, nothing
+is flushed, and the protocol's own teardown never completed. So the cost is
+still counted rather than assumed away. `Manager.Abandoned` reports a gauge (how
+many right now) and a cumulative counter (how many ever), `/api/metrics` exports
+both as `veepin_listeners_abandoned` and `veepin_listeners_abandoned_total`, and
+a reaper keeps watching each abandoned teardown so a `Close` that eventually
+returns brings the gauge back down while the counter keeps the record.
+
+A `Server` that does not implement `AbandonableServer` — none in this tree; the
+root package's `TestEveryRegisteredServerCanBeAbandoned` sees to that — is still
+abandoned rather than waited for, and still leaks. The log line says which of
+the two happened.
 
 Both counters are atomics rather than fields under `Manager.mu`, and that is a
 correctness constraint rather than a performance one: `stopListenerLocked` runs
