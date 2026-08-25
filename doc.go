@@ -72,6 +72,31 @@
 // Two packages are shared by the PPP-carrying protocols: internal/ppp (LCP,
 // MS-CHAPv2, IPCP, both roles) and internal/mschap.
 //
+// # The post-quantum variants
+//
+// Ten of those protocols carry a second registry name — pq-ikev2, pq-openvpn,
+// pq-sstp, pq-anyconnect, pq-fortinet, pq-gp, pq-pulse, pq-masque,
+// pq-softether and pq-ssh — under which post-quantum cryptography is mandatory
+// rather than negotiated: ML-KEM for the key exchange, ML-DSA (FIPS 204) for
+// authentication, and a refused handshake rather than a classical fallback.
+//
+// They are names rather than flags because a flag is a modifier an operator can
+// forget, and forgetting one yields the weaker behaviour silently. Each variant
+// lives in a pq sub-package of the protocol it varies (ikev2/pq, sstp/pq, …),
+// contains no protocol code, and delegates to the base facade's own parse — so
+// `veepin serve pq-sstp` takes byte-for-byte the flag set of `veepin serve
+// sstp`. internal/pqpolicy holds the single definition of the contract they
+// share, and it is the one package permitted to pin tls.Config.CurvePreferences.
+//
+// The variants are deliberately NOT counted among the sixteen production
+// protocols: pq-ikev2 is ikev2 with a floor under it, not a seventeenth
+// protocol. Six protocols have no variant and cannot have one — WireGuard and
+// AmneziaWG fix X25519 in Noise_IKpsk2, Nebula is plain Noise_IX, Cisco IPsec
+// and L2TP/IPsec are IKEv1 with no additional-key-exchange mechanism, and
+// L2TPv3 has no cryptography at all. pq-ssh carries only the key-exchange half,
+// because SSH has no post-quantum signature algorithm in any specification.
+// See doc/pq-variants-plan.md and doc/security.md.
+//
 // # The supervisor and management plane
 //
 // internal/supervisor runs multiple client.Server instances in one process:

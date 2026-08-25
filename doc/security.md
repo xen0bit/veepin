@@ -325,6 +325,103 @@ Three things this does **not** cover, and each is a real boundary:
   guard from outliving the default it assumes.
 
 
+## The `pq-` variants: post-quantum as a name, and what it does not cover
+
+Everything the two sections above describe is a **default**, and a default can
+be negotiated away. A peer offering only classical mechanisms still completes a
+handshake; it simply completes a weaker one, and nothing in the log distinguishes
+that from success. Ten protocols therefore carry a second registry name —
+`pq-ikev2`, `pq-openvpn`, `pq-sstp`, `pq-anyconnect`, `pq-fortinet`, `pq-gp`,
+`pq-pulse`, `pq-masque`, `pq-softether`, `pq-ssh` — under which:
+
+> both halves of the handshake are post-quantum — key exchange **and**
+> authentication — and anything less is refused rather than negotiated down.
+
+The single definition lives in [`internal/pqpolicy`](../internal/pqpolicy), which
+is also the one package permitted to pin `tls.Config.CurvePreferences`;
+`TestNoTLSConfigPinsCurvePreferences` still refuses it everywhere else.
+
+**Why a name rather than a flag.** A flag is a modifier an operator can forget,
+and forgetting it yields the weaker behaviour silently — the same failure this
+document describes for a `mlockall` that warns instead of aborting. A name cannot
+be forgotten: `veepin serve pq-ikev2` either starts with the guarantee in force
+or does not start. The second reason is evidentiary: the interop matrix is keyed
+by protocol name, so a variant earns a published, CI-verified row, and a flag
+would earn nothing.
+
+**Failures are loud and early.** A `pq-` server pointed at an RSA or ECDSA
+certificate fails in `NewServer`, before the TUN is opened and before anything
+binds. Left to the first handshake, an operator would see a listener come up
+normally and then refuse every client, with the cause several layers down in a
+TLS error.
+
+Five boundaries, each a real limit rather than an oversight:
+
+- **PSK authentication is still accepted under `pq-ikev2`, deliberately.** A
+  pre-shared key is symmetric and is not broken by a quantum adversary — that is
+  the entire premise of RFC 8784, a specification that exists to give IKEv2
+  quantum resistance using exactly this property. What `pq-ikev2` refuses is
+  classical *public-key* authentication: an RSA or ECDSA certificate, and the
+  legacy AUTH method 1, which names no algorithm and so has no post-quantum
+  spelling. A low-entropy PSK is a weak secret for ordinary reasons, and the
+  variant does not and cannot check that.
+
+- **EAP-MSCHAPv2 is refused, and not for a quantum reason.** Its own primitives
+  are MD4 and single-DES, which are broken classically. A name promising maximum
+  assurance should not accept it. The practical consequence is that `pq-ikev2`
+  has no username/password path; use PSK or an ML-DSA certificate.
+
+- **`pq-ssh` carries only the key-exchange half.** SSH has no post-quantum
+  signature algorithm in any specification or implementation, so host keys and
+  user keys stay classical. This is a limit of SSH rather than of veepin —
+  [OpenSSH states it](https://www.openssh.org/pq.html) and says signature support
+  is future work. The exemption is recorded by name in `pqpolicy`, and
+  `TestSSHIsTheOnlyPQAuthException` holds that list at exactly one entry so a
+  second protocol claiming the same excuse has to argue for it. It ships anyway
+  because the alternative is worse: without it veepin's SSH silently settles for
+  `curve25519-sha256` against any peer older than OpenSSH 9.9, and
+  `mlkem768x25519-sha256` is the only post-quantum key exchange the two stacks
+  have in common — `x/crypto` implements no `sntrup761`, which is what OpenSSH
+  9.0 through 9.8 offer.
+
+- **The DTLS data channels have no post-quantum path at all**, so `pq-anyconnect`
+  and `pq-fortinet` force `-no-dtls` rather than leaving them bound.
+  `internal/dtls` is a from-scratch DTLS 1.2 with two fixed suites. Without the
+  forcing, the name would be describing the control channel while the bulk
+  traffic stayed classical. The cost is real: those two variants lose the UDP
+  data channel and run over TLS, with the head-of-line blocking that implies.
+
+- **Six protocols have no variant and cannot have one.** WireGuard and AmneziaWG
+  fix X25519 in Noise_IKpsk2 and negotiate nothing — Rosenpass is not reachable
+  under the dependency policy, for the reasons in
+  [`rosenpass-plan.md`](rosenpass-plan.md); Nebula is plain Noise_IX with inert
+  PSK machinery; Cisco IPsec and L2TP/IPsec are IKEv1, which has no additional
+  key-exchange mechanism and will not gain one; L2TPv3 has no cryptography at
+  all. **These absences are structural, not a backlog.** WireGuard's optional
+  per-peer preshared key remains the right hedge there, and it is available on
+  the base protocol.
+
+### What the evidence actually is, per variant
+
+This matters more than usual here, because for most of these variants **no
+third-party peer exists to test against** — and that is a fact about the
+ecosystem in 2026, not a gap in the test suite.
+
+| Variant | Cross-implementation evidence |
+|---|---|
+| `pq-ikev2` | strongSwan proves the **key exchange** half (RFC 9370). Its ML-DSA authentication is on an `ml-dsa` branch targeted at 6.1.0, so the **authentication** half has no peer yet. |
+| `pq-openvpn` | `openvpn` 2.6.14 links OpenSSL 3.5.6, which does both ML-KEM and ML-DSA. |
+| `pq-ssh` | OpenSSH 10.0 speaks `mlkem768x25519-sha256`. Key exchange only, per above. |
+| `pq-anyconnect`, `pq-fortinet`, `pq-gp`, `pq-pulse` | **None, and none in prospect.** openconnect links GnuTLS, and GnuTLS 3.8.9 has no ML-KEM group at all — measured, not assumed. |
+| `pq-sstp`, `pq-softether`, `pq-masque` | **None.** `sstp-client` is older still, SoftEther has its own stack, and aioquic brings its own TLS. |
+
+Where a cell has no peer it takes the fixed `—†` label the interop matrix
+already carries for this situation, rather than a false ✗. Read those rows as
+what they are: **veepin↔veepin evidence only**, which proves the two halves agree
+with each other and not that they are right. That is the weaker standard this
+tree normally refuses, accepted here because the alternative is not shipping the
+guarantee at all — and it is stated rather than glossed.
+
 ## SoftEther is layer 2, and shares a broadcast domain between clients
 
 Every other protocol here routes IP. SoftEther bridges Ethernet, which means

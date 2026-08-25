@@ -243,18 +243,18 @@ func lookupSigAlg(algID []byte) (sigAlg, bool) {
 // SIGNATURE_HASH_ALGORITHMS notify) that also suits the key. For ECDSA the hash
 // is matched to the curve; for RSA SHA-256 is the floor.
 func chooseSigAlg(pub crypto.PublicKey, peerHashes []uint16) (sigAlg, error) {
-	fam := famRSA
+	var fam sigFamily
 	pref := []uint16{payload.HashSHA256, payload.HashSHA384, payload.HashSHA512}
 	switch k := pub.(type) {
 	case *rsa.PublicKey:
 		fam = famRSA
 	case *mldsa.PublicKey:
 		// ML-DSA hashes the message internally, so the only acceptable "hash"
-		// is the Identity hash -- and the peer must have said it accepts it.
-		// A peer that advertised only SHA-2 gets a clean failure here rather
-		// than a signature it will reject.
-		fam = famMLDSA
-		pref = []uint16{payload.HashIdentity}
+		// is the Identity hash -- and the peer must have said it accepts it. A
+		// peer that advertised only SHA-2 gets a clean failure here rather than
+		// a signature it will reject. This arm returns directly: there is one
+		// scheme per parameter set, so there is nothing for the loop below to
+		// choose between.
 		for _, a := range knownSigAlgs {
 			if a.family == famMLDSA && a.params == k.Parameters() {
 				if len(peerHashes) > 0 && !slices.Contains(peerHashes, payload.HashIdentity) {

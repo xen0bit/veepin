@@ -77,7 +77,7 @@ func mint(t *testing.T, pq bool) (tls.Certificate, *x509.CertPool) {
 // A deadline turns that into an ordinary I/O error. The alert write fails,
 // crypto/tls discards that error and returns the verification error it already
 // had, and the assertion sees what it came for.
-func handshake(t *testing.T, srv, cli *tls.Config) (error, tls.ConnectionState) {
+func handshake(t *testing.T, srv, cli *tls.Config) (tls.ConnectionState, error) {
 	t.Helper()
 	c, s := net.Pipe()
 	deadline := time.Now().Add(2 * time.Second)
@@ -94,7 +94,7 @@ func handshake(t *testing.T, srv, cli *tls.Config) (error, tls.ConnectionState) 
 	c.Close()
 	s.Close()
 	<-done
-	return err, state
+	return state, err
 }
 
 // TestHardenedServerRefusesAClassicalKeyExchange is the contract's key-exchange
@@ -106,7 +106,7 @@ func TestHardenedServerRefusesAClassicalKeyExchange(t *testing.T) {
 	srv := &tls.Config{Certificates: []tls.Certificate{cert}}
 	HardenTLS(srv)
 
-	err, _ := handshake(t, srv, &tls.Config{
+	_, err := handshake(t, srv, &tls.Config{
 		RootCAs: pool, ServerName: "pq.example.com",
 		MinVersion:       tls.VersionTLS13,
 		CurvePreferences: []tls.CurveID{tls.X25519},
@@ -128,7 +128,7 @@ func TestHardenedServerRefusesTLS12(t *testing.T) {
 		t.Fatalf("MinVersion = %x, want TLS 1.3: HardenTLS must raise a 1.2 floor", srv.MinVersion)
 	}
 
-	err, _ := handshake(t, srv, &tls.Config{
+	_, err := handshake(t, srv, &tls.Config{
 		RootCAs: pool, ServerName: "pq.example.com",
 		MaxVersion: tls.VersionTLS12,
 	})
@@ -146,7 +146,7 @@ func TestHardenedClientRefusesAClassicalServerCertificate(t *testing.T) {
 	cli := &tls.Config{RootCAs: pool, ServerName: "pq.example.com"}
 	HardenTLS(cli)
 
-	err, _ := handshake(t, &tls.Config{
+	_, err := handshake(t, &tls.Config{
 		Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13,
 	}, cli)
 	if err == nil {
@@ -167,7 +167,7 @@ func TestHardenedPeersCompleteBothHalves(t *testing.T) {
 	cli := &tls.Config{RootCAs: pool, ServerName: "pq.example.com"}
 	HardenTLS(cli)
 
-	err, st := handshake(t, srv, cli)
+	st, err := handshake(t, srv, cli)
 	if err != nil {
 		t.Fatalf("two pq- peers failed to handshake: %v", err)
 	}

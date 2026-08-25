@@ -96,16 +96,10 @@ func TestEveryVariantResolvesItsBaseOptSpecs(t *testing.T) {
 // base sees. Without this a variant could register, resolve, generate flags and
 // dial -- and enforce nothing at all.
 func TestEveryVariantForcesThePostQuantumMarker(t *testing.T) {
-	for _, v := range client.AllVariants() {
-		// Parse will fail on missing required options for most protocols; that
-		// is fine and expected. What is asserted is the marker, captured by a
-		// stand-in registered as the base of a throwaway variant below.
-		if _, ok := pqpolicy.KeyExchangeOnly(v); ok {
-			continue // exempt variants still force the marker, checked in pqpolicy
-		}
-	}
-
-	// The real check, on a base we control, so it can observe what it was given.
+	// The check runs against a base we control, so it can observe exactly what
+	// it was handed. Driving the real facades instead would prove less: their
+	// parse functions reject missing required options long before the marker
+	// could be inspected.
 	var seen map[string]string
 	client.Register("pqguard", func(opts map[string]string) (client.Dialer, error) {
 		seen = opts
