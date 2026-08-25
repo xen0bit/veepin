@@ -38,10 +38,20 @@ The second (`feat/replay-and-reach`) executes **H8 and H4**, which brings it to
 twenty-one accounted for.
 
 The third (`feat/ikev2-over-tcp`) executes **item 9**, which brings it to
-twenty-two accounted for and four outstanding. This section is the record of
-what each row cost against what it was predicted to cost.
+twenty-two accounted for and four outstanding.
 
-What remains, and why each stopped where it did:
+The fourth (`feat/lifecycle-and-close-out`) closes the page: **item 12**, and a
+decision or a survey for every row that was waiting on one — H3b, H4's
+remainder, H6, H7 and H11. Two defects that earlier branches named and deferred
+went with it: OpenVPN's server never released an established client that stopped
+answering, and abandoning a wedged listener cost a goroutine and a TUN fd for the
+life of the process. **Twenty-six of twenty-six accounted for.**
+
+This section is the record of what each row cost against what it was predicted
+to cost.
+
+What remains, and why each stopped where it did — as of the third branch. The
+fourth answered all of it; each entry below now carries where:
 
 - **Item 12 (`slog`)** has landed, and cost about a fifth of what this page
   estimated — see [what it cost](#what-it-actually-cost-and-what-it-found-1).
@@ -49,8 +59,12 @@ What remains, and why each stopped where it did:
   AmneziaWG for free. The decision on the rest has since been made and written
   down: no campaign, MASQUE next because most of it is already written, and two
   of the "missing" thirteen were layer 2 and never needed it.
-- **H6** is gated on a profile nobody has taken since Option 1 landed, and
-  **H7** on a product decision. **H11** has a decision written and no code.
+- **H6** was gated on a profile nobody had taken since Option 1 landed — it has
+  been taken, and it says the ceiling does not bind and the allocator, not the
+  plumbing, is what caps parallelism. **H7** was gated on a product decision,
+  which is made: road warriors, on purpose, written down as a boundary in
+  `security.md`. **H11** had a decision and no code; it still has no code, and
+  the README now states the obstacles that are actually true.
 - **H3b** (ML-DSA in IKEv2's AUTH payload) has been surveyed and stays gated —
   but on a release date now rather than an unknown. The draft is through IESG
   review; strongSwan's ML-DSA authentication is on a branch for 6.1.0 and not in
