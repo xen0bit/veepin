@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"strconv"
@@ -22,6 +22,7 @@ import (
 	"github.com/xen0bit/veepin/internal/ppp"
 	"github.com/xen0bit/veepin/internal/sstp/wire"
 	"github.com/xen0bit/veepin/internal/userdb"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // ServerConfig configures an SSTP responder and its userspace data path.
@@ -61,7 +62,7 @@ type ServerConfig struct {
 	// TUNName is the desired TUN interface name; empty lets the kernel pick.
 	TUNName string
 	// Logger receives progress logs; nil discards them.
-	Logger *log.Logger
+	Logger *slog.Logger
 }
 
 // handshakeTimeout bounds the TLS/HTTP/SSTP/PPP negotiation before the tunnel is
@@ -89,7 +90,7 @@ type Server struct {
 	gateway       net.IP
 	dns           []net.IP
 	users         map[string]string
-	logger        *log.Logger
+	logger        *vlog.Logger
 	gate          *dataplane.Gate
 	// shaper pads outbound PPP frames so the TLS record carrying them says less
 	// about the packet inside; nil disables shaping.
@@ -144,9 +145,9 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("sstp: invalid listen IP %q", cfg.ListenIP)
 	}
 
-	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(debuglog.Writer(), "", log.LstdFlags|log.Lmicroseconds)
+	logger := vlog.From(cfg.Logger)
+	if cfg.Logger == nil {
+		logger = vlog.Text(debuglog.Writer())
 	}
 
 	tun, err := dataplane.OpenTUN(cfg.TUNName)
@@ -212,7 +213,7 @@ func (s *Server) ListenAndServe() error {
 		// for a peer that has not authenticated. Bounding it here, at accept,
 		// covers the whole cost rather than only the part after TLS completes.
 		if r := s.gate.Admit(conn.RemoteAddr()); r != dataplane.Admitted {
-			s.logger.Printf("sstp: refusing connection from %s: %v", conn.RemoteAddr(), r)
+			s.logger.Warnf("sstp: refusing connection from %s: %v", conn.RemoteAddr(), r)
 			_ = conn.Close()
 			continue
 		}
@@ -332,6 +333,24 @@ func (s *Server) Close() error {
 	})
 	return nil
 }
+
+// Abandon implements client.AbandonableServer. It closes the TUN directly, so
+// an abandoned listener's packet pump unparks and its descriptor is released
+// even though Close never returned. See client.AbandonableServer for why this
+// is not simply Close.
+//
+// The TUN is set in NewServer and never reassigned, so this reads it without
+// the lock Close takes -- deliberately, because a wedged Close may be holding
+// that lock, and waiting on it here would reproduce the very stall this is the
+// escape from.
+func (s *Server) Abandon() { s.tun.Close() }
+
+// Server implements client.AbandonableServer, so the supervisor can take its
+// descriptors back when Close overruns. Asserted here because the interface is
+// found by type assertion at the one call site: without this, a renamed or
+// re-signatured Abandon compiles fine and the assertion silently starts failing,
+// which reads as the leak coming back.
+var _ client.AbandonableServer = (*Server)(nil)
 
 // sstpClient is one accepted client: its TLS connection, PPP server session, and
 // assignment. It implements ppp.Transport (framing PPP into SSTP data packets)
@@ -565,7 +584,7 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 		Pool:     opts[OptServerPool],
 		TUNName:  opts[OptServerTUN],
 		Users:    map[string]string{},
-		Logger:   log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds),
+		Logger:   slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
 	}
 	var err error
 	if cfg.Cert, err = os.ReadFile(opts[OptServerCert]); err != nil {

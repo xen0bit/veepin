@@ -78,6 +78,7 @@ round trip:
 | `autherr_test.go` — `TestEveryProtocolJudgingACredentialReportsErrAuth` | every facade declaring a `Secret` client option references `client.ErrAuth`/`client.WrapAuth`, or is named in `noCredentialJudged` with the reason its `Dial` judges no credential |
 | `docs_test.go` — `TestEveryOptConstIsDescribedByAnOptSpec` | every `Opt*` const a facade declares is named as a `Key` in one of its two OptSpec tables |
 | `internal/livingreadme/interop_test.go` | every test named in the matrix exists, and every `TestInterop*` is in the matrix — **a test absent from the matrix runs in no CI shard and therefore never runs** |
+| `abandon_test.go` — `TestEveryRegisteredServerCanBeAbandoned` | every facade registering a server asserts `client.AbandonableServer` on its own `*Server`, so a listener the supervisor gives up waiting for still gives its TUN fd and pump goroutine back |
 | `nm/cmd/.../TestAllSupportedProtocolsRegistered` | `nmconfig.SupportedProtocols` and the service's blank imports agree |
 | `tests/e2e/harness/registry_test.go` | the Playwright harness blank-imports every facade, so the panel it serves has the same registry the real binary does |
 
@@ -271,6 +272,12 @@ The code reads like prose and the comments carry the reasoning. Match it.
 - **Errors are lower-case, prefixed with the package name**, and the drop path on
   a data path uses pre-built sentinels so a flood of bad packets allocates
   nothing.
+- **Logging goes through `internal/vlog`** — `log/slog` with `Printf`-shaped
+  calls. `Printf` is Info, and `Warnf`/`Errorf` exist so `-log-level warn` means
+  something. A line may only ever be reclassified **upward**: Info→Warn keeps it
+  visible at the default level, Info→Debug hides it from everyone who has not
+  asked, and twenty-eight interop cells read this stream. A facade's public
+  `Logger` field is an `*slog.Logger`, wrapped on the way in.
 - **Every `internal/<proto>/README.md` ends with an honest caveats section.**
   Missing forward secrecy, unimplemented modes, protocol weaknesses veepin
   inherits — state them plainly. `doc/security.md` carries the longer form.
@@ -287,6 +294,12 @@ Re-run these; don't "fix" them.
 - `internal/ikev2/ike` — "ESP packet never reached the server TUN".
 - `internal/fortinet` — `TestDTLSAttachesToTLSTunnel`.
 - The release workflow's `nm-packages` job dying on an Ubuntu mirror sync.
+- `compose up: signal: killed` in an interop shard, with the last line of output
+  a container *Starting* and never *Started*. That is the Docker daemon taking
+  minutes over a start that normally takes milliseconds — seen on the
+  `softether-vpn` and `sstp` shards, and reproducible locally. `composeUp`
+  retries once on it now, so a red build means it happened twice; the retry is
+  safe because `up --build -d` waits for nothing veepin does.
 
 ## Cutting a release
 

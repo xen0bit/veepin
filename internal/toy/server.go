@@ -13,14 +13,13 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
-	"log"
 	"net"
 	"net/netip"
 	"sync"
 	"time"
 
 	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // SessionTimeout is how long a session survives without inbound traffic. The
@@ -38,7 +37,7 @@ type ServerConfig struct {
 	// MTU is offered to clients in WELCOME.
 	MTU uint16
 	// Logger receives progress messages; nil discards them.
-	Logger *log.Logger
+	Logger *vlog.Logger
 	// Gate bounds how much unauthenticated work this server accepts. Nil
 	// installs one with the package defaults, which is what a caller wanting
 	// sane behaviour should do -- an unbounded server is not a supported
@@ -62,7 +61,7 @@ type Server struct {
 	pump *dataplane.Pump
 	gate *dataplane.Gate
 	cfg  ServerConfig
-	log  *log.Logger
+	log  *vlog.Logger
 
 	mu       sync.Mutex
 	pending  map[uint16]*pending
@@ -84,9 +83,6 @@ func NewServer(rawConn *net.UDPConn, tun *dataplane.TUN, cfg ServerConfig) (*Ser
 		return nil, errors.New("toy: no users configured")
 	}
 	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
 
 	gate := cfg.Gate
 	if gate == nil {
@@ -110,7 +106,7 @@ func NewServer(rawConn *net.UDPConn, tun *dataplane.TUN, cfg ServerConfig) (*Ser
 			logger.Printf("toy: send: %v", err)
 		}
 	}
-	s.pump = dataplane.NewPump(tun, send, SessionOf, logger)
+	s.pump = dataplane.NewPump(tun, send, SessionOf, logger.Slog())
 	s.pump.SetInnerMTU(int(cfg.MTU))
 	return s, nil
 }
@@ -210,7 +206,7 @@ func (s *Server) handleHello(body []byte, from *net.UDPAddr) {
 	// exhaust the cap.
 	if r := s.gate.Admit(from); r != dataplane.Admitted {
 		s.reject(from, 0, RejectBusy)
-		s.log.Printf("toy: refusing handshake from %v: %v", from, r)
+		s.log.Warnf("toy: refusing handshake from %v: %v", from, r)
 		return
 	}
 
@@ -277,7 +273,7 @@ func (s *Server) handleAuth(h Header, body []byte, from *net.UDPAddr) {
 		// This is the same rule as checking a packet tag before touching the
 		// replay window: unauthenticated input must not be able to destroy state.
 		s.reject(from, h.Session, RejectAuthFailed)
-		s.log.Printf("toy: session %d: authentication failed for %q", h.Session, p.user)
+		s.log.Warnf("toy: session %d: authentication failed for %q", h.Session, p.user)
 		return
 	}
 
@@ -479,7 +475,7 @@ func (s *Server) expire() {
 	for _, d := range drop {
 		if d.sess != nil {
 			s.pump.RemoveTunnel(d.sess)
-			s.log.Printf("toy: session %d expired", d.sess.ID)
+			s.log.Warnf("toy: session %d expired", d.sess.ID)
 		}
 		if d.ip != nil {
 			s.cfg.Pool.Release(d.ip)

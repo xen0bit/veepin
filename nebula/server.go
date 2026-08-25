@@ -110,6 +110,31 @@ func (s *Server) Close() error {
 	return nil
 }
 
+// Abandon implements client.AbandonableServer. Nebula is the one server here
+// that owns no TUN of its own: the lighthouse runs as a host, and the TUN
+// belongs to the Session that ListenAndServe dials. So this reaches through the
+// session to the same descriptor every other facade closes directly.
+//
+// It takes s.mu, which the rest of this file's contract permits: nothing holds
+// this mutex across a blocking call. Close latches a flag and closes a channel
+// under it, and the teardown that can block -- sess.Close in ListenAndServe --
+// runs holding nothing.
+func (s *Server) Abandon() {
+	s.mu.Lock()
+	sess := s.sess
+	s.mu.Unlock()
+	if sess != nil && sess.tun != nil {
+		sess.tun.Close()
+	}
+}
+
+// Server implements client.AbandonableServer, so the supervisor can take its
+// descriptors back when Close overruns. Asserted here because the interface is
+// found by type assertion at the one call site: without this, a renamed or
+// re-signatured Abandon compiles fine and the assertion silently starts failing,
+// which reads as the leak coming back.
+var _ client.AbandonableServer = (*Server)(nil)
+
 // TUNName is the interface the lighthouse is bound to.
 func (s *Server) TUNName() string {
 	s.mu.Lock()

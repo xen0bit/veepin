@@ -12,13 +12,12 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
-	"io"
-	"log"
 	"net"
 	"net/netip"
 	"time"
 
 	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // Handshake retransmission. There is no reliability layer, so an unanswered
@@ -41,7 +40,7 @@ type ClientConfig struct {
 	// Secret is the shared secret. See SPEC.md for why this protects nothing.
 	Secret string
 	// Logger receives progress messages; nil discards them.
-	Logger *log.Logger
+	Logger *vlog.Logger
 }
 
 // Client is an established client session.
@@ -50,7 +49,7 @@ type Client struct {
 	session *Session
 	pump    *dataplane.Pump
 	tun     *dataplane.TUN
-	log     *log.Logger
+	log     *vlog.Logger
 
 	// Welcome is what the server assigned.
 	Welcome Welcome
@@ -66,9 +65,6 @@ type Client struct {
 // independent implementation.
 func Handshake(ctx context.Context, conn *net.UDPConn, cfg ClientConfig) (*Session, Welcome, error) {
 	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
 	if len(cfg.User) > 255 {
 		return nil, Welcome{}, errors.New("toy: username longer than 255 octets")
 	}
@@ -124,7 +120,7 @@ func Handshake(ctx context.Context, conn *net.UDPConn, cfg ClientConfig) (*Sessi
 // exchange sends req until a datagram of type want arrives, or the budget runs
 // out. A REJECT is reported as the error it is rather than retried.
 func exchange(ctx context.Context, conn *net.UDPConn, server *net.UDPAddr, req []byte,
-	want MsgType, logger *log.Logger, what string) ([]byte, Header, error) {
+	want MsgType, logger *vlog.Logger, what string) ([]byte, Header, error) {
 
 	buf := make([]byte, 2048)
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
@@ -194,16 +190,13 @@ func StartClient(ctx context.Context, conn *net.UDPConn, tun *dataplane.TUN, cfg
 	}
 
 	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
 
 	send := func(pkt []byte, to *net.UDPAddr) {
 		if _, err := conn.WriteToUDP(pkt, to); err != nil {
 			logger.Printf("toy: send: %v", err)
 		}
 	}
-	pump := dataplane.NewPump(tun, send, SessionOf, logger)
+	pump := dataplane.NewPump(tun, send, SessionOf, logger.Slog())
 	pump.SetInnerMTU(int(welcome.MTU))
 	pump.AddTunnel(session)
 

@@ -2,13 +2,13 @@ package ike
 
 import (
 	"bytes"
-	"io"
-	"log"
 	"net"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // startTCPTestServer is startTestServer with the RFC 8229/9329 listener on. The
@@ -28,7 +28,7 @@ func startTCPTestServer(t *testing.T) (p500, p4500 int, srv *Server, childCh cha
 		PSK:      []byte("test-psk"),
 		LocalID:  FQDNIdentity("vpn.example"),
 		PublicIP: net.ParseIP("127.0.0.1"),
-		Logger:   log.New(io.Discard, "", 0),
+		Logger:   vlog.Discard(),
 		AssignAddr: func(want AddressRequest) (Assignment, error) {
 			a := Assignment{DNS: []net.IP{net.IPv4(1, 1, 1, 1)}}
 			if want.IP4 {
@@ -63,7 +63,7 @@ func TestAWholeHandshakeAndDataPathCrossOneTCPStream(t *testing.T) {
 		TCP:     true,
 		PSK:     []byte("test-psk"),
 		LocalID: FQDNIdentity("client.example"),
-		Logger:  log.New(io.Discard, "", 0),
+		Logger:  vlog.Discard(),
 	})
 	res, err := client.Connect()
 	if err != nil {
@@ -135,7 +135,7 @@ func TestATCPServerStillAnswersUDP(t *testing.T) {
 		ServerHost: "127.0.0.1", ServerPort: p500, NATTPort: p4500,
 		PSK:     []byte("test-psk"),
 		LocalID: FQDNIdentity("client.example"),
-		Logger:  log.New(io.Discard, "", 0),
+		Logger:  vlog.Discard(),
 	})
 	res, err := client.Connect()
 	if err != nil {
@@ -170,7 +170,7 @@ func TestATCPClientFailsRatherThanFallingBackToUDP(t *testing.T) {
 		TCP:     true,
 		PSK:     []byte("test-psk"),
 		LocalID: FQDNIdentity("client.example"),
-		Logger:  log.New(io.Discard, "", 0),
+		Logger:  vlog.Discard(),
 	})
 	if _, err := client.Connect(); err == nil {
 		client.Close()
@@ -245,7 +245,7 @@ func TestMOBIKEIsRefusedOverTCP(t *testing.T) {
 		TCP:     true,
 		PSK:     []byte("test-psk"),
 		LocalID: FQDNIdentity("client.example"),
-		Logger:  log.New(io.Discard, "", 0),
+		Logger:  vlog.Discard(),
 	})
 	if _, err := client.Connect(); err != nil {
 		t.Fatalf("connect over TCP: %v", err)

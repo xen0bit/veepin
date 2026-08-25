@@ -38,8 +38,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
-	"log"
 	"net"
 	"net/netip"
 	"sync"
@@ -47,6 +45,7 @@ import (
 
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/veepin/internal/vlog"
 	"github.com/xen0bit/veepin/internal/wireguard/noise"
 	"github.com/xen0bit/veepin/internal/wireguard/transport"
 	"github.com/xen0bit/veepin/internal/wireguard/wire"
@@ -255,10 +254,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	if err != nil {
 		return nil, client.Result{}, fmt.Errorf("wireguard: %w", err)
 	}
-	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
+	logger := vlog.From(cfg.Logger)
 
 	// A connected socket: the kernel filters to the endpoint, and every send
 	// implicitly addresses it, so the road-warrior return-address handling the
@@ -311,12 +307,12 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	send := func(pkt []byte, _ *net.UDPAddr) {
 		pkt = obfuscateSend(pkt, obf)
 		if _, werr := conn.Write(pkt); werr != nil {
-			logger.Printf("wireguard: send error: %v", werr)
+			logger.Warnf("wireguard: send error: %v", werr)
 		}
 	}
 	// Outbound TUN traffic is routed to the peer by longest-prefix match over its
 	// AllowedIPs; inbound transport packets demux on our receiver index.
-	pump := dataplane.NewPump(tun, send, wire.Demux, logger)
+	pump := dataplane.NewPump(tun, send, wire.Demux, logger.Slog())
 	if cfg.Shape > 0 {
 		pump.SetShaper(dataplane.NewShaper(dataplane.ShapeConfig{Bytes: cfg.Shape}))
 		logger.Printf("wireguard: outbound shaping on, %d bytes per flow", cfg.Shape)
@@ -329,7 +325,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 			pkts[i] = obfuscateSend(pkts[i], obf)
 		}
 		if _, werr := sendBC.WriteBatch(pkts, nil); werr != nil {
-			logger.Printf("wireguard: batch send error: %v", werr)
+			logger.Warnf("wireguard: batch send error: %v", werr)
 		}
 	})
 	pump.SetInnerMTU(r.mtu)
@@ -367,7 +363,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 //
 // obf, if non-zero, applies AmneziaWG wire transforms to the initiation and
 // response, and emits Jc junk datagrams ahead of each initiation.
-func handshake(ctx context.Context, conn *net.UDPConn, cfg noise.Config, logger *log.Logger, obf ObfuscationConfig) (*noise.Keypair, error) {
+func handshake(ctx context.Context, conn *net.UDPConn, cfg noise.Config, logger *vlog.Logger, obf ObfuscationConfig) (*noise.Keypair, error) {
 	// The response arrives padded by S2, so the buffer must have room for it;
 	// sizing it to the stock 92 bytes silently truncates an obfuscated response
 	// and the handshake fails with a parse error that names the wrong cause.
@@ -419,7 +415,7 @@ func handshake(ctx context.Context, conn *net.UDPConn, cfg noise.Config, logger 
 				if attempt >= maxAttempts {
 					return nil, fmt.Errorf("no response after %d attempts", maxAttempts)
 				}
-				logger.Printf("wireguard: handshake attempt %d timed out, retrying", attempt)
+				logger.Warnf("wireguard: handshake attempt %d timed out, retrying", attempt)
 				continue
 			}
 			return nil, err
@@ -452,7 +448,7 @@ type session struct {
 	tun    *dataplane.TUN
 	pump   *dataplane.Pump
 	tunnel *wgTunnel
-	logger *log.Logger
+	logger *vlog.Logger
 
 	// noiseCfg is kept so the rekey loop can start fresh handshakes, and
 	// rekeyInterval is how often it does.
@@ -609,7 +605,7 @@ func (s *session) rekey() {
 		}
 	}()
 	if err := s.handshakeOnce(ctx); err != nil {
-		s.logger.Printf("wireguard: rekey failed: %v", err)
+		s.logger.Warnf("wireguard: rekey failed: %v", err)
 	}
 }
 
@@ -719,7 +715,7 @@ func (s *session) doHandshake(ctx context.Context) (*noise.Keypair, error) {
 			}
 			return kp, nil
 		case <-timer.C:
-			s.logger.Printf("wireguard: rekey attempt timed out, retrying")
+			s.logger.Warnf("wireguard: rekey attempt timed out, retrying")
 			continue
 		case <-ctx.Done():
 			timer.Stop()

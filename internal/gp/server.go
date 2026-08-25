@@ -23,7 +23,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/netip"
@@ -33,6 +32,7 @@ import (
 
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/userdb"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // ServerConfig configures a GlobalProtect gateway.
@@ -58,7 +58,7 @@ type ServerConfig struct {
 	// ESPPort is where ESP is served; 0 means DefaultESPPort.
 	ESPPort int
 	// Logger receives progress messages; nil discards them.
-	Logger *log.Logger
+	Logger *vlog.Logger
 	// Gate bounds unauthenticated work; nil installs one with the defaults.
 	Gate *dataplane.Gate
 	// Shape is the per-flow downstream shaping budget in bytes; 0 disables it.
@@ -130,7 +130,7 @@ type Server struct {
 	cfg  ServerConfig
 	tun  io.ReadWriteCloser
 	gate *dataplane.Gate
-	log  *log.Logger
+	log  *vlog.Logger
 	// shaper pads outbound packets so the record or datagram carrying them says
 	// less about the packet inside (dataplane/shape.go); nil disables shaping.
 	// One Shaper is safe to share here precisely because RunTUN is the single
@@ -157,9 +157,6 @@ func NewServer(cfg ServerConfig, tun io.ReadWriteCloser) (*Server, error) {
 		return nil, errors.New("gp: no users configured")
 	}
 	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
 	gate := cfg.Gate
 	if gate == nil {
 		gate = dataplane.NewGate(dataplane.AdmissionConfig{})
@@ -298,7 +295,7 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (LoginRequ
 	}
 	pass, ok := s.cfg.Users[req.User]
 	if !ok || !userdb.Verify(pass, req.Password) {
-		s.log.Printf("gp: login failed for %q", req.User)
+		s.log.Warnf("gp: login failed for %q", req.User)
 		http.Error(w, "Invalid username or password", http.StatusForbidden)
 		return LoginRequest{}, false
 	}

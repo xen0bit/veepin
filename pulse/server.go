@@ -12,7 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"strconv"
@@ -23,6 +23,7 @@ import (
 	"github.com/xen0bit/veepin/dataplane"
 	ipulse "github.com/xen0bit/veepin/internal/pulse"
 	"github.com/xen0bit/veepin/internal/userdb"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 func init() {
@@ -97,7 +98,7 @@ type ServerConfig struct {
 	// which every IP stack trims by the packet's own header length.
 	Shape int
 
-	Logger *log.Logger
+	Logger *slog.Logger
 }
 
 // Server is an Ivanti Connect Secure gateway.
@@ -160,7 +161,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		ESPPort:  cfg.ESPPort,
 		Shape:    cfg.Shape,
 		MTU:      client.DefaultTunnelMTU,
-		Logger:   cfg.Logger,
+		Logger:   vlog.From(cfg.Logger),
 	}, tun)
 	if err != nil {
 		_ = tun.Close()
@@ -250,6 +251,24 @@ func (s *Server) Close() error {
 	return err
 }
 
+// Abandon implements client.AbandonableServer. It closes the TUN directly, so
+// an abandoned listener's packet pump unparks and its descriptor is released
+// even though Close never returned. See client.AbandonableServer for why this
+// is not simply Close.
+//
+// The TUN is set in NewServer and never reassigned, so this reads it without
+// the lock Close takes -- deliberately, because a wedged Close may be holding
+// that lock, and waiting on it here would reproduce the very stall this is the
+// escape from.
+func (s *Server) Abandon() { s.tun.Close() }
+
+// Server implements client.AbandonableServer, so the supervisor can take its
+// descriptors back when Close overruns. Asserted here because the interface is
+// found by type assertion at the one call site: without this, a renamed or
+// re-signatured Abandon compiles fine and the assertion silently starts failing,
+// which reads as the leak coming back.
+var _ client.AbandonableServer = (*Server)(nil)
+
 // TUNName is the interface the gateway is bound to.
 func (s *Server) TUNName() string {
 	if s.tun == nil {
@@ -272,7 +291,7 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 		Domain:   opts[OptServerDomain],
 		NoESP:    opts[OptServerNoESP] == "true",
 		TUNName:  opts[OptServerTUN],
-		Logger:   log.New(logDest(), "", log.LstdFlags|log.Lmicroseconds),
+		Logger:   vlog.SlogText(logDest()),
 	}
 	user, pass := opts[OptServerUser], opts[OptServerPass]
 	if user != "" && pass == "" {

@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -26,6 +25,7 @@ import (
 	"github.com/xen0bit/veepin/internal/keygen"
 	"github.com/xen0bit/veepin/internal/profile"
 	"github.com/xen0bit/veepin/internal/supervisor"
+	"github.com/xen0bit/veepin/internal/vlog"
 	"github.com/xen0bit/veepin/wireguard"
 
 	// Blank-import the production facades so the registry the API reads from
@@ -134,7 +134,7 @@ func newTestServer(t *testing.T, statuses map[string]supervisor.Status) *Server 
 		_ = os.WriteFile(filepath.Join(dir, name+".json"), body, 0o600)
 	}
 	mgr := &fakeMgr{statuses: statuses}
-	srv, err := NewServer(dir, mgr, log.New(io.Discard, "", 0))
+	srv, err := NewServer(dir, mgr, vlog.Discard())
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -682,7 +682,7 @@ func TestPatchRebuildFailureIsSavedNotSunk(t *testing.T) {
 func newTestServerWithProfiles(t *testing.T, statuses map[string]supervisor.Status, profiles string) *Server {
 	t.Helper()
 	s := newTestServer(t, statuses)
-	withProfiles, err := NewServer(s.dir, s.mgr, log.New(io.Discard, "", 0), WithProfileDir(profiles))
+	withProfiles, err := NewServer(s.dir, s.mgr, vlog.Discard(), WithProfileDir(profiles))
 	if err != nil {
 		t.Fatalf("NewServer with profiles: %v", err)
 	}
@@ -883,7 +883,7 @@ func TestDeletingAStoppedListenerIsNotAnAuditFailure(t *testing.T) {
 // must land in the ring, one entry per line, newest first.
 func TestLogRingCapturesLines(t *testing.T) {
 	lr := NewLogRing()
-	lgr := log.New(lr, "", 0)
+	lgr := vlog.Plain(lr)
 	lgr.Printf("first")
 	lgr.Printf("second")
 	got := lr.Recent(0)
@@ -908,7 +908,7 @@ func TestLogRingCapturesLines(t *testing.T) {
 func TestLogsEndpointRequiresAndServesTheRing(t *testing.T) {
 	dir := t.TempDir()
 	mgr := &fakeMgr{statuses: map[string]supervisor.Status{}}
-	srv, err := NewServer(dir, mgr, log.New(io.Discard, "", 0))
+	srv, err := NewServer(dir, mgr, vlog.Discard())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -918,7 +918,7 @@ func TestLogsEndpointRequiresAndServesTheRing(t *testing.T) {
 	}
 
 	lr := NewLogRing()
-	srv2, err := NewServer(dir, &fakeMgr{}, log.New(lr, "", 0), WithLogRing(lr))
+	srv2, err := NewServer(dir, &fakeMgr{}, vlog.Plain(lr), WithLogRing(lr))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1754,7 +1754,7 @@ func TestPeerEndpointReturnsPeersForDescriber(t *testing.T) {
 		statuses:   statuses,
 		peerServer: &fakePeerDescriber{peers: []client.PeerInfo{{ID: "AAAA", Address: "10.10.0.2", State: "connected"}}},
 	}
-	srv, err := NewServer(dir, mgr, log.New(io.Discard, "", 0))
+	srv, err := NewServer(dir, mgr, vlog.Discard())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1797,7 +1797,7 @@ func TestPeerDeleteRemovesAConfiguredPeer(t *testing.T) {
 	body, _ := json.Marshal(cfg)
 	_ = os.WriteFile(filepath.Join(dir, "wg.json"), body, 0o600)
 	mgr := &fakeMgr{statuses: map[string]supervisor.Status{"wg": {Name: "wg", State: "running"}}}
-	srv, err := NewServer(dir, mgr, log.New(io.Discard, "", 0))
+	srv, err := NewServer(dir, mgr, vlog.Discard())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1830,7 +1830,7 @@ func TestPeerDeleteClearsTheSinglePeerOptions(t *testing.T) {
 	body, _ := json.Marshal(cfg)
 	_ = os.WriteFile(filepath.Join(dir, "wg.json"), body, 0o600)
 	mgr := &fakeMgr{statuses: map[string]supervisor.Status{"wg": {Name: "wg", State: "running"}}}
-	srv, err := NewServer(dir, mgr, log.New(io.Discard, "", 0))
+	srv, err := NewServer(dir, mgr, vlog.Discard())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1862,7 +1862,7 @@ func TestPeerDeleteUnknownKeyAndWrongProtocol(t *testing.T) {
 	body2, _ := json.Marshal(other)
 	_ = os.WriteFile(filepath.Join(dir, "toy.json"), body2, 0o600)
 	mgr := &fakeMgr{statuses: map[string]supervisor.Status{}}
-	srv, err := NewServer(dir, mgr, log.New(io.Discard, "", 0))
+	srv, err := NewServer(dir, mgr, vlog.Discard())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1889,7 +1889,7 @@ func TestPeerDeleteRollsBackOnRebuildFailure(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(dir, "wg.json"), body, 0o600)
 	mgr := &fakeMgr{statuses: map[string]supervisor.Status{"wg": {Name: "wg", State: "running"}}}
 	mgr.rebuildErr = errors.New("wireguard: listen udp 51820: address in use")
-	srv, err := NewServer(dir, mgr, log.New(io.Discard, "", 0))
+	srv, err := NewServer(dir, mgr, vlog.Discard())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1918,7 +1918,7 @@ func TestPeerDeleteRollsBackTheSinglePeerOptions(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(dir, "wg.json"), body, 0o600)
 	mgr := &fakeMgr{statuses: map[string]supervisor.Status{"wg": {Name: "wg", State: "running"}}}
 	mgr.rebuildErr = errors.New("wireguard: listen udp 51820: address in use")
-	srv, err := NewServer(dir, mgr, log.New(io.Discard, "", 0))
+	srv, err := NewServer(dir, mgr, vlog.Discard())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1946,7 +1946,7 @@ func TestPollingDoesNotEvictTheLogRing(t *testing.T) {
 	dir := t.TempDir()
 	ring := NewLogRing()
 	mgr := &fakeMgr{statuses: map[string]supervisor.Status{}}
-	srv, err := NewServer(dir, mgr, log.New(ring, "", 0), WithLogRing(ring))
+	srv, err := NewServer(dir, mgr, vlog.Plain(ring), WithLogRing(ring))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1981,7 +1981,7 @@ func TestFailedRequestsAreStillLogged(t *testing.T) {
 	dir := t.TempDir()
 	ring := NewLogRing()
 	mgr := &fakeMgr{statuses: map[string]supervisor.Status{}}
-	srv, err := NewServer(dir, mgr, log.New(ring, "", 0), WithLogRing(ring))
+	srv, err := NewServer(dir, mgr, vlog.Plain(ring), WithLogRing(ring))
 	if err != nil {
 		t.Fatal(err)
 	}

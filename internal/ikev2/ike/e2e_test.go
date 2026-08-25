@@ -2,8 +2,6 @@ package ike
 
 import (
 	"bytes"
-	"io"
-	"log"
 	"net"
 	"testing"
 	"time"
@@ -11,6 +9,7 @@ import (
 	"github.com/xen0bit/veepin/internal/cryptoutil"
 	"github.com/xen0bit/veepin/internal/ikev2/payload"
 	"github.com/xen0bit/veepin/internal/ikev2/transform"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // TestEndToEndHandshake drives a full IKE_SA_INIT + IKE_AUTH exchange as an
@@ -32,7 +31,7 @@ func TestEndToEndHandshake(t *testing.T) {
 		Port4500:  p4500,
 		PSK:       psk,
 		LocalID:   FQDNIdentity("responder.test"),
-		Logger:    log.New(io.Discard, "", 0),
+		Logger:    vlog.Discard(),
 		OnChildSA: func(sa *IKESA, c *ChildSA) { childCh <- c },
 	}
 	srv, err := NewServer(cfg)
@@ -88,7 +87,7 @@ func TestEndToEndHandshakeDualStack(t *testing.T) {
 		ListenIP: "127.0.0.1", Port500: p500, Port4500: p4500,
 		PSK:     psk,
 		LocalID: FQDNIdentity("responder.test"),
-		Logger:  log.New(io.Discard, "", 0),
+		Logger:  vlog.Discard(),
 		AssignAddr: func(AddressRequest) (Assignment, error) {
 			return Assignment{
 				IP4:     wantV4,
@@ -161,7 +160,7 @@ func TestEndToEndHandshakeChaCha20(t *testing.T) {
 		ListenIP: "127.0.0.1", Port500: p500, Port4500: p4500,
 		PSK:       psk,
 		LocalID:   FQDNIdentity("responder.test"),
-		Logger:    log.New(io.Discard, "", 0),
+		Logger:    vlog.Discard(),
 		OnChildSA: func(sa *IKESA, c *ChildSA) { childCh <- c },
 	})
 	if err != nil {

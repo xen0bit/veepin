@@ -49,7 +49,7 @@ func (s *Server) handleIKESAInit(pkt []byte, hdr payload.Header, remote *net.UDP
 		return
 	}
 	if r := s.gate.Admit(remote); r != dataplane.Admitted {
-		s.log.Printf("ikev2: refusing SA_INIT from %s: %v", remote, r)
+		s.log.Warnf("ikev2: refusing SA_INIT from %s: %v", remote, r)
 		return
 	}
 	defer s.gate.Done()

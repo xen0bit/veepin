@@ -5,8 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/netip"
 	"os"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/veepin/internal/vlog"
 	"github.com/xen0bit/veepin/internal/wireguard/noise"
 	"github.com/xen0bit/veepin/internal/wireguard/transport"
 	"github.com/xen0bit/veepin/internal/wireguard/wire"
@@ -72,7 +72,7 @@ type ServerConfig struct {
 	// dataplane.DefaultShapeBytes is a reasonable value.
 	Shape int
 
-	Logger *log.Logger
+	Logger *slog.Logger
 }
 
 // ServerPeer is one client the server will accept: its static public key, the
@@ -203,7 +203,7 @@ func ServerConfigFromOptions(opts map[string]string) (ServerConfig, error) {
 		sc.Peers = append(sc.Peers, extra...)
 	}
 	sc.ListenIP = opts[OptServerListenIP]
-	sc.Logger = log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
+	sc.Logger = vlog.SlogText(os.Stdout)
 	return sc, nil
 }
 
@@ -280,7 +280,7 @@ type Server struct {
 	network6 netip.Prefix
 	obfCfg   ObfuscationConfig // AmneziaWG wire obfuscation (zero = stock)
 
-	logger *log.Logger
+	logger *vlog.Logger
 	tun    *dataplane.TUN
 	// gate bounds unauthenticated handshake work; see internal admission notes.
 	gate *dataplane.Gate
@@ -330,10 +330,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, errors.New("wireguard: a server needs at least one peer")
 	}
 
-	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
+	logger := vlog.From(cfg.Logger)
 	mtu := cfg.MTU
 	if mtu == 0 {
 		mtu = defaultMTU
@@ -460,7 +457,7 @@ func (s *Server) ListenAndServe() error {
 			s.logger.Printf("wireguard: send to %s: %v", to, werr)
 		}
 	}
-	s.pump = dataplane.NewPump(s.tun, send, wire.Demux, s.logger)
+	s.pump = dataplane.NewPump(s.tun, send, wire.Demux, s.logger.Slog())
 	// GSO bursts flush with one sendmmsg, source-pinned like every send.
 	s.pump.SetBatchSender(func(pkts [][]byte, to *net.UDPAddr) {
 		if to == nil {
@@ -557,7 +554,7 @@ func (s *Server) handleInitiation(pkt []byte, from *net.UDPAddr) {
 	// The reservation covers only the initiation: by the time this returns the
 	// work is done and the session, if any, is authenticated.
 	if r := s.gate.Admit(from); r != dataplane.Admitted {
-		s.logger.Printf("wireguard: refusing initiation from %s: %v", from, r)
+		s.logger.Warnf("wireguard: refusing initiation from %s: %v", from, r)
 		return
 	}
 	defer s.gate.Done()
@@ -572,7 +569,7 @@ func (s *Server) handleInitiation(pkt []byte, from *net.UDPAddr) {
 		// ErrMAC1 means the packet was not addressed to us — common noise on an
 		// open port, not worth logging loudly.
 		if !errors.Is(err, noise.ErrMAC1) {
-			s.logger.Printf("wireguard: rejecting initiation from %s: %v", from, err)
+			s.logger.Warnf("wireguard: rejecting initiation from %s: %v", from, err)
 		}
 		return
 	}
@@ -657,6 +654,24 @@ func (s *Server) Close() error {
 	})
 	return s.closeErr
 }
+
+// Abandon implements client.AbandonableServer. It closes the TUN directly, so
+// an abandoned listener's packet pump unparks and its descriptor is released
+// even though Close never returned. See client.AbandonableServer for why this
+// is not simply Close.
+//
+// The TUN is set in NewServer and never reassigned, so this reads it without
+// the lock Close takes -- deliberately, because a wedged Close may be holding
+// that lock, and waiting on it here would reproduce the very stall this is the
+// escape from.
+func (s *Server) Abandon() { s.tun.Close() }
+
+// Server implements client.AbandonableServer, so the supervisor can take its
+// descriptors back when Close overruns. Asserted here because the interface is
+// found by type assertion at the one call site: without this, a renamed or
+// re-signatured Abandon compiles fine and the assertion silently starts failing,
+// which reads as the leak coming back.
+var _ client.AbandonableServer = (*Server)(nil)
 
 // Peers returns every configured peer with their live state, implementing
 // client.PeerDescriber so the management panel shows a peer list for WireGuard

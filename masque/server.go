@@ -14,7 +14,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"strconv"
 	"sync"
@@ -22,6 +22,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	imasque "github.com/xen0bit/veepin/internal/masque"
+	"github.com/xen0bit/veepin/internal/vlog"
 	"golang.org/x/net/quic"
 )
 
@@ -71,7 +72,7 @@ type ServerConfig struct {
 	// Shape is the per-flow downstream shaping budget in bytes; zero is off.
 	Shape int
 	// Logger receives progress messages.
-	Logger *log.Logger
+	Logger *slog.Logger
 }
 
 // Server is a MASQUE proxy.
@@ -161,7 +162,7 @@ func (s *Server) ListenAndServe() error {
 		return fmt.Errorf("masque: listening on %s: %w", bind, err)
 	}
 
-	logger := s.cfg.Logger
+	logger := vlog.From(s.cfg.Logger)
 	engine, err := imasque.NewServer(end, s.tun, imasque.ServerConfig{
 		Pool:   s.pool,
 		MTU:    s.serverMTU(),
@@ -213,6 +214,28 @@ func (s *Server) Close() error {
 	return engine.Close()
 }
 
+// Abandon implements client.AbandonableServer. It closes the TUN directly, so
+// an abandoned listener's packet pump unparks and its fd is released even
+// though Close never returned. See client.AbandonableServer for why this is not
+// simply Close.
+//
+// The TUN is set in NewServer and never reassigned, so this reads it without the
+// lock Close takes -- deliberately, because a wedged Close may be holding that
+// lock. The nil check mirrors Close's: a server constructed and never started
+// still owns its TUN, and one that failed partway through construction may not.
+func (s *Server) Abandon() {
+	if s.tun != nil {
+		s.tun.Close()
+	}
+}
+
+// Server implements client.AbandonableServer, so the supervisor can take its
+// descriptors back when Close overruns. Asserted here because the interface is
+// found by type assertion at the one call site: without this, a renamed or
+// re-signatured Abandon compiles fine and the assertion silently starts failing,
+// which reads as the leak coming back.
+var _ client.AbandonableServer = (*Server)(nil)
+
 // TUNName is the interface the server is bound to.
 func (s *Server) TUNName() string {
 	s.mu.Lock()
@@ -235,7 +258,7 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 		ListenIP: opts[OptServerListen],
 		Pool:     opts[OptServerPool],
 		TUNName:  opts[OptServerTUN],
-		Logger:   log.New(logDest(), "", log.LstdFlags|log.Lmicroseconds),
+		Logger:   vlog.SlogText(logDest()),
 	}
 	if v := opts[OptServerPort]; v != "" {
 		p, err := strconv.Atoi(v)

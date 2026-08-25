@@ -11,7 +11,7 @@ package toy
 import (
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/netip"
 	"os"
@@ -22,6 +22,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	itoy "github.com/xen0bit/veepin/internal/toy"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 func init() {
@@ -67,7 +68,7 @@ type ServerConfig struct {
 	// TUNName is the interface to open.
 	TUNName string
 	// Logger receives progress messages.
-	Logger *log.Logger
+	Logger *slog.Logger
 }
 
 // Server is a TOY server.
@@ -154,7 +155,7 @@ func (s *Server) ListenAndServe() error {
 		Pool:   s.pool,
 		DNS:    s.cfg.DNS,
 		MTU:    uint16(mtu),
-		Logger: s.cfg.Logger,
+		Logger: vlog.From(s.cfg.Logger),
 	})
 	if err != nil {
 		_ = conn.Close()
@@ -195,6 +196,24 @@ func (s *Server) Close() error {
 	}
 	return engine.Close()
 }
+
+// Abandon implements client.AbandonableServer. It closes the TUN directly, so
+// an abandoned listener's packet pump unparks and its descriptor is released
+// even though Close never returned. See client.AbandonableServer for why this
+// is not simply Close.
+//
+// The TUN is set in NewServer and never reassigned, so this reads it without
+// the lock Close takes -- deliberately, because a wedged Close may be holding
+// that lock, and waiting on it here would reproduce the very stall this is the
+// escape from.
+func (s *Server) Abandon() { s.tun.Close() }
+
+// Server implements client.AbandonableServer, so the supervisor can take its
+// descriptors back when Close overruns. Asserted here because the interface is
+// found by type assertion at the one call site: without this, a renamed or
+// re-signatured Abandon compiles fine and the assertion silently starts failing,
+// which reads as the leak coming back.
+var _ client.AbandonableServer = (*Server)(nil)
 
 // TUNName is the interface the server is bound to.
 func (s *Server) TUNName() string {
@@ -238,7 +257,7 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 		Pool:     opts[OptServerPool],
 		Users:    map[string]string{user: secret},
 		TUNName:  opts[OptServerTUN],
-		Logger:   log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds),
+		Logger:   slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
 	}
 	if cfg.Pool == "" {
 		cfg.Pool = "10.9.0.0/24"

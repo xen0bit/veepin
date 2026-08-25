@@ -14,8 +14,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -27,6 +25,7 @@ import (
 
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/internal/hostnet"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // Constructor turns a ListenerConfig into a constructed (not yet listening)
@@ -104,7 +103,7 @@ func (r *running) setState(cfg ListenerConfig, state string, err error) {
 type Manager struct {
 	dir  string
 	ctor Constructor
-	log  *log.Logger
+	log  *vlog.Logger
 	// run is the commander hostnet shells out through. Nil means the real
 	// ip/iptables/sysctl; tests set it with SetCommander so the host-networking
 	// half of a build is exercised without privileges, the same way ctor covers
@@ -165,18 +164,18 @@ func (m *Manager) Abandoned() (current int, total uint64) {
 func (m *Manager) reap(name string, closed <-chan struct{}, started time.Time) {
 	<-closed
 	m.abandoned.Add(-1)
-	m.log.Printf("supervisor: %s: abandoned listener's Close finally returned after %s; "+
+	m.log.Warnf("supervisor: %s: abandoned listener's Close finally returned after %s; "+
 		"its goroutine and TUN fd are released", name, time.Since(started).Round(time.Millisecond))
 }
 
 // NewManager returns a Manager whose ctor is real if none is supplied.
-func NewManager(dir string, logger *log.Logger, ctor Constructor) *Manager {
+func NewManager(dir string, logger *vlog.Logger, ctor Constructor) *Manager {
 	if ctor == nil {
 		// DefaultConstructor is the production path: client.NewServer.
 		ctor = client.NewServer
 	}
 	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
+		logger = vlog.Discard()
 	}
 	return &Manager{
 		dir:       dir,
@@ -811,18 +810,26 @@ const stopGrace = 5 * time.Second
 // the failure this whole package exists to avoid. Bounded, the listener is
 // abandoned with a log line and the rest of the fleet keeps serving.
 //
-// Abandoning leaks the pump goroutine and its fd until that listener's Close
-// finally returns, or until the process exits if it never does. That is the
-// lesser of the two evils here and is named in internal/supervisor/README.md;
-// the real fix is for the blocking path to become interruptible, which lives in
-// whichever protocol owns it rather than in this package.
+// Abandoning used to leak the pump goroutine and its TUN fd until that
+// listener's Close finally returned, or until the process exited if it never
+// did -- so a fleet restarting a wedged listener on a timer accumulated one of
+// each per attempt. Two things changed that, and they are different in kind.
 //
-// What this package can do, and now does, is stop the leak being invisible.
-// Manager.Abandoned reports a gauge and a cumulative counter, /api/metrics
-// exports both, and reap keeps watching so a Close that eventually returns
-// brings the gauge back down. A fleet restarting a wedged listener on a timer
-// used to accumulate a goroutine and an fd per attempt with a log line as the
-// only trace; now it accumulates a number an operator can alert on.
+// The leak itself is closed by client.AbandonableServer. Every server here owns
+// a TUN, dataplane holds that TUN non-blocking and polls it against a wake
+// eventfd, and closing it unparks the pump's read -- so a listener whose Close
+// is wedged can still have its descriptor taken away from underneath it, and the
+// goroutine follows the fd out. Abandon takes no lock the wedged Close could be
+// holding and waits for nothing, which is the whole reason it is not just Close
+// called twice. What stays abandoned is state, not resources: sessions are not
+// told, nothing is flushed, and the wedged Close is still wedged.
+//
+// The cost of that is made visible rather than assumed away. Manager.Abandoned
+// reports a gauge and a cumulative counter, /api/metrics exports both, and reap
+// keeps watching so a Close that eventually returns brings the gauge back down.
+// A server that does not implement Abandon -- none in this tree, but the
+// interface is optional for implementations outside it -- still leaks, and the
+// log line says which case it was.
 func (m *Manager) stopListener(r *running) {
 	r.buildMu.Lock()
 	defer r.buildMu.Unlock()
@@ -863,10 +870,19 @@ func (m *Manager) stopListenerLocked(r *running) {
 			abandoned = true
 			current := m.abandoned.Add(1)
 			total := m.abandonedTotal.Add(1)
-			m.log.Printf("supervisor: %s: Close did not return within %s; abandoning the listener "+
-				"(its packet pump is blocked reading the TUN and will exit when a packet arrives). "+
-				"%d listener(s) abandoned now, %d since start -- see Manager.Abandoned",
-				cfg.Name, stopGrace, current, total)
+			// Take the descriptors back before anything else. This is what
+			// keeps abandonment from costing a goroutine and an fd for the
+			// life of the process; see client.AbandonableServer.
+			released := "its packet pump and TUN fd were released"
+			if a, ok := srv.(client.AbandonableServer); ok {
+				a.Abandon()
+			} else {
+				released = "it does not implement client.AbandonableServer, so its " +
+					"packet pump goroutine and TUN fd are leaked until Close returns"
+			}
+			m.log.Warnf("supervisor: %s: Close did not return within %s; abandoning the listener "+
+				"(%s). %d listener(s) abandoned now, %d since start -- see Manager.Abandoned",
+				cfg.Name, stopGrace, released, current, total)
 			go m.reap(cfg.Name, closed, time.Now())
 		}
 	}
@@ -923,7 +939,7 @@ func (m *Manager) stopListenerLocked(r *running) {
 // still being this generation's channel, so a goroutine that returns after its
 // server was replaced (or after stopListener gave up waiting) cannot overwrite the
 // live listener's state with its own stale outcome.
-func serve(r *running, logger *log.Logger, srv client.Server, done chan struct{}) {
+func serve(r *running, logger *vlog.Logger, srv client.Server, done chan struct{}) {
 	defer close(done)
 	err := srv.ListenAndServe()
 

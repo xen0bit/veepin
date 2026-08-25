@@ -15,9 +15,10 @@ package gp
 
 import (
 	"io"
-	"log"
 	"net"
 	"sync"
+
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // maxInnerPacket bounds a packet read from the TUN. It is the framing's own
@@ -30,7 +31,7 @@ type tunnelLink struct {
 	conn   net.Conn
 	reader io.Reader // read side; nil means read from conn (a hijacked server conn sets it)
 	tun    io.ReadWriteCloser
-	logger *log.Logger
+	logger *vlog.Logger
 
 	// ownsTUN is true for a client, which has the TUN to itself; false for a
 	// server link, which shares one TUN across clients and must not close it.
@@ -54,9 +55,9 @@ type tunnelLink struct {
 }
 
 // newLink builds a link with the channels its loops need.
-func newLink(conn net.Conn, reader io.Reader, tun io.ReadWriteCloser, logger *log.Logger) *tunnelLink {
+func newLink(conn net.Conn, reader io.Reader, tun io.ReadWriteCloser, logger *vlog.Logger) *tunnelLink {
 	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
+		logger = vlog.Discard()
 	}
 	return &tunnelLink{
 		conn:   conn,

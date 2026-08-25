@@ -516,7 +516,7 @@ func (s *Server) buildWGClientConfig(cfg supervisor.ListenerConfig, req ClientCo
 			cfg.Options[wireguard.OptServerPeers] = prevPeers
 		}
 		if rerr := supervisor.WriteListenerFile(s.dir, cfg); rerr != nil {
-			s.log.Printf("mgmt: %s: rolling back a failed peer provision: %v", cfg.Name, rerr)
+			s.log.Warnf("mgmt: %s: rolling back a failed peer provision: %v", cfg.Name, rerr)
 		}
 		return nil, serverFault("provisioning peer: %v", err)
 	}

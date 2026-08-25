@@ -327,9 +327,7 @@ func TestInteropIKEv2ChildRekey(t *testing.T) {
 	requireDocker(t)
 	const composeFile = "compose.selftest-rekey.yml"
 
-	if out, err := compose(t, composeFile, "up", "--build", "-d"); err != nil {
-		t.Fatalf("compose up: %v\n%s", err, out)
-	}
+	composeUp(t, composeFile)
 	t.Cleanup(func() {
 		if t.Failed() {
 			if logs, err := compose(t, composeFile, "logs", "--no-color"); err == nil {
@@ -383,9 +381,7 @@ func TestInteropIKEv2IKERekey(t *testing.T) {
 	requireDocker(t)
 	const composeFile = "compose.selftest-ike-rekey.yml"
 
-	if out, err := compose(t, composeFile, "up", "--build", "-d"); err != nil {
-		t.Fatalf("compose up: %v\n%s", err, out)
-	}
+	composeUp(t, composeFile)
 	t.Cleanup(func() {
 		if t.Failed() {
 			if logs, err := compose(t, composeFile, "logs", "--no-color"); err == nil {
@@ -814,9 +810,7 @@ func TestInteropWireguardRekey(t *testing.T) {
 	requireDocker(t)
 	const file = "compose.wireguard-rekey.yml"
 
-	if out, err := compose(t, file, "up", "--build", "-d"); err != nil {
-		t.Fatalf("compose up: %v\n%s", err, out)
-	}
+	composeUp(t, file)
 	t.Cleanup(func() {
 		if t.Failed() {
 			if logs, err := compose(t, file, "logs", "--no-color"); err == nil {
@@ -1595,9 +1589,7 @@ func runInterop(t *testing.T, composeFile, pingSvc string, targets ...string) {
 	t.Helper()
 	requireDocker(t)
 
-	if out, err := compose(t, composeFile, "up", "--build", "-d"); err != nil {
-		t.Fatalf("compose up: %v\n%s", err, out)
-	}
+	composeUp(t, composeFile)
 	t.Cleanup(func() {
 		if t.Failed() {
 			if logs, err := compose(t, composeFile, "logs", "--no-color"); err == nil {
@@ -1840,9 +1832,7 @@ func runInteropUDPEcho(t *testing.T, composeFile, probeSvc, listen string) {
 	t.Helper()
 	requireDocker(t)
 
-	if out, err := compose(t, composeFile, "up", "--build", "-d"); err != nil {
-		t.Fatalf("compose up: %v\n%s", err, out)
-	}
+	composeUp(t, composeFile)
 	t.Cleanup(func() {
 		if t.Failed() {
 			if logs, err := compose(t, composeFile, "logs", "--no-color"); err == nil {
@@ -1889,13 +1879,66 @@ const composeTimeout = 8 * time.Minute
 
 // compose runs `docker compose -f <file> <args...>` in the test's directory
 // (which holds the compose files and their relative build contexts).
+//
+// It reports whether the command was killed by composeTimeout rather than
+// returning an error of its own; composeUp is the only caller that cares, and
+// why is written there.
 func compose(t *testing.T, file string, args ...string) (string, error) {
+	out, err, _ := composeTimed(t, file, args...)
+	return out, err
+}
+
+func composeTimed(t *testing.T, file string, args ...string) (string, error, bool) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), composeTimeout)
 	defer cancel()
 	full := append([]string{"compose", "-f", file}, args...)
 	out, err := exec.CommandContext(ctx, "docker", full...).CombinedOutput()
-	return string(out), err
+	return string(out), err, ctx.Err() != nil
+}
+
+// composeUp brings a cell up, and retries once if the first attempt was killed
+// by composeTimeout rather than failing.
+//
+// The stall it exists for is `compose up: signal: killed` with the last line of
+// output being a container Starting and never Started -- the Docker daemon
+// taking minutes over a start that normally takes milliseconds. It has been
+// seen on the softether-vpn and sstp shards in CI and reproduced locally, and
+// the workflow's pre-pull step already covers the other half of the same
+// family (a registry stall inside a cell's budget).
+//
+// **A retry here cannot hide a veepin defect**, which is the whole reason it is
+// safe to have. `up --build -d` returns once the containers are *started*; it
+// waits for nothing veepin does, has no healthcheck to satisfy, and every claim
+// a cell makes is asserted afterwards by the ping, the log line or the ARP
+// entry. So the only thing this can convert is an infrastructure stall, and it
+// converts it into a slower cell rather than a red build that names the wrong
+// culprit.
+//
+// One retry, not a loop: twice in a row is not a hiccup, and a cell that cannot
+// start after a full teardown should fail and be looked at.
+func composeUp(t *testing.T, file string) {
+	t.Helper()
+	out, err, timedOut := composeTimed(t, file, "up", "--build", "-d")
+	if err == nil {
+		return
+	}
+	if !timedOut {
+		t.Fatalf("compose up: %v\n%s", err, out)
+	}
+	t.Logf("compose up was killed after %s with the containers still starting; "+
+		"tearing down and trying once more. This is the Docker-daemon stall described "+
+		"at composeUp, not a cell that failed:\n%s", composeTimeout, out)
+	if down, derr := compose(t, file, "down", "-v", "--remove-orphans", "--timeout", "5"); derr != nil {
+		t.Logf("teardown before the retry also failed: %v\n%s", derr, down)
+	}
+	if out, err = compose(t, file, "up", "--build", "-d"); err != nil {
+		// Tear down before failing: the cleanup that normally does this is
+		// registered by the caller *after* a successful up, so without this a
+		// half-started stack outlives the run on a developer's machine.
+		_, _ = compose(t, file, "down", "-v", "--remove-orphans", "--timeout", "5")
+		t.Fatalf("compose up failed twice, the first time by timing out: %v\n%s", err, out)
+	}
 }
 
 // requireDocker skips the test unless a working Docker daemon is reachable.

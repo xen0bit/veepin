@@ -207,6 +207,12 @@ ordered stream blocks head-of-line, the frame lengths still expose the packet
 sizes, and the `IKETCP` prefix is trivially distinguishable from TLS. See
 [`doc/security.md`](../security.md) for the full statement.
 
+On a desktop it is a checkbox rather than a flag: the NetworkManager editor's
+IKEv2 form carries *Tunnel over TCP (for networks that block UDP)*, which writes
+the same `tcp` key the CLI's `-tcp` sets. That is deliberate — the networks this
+exists for are hotel, airline and corporate-guest Wi-Fi, and the person on one is
+in a GUI with no tunnel and no obvious reason why.
+
 Interoperability is with **libreswan**, which is the only open-source
 implementation of either role (strongSwan implements none of it):
 

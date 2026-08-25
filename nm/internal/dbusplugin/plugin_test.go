@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"os/exec"
 	"strings"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/godbus/dbus/v5"
 	"github.com/xen0bit/veepin/client"
+	"github.com/xen0bit/veepin/internal/vlog"
 	"github.com/xen0bit/veepin/nm/internal/nmconfig"
 )
 
@@ -78,7 +78,7 @@ var testBusName = BusNameFor("ikev2")
 
 func exportTestPlugin(t *testing.T, server *dbus.Conn) *Plugin {
 	t.Helper()
-	p := New(server, testBusName, log.New(io.Discard, "", 0))
+	p := New(server, testBusName, vlog.Discard())
 	if err := p.Export(); err != nil {
 		t.Fatalf("export: %v", err)
 	}
@@ -91,7 +91,7 @@ func exportTestPlugin(t *testing.T, server *dbus.Conn) *Plugin {
 // protocol but one.
 func TestExportClaimsTheRequestedName(t *testing.T) {
 	server, caller := newTestBus(t)
-	p := New(server, BusNameFor("wireguard"), log.New(io.Discard, "", 0))
+	p := New(server, BusNameFor("wireguard"), vlog.Discard())
 	if err := p.Export(); err != nil {
 		t.Fatalf("export: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestExportClaimsTheRequestedName(t *testing.T) {
 // --bus-name owns the bare prefix, which backs no VPN type, rather than
 // silently taking a protocol's name.
 func TestNewDefaultsToThePrefix(t *testing.T) {
-	if got := New(nil, "", log.New(io.Discard, "", 0)).BusName(); got != BusNamePrefix {
+	if got := New(nil, "", vlog.Discard()).BusName(); got != BusNamePrefix {
 		t.Errorf("BusName() = %q, want %q", got, BusNamePrefix)
 	}
 }

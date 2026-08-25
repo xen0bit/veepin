@@ -14,13 +14,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/netip"
 	"time"
 
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/ikev2/esp"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // TypeConfigDone is the Juniper message type that ends the configuration phase.
@@ -39,7 +39,7 @@ const espProbeInterval = 200 * time.Millisecond
 type Client struct {
 	cfg    Config
 	info   LoginInfo
-	logger *log.Logger
+	logger *vlog.Logger
 
 	link *link // the IF-T/TLS carrier: the control channel always, the data path sometimes
 
@@ -63,10 +63,10 @@ func (c *Client) OverESP() bool { return c.pump != nil }
 // wantESP asks for the ESP data path where the server offers one; shape is the
 // per-flow outbound shaping budget in bytes, and 0 disables it.
 func Connect(conn net.Conn, host, path, user, password, hostname string,
-	tun io.ReadWriteCloser, logger *log.Logger, wantESP bool, shape int,
+	tun io.ReadWriteCloser, logger *vlog.Logger, wantESP bool, shape int,
 ) (*Client, error) {
 	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
+		logger = vlog.Discard()
 	}
 	s, info, err := ClientAuth(conn, host, path, user, password, hostname)
 	if err != nil {
@@ -103,7 +103,7 @@ func Connect(conn net.Conn, host, path, user, password, hostname string,
 
 // shaperTarget builds the padding decision the TUN loop consults, or nil when
 // shaping is off.
-func shaperTarget(shape, mtu int, logger *log.Logger) func([]byte) int {
+func shaperTarget(shape, mtu int, logger *vlog.Logger) func([]byte) int {
 	if shape <= 0 {
 		return nil
 	}
@@ -117,7 +117,7 @@ func shaperTarget(shape, mtu int, logger *log.Logger) func([]byte) int {
 
 // clientConfigPhase reads the server's configuration packets until it says it
 // is done, answering the ESP keying packet on the way.
-func clientConfigPhase(s *stream, logger *log.Logger) (Config, *Keys, *Keys, error) {
+func clientConfigPhase(s *stream, logger *vlog.Logger) (Config, *Keys, *Keys, error) {
 	var cfg Config
 	var serverKeys, myKeys *Keys
 	var haveConfig bool
@@ -224,7 +224,7 @@ func (c *Client) startESP(conn net.Conn, cfg Config, myKeys, serverKeys *Keys,
 			c.link.stop(werr)
 		}
 	}
-	c.pump = dataplane.NewPump(tun, send, dataplane.SPIDemux, c.logger)
+	c.pump = dataplane.NewPump(tun, send, dataplane.SPIDemux, c.logger.Slog())
 	if cfg.MTU > 0 {
 		c.pump.SetInnerMTU(cfg.MTU)
 	}

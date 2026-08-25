@@ -9,12 +9,12 @@ package pulse
 // messages back. Both end through stop, which records the first cause.
 
 import (
-	"log"
 	"net"
 	"net/netip"
 	"sync"
 
 	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // maxInnerPacket bounds one inner packet, and with it the read buffer. It is
@@ -25,7 +25,7 @@ const maxInnerPacket = 9000
 type link struct {
 	conn   net.Conn
 	tun    tunIO
-	logger *log.Logger
+	logger *vlog.Logger
 	seq    uint32
 
 	// sourceIs, when set, is the inner address the peer is allowed to send
@@ -46,7 +46,7 @@ type link struct {
 	shutdown func()
 }
 
-func newLink(conn net.Conn, tun tunIO, logger *log.Logger) *link {
+func newLink(conn net.Conn, tun tunIO, logger *vlog.Logger) *link {
 	return &link{conn: conn, tun: tun, logger: logger, done: make(chan struct{})}
 }
 

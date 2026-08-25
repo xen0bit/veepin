@@ -3,11 +3,12 @@ package ikev1
 import (
 	"bytes"
 	"errors"
-	"log"
 	"net"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // pair wires two sessions to each other over in-memory "sockets", so a whole
@@ -65,7 +66,7 @@ func (p *pair) settle(now bool) {
 func newPair(t *testing.T, initCfg, respCfg Config) *pair {
 	t.Helper()
 	p := &pair{settled: make(chan struct{})}
-	logger := log.New(testWriter{t}, "", 0)
+	logger := vlog.Plain(testWriter{t})
 
 	initCfg.Role = Initiator
 	initCfg.Handler = sideHandler{p, true}

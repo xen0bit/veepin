@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"log"
 	"net"
 	"sync"
 
@@ -14,6 +12,7 @@ import (
 	"github.com/xen0bit/veepin/internal/ikev2/esp"
 	"github.com/xen0bit/veepin/internal/mschap"
 	"github.com/xen0bit/veepin/internal/ppp"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // tunIO is the userspace TUN the data path reads IP from and writes IP to.
@@ -33,7 +32,7 @@ type ClientConfig struct {
 	Username string
 	Password string
 	DNS      []net.IP
-	Logger   *log.Logger
+	Logger   *vlog.Logger
 }
 
 // NetConfig is the inner addressing PPP/IPCP assigned the client, which the
@@ -58,7 +57,7 @@ type Client struct {
 	cfg    ClientConfig
 	conn   *net.UDPConn
 	tun    tunIO
-	logger *log.Logger
+	logger *vlog.Logger
 
 	ikeAddr  *net.UDPAddr // peer's IKE port, used until the float
 	nattAddr *net.UDPAddr // peer's NAT-T port: IKE after the float, and all ESP
@@ -81,9 +80,6 @@ type Client struct {
 // is the peer's Main Mode port; the NAT-T port is fixed by RFC 3948.
 func NewClient(conn *net.UDPConn, tun tunIO, cfg ClientConfig) *Client {
 	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
 	ikePort := cfg.IKEPort
 	if ikePort == 0 {
 		ikePort = defaultIKEPort

@@ -2,8 +2,6 @@ package wireguard
 
 import (
 	"context"
-	"io"
-	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -11,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xen0bit/veepin/internal/vlog"
 	"github.com/xen0bit/veepin/internal/wireguard/noise"
 	"github.com/xen0bit/veepin/internal/wireguard/wire"
 )
@@ -110,7 +109,7 @@ func TestHandshakeRetransmitsPastJunk(t *testing.T) {
 	}
 }
 
-func discardLogger() *log.Logger { return log.New(io.Discard, "", 0) }
+func discardLogger() *vlog.Logger { return vlog.Discard() }
 
 // TestParseOptionsFromFile checks the registry entry point: a wg-quick file
 // named by OptConfig is loaded, and inline options override it.

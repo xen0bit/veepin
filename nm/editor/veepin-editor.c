@@ -50,6 +50,7 @@
 /* Shared across protocols. */
 #define KEY_SERVER        "server"
 #define KEY_PORT          "port"
+#define KEY_TCP           "tcp"
 #define KEY_USER          "user"
 #define KEY_PASSWORD      "password"
 #define KEY_DNS           "dns"
@@ -100,6 +101,7 @@ typedef enum {
     F_REQUIRED, /* required data item — update_connection fails if empty */
     F_DATA,     /* optional data item — written only when non-empty */
     F_SECRET,   /* stored as a secret with the chosen storage flag */
+    F_BOOL,     /* checkbox; written as "true" only when checked, never as "false" */
 } FieldKind;
 
 typedef struct {
@@ -115,6 +117,11 @@ typedef struct {
     guint           n_fields;
 } ProtocolDef;
 
+/* The TCP row is the only checkbox in any of these tables, and it is here rather
+ * than left to nmcli because of who needs it: RFC 8229/9329 encapsulation exists
+ * for a network that passes TCP and drops UDP — hotel and airline Wi-Fi, a
+ * corporate guest network — and the person sitting on one is at a desktop,
+ * looking at this dialog, with no tunnel and no obvious reason why. */
 static const FieldDef ikev2_fields[] = {
     { "Gateway",        KEY_GATEWAY,   F_REQUIRED },
     { "Local ID",       KEY_LOCAL_ID,  F_REQUIRED },
@@ -122,6 +129,7 @@ static const FieldDef ikev2_fields[] = {
     { "Username",       KEY_USER,      F_DATA },
     { "Pre-shared key", KEY_PSK,       F_SECRET },
     { "Password",       KEY_PASSWORD,  F_SECRET },
+    { "Tunnel over TCP (for networks that block UDP)", KEY_TCP, F_BOOL },
 };
 
 static const FieldDef wireguard_fields[] = {
@@ -379,6 +387,28 @@ add_optional_data(NMSettingVpn *vpn, GtkWidget *entry, const char *key)
         nm_setting_vpn_add_data_item(vpn, key, s);
 }
 
+/* add_bool_data writes "true" for a checked box and nothing at all for an
+ * unchecked one.
+ *
+ * Nothing, deliberately, rather than "false": an option absent from the map is
+ * what lets the protocol's own default stand, and these keys are read on the Go
+ * side as `opts[key] == "true"`. Writing "false" would be equivalent today and
+ * would quietly become an override the first time a default changed. */
+static void
+add_bool_data(NMSettingVpn *vpn, GtkWidget *check, const char *key)
+{
+    if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(check)))
+        nm_setting_vpn_add_data_item(vpn, key, "true");
+}
+
+/* Populate a checkbox from an existing connection's vpn data item. */
+static void
+set_check_from_data(GtkWidget *check, NMSettingVpn *vpn, const char *key)
+{
+    const char *v = vpn ? nm_setting_vpn_get_data_item(vpn, key) : NULL;
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(check), g_strcmp0(v, "true") == 0);
+}
+
 /* add_secret stores an entry's value as a secret with the chosen storage flag. */
 static void
 add_secret(NMSettingVpn *vpn, GtkWidget *entry, const char *key, NMSettingSecretFlags flags)
@@ -428,6 +458,9 @@ update_connection(NMVpnEditor *editor, NMConnection *connection, GError **error)
             break;
         case F_SECRET:
             add_secret(vpn, entry, f->key, flags);
+            break;
+        case F_BOOL:
+            add_bool_data(vpn, entry, f->key);
             break;
         }
     }
@@ -513,6 +546,16 @@ build_ui(VeepinEditor *self, NMConnection *connection)
     self->entries = g_new0(GtkWidget *, p->n_fields);
     for (guint j = 0; j < p->n_fields; j++) {
         const FieldDef *f = &p->fields[j];
+        if (f->kind == F_BOOL) {
+            /* A checkbox carries its own label, so it spans both grid columns
+             * rather than sitting in the value column beside an empty one. */
+            GtkWidget *c = gtk_check_button_new_with_label(f->label);
+            gtk_grid_attach(grid, c, 0, (int) j, 2, 1);
+            self->entries[j] = c;
+            g_signal_connect(c, "toggled", G_CALLBACK(field_changed), self);
+            set_check_from_data(c, vpn, f->key);
+            continue;
+        }
         GtkWidget *e = make_entry(f->kind == F_SECRET);
         add_row(grid, (int) j, f->label, e);
         self->entries[j] = e;

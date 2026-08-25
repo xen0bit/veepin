@@ -3,14 +3,15 @@ package l2tpv3
 import (
 	"errors"
 	"fmt"
-	"log"
 	"net"
+	"os"
 	"sync/atomic"
 	"time"
 
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/l2tpv3"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // ServerConfig configures an L2TPv3 Ethernet pseudowire server.
@@ -42,7 +43,7 @@ type Server struct {
 	pump   *l2tpv3.Pump
 	cfg    ServerConfig
 	sess   *l2tpv3.SessionConfig
-	logger *log.Logger
+	logger *vlog.Logger
 
 	// conn is written by ListenAndServe and read by the pump's send callback on
 	// another goroutine, so it is atomic rather than a plain field.
@@ -71,7 +72,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		tap:    tap,
 		cfg:    cfg,
 		sess:   sessCfg,
-		logger: log.New(log.Writer(), "", log.LstdFlags),
+		logger: vlog.Text(os.Stderr),
 	}
 	s.pump = l2tpv3.NewPump(tap, s.send, sessCfg, s.logger)
 	if cfg.CCID != 0 && cfg.PeerCCID != 0 {
@@ -173,6 +174,24 @@ func (s *Server) Close() error {
 	}
 	return s.tap.Close()
 }
+
+// Abandon implements client.AbandonableServer. It closes the TAP directly, so
+// an abandoned listener's packet pump unparks and its descriptor is released
+// even though Close never returned. See client.AbandonableServer for why this
+// is not simply Close.
+//
+// The TAP is set in NewServer and never reassigned, so this reads it without
+// the lock Close takes -- deliberately, because a wedged Close may be holding
+// that lock, and waiting on it here would reproduce the very stall this is the
+// escape from.
+func (s *Server) Abandon() { s.tap.Close() }
+
+// Server implements client.AbandonableServer, so the supervisor can take its
+// descriptors back when Close overruns. Asserted here because the interface is
+// found by type assertion at the one call site: without this, a renamed or
+// re-signatured Abandon compiles fine and the assertion silently starts failing,
+// which reads as the leak coming back.
+var _ client.AbandonableServer = (*Server)(nil)
 
 // TUNName is the TAP interface the pseudowire is bound to.
 func (s *Server) TUNName() string { return s.tap.Name() }

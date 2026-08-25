@@ -16,12 +16,12 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"io"
-	"log"
+	"log/slog"
 	"net"
 	"strconv"
 
 	imasque "github.com/xen0bit/veepin/internal/masque"
+	"github.com/xen0bit/veepin/internal/vlog"
 	"golang.org/x/net/quic"
 )
 
@@ -45,7 +45,7 @@ type UDPProxyConfig struct {
 	TargetPort int
 
 	// Logger receives progress messages; nil discards them.
-	Logger *log.Logger
+	Logger *slog.Logger
 }
 
 // UDPProxy is a running CONNECT-UDP forwarder.
@@ -66,10 +66,7 @@ func NewUDPProxy(ctx context.Context, cfg UDPProxyConfig) (*UDPProxy, error) {
 	if cfg.TargetHost == "" || cfg.TargetPort <= 0 {
 		return nil, fmt.Errorf("masque: a target host and port are required")
 	}
-	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
+	logger := vlog.From(cfg.Logger)
 
 	port := cfg.Port
 	if port == 0 {

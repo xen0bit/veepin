@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/netip"
 	"os"
 	"strconv"
@@ -59,7 +59,7 @@ type Config struct {
 
 	// Logger receives progress logs; nil discards them. It has no wg-quick
 	// equivalent and is set by a Go caller.
-	Logger *log.Logger
+	Logger *slog.Logger
 }
 
 // Peer is one [Peer] section: a remote static key and the inner destinations

@@ -16,7 +16,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/netip"
@@ -25,6 +24,7 @@ import (
 
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/ikev2/esp"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // ErrAuth reports rejected credentials, so a caller can tell a bad password from
@@ -143,7 +143,7 @@ func (c *Client) OverESP() bool { return c.pump != nil }
 
 // RunSSL drives the SSL tunnel over conn and binds it to tun. conn must already
 // have had the tunnel request written to it and its START_TUNNEL answer read.
-func RunSSL(conn net.Conn, cfg Config, tun io.ReadWriteCloser, logger *log.Logger) (*Client, error) {
+func RunSSL(conn net.Conn, cfg Config, tun io.ReadWriteCloser, logger *vlog.Logger) (*Client, error) {
 	link := newLink(conn, nil, tun, logger)
 	link.ownsTUN = true
 	go link.readLoop()
@@ -171,9 +171,9 @@ func ReadTunnelStart(conn net.Conn) error {
 // reason, and the SSL tunnel is what the protocol keeps for it.
 //
 // shape is the per-flow shaping budget in bytes; 0 disables shaping.
-func RunESP(cfg Config, tun io.ReadWriteCloser, logger *log.Logger, shape, mtu int) (*Client, error) {
+func RunESP(cfg Config, tun io.ReadWriteCloser, logger *vlog.Logger, shape, mtu int) (*Client, error) {
 	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
+		logger = vlog.Discard()
 	}
 	if cfg.ESP == nil {
 		return nil, errors.New("gp: the gateway offered no ESP keys")
@@ -207,7 +207,7 @@ func RunESP(cfg Config, tun io.ReadWriteCloser, logger *log.Logger, shape, mtu i
 			c.stop(err)
 		}
 	}
-	c.pump = dataplane.NewPump(tun, send, dataplane.SPIDemux, logger)
+	c.pump = dataplane.NewPump(tun, send, dataplane.SPIDemux, logger.Slog())
 	if mtu > 0 {
 		c.pump.SetInnerMTU(mtu)
 	}

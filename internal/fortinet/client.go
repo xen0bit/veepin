@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -23,6 +22,7 @@ import (
 
 	"github.com/xen0bit/veepin/internal/mschap"
 	"github.com/xen0bit/veepin/internal/ppp"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // ErrAuth reports rejected credentials, so a caller can tell a bad password from
@@ -161,20 +161,20 @@ func (c *Client) AssignedConfig() Config { return c.cfg }
 // already have had the tunnel GET written to it. cfg is the configuration from
 // Login, used for the returned Result; the link itself confirms the address over
 // IPCP.
-func RunClient(conn net.Conn, cfg Config, tun io.ReadWriteCloser, logger *log.Logger) (*Client, error) {
+func RunClient(conn net.Conn, cfg Config, tun io.ReadWriteCloser, logger *vlog.Logger) (*Client, error) {
 	return runClient(conn, cfg, tun, logger, false)
 }
 
 // RunDTLSClient is RunClient over the UDP data channel: conn is the established
 // DTLS session from DialDTLS, which has already presented the cookie, and each
 // datagram carries exactly one framed record.
-func RunDTLSClient(conn net.Conn, cfg Config, tun io.ReadWriteCloser, logger *log.Logger) (*Client, error) {
+func RunDTLSClient(conn net.Conn, cfg Config, tun io.ReadWriteCloser, logger *vlog.Logger) (*Client, error) {
 	return runClient(conn, cfg, tun, logger, true)
 }
 
-func runClient(conn net.Conn, cfg Config, tun io.ReadWriteCloser, logger *log.Logger, datagram bool) (*Client, error) {
+func runClient(conn net.Conn, cfg Config, tun io.ReadWriteCloser, logger *vlog.Logger, datagram bool) (*Client, error) {
 	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
+		logger = vlog.Discard()
 	}
 	h := &clientHandler{ready: make(chan struct{}), closed: make(chan error, 1)}
 

@@ -10,10 +10,10 @@ package main
 
 import (
 	"flag"
-	"log"
 	"os"
 
 	"github.com/godbus/dbus/v5"
+	"github.com/xen0bit/veepin/internal/vlog"
 	"github.com/xen0bit/veepin/nm/internal/dbusplugin"
 
 	// Registers the protocols this plugin can dial with the client registry.
@@ -53,7 +53,7 @@ func main() {
 	flag.Parse()
 	_ = persist
 
-	logger := log.New(os.Stderr, "nm-veepin: ", log.LstdFlags)
+	logger := vlog.Text(os.Stderr).Prefixed("nm-veepin: ")
 
 	connect := dbus.ConnectSystemBus
 	if *session {
@@ -61,13 +61,18 @@ func main() {
 	}
 	conn, err := connect()
 	if err != nil {
-		logger.Fatalf("connect bus: %v", err)
+		// Errorf then exit, rather than a Fatalf on the logger: vlog has no
+		// Fatal on purpose, because a logger that can end the process is one
+		// every package could end the process with.
+		logger.Errorf("connect bus: %v", err)
+		os.Exit(1)
 	}
 	defer conn.Close()
 
 	plugin := dbusplugin.New(conn, *busName, logger)
 	if err := plugin.Export(); err != nil {
-		logger.Fatalf("export plugin: %v", err)
+		logger.Errorf("export plugin: %v", err)
+		os.Exit(1)
 	}
 
 	logger.Printf("ready; waiting for NetworkManager")

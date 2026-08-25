@@ -16,7 +16,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/netip"
@@ -29,6 +28,7 @@ import (
 	"github.com/xen0bit/veepin/internal/ppp"
 	"github.com/xen0bit/veepin/internal/udpmux"
 	"github.com/xen0bit/veepin/internal/userdb"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // ServerConfig configures a Fortinet SSL VPN server.
@@ -42,7 +42,7 @@ type ServerConfig struct {
 	// DNS is offered to clients in the config XML.
 	DNS []net.IP
 	// Logger receives progress messages; nil discards them.
-	Logger *log.Logger
+	Logger *vlog.Logger
 	// Gate bounds unauthenticated work; nil installs one with the defaults.
 	Gate *dataplane.Gate
 	// Certificate is the gateway's certificate and key for the DTLS data
@@ -75,7 +75,7 @@ type Server struct {
 	cfg  ServerConfig
 	tun  io.ReadWriteCloser
 	gate *dataplane.Gate
-	log  *log.Logger
+	log  *vlog.Logger
 	// shaper pads outbound PPP frames so the TLS record carrying them says less
 	// about the packet inside (dataplane/shape.go); nil disables shaping.
 	//
@@ -105,9 +105,6 @@ func NewServer(cfg ServerConfig, tun io.ReadWriteCloser) (*Server, error) {
 		return nil, errors.New("fortinet: no users configured")
 	}
 	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
 	gate := cfg.Gate
 	if gate == nil {
 		gate = dataplane.NewGate(dataplane.AdmissionConfig{})
@@ -188,7 +185,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	pass, ok := s.cfg.Users[req.Username]
 	if !ok || !userdb.Verify(pass, req.Password) {
-		s.log.Printf("fortinet: login failed for %q", req.Username)
+		s.log.Warnf("fortinet: login failed for %q", req.Username)
 		// FortiOS answers a bad login with ret=1 on a permit-all portal or an
 		// error page otherwise; a plain 403 is unambiguous and is what a client
 		// treats as auth failure.
@@ -240,7 +237,7 @@ func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request, body st
 	s.mu.Unlock()
 
 	if !ok || state.username != req.Username {
-		s.log.Printf("fortinet: challenge response with an unknown or expired reqid")
+		s.log.Warnf("fortinet: challenge response with an unknown or expired reqid")
 		http.Error(w, "ret=4", http.StatusForbidden)
 		return
 	}
@@ -254,7 +251,7 @@ func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request, body st
 
 	secret, err := otp.DecodeSecret(s.cfg.TOTPSecrets[state.username])
 	if err != nil || !otp.Verify(secret, req.Code, time.Now(), s.cfg.TOTP) {
-		s.log.Printf("fortinet: second factor rejected for %q", state.username)
+		s.log.Warnf("fortinet: second factor rejected for %q", state.username)
 		http.Error(w, "ret=4", http.StatusForbidden)
 		return
 	}

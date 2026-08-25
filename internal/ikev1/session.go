@@ -6,13 +6,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
-	"log"
 	"net"
 	"sync"
 	"time"
 
 	"github.com/xen0bit/veepin/internal/cryptoutil"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // Role selects the IKE role: the Initiator drives Main Mode and Quick Mode, the
@@ -167,7 +166,7 @@ type Config struct {
 	// marker rather than the plain IKE port.
 	Send    func(msg []byte, natt bool) error
 	Handler Handler
-	Logger  *log.Logger
+	Logger  *vlog.Logger
 }
 
 type sessionState int
@@ -208,7 +207,7 @@ const (
 // datagrams go out through cfg.Send and come in via HandleInbound.
 type Session struct {
 	cfg    Config
-	logger *log.Logger
+	logger *vlog.Logger
 
 	mu    sync.Mutex
 	state sessionState
@@ -282,9 +281,6 @@ func InitiatorCookie(msg []byte) ([8]byte, bool) {
 // begins on the first inbound message.
 func NewSession(cfg Config) *Session {
 	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
 	return &Session{cfg: cfg, logger: logger, psk: cfg.PSK}
 }
 

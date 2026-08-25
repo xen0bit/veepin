@@ -16,13 +16,12 @@ package masque
 import (
 	"context"
 	"fmt"
-	"io"
-	"log"
 	"net"
 	"sync"
 	"time"
 
 	"github.com/xen0bit/veepin/internal/masque/http3"
+	"github.com/xen0bit/veepin/internal/vlog"
 	"golang.org/x/net/quic"
 )
 
@@ -38,7 +37,7 @@ type UDPForwarder struct {
 	host      string
 	port      int
 	authority string
-	logger    *log.Logger
+	logger    *vlog.Logger
 
 	mu     sync.Mutex
 	flows  map[string]*udpFlow
@@ -57,7 +56,7 @@ type udpFlow struct {
 // NewUDPForwarderOverQUIC performs the HTTP/3 client setup over an established
 // QUIC connection and returns a forwarder. It keeps the http3 types inside this
 // package, so the public facade deals only in net and quic.
-func NewUDPForwarderOverQUIC(ctx context.Context, qc *quic.Conn, local *net.UDPConn, host string, port int, authority string, logger *log.Logger) (*UDPForwarder, error) {
+func NewUDPForwarderOverQUIC(ctx context.Context, qc *quic.Conn, local *net.UDPConn, host string, port int, authority string, logger *vlog.Logger) (*UDPForwarder, error) {
 	h3conn, err := http3.Client(ctx, qc)
 	if err != nil {
 		return nil, err
@@ -67,9 +66,9 @@ func NewUDPForwarderOverQUIC(ctx context.Context, qc *quic.Conn, local *net.UDPC
 
 // NewUDPForwarder builds a forwarder over an established HTTP/3 connection to the
 // proxy and a bound local socket, targeting host:port.
-func NewUDPForwarder(h3conn *http3.Conn, local *net.UDPConn, host string, port int, authority string, logger *log.Logger) *UDPForwarder {
+func NewUDPForwarder(h3conn *http3.Conn, local *net.UDPConn, host string, port int, authority string, logger *vlog.Logger) *UDPForwarder {
 	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
+		logger = vlog.Discard()
 	}
 	return &UDPForwarder{
 		h3:        h3conn,

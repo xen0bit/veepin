@@ -15,8 +15,6 @@ package pulse
 import (
 	"encoding/binary"
 	"errors"
-	"io"
-	"log"
 	"net"
 	"net/netip"
 	"sync"
@@ -24,6 +22,7 @@ import (
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/ikev2/esp"
 	"github.com/xen0bit/veepin/internal/userdb"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // tunIO is the userspace TUN the data path reads IP from and writes IP to.
@@ -61,7 +60,7 @@ type ServerConfig struct {
 	// Shape is the per-flow downstream shaping budget in bytes; 0 disables it.
 	Shape  int
 	MTU    int
-	Logger *log.Logger
+	Logger *vlog.Logger
 }
 
 // clientLink is how the TUN loop reaches one client, whichever data path it
@@ -119,7 +118,7 @@ type session struct {
 type Server struct {
 	cfg    ServerConfig
 	tun    tunIO
-	logger *log.Logger
+	logger *vlog.Logger
 	gate   *dataplane.Gate
 	shaper *dataplane.Shaper
 
@@ -144,9 +143,6 @@ func NewServer(cfg ServerConfig, tun tunIO) (*Server, error) {
 		return nil, errors.New("pulse: an address pool is required")
 	}
 	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
 	s := &Server{
 		cfg:      cfg,
 		tun:      tun,
@@ -217,7 +213,7 @@ func (s *Server) Serve(ln net.Listener) error {
 			return err
 		}
 		if r := s.gate.Admit(conn.RemoteAddr()); r != dataplane.Admitted {
-			s.logger.Printf("pulse: refusing %s: %v", conn.RemoteAddr(), r)
+			s.logger.Warnf("pulse: refusing %s: %v", conn.RemoteAddr(), r)
 			_ = conn.Close()
 			continue
 		}

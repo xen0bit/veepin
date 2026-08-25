@@ -4,8 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"strconv"
@@ -18,6 +17,7 @@ import (
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/sshtun"
 	"github.com/xen0bit/veepin/internal/userdb"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // ServerConfig configures an SSH VPN responder — an SSH server that accepts
@@ -50,7 +50,7 @@ type ServerConfig struct {
 	// shaping, which is the behaviour from before it existed.
 	Shape int
 	// Logger receives progress logs; nil discards them.
-	Logger *log.Logger
+	Logger *slog.Logger
 }
 
 func (c *ServerConfig) validate() error {
@@ -72,7 +72,7 @@ type Server struct {
 	pool    *dataplane.AddrPool
 	gateway net.IP
 	network *net.IPNet
-	logger  *log.Logger
+	logger  *vlog.Logger
 
 	listenAddr *net.TCPAddr
 	tun        *dataplane.TUN
@@ -123,10 +123,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("ssh: invalid listen IP %q", cfg.ListenIP)
 	}
 
-	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
+	logger := vlog.From(cfg.Logger)
 
 	tun, err := dataplane.OpenTUN(cfg.TUNName)
 	if err != nil {
@@ -299,6 +296,24 @@ func (s *Server) Close() error {
 	return nil
 }
 
+// Abandon implements client.AbandonableServer. It closes the TUN directly, so
+// an abandoned listener's packet pump unparks and its descriptor is released
+// even though Close never returned. See client.AbandonableServer for why this
+// is not simply Close.
+//
+// The TUN is set in NewServer and never reassigned, so this reads it without
+// the lock Close takes -- deliberately, because a wedged Close may be holding
+// that lock, and waiting on it here would reproduce the very stall this is the
+// escape from.
+func (s *Server) Abandon() { s.tun.Close() }
+
+// Server implements client.AbandonableServer, so the supervisor can take its
+// descriptors back when Close overruns. Asserted here because the interface is
+// found by type assertion at the one call site: without this, a renamed or
+// re-signatured Abandon compiles fine and the assertion silently starts failing,
+// which reads as the leak coming back.
+var _ client.AbandonableServer = (*Server)(nil)
+
 // sshClient is one accepted client's tunnel channel and learned address.
 type sshClient struct {
 	ch      cryptossh.Channel
@@ -449,7 +464,7 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 		Pool:     opts[OptServerPool],
 		TUNName:  opts[OptServerTUN],
 		Users:    map[string]string{},
-		Logger:   log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds),
+		Logger:   slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
 	}
 	if v := opts[OptServerShape]; v != "" {
 		sh, cerr := strconv.Atoi(v)

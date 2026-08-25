@@ -2,17 +2,16 @@ package main
 
 import (
 	"errors"
-	"io"
-	"log"
 	"net"
 	"strings"
 	"testing"
 
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
-func quietLogger() *log.Logger { return log.New(io.Discard, "", 0) }
+func quietLogger() *vlog.Logger { return vlog.Discard() }
 
 // A split tunnel deliberately sends some traffic outside the VPN, so there is
 // nothing there to fail closed: blackholing everything would break exactly the

@@ -86,13 +86,19 @@ type packetConn interface {
 }
 
 // Logger is the subset of logging the host uses.
+// Logger is the subset of *vlog.Logger this package needs. It is an interface
+// rather than the concrete type because nebula's host predates the wrapper and
+// its tests substitute a recorder; Warnf is here for the same reason every other
+// package has it, so a line that reports a problem survives -log-level warn.
 type Logger interface {
 	Printf(format string, v ...any)
+	Warnf(format string, v ...any)
 }
 
 type nopLogger struct{}
 
 func (nopLogger) Printf(string, ...any) {}
+func (nopLogger) Warnf(string, ...any)  {}
 
 // Config configures a host.
 type Config struct {
@@ -364,7 +370,7 @@ func (h *Host) expireTunnels() {
 
 	for _, t := range dead {
 		h.releaseTunnel(t)
-		h.log.Printf("nebula: tunnel with %v idle for %v; dropped", t.PeerAddr(), tunnelIdleTimeout)
+		h.log.Warnf("nebula: tunnel with %v idle for %v; dropped", t.PeerAddr(), tunnelIdleTimeout)
 	}
 }
 
@@ -459,7 +465,7 @@ func (h *Host) readTUN() {
 			// steady stream of drops that never means anything -- and would
 			// bury the drops that do.
 			if !errors.Is(err, errNotIPv4) {
-				h.log.Printf("nebula: dropping outbound packet: %v", err)
+				h.log.Warnf("nebula: dropping outbound packet: %v", err)
 			}
 		}
 	}
@@ -799,13 +805,13 @@ func (h *Host) handleHandshake(pkt []byte, hdr header, from netip.AddrPort) {
 		// released as soon as respond returns, since by then the work is either
 		// done or abandoned; a mesh has no multi-message pending state to hold.
 		if r := h.gate.Admit(net.UDPAddrFromAddrPort(from)); r != dataplane.Admitted {
-			h.log.Printf("nebula: refusing handshake from %v: %v", from, r)
+			h.log.Warnf("nebula: refusing handshake from %v: %v", from, r)
 			return
 		}
 		reply, t, err := h.hs.respond(pkt)
 		h.gate.Done()
 		if err != nil {
-			h.log.Printf("nebula: handshake from %v rejected: %v", from, err)
+			h.log.Warnf("nebula: handshake from %v rejected: %v", from, err)
 			return
 		}
 		// The reply retraces the path the request took. A handshake that
@@ -977,7 +983,7 @@ func (h *Host) handleMessage(pkt []byte, hdr header, from netip.AddrPort) {
 
 	_, payload, err := t.decrypt(pkt)
 	if err != nil {
-		h.log.Printf("nebula: dropping packet from %v: %v", from, err)
+		h.log.Warnf("nebula: dropping packet from %v: %v", from, err)
 		return
 	}
 
@@ -986,7 +992,7 @@ func (h *Host) handleMessage(pkt []byte, hdr header, from netip.AddrPort) {
 	// without this, any valid member could inject traffic claiming to come from
 	// any address in the mesh.
 	if src, ok := sourceAddr(payload); !ok || !certAllows(t.peerCert, src) {
-		h.log.Printf("nebula: dropping packet from %v (%s): source address not permitted by its certificate",
+		h.log.Warnf("nebula: dropping packet from %v (%s): source address not permitted by its certificate",
 			t.PeerAddr(), t.peerCert.Name)
 		return
 	}
@@ -1139,7 +1145,7 @@ func (h *Host) probeQuietTunnels() {
 		}
 	}
 	for _, t := range dead {
-		h.log.Printf("nebula: %v did not answer a reachability probe in %v; tunnel dropped",
+		h.log.Warnf("nebula: %v did not answer a reachability probe in %v; tunnel dropped",
 			t.PeerAddr(), tunnelProbeGrace)
 		h.dropTunnel(t)
 	}

@@ -13,12 +13,12 @@ package dataplane
 
 import (
 	"errors"
-	"log"
 	"net"
 	"os"
 	"testing"
 	"time"
 
+	"github.com/xen0bit/veepin/internal/vlog"
 	"golang.org/x/sys/unix"
 )
 
@@ -276,7 +276,7 @@ func TestCloseUnblocksAParkedWrite(t *testing.T) {
 // either.
 func TestPumpRunReturnsWhenTheTUNIsClosed(t *testing.T) {
 	tun, _ := pipeTUN(t, "read")
-	p := NewPump(tun, func(pkt []byte, to *net.UDPAddr) {}, nil, log.New(os.Stderr, "", 0))
+	p := NewPump(tun, func(pkt []byte, to *net.UDPAddr) {}, nil, vlog.SlogText(os.Stderr))
 
 	stopped := make(chan struct{})
 	go func() {

@@ -21,8 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"strconv"
@@ -35,6 +34,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/sshtun"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 func init() { client.Register("ssh", parseOptions) }
@@ -81,7 +81,7 @@ type Config struct {
 	DNS      []net.IP
 
 	TUNName string
-	Logger  *log.Logger
+	Logger  *slog.Logger
 }
 
 func (c *Config) validate() error {
@@ -142,10 +142,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	if err := cfg.validate(); err != nil {
 		return nil, client.Result{}, err
 	}
-	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
+	logger := vlog.From(cfg.Logger)
 
 	assignedIP, netmask, err := parseCIDR(cfg.Address)
 	if err != nil {
@@ -292,7 +289,7 @@ type session struct {
 	conn   *cryptossh.Client
 	ch     cryptossh.Channel
 	tun    *dataplane.TUN
-	logger *log.Logger
+	logger *vlog.Logger
 
 	closeOnce sync.Once
 	closeErr  error

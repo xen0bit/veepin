@@ -2,7 +2,7 @@ package dataplane
 
 import (
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/netip"
 	"testing"
@@ -55,7 +55,7 @@ func ipv4Packet(dst string, total int) []byte {
 func newTestPump(t *testing.T) (*Pump, *fakeTUN) {
 	t.Helper()
 	tun := newFakeTUN()
-	return NewPump(tun, func([]byte, *net.UDPAddr) {}, SPIDemux, log.New(io.Discard, "", 0)), tun
+	return NewPump(tun, func([]byte, *net.UDPAddr) {}, SPIDemux, slog.New(slog.DiscardHandler)), tun
 }
 
 // The claim the whole item exists for: after traffic crosses, the pump can say

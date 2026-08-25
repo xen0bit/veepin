@@ -1,13 +1,12 @@
 package ike
 
 import (
-	"io"
-	"log"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/xen0bit/veepin/internal/ikev2/payload"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // BenchmarkSKSeal measures building an encrypted (SK) IKE message: padding,
@@ -80,7 +79,7 @@ func BenchmarkFullHandshakePSK(b *testing.B) {
 		PSK:      psk,
 		LocalID:  FQDNIdentity("vpn.example"),
 		PublicIP: net.ParseIP("127.0.0.1"),
-		Logger:   log.New(io.Discard, "", 0),
+		Logger:   vlog.Discard(),
 		AssignAddr: func(AddressRequest) (Assignment, error) {
 			return Assignment{IP4: net.IPv4(10, 0, 0, 2), Netmask: net.IPv4(255, 255, 255, 0)}, nil
 		},

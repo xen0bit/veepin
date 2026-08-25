@@ -37,7 +37,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/netip"
 	"strconv"
@@ -51,6 +50,7 @@ import (
 	"github.com/xen0bit/veepin/internal/openvpn/keys"
 	"github.com/xen0bit/veepin/internal/openvpn/tlswrap"
 	"github.com/xen0bit/veepin/internal/openvpn/wire"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 func init() { client.Register("openvpn", parseOptions) }
@@ -61,9 +61,15 @@ const (
 	handshakeTimeout = 30 * time.Second
 	// controlTimeout is the control-channel retransmit interval (--tls-timeout).
 	controlTimeout = 2 * time.Second
-	// keepaliveInterval is how often the client sends a data-channel ping to hold
+	// keepaliveInterval is how often either role sends a data-channel ping to hold
 	// the tunnel and NAT binding open.
 	keepaliveInterval = 10 * time.Second
+	// pingRestart is how long a peer may be silent before it is considered gone.
+	// It is the second half of the `ping 10,ping-restart 60` the server pushes:
+	// the client is told to restart after 60s of silence, and the server holds
+	// itself to the same bound in the other direction. Reaping sooner than the
+	// client restarts would tear down a peer that is still trying.
+	pingRestart = 60 * time.Second
 	// dataTunnelKey is the pump demux key for the client's single data tunnel;
 	// the value is arbitrary since there is only one.
 	dataTunnelKey = 1
@@ -113,10 +119,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	if err := cfg.validate(); err != nil {
 		return nil, client.Result{}, fmt.Errorf("openvpn: %w", err)
 	}
-	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
+	logger := vlog.From(cfg.Logger)
 
 	tlsCfg, err := clientTLSConfig(&cfg)
 	if err != nil {
@@ -179,7 +182,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 			logger.Printf("openvpn: send: %v", werr)
 		}
 	}
-	pump := dataplane.NewPump(tun, send, dataDemux, logger)
+	pump := dataplane.NewPump(tun, send, dataDemux, logger.Slog())
 	// GSO bursts flush with one sendmmsg on the connected socket. This
 	// BatchConn is the pump goroutine's own; the muxer read loop has another.
 	sendBC := dataplane.NewBatchConn(conn)
@@ -256,7 +259,7 @@ func verifyChainToCA(pool *x509.CertPool) func([][]byte, [][]*x509.Certificate) 
 // negotiate runs the post-connect handshake over the control channel: TLS, the
 // key_method_2 exchange, key derivation, and the config pull. It returns the
 // Result (minus the TUN name) and the built data tunnel.
-func negotiate(ctx context.Context, cfg *Config, ch *control.Channel, tlsCfg *tls.Config, endpoint *net.UDPAddr, logger *log.Logger) (client.Result, *tunnel, time.Duration, error) {
+func negotiate(ctx context.Context, cfg *Config, ch *control.Channel, tlsCfg *tls.Config, endpoint *net.UDPAddr, logger *vlog.Logger) (client.Result, *tunnel, time.Duration, error) {
 	tlsConn := tls.Client(ch, tlsCfg)
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
 		return client.Result{}, nil, 0, fmt.Errorf("tls handshake: %w", err)

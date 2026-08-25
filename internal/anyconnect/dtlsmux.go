@@ -23,7 +23,10 @@ import (
 // dtlsListener admits DTLS sessions for App-IDs this server has handed out.
 type dtlsListener struct {
 	mux    *udpmux.Mux
-	logger interface{ Printf(string, ...any) }
+	logger interface {
+		Printf(string, ...any)
+		Warnf(string, ...any)
+	}
 
 	mu      sync.Mutex
 	pending map[string]*pendingSession
@@ -37,7 +40,10 @@ type pendingSession struct {
 	mtu    int
 }
 
-func newDTLSListener(conn *net.UDPConn, logger interface{ Printf(string, ...any) }) *dtlsListener {
+func newDTLSListener(conn *net.UDPConn, logger interface {
+	Printf(string, ...any)
+	Warnf(string, ...any)
+}) *dtlsListener {
 	l := &dtlsListener{logger: logger, pending: map[string]*pendingSession{}}
 	l.mux = udpmux.New(conn, maxPayload, l.admit)
 	return l
@@ -84,7 +90,7 @@ func (l *dtlsListener) handshake(p *udpmux.Conn, sess *pendingSession) {
 		HandshakeTimeout: dtlsHandshakeTimeout,
 	})
 	if err != nil {
-		l.logger.Printf("anyconnect: DTLS handshake with %s failed: %v", p.RemoteAddr(), err)
+		l.logger.Warnf("anyconnect: DTLS handshake with %s failed: %v", p.RemoteAddr(), err)
 		l.mux.Drop(p)
 		return
 	}

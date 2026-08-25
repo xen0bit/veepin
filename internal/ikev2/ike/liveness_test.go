@@ -2,10 +2,10 @@ package ike
 
 import (
 	"context"
-	"io"
-	"log"
 	"testing"
 	"time"
+
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // pumpInbox mimics the data-path read loop: it reads IKE datagrams off the
@@ -42,7 +42,7 @@ func TestClientDPD(t *testing.T) {
 		ServerHost: "127.0.0.1", ServerPort: p500, NATTPort: p4500,
 		PSK:     []byte("mobike-psk"),
 		LocalID: FQDNIdentity("client.example"),
-		Logger:  log.New(io.Discard, "", 0),
+		Logger:  vlog.Discard(),
 	})
 	if _, err := client.Connect(); err != nil {
 		t.Fatalf("connect: %v", err)
@@ -80,7 +80,7 @@ func TestClientDPDTimesOutOnDeadPeer(t *testing.T) {
 		ServerHost: "127.0.0.1", ServerPort: p500, NATTPort: p4500,
 		PSK:     []byte("mobike-psk"),
 		LocalID: FQDNIdentity("client.example"),
-		Logger:  log.New(io.Discard, "", 0),
+		Logger:  vlog.Discard(),
 	})
 	if _, err := client.Connect(); err != nil {
 		t.Fatalf("connect: %v", err)
@@ -108,7 +108,7 @@ func TestSendDPDRequiresAttach(t *testing.T) {
 		ServerHost: "127.0.0.1", ServerPort: 500,
 		PSK:     []byte("x"),
 		LocalID: FQDNIdentity("client.example"),
-		Logger:  log.New(io.Discard, "", 0),
+		Logger:  vlog.Discard(),
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()

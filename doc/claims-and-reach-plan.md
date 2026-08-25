@@ -38,18 +38,37 @@ The second (`feat/replay-and-reach`) executes **H8 and H4**, which brings it to
 twenty-one accounted for.
 
 The third (`feat/ikev2-over-tcp`) executes **item 9**, which brings it to
-twenty-two accounted for and four outstanding. This section is the record of
-what each row cost against what it was predicted to cost.
+twenty-two accounted for and four outstanding.
 
-What remains, and why each stopped where it did:
+The fourth (`feat/lifecycle-and-close-out`) closes the page: **item 12**, and a
+decision or a survey for every row that was waiting on one — H3b, H4's
+remainder, H6, H7 and H11. Two defects that earlier branches named and deferred
+went with it: OpenVPN's server never released an established client that stopped
+answering, and abandoning a wedged listener cost a goroutine and a TUN fd for the
+life of the process. **Twenty-six of twenty-six accounted for.**
 
-- **Item 12 (`slog`)** is unstarted, and is the lowest-value row left.
-- **H4 (inner IPv6 beyond IKEv2)** did its two — WireGuard and OpenVPN. Whether
-  the other thirteen follow is now a decision with evidence behind it.
-- **H6** is gated on a profile nobody has taken since Option 1 landed, and
-  **H7** on a product decision. **H11** has a decision written and no code.
-- **H3b** (ML-DSA in IKEv2's AUTH payload) stays gated on surveying the current
-  IETF document and whether strongSwan 6.x implements it.
+This section is the record of what each row cost against what it was predicted
+to cost.
+
+What remains, and why each stopped where it did — as of the third branch. The
+fourth answered all of it; each entry below now carries where:
+
+- **Item 12 (`slog`)** has landed, and cost about a fifth of what this page
+  estimated — see [what it cost](#what-it-actually-cost-and-what-it-found-1).
+- **H4 (inner IPv6 beyond IKEv2)** did its two — WireGuard and OpenVPN, and
+  AmneziaWG for free. The decision on the rest has since been made and written
+  down: no campaign, MASQUE next because most of it is already written, and two
+  of the "missing" thirteen were layer 2 and never needed it.
+- **H6** was gated on a profile nobody had taken since Option 1 landed — it has
+  been taken, and it says the ceiling does not bind and the allocator, not the
+  plumbing, is what caps parallelism. **H7** was gated on a product decision,
+  which is made: road warriors, on purpose, written down as a boundary in
+  `security.md`. **H11** had a decision and no code; it still has no code, and
+  the README now states the obstacles that are actually true.
+- **H3b** (ML-DSA in IKEv2's AUTH payload) has been surveyed and stays gated —
+  but on a release date now rather than an unknown. The draft is through IESG
+  review; strongSwan's ML-DSA authentication is on a branch for 6.1.0 and not in
+  any release.
 
 Three predictions on this page turned out to be wrong, and each is corrected in
 place rather than deleted: item 3's ql2tpd hypothesis (it is not a duplicate
@@ -97,7 +116,7 @@ kernel does not produce the super-frame at all).
 |---|------|-------|------|---------|--------|
 | 10 | An abandoned listener leaks its pump goroutine and its TUN fd | **High** | Low | **Do** | ✅ landed (visibility half) |
 | 11 | No kill switch on macOS | Medium | **Medium** | Decided: **no** — see below | ✅ resolved |
-| 12 | `-log-level` gates the stream, not the call site | Low | Medium | Do last | ☐ |
+| 12 | `-log-level` gates the stream, not the call site | Low | Medium | Do last | ✅ landed |
 
 **If only three things happen: 1, 2 and 10.** One and two are a defect that
 every passing test agrees is fine; ten is a resource leak that compounds with
@@ -851,6 +870,42 @@ If it happens, it happens as a mechanical pass with `slog.Logger` behind the
 same field name, one package per commit, with the `AllocsPerRun` guards run
 without `-race` after each.
 
+### What it actually cost, and what it found
+
+**A fifth of the estimate, because the premise was wrong.** "Several hundred
+call sites" is the right count — 482 — but they did not need rewriting. What the
+tree needs from a logger is a level, not attributes, and `internal/vlog` is
+`log/slog` with the `Printf` shape kept: every existing call compiles unchanged
+and becomes an Info line. Going straight to `*slog.Logger` would have meant
+`Info(fmt.Sprintf(...))` at all 482, which is worse code and a diff nobody could
+review. Wrapping costs one type, and the diff that changes *behaviour* is then
+only the lines that changed level — which is the diff worth reading.
+
+**The public surface is `*slog.Logger` even so.** Every facade's `Config.Logger`
+takes the standard-library type and wraps it internally, so nobody outside this
+module learns the wrapper. `dataplane` does the same, for the stronger reason
+that an internal type in an exported signature is one no external caller could
+satisfy at all.
+
+**The risk this page named was real, and is now pinned.** slog's attribute API
+allocates; the drop path on every data path logs through this. `logf` checks
+`Enabled` before it formats, a suppressed line costs 4.5ns and zero allocations,
+and `TestASuppressedLineAllocatesNothing` is what stops that ordering being
+tidied away.
+
+**The risk it did not name was bigger.** Twenty-eight interop cells assert
+substrings of veepin's own log output, the panel serves the stream as free text,
+and the runbooks quote lines from it. A `slog.TextHandler` renders
+`time=... level=INFO msg="..."` and would have broken all of them at once —
+silently, as lines that stopped matching. So the text format is a handler of our
+own that emits exactly what `log.LstdFlags|log.Lmicroseconds` did, with a test
+comparing it against `log.Logger` character class by character class.
+
+That is also why the reclassification rule is **never downward**: Info→Warn keeps
+a line visible at the default level, Info→Debug hides it from everyone who has
+not asked. Seventy-eight lines whose own text says "failed", "refusing",
+"rejected" or "dropped" moved up; nothing moved down.
+
 ---
 
 # The longer horizon
@@ -873,15 +928,15 @@ than a bare assertion.
 |---|------|-------|------|------|
 | H1 | Every TLS 1.3 protocol already does hybrid PQ key exchange, and nothing says so | **High** | Low | ✅ landed |
 | H2 | OpenVPN's server caps TLS at 1.2, which forecloses H1 for it | Medium | Low | ✅ landed — the hypothesis held |
-| H3 | PQ **authentication** — unblocked by Go 1.27's `crypto/mldsa` | **High** | Medium | ✅ H3a landed; H3b still gated on the IKEv2 interop survey |
-| H4 | Inner IPv6 reaches one protocol of sixteen | **High** | **High** | pick two protocols, not all fifteen |
+| H3 | PQ **authentication** — unblocked by Go 1.27's `crypto/mldsa` | **High** | Medium | ✅ H3a landed; H3b surveyed — gated on strongSwan 6.1.0 |
+| H4 | Inner IPv6 reaches one protocol of sixteen | **High** | **High** | ✅ two done (four reached); the rest is a decision with evidence — see below |
 | H5 | GSO/GRO are IPv4-only, and IKEv2 now carries inner v6 | Medium | Medium | ✅ surveyed: there is no slow path, only an absent optimisation |
-| H6 | `scaling-the-data-path.md` Option 2 — parallelism with per-tunnel affinity | Medium | **High** | a profile showing the ceiling actually binds |
-| H7 | Site-to-site: multi-SA, subnet selectors, no config-mode assignment | **High** | **High** | a decision that veepin is for more than road warriors |
+| H6 | `scaling-the-data-path.md` Option 2 — parallelism with per-tunnel affinity | Medium | **High** | ✅ profiled: the ceiling does not bind, and the allocator caps parallelism at 2.4× — not next |
+| H7 | Site-to-site: multi-SA, subnet selectors, no config-mode assignment | **High** | **High** | ✅ decided: road warriors, on purpose — a boundary in `security.md` |
 | H8 | Record the peer, replay it offline | **High** | Medium | none — the cheapest leverage on this page |
 | H9 | Memory hygiene that can actually hold, instead of zeroing that cannot | Medium | Low | ✅ landed |
 | H10 | The management panel's authentication ceiling | Medium | Medium | ✅ decided: one operator, permanently |
-| H11 | Windows — and the README names the wrong obstacle first | Low | **High** | somebody who wants it enough to argue it |
+| H11 | Windows — and the README names the wrong obstacle first | Low | **High** | ✅ the README now names the right obstacles; still nobody arguing for the port |
 | H12 | Signed releases, SBOM, continuous fuzzing | Low | Low | ✅ signing + SBOM landed; OSS-Fuzz is an application, not code |
 
 **If only two things happen from this page: H1 and H8.** H1 is a claim veepin has
@@ -1029,7 +1084,7 @@ than a veepin↔veepin cell. Expect the answer to be partial — a vendor client
 verifies an ML-DSA chain is a different thing from one that offers the signature
 algorithm — and expect that partial answer to be worth publishing either way.
 
-### H3b. IKEv2 post-quantum authentication is real protocol work
+### H3b. IKEv2 post-quantum authentication is real protocol work *(surveyed)*
 
 This is the one that closes `security.md`'s stated gap, since IKEv2 is where the
 PQ key exchange already lives and the mismatch is therefore sharpest: ML-KEM-768
@@ -1043,6 +1098,48 @@ whether a peer speaks it. **Survey before scoping:** find the current IETF
 document for ML-DSA in IKEv2 auth, and check whether strongSwan 6.x implements
 it. If it does not, this ships with a veepin↔veepin cell as its only evidence —
 the position item 8 was rejected for — and should wait.
+
+#### The survey, taken 2026-08-25
+
+**The specification half is done, and it is the extension point this page
+predicted.** [`draft-ietf-ipsecme-ikev2-pqc-auth`][pqcauth] is at **-12**
+(20 August 2026) and its IESG state is *Approved-announcement sent* — through
+review, heading for an RFC number. It was `-02` when the paragraph above was
+written. Four things it settles:
+
+- **No new AUTH method.** It uses RFC 7427 Digital Signature (method 14) with a
+  DER-encoded `AlgorithmIdentifier`, which is exactly what `certauth.go` already
+  builds and parses. ML-DSA-44/65/87 and twelve SLH-DSA variants get identifiers
+  from [RFC 9881][rfc9881] / RFC 9909 — the same PKIX objects `crypto/x509`
+  already understands.
+- **The "Identity" hash (value 5) must be advertised** in
+  `SIGNATURE_HASH_ALGORITHMS`. ML-DSA hashes the message internally, so no
+  external hash is applied — and `sigHashList` in `certauth.go` currently offers
+  SHA-512/384/256 and nothing else. That is the one wire change with teeth.
+- **Fragmentation is mandatory**, because the signatures and keys do not fit.
+  Item 1 of this plan gave veepin outbound RFC 7383 fragmentation, having been
+  justified by a documentation claim that turned out to be false; it is the
+  prerequisite for this, which nobody knew at the time.
+- Deterministic vs hedged signing is a local choice; verification is
+  mode-agnostic.
+
+**The peer half is not done, and that is still the gate.** strongSwan's latest
+release is **6.0.7** (June 2026), which has ML-KEM key exchange and no ML-DSA
+authentication. The implementation lives on an `ml-dsa` branch targeted at
+**6.1.0**, whose ETA upstream has tied explicitly to this draft finalising —
+which it now has. libreswan, the tree's second IKEv2 peer, has nothing.
+
+**Verdict: unchanged, and for a smaller reason than before.** Today this would
+still ship with a veepin↔veepin cell as its only evidence, which is the position
+item 8 was rejected for. But the gate is no longer "is there a specification and
+does anyone implement it" — it is a release date. When strongSwan 6.1.0 ships,
+this becomes an ordinary protocol row with a real peer, and the scoping is
+already done: `sigHashList` gains the Identity hash, `certauth.go` gains the
+ML-DSA `AlgorithmIdentifier` arm, and `crypto/mldsa` supplies the rest.
+`pqauth_test.go` already proves the Go side end to end for TLS.
+
+[pqcauth]: https://datatracker.ietf.org/doc/draft-ietf-ipsecme-ikev2-pqc-auth/
+[rfc9881]: https://www.rfc-editor.org/rfc/rfc9881.html
 
 ### The prerequisite, measured rather than guessed
 
@@ -1139,7 +1236,9 @@ happened to exist. Item 4's fixture survey should add a question to its list:
 *which test seams depend on runtime behaviour that a toolchain bump can remove?*
 
 **Verdict: no longer "watch." H3a is a week and produces a publishable result
-either way. H3b is gated on the interop survey above, and should stay gated.**
+either way. H3b is gated on the interop survey above, and should stay gated** —
+the survey has since been taken, and the gate is now strongSwan 6.1.0 rather
+than an open question. See [the survey](#the-survey-taken-2026-08-25).
 
 Also worth noting, since the original survey turned it up: `crypto/hpke` is in
 the standard library as of 1.26. Not post-quantum, and nothing in the tree needs
@@ -1218,6 +1317,44 @@ second allocator would be a second thing to leak. Fixing the lifecycle needs a
 liveness notion for a UDP client (OpenVPN's own `ping-restart` implies one) and
 belongs on its own branch.
 
+**That branch happened.** `serveClient` now reaps a client whose last
+authenticated packet is older than the 60s `ping-restart` the server itself
+pushes, using the per-tunnel `LastSeen` the pump was already stamping. The
+derived-v6 decision stands anyway, and its justification changed rather than
+disappearing: derivation is 1:1 with the v4 assignment, so releasing the v4
+address releases both, on a path that gets exactly one chance to run.
+
+### The decision on the other thirteen
+
+**Not all thirteen, and the number is not thirteen.** Two corrections to the
+denominator first, both from reading the tree rather than from new work:
+
+- **AmneziaWG already has it.** Its `Dial` *is* `wireguard.Dial` and its server
+  *is* `wireguard.NewServer` — the obfuscation is the only thing it owns — so it
+  inherited the whole fix. Four of sixteen carry inner v6, not three.
+- **SoftEther and L2TPv3 never needed it.** Both are layer 2. veepin assigns no
+  inner address on a TAP at all; addressing inside the segment is DHCP's or the
+  operator's job, so inner v6 works today if the bridged network supplies it.
+  That is a property of the design, not a gap.
+
+That leaves ten, and they are three jobs of very different size:
+
+| protocol(s) | what it takes | verdict |
+|---|---|---|
+| MASQUE | The wire half is **already done** — `appendAddress` writes a `4` or a `6` by inspecting the address, because RFC 9484's ADDRESS_ASSIGN is family-agnostic by construction. What is missing is a second pool, the assignment, and the client applying it | **Do this one next**, whenever v6 is next asked for |
+| SSTP, L2TP | IPV6CP (RFC 5072) in `internal/ppp` — a new control protocol, but *one* job for two protocols, and the PPP peers to test against exist | Do together, on demand |
+| AnyConnect, Fortinet, GlobalProtect, Pulse, Cisco IPsec, SSH | Each has its own vendor configuration channel and its own peer. Six separate jobs with nothing shared between them | Only on demand, one at a time |
+
+Nebula is the tenth and is not on that list: its overlay address comes from the
+certificate, so inner v6 is upstream's design decision rather than a config-mode
+extension veepin can make.
+
+**So: no campaign.** The pattern is established, the two shapes of work are
+known, and the next one to do is MASQUE because most of it is already written.
+Doing the other nine speculatively would be nine interop cells for a demand
+nobody has expressed — and the OpenVPN cell taught that a v6 cell written the
+obvious way cannot fail, so each one costs more care than it looks like.
+
 ---
 
 ## H5. GSO and GRO are IPv4-only, and IKEv2 now carries inner v6
@@ -1238,7 +1375,7 @@ parenthetical in the doc and stop. If it is large, TSO6 is a bounded change to
 
 ---
 
-## H6. `scaling-the-data-path.md` Option 2 — parallelism with per-tunnel affinity
+## H6. `scaling-the-data-path.md` Option 2 — parallelism with per-tunnel affinity *(gate answered: no)*
 
 The largest designed-but-unbuilt item in the tree, and the design doc has already
 done the hard part: it enumerates the single-goroutine assumptions a naive
@@ -1255,9 +1392,33 @@ that is a result worth having for the cost of an afternoon.
 **Gate: a profile showing the ceiling actually binds.** Without it this is
 speculative work on the most correctness-sensitive code in the repository.
 
+### The profile was taken, and it says no
+
+Recorded in full in
+[`scaling-the-data-path.md`](scaling-the-data-path.md#measured-the-profile-option-2-was-gated-on-taken).
+Three things, and the second was not what anyone expected:
+
+- **One core does 15–18 Gbit/s** through the whole pump path with the syscalls
+  removed. Nothing here is near that.
+- **Parallelism plateaus at 2.4×** and then regresses past sixteen threads —
+  with an independent SA per goroutine and no shared state at all. The same
+  benchmark under `GOGC=off` reaches 8.8×. The workload is **allocation-bound**,
+  not CPU-bound and not lock-bound: the one permitted allocation per packet is
+  what the collector runs out of first. Option 2 parallelises the plumbing, which
+  is not the thing that binds, so it would buy 2.4× at best while making every
+  single-goroutine hazard live.
+- Two cheap unrelated findings fell out: `time.Now()` is called twice per inbound
+  packet (7.5% of CPU) to feed timers measured in tens of seconds, and the
+  uncontended `RWMutex` on the pump maps costs 5.3% — the latter being the doc's
+  own hazard 3, whose whole point is that read-side cost grows with readers.
+
+So the answer is **not yet, and not next**: removing the per-packet output
+allocation comes first, and it changes `Encapsulate`'s contract, which is a
+program rather than a task. The afternoon this cost was worth it.
+
 ---
 
-## H7. Site-to-site: multiple SAs, subnet selectors, no config-mode assignment
+## H7. Site-to-site: multiple SAs, subnet selectors, no config-mode assignment *(decided: no)*
 
 The README names this as a boundary in one clause — *"one IKE SA per Child,
 sufficient for road-warrior clients rather than a site-to-site multi-SA
@@ -1279,6 +1440,24 @@ one of the candidates that would ship with a `—†`.
 product question and it should be answered on purpose. If the answer is no, the
 README clause should say "deliberately" rather than "sufficient," and this entry
 becomes a permanent boundary in `doc/security.md` instead of a horizon item.
+
+### Decided: no, and it is written down as a boundary
+
+The answer is **road warriors, on purpose**. The README's IKEv2 bullet now says
+"deliberately" and points at
+[`security.md`](security.md#veepin-is-a-road-warrior-vpn-on-purpose), which
+carries the long form: what a site-to-site gateway would actually require, why
+the `client.Result` contract change under sixteen protocols is what makes it a
+program rather than a feature, and the two things that follow for anyone reading
+the tree (a `-pool` is not a site-to-site selector; traffic-selector narrowing is
+a road-warrior narrowing).
+
+The decision is recorded rather than assumed so that reversing it is a decision
+too. Nothing about it is technically forced — strongSwan does both roles, so the
+evidence would be there — and the case against is that it would be the largest
+capability in the tree, resting on a contract change under every protocol, for a
+deployment nobody has asked for. One word in the README is what it takes to
+reopen.
 
 ---
 
@@ -1405,7 +1584,7 @@ never assumed one.
 
 ---
 
-## H11. Windows — and the README names the wrong obstacle first
+## H11. Windows — and the README names the wrong obstacle first *(README corrected)*
 
 The README's position is *"wintun is a DLL, which costs both the 'no runtime
 dependencies' and the pure-Go claims; it is a trade worth making only for someone
@@ -1426,6 +1605,16 @@ or WFP. That is the expensive part, and the README does not mention it.
 above: the macOS client compiles, is shipped, and *has never been run by anyone*.
 Adding a second unverified platform before verifying the first turns two bugs
 into one indistinguishable failure — the same argument that gates item 11.
+
+### What changed: the README now says this
+
+The port is still not recommended and nobody is arguing for it, so no code
+moved. What was wrong was the *stated* reason — an invitation to argue is worth
+nothing if it misstates the case. README §Platforms no longer claims wintun
+costs the pure-Go property (it does not; it is `LoadLibrary`'d at runtime, as
+wireguard-go does), and names the three obstacles that are real: the DLL as a
+supply-chain surface, `internal/hostnet`'s second backend in `netsh` or WFP, and
+the unverified macOS client that should be verified first.
 
 ---
 

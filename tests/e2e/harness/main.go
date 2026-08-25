@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
@@ -47,6 +48,7 @@ import (
 	"github.com/xen0bit/veepin/internal/mgmt/ui"
 	"github.com/xen0bit/veepin/internal/profile"
 	"github.com/xen0bit/veepin/internal/supervisor"
+	"github.com/xen0bit/veepin/internal/vlog"
 	"github.com/xen0bit/veepin/wireguard"
 
 	// Blank-import every facade so the registry the API reads from knows every
@@ -133,7 +135,7 @@ func run() error {
 	// The supervisor's shared log ring, pre-filled with the seed's lines so the
 	// panel's log tail has something to show before the first mutation.
 	ring := mgmt.NewLogRing()
-	logger := log.New(os.Stdout, "harness: ", log.LstdFlags|log.Lmicroseconds)
+	logger := vlog.Text(os.Stdout).Prefixed("harness: ")
 	for _, line := range s.Logs {
 		_, _ = ring.Write([]byte(line + "\n"))
 	}
@@ -175,8 +177,9 @@ func run() error {
 		return err
 	}
 	httpSrv := &http.Server{
-		Handler:  mgmt.RequireHost([]string{ln.Addr().String()}, mux),
-		ErrorLog: logger,
+		Handler: mgmt.RequireHost([]string{ln.Addr().String()}, mux),
+		// net/http wants a *log.Logger; bridge one onto the same handler.
+		ErrorLog: slog.NewLogLogger(vlog.NewTextHandler(os.Stdout, slog.LevelInfo), slog.LevelError),
 	}
 	// The address, not the token. It is a fixed test token so printing it leaks
 	// nothing, but this log goes to CI output verbatim and a bearer token in a

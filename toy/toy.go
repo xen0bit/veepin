@@ -42,7 +42,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"strconv"
@@ -52,6 +52,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	itoy "github.com/xen0bit/veepin/internal/toy"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 func init() { client.Register("toy", parseOptions) }
@@ -92,7 +93,7 @@ type Config struct {
 	// TUNName is the interface to open; empty picks the next free one.
 	TUNName string
 	// Logger receives progress messages; nil discards them.
-	Logger *log.Logger
+	Logger *slog.Logger
 }
 
 // warning is printed by both roles on every startup.
@@ -114,12 +115,16 @@ const warning = `
 `
 
 // Warn prints the insecurity warning. Both roles call it before doing anything.
-func Warn(logger *log.Logger) {
+func Warn(logger *slog.Logger) {
+	l := vlog.From(logger)
 	if logger == nil {
-		logger = log.New(os.Stderr, "", 0)
+		l = vlog.Text(os.Stderr)
 	}
 	for line := range strings.SplitSeq(strings.TrimSpace(warning), "\n") {
-		logger.Print(line)
+		// Warn, not Print: this is the banner saying the protocol is insecure
+		// and must never carry traffic, and it is the one line here that must
+		// survive an operator running with -log-level warn.
+		l.Warnf("%s", line)
 	}
 }
 
@@ -133,8 +138,8 @@ type Session struct {
 // Like every protocol here it installs no addresses, routes or DNS: it returns
 // the client.Result and the caller applies it.
 func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
-	logger := cfg.Logger
-	Warn(logger)
+	Warn(cfg.Logger)
+	logger := vlog.From(cfg.Logger)
 
 	if cfg.Server == "" {
 		return nil, client.Result{}, errors.New("toy: server is required")
@@ -255,7 +260,7 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 		User:    opts[OptUser],
 		Secret:  opts[OptSecret],
 		TUNName: opts[OptTUN],
-		Logger:  log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds),
+		Logger:  slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
 	}
 	if v := opts[OptPort]; v != "" {
 		p, err := strconv.Atoi(v)

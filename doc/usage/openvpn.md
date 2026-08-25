@@ -67,11 +67,25 @@ sudo ./veepin serve openvpn -ca ca.crt -cert server.crt -key server.key \
 A client's v6 address is **derived** from its v4 one — the v4 address's offset
 within `-pool`, added to the prefix's base, so `10.8.0.2` becomes `fd00:8::2`.
 That is a deliberate departure from OpenVPN's own `--ifconfig-ipv6-pool`, and
-the reason is lifecycle rather than taste: this server has one allocator and no
-path that releases from it (a UDP client simply stops answering), so a second
-allocator would be a second thing to leak and a second thing to desynchronise
-from the first. Derivation is one-to-one with the v4 assignment by
-construction, needs no release, and makes the mapping legible.
+the reason is lifecycle rather than taste: a second allocator is a second thing
+to release, on a path that gets exactly one chance to run and has no peer to
+confirm it with. Derivation is one-to-one with the v4 assignment by
+construction, so releasing the v4 address releases both, and it makes the
+mapping legible.
+
+### When a client goes away
+
+A UDP client never says goodbye; it stops answering. The server pushes
+`ping 10,ping-restart 60` and holds itself to the same bound in the other
+direction: a client whose last authenticated packet — data **or** keepalive —
+is more than 60 seconds old is torn down, and its address, its tunnel and its
+session are released. Reaping no sooner than the client's own `ping-restart`
+is deliberate, so a peer that is still trying is never disconnected by the
+server first.
+
+Until this existed the server simply never released anything: an established
+client that vanished kept its pool address for the life of the process, and a
+server that had handed out its whole `-pool` stayed exhausted.
 
 `-setup-nat` installs the server's own `fd00:8::1` on the interface along with
 v6 forwarding and the `ip6tables` rules, the same way it does the v4 half.

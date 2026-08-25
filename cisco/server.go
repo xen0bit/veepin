@@ -11,7 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"strconv"
@@ -22,6 +22,7 @@ import (
 	"github.com/xen0bit/veepin/dataplane"
 	icisco "github.com/xen0bit/veepin/internal/cisco"
 	"github.com/xen0bit/veepin/internal/userdb"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 func init() {
@@ -100,7 +101,7 @@ type ServerConfig struct {
 	// unmodified. dataplane.DefaultShapeBytes is a reasonable value.
 	Shape int
 
-	Logger *log.Logger
+	Logger *slog.Logger
 }
 
 // Server is a Cisco IPsec gateway.
@@ -192,7 +193,7 @@ func (s *Server) ListenAndServe() error {
 		SplitInclude: s.cfg.SplitInclude,
 		Shape:        s.cfg.Shape,
 		MTU:          client.DefaultTunnelMTU,
-		Logger:       s.cfg.Logger,
+		Logger:       vlog.From(s.cfg.Logger),
 	})
 	if err != nil {
 		_ = ikeConn.Close()
@@ -223,6 +224,24 @@ func (s *Server) Close() error {
 	return s.tun.Close()
 }
 
+// Abandon implements client.AbandonableServer. It closes the TUN directly, so
+// an abandoned listener's packet pump unparks and its descriptor is released
+// even though Close never returned. See client.AbandonableServer for why this
+// is not simply Close.
+//
+// The TUN is set in NewServer and never reassigned, so this reads it without
+// the lock Close takes -- deliberately, because a wedged Close may be holding
+// that lock, and waiting on it here would reproduce the very stall this is the
+// escape from.
+func (s *Server) Abandon() { s.tun.Close() }
+
+// Server implements client.AbandonableServer, so the supervisor can take its
+// descriptors back when Close overruns. Asserted here because the interface is
+// found by type assertion at the one call site: without this, a renamed or
+// re-signatured Abandon compiles fine and the assertion silently starts failing,
+// which reads as the leak coming back.
+var _ client.AbandonableServer = (*Server)(nil)
+
 // TUNName is the interface the gateway is bound to.
 func (s *Server) TUNName() string {
 	if s.tun == nil {
@@ -245,7 +264,7 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 		Domain:   opts[OptServerDomain],
 		Banner:   opts[OptServerBanner],
 		TUNName:  opts[OptServerTUN],
-		Logger:   log.New(logDest(), "", log.LstdFlags|log.Lmicroseconds),
+		Logger:   vlog.SlogText(logDest()),
 	}
 	group, psk := opts[OptServerGroup], opts[OptServerGroupPSK]
 	if group == "" || psk == "" {
