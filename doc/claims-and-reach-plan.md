@@ -1238,7 +1238,7 @@ parenthetical in the doc and stop. If it is large, TSO6 is a bounded change to
 
 ---
 
-## H6. `scaling-the-data-path.md` Option 2 — parallelism with per-tunnel affinity
+## H6. `scaling-the-data-path.md` Option 2 — parallelism with per-tunnel affinity *(gate answered: no)*
 
 The largest designed-but-unbuilt item in the tree, and the design doc has already
 done the hard part: it enumerates the single-goroutine assumptions a naive
@@ -1254,6 +1254,30 @@ that is a result worth having for the cost of an afternoon.
 
 **Gate: a profile showing the ceiling actually binds.** Without it this is
 speculative work on the most correctness-sensitive code in the repository.
+
+### The profile was taken, and it says no
+
+Recorded in full in
+[`scaling-the-data-path.md`](scaling-the-data-path.md#measured-the-profile-option-2-was-gated-on-taken).
+Three things, and the second was not what anyone expected:
+
+- **One core does 15–18 Gbit/s** through the whole pump path with the syscalls
+  removed. Nothing here is near that.
+- **Parallelism plateaus at 2.4×** and then regresses past sixteen threads —
+  with an independent SA per goroutine and no shared state at all. The same
+  benchmark under `GOGC=off` reaches 8.8×. The workload is **allocation-bound**,
+  not CPU-bound and not lock-bound: the one permitted allocation per packet is
+  what the collector runs out of first. Option 2 parallelises the plumbing, which
+  is not the thing that binds, so it would buy 2.4× at best while making every
+  single-goroutine hazard live.
+- Two cheap unrelated findings fell out: `time.Now()` is called twice per inbound
+  packet (7.5% of CPU) to feed timers measured in tens of seconds, and the
+  uncontended `RWMutex` on the pump maps costs 5.3% — the latter being the doc's
+  own hazard 3, whose whole point is that read-side cost grows with readers.
+
+So the answer is **not yet, and not next**: removing the per-packet output
+allocation comes first, and it changes `Encapsulate`'s contract, which is a
+program rather than a task. The afternoon this cost was worth it.
 
 ---
 

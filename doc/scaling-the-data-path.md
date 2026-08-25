@@ -188,6 +188,84 @@ syscalls are amortised.
 
 Batching alone may lift the ceiling far enough that Option 2 is never needed.
 
+## Measured: the profile Option 2 was gated on *(taken)*
+
+"Profile before choosing" had not been done since Option 1 landed, and Option 2
+was gated on it. It has now been taken, and it moved the answer.
+
+Machine: i9-14900KF (8 P-cores + 16 E-cores, 32 threads), Go 1.27, AES-256-GCM,
+1400-byte inner packets. Reproduce with:
+
+```sh
+go test ./dataplane/ -run '^$' -bench 'BenchmarkPump' -benchtime 2s -cpu 1 \
+  -cpuprofile /tmp/pump.prof
+go tool pprof -top -nodecount=25 /tmp/pump.prof
+
+for c in 1 2 4 8 16 32; do
+  go test ./internal/ikev2/esp/ -run '^$' -bench ESPDecapParallel -cpu $c
+done
+```
+
+### One core is not the ceiling anyone is near
+
+| path | ns/packet | inner throughput |
+|---|---|---|
+| `BenchmarkPumpInbound/1400B` (demux + decap + TUN write) | 633 | 2.2 GB/s ≈ **17.7 Gbit/s** |
+| `BenchmarkPumpOutbound/1400B` (route + encap + send) | 762 | 1.8 GB/s ≈ **14.7 Gbit/s** |
+
+Both are with a discard TUN and a no-op sender, so they are the *plumbing plus
+crypto* cost with the syscalls removed — an upper bound on one core, not a
+deployment figure. Nothing veepin is asked to do comes near it.
+
+### The finding: adding cores does not multiply this workload — the allocator caps it
+
+`BenchmarkESPDecapParallel` runs an independent SA per goroutine, which is the
+multi-client concentrator Option 2 exists for, with no shared state at all.
+It should scale linearly. It does not:
+
+| threads | 1 | 2 | 4 | 8 | 16 | 32 |
+|---|---|---|---|---|---|---|
+| GC on (default) | 2.7 GB/s | 3.3 | 4.6 | 5.9 | **6.7** | 5.5 *(regresses)* |
+| `GOGC=off` | 2.7 GB/s | — | — | 11.5 | — | **24.1** |
+
+With the collector running, aggregate throughput plateaus at **2.4×** the
+single-core rate by sixteen threads and then goes *backwards*. With it off the
+same code reaches 8.8×. The workload is not contended and it is not
+lock-bound — it is **allocation-bound**: every `Decapsulate`/`Encapsulate`
+returns a fresh buffer (1536 B/op, the one allocation the data path's contract
+permits), and at these packet rates the collector is what runs out first.
+
+`GOGC=off` is a diagnostic, not a deployment. What it proves is where the
+ceiling is: not in the plumbing Option 2 would parallelise.
+
+**So Option 2 stays unstarted, and now for a measured reason.** Parallelising
+the plumbing before removing the per-packet allocation buys 2.4× at best, on the
+most correctness-sensitive code in the repository, and every hazard below becomes
+live in exchange. Reusing the output buffers first would raise the single-core
+number *and* make Option 2 worth what it costs — and it is a change to
+`Encapsulate`'s contract, which is a program of its own.
+
+### Cheaper things the same profile found
+
+Flat CPU shares from `BenchmarkPump*` at `-cpu 1`, all of them plumbing rather
+than cipher:
+
+- **`time.Now()` twice per inbound packet — 7.5%.** `decapInbound` stamps the
+  pump-wide liveness clock and `countRx` stamps the tunnel's `LastSeen`, both on
+  every packet. Both feed timers measured in *tens of seconds* (idle probes,
+  OpenVPN's 60s ping-restart), so nanosecond precision is bought and thrown away.
+- **`RWMutex` read lock/unlock — 5.3%,** uncontended, on `byKey` and `routes`.
+  That is hazard 3 below, and the number is what makes it worth doing on its own:
+  it is 5% today with one reader, and RWMutex read-side cost is exactly what
+  degrades as readers are added, so it is a prerequisite to Option 2 rather than
+  a bonus.
+- **`routeTable.lookup` + `addrBit` — 10%** of the outbound path, walking the
+  trie a bit at a time.
+
+Crypto is 31% flat (`gcmAesEnc` + `gcmAesDec`) with the syscalls absent. In a
+deployment it is a smaller share still, which is the same conclusion from the
+other side: the cipher is not what to fix.
+
 ## Option 2 (if still CPU-bound): parallelize, with per-tunnel affinity
 
 If profiling shows the work is genuinely CPU-bound after batching — the busy
@@ -257,22 +335,28 @@ slowdowns:
 
 ## Sequencing
 
-1. **Profile a saturated tunnel.** Confirm CPU-bound vs syscall-bound; it decides
-   whether Option 2 is even worth starting.
+1. **Profile a saturated tunnel — done**, and it decided against Option 2 for
+   now. See [Measured](#measured-the-profile-option-2-was-gated-on-taken):
+   the work is neither CPU-bound in the cipher nor lock-bound, it is
+   allocation-bound, and parallelism plateaus at 2.4× until that changes.
 2. **Option 1 — batching: complete.** Ingress: `PacketConn.ReadBatch` /
    `BatchConn` in every single-socket read loop, measured above. Egress:
    `OpenTUNGSO` + userspace TSO + `SetBatchSender` flush in the pump
    protocols. Inbound TUN writes: GRO coalescing via `HandleInboundBatch`.
 3. **Lock-free pump map** (hazard 3). Pure win, testable in isolation, de-risks
    Option 2.
-4. **Option 2 — per-tunnel-affinity workers**: shared `SO_REUSEPORT` source
+4. **Remove the per-packet output allocation** (buffer reuse through
+   `Encapsulate`/`Decapsulate`). The measurement above puts this *before*
+   Option 2 rather than after it: until it lands, parallelism buys 2.4×, and
+   after it the same benchmark says 8.8× is available.
+5. **Option 2 — per-tunnel-affinity workers**: shared `SO_REUSEPORT` source
    inbound, multi-queue TUN with hand-off outbound. Guard with the interop matrix
    plus a new multi-reader stress test.
-5. Validate with a multi-core benchmark **and** the full interop matrix. A
+6. Validate with a multi-core benchmark **and** the full interop matrix. A
    reordering regression shows up as a throughput cliff on the TCP-carried cells,
    not a test failure, so watch the living throughput table across the change.
 
-None of this is urgent: one core per direction is already several Gbit/s, and no
-workload here is asking for more. The value of writing it down is that the
+None of this is urgent: one core per direction is already 15–18 Gbit/s measured,
+and no workload here is asking for more. The value of writing it down is that the
 single-goroutine assumptions are invisible until someone adds a goroutine — so
 this note exists to be read *before* that happens, not after.
