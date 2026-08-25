@@ -44,8 +44,10 @@ what each row cost against what it was predicted to cost.
 What remains, and why each stopped where it did:
 
 - **Item 12 (`slog`)** is unstarted, and is the lowest-value row left.
-- **H4 (inner IPv6 beyond IKEv2)** did its two — WireGuard and OpenVPN. Whether
-  the other thirteen follow is now a decision with evidence behind it.
+- **H4 (inner IPv6 beyond IKEv2)** did its two — WireGuard and OpenVPN, and
+  AmneziaWG for free. The decision on the rest has since been made and written
+  down: no campaign, MASQUE next because most of it is already written, and two
+  of the "missing" thirteen were layer 2 and never needed it.
 - **H6** is gated on a profile nobody has taken since Option 1 landed, and
   **H7** on a product decision. **H11** has a decision written and no code.
 - **H3b** (ML-DSA in IKEv2's AUTH payload) has been surveyed and stays gated —
@@ -1263,6 +1265,44 @@ addresses are derived from its v4 ones rather than drawn from a second pool: a
 second allocator would be a second thing to leak. Fixing the lifecycle needs a
 liveness notion for a UDP client (OpenVPN's own `ping-restart` implies one) and
 belongs on its own branch.
+
+**That branch happened.** `serveClient` now reaps a client whose last
+authenticated packet is older than the 60s `ping-restart` the server itself
+pushes, using the per-tunnel `LastSeen` the pump was already stamping. The
+derived-v6 decision stands anyway, and its justification changed rather than
+disappearing: derivation is 1:1 with the v4 assignment, so releasing the v4
+address releases both, on a path that gets exactly one chance to run.
+
+### The decision on the other thirteen
+
+**Not all thirteen, and the number is not thirteen.** Two corrections to the
+denominator first, both from reading the tree rather than from new work:
+
+- **AmneziaWG already has it.** Its `Dial` *is* `wireguard.Dial` and its server
+  *is* `wireguard.NewServer` — the obfuscation is the only thing it owns — so it
+  inherited the whole fix. Four of sixteen carry inner v6, not three.
+- **SoftEther and L2TPv3 never needed it.** Both are layer 2. veepin assigns no
+  inner address on a TAP at all; addressing inside the segment is DHCP's or the
+  operator's job, so inner v6 works today if the bridged network supplies it.
+  That is a property of the design, not a gap.
+
+That leaves ten, and they are three jobs of very different size:
+
+| protocol(s) | what it takes | verdict |
+|---|---|---|
+| MASQUE | The wire half is **already done** — `appendAddress` writes a `4` or a `6` by inspecting the address, because RFC 9484's ADDRESS_ASSIGN is family-agnostic by construction. What is missing is a second pool, the assignment, and the client applying it | **Do this one next**, whenever v6 is next asked for |
+| SSTP, L2TP | IPV6CP (RFC 5072) in `internal/ppp` — a new control protocol, but *one* job for two protocols, and the PPP peers to test against exist | Do together, on demand |
+| AnyConnect, Fortinet, GlobalProtect, Pulse, Cisco IPsec, SSH | Each has its own vendor configuration channel and its own peer. Six separate jobs with nothing shared between them | Only on demand, one at a time |
+
+Nebula is the tenth and is not on that list: its overlay address comes from the
+certificate, so inner v6 is upstream's design decision rather than a config-mode
+extension veepin can make.
+
+**So: no campaign.** The pattern is established, the two shapes of work are
+known, and the next one to do is MASQUE because most of it is already written.
+Doing the other nine speculatively would be nine interop cells for a demand
+nobody has expressed — and the OpenVPN cell taught that a v6 cell written the
+obvious way cannot fail, so each one costs more care than it looks like.
 
 ---
 
