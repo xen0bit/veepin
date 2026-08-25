@@ -294,6 +294,12 @@ Re-run these; don't "fix" them.
 - `internal/ikev2/ike` — "ESP packet never reached the server TUN".
 - `internal/fortinet` — `TestDTLSAttachesToTLSTunnel`.
 - The release workflow's `nm-packages` job dying on an Ubuntu mirror sync.
+- `compose up: signal: killed` in an interop shard, with the last line of output
+  a container *Starting* and never *Started*. That is the Docker daemon taking
+  minutes over a start that normally takes milliseconds — seen on the
+  `softether-vpn` and `sstp` shards, and reproducible locally. `composeUp`
+  retries once on it now, so a red build means it happened twice; the retry is
+  safe because `up --build -d` waits for nothing veepin does.
 
 ## Cutting a release
 
