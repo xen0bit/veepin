@@ -303,12 +303,13 @@ func (s *Server) Network() *net.IPNet { return s.pool.Network() }
 // parseServerOptions turns registry options into a constructed Server.
 func parseServerOptions(opts map[string]string) (client.Server, error) {
 	cfg := ServerConfig{
+		ListenIP: opts[OptServerListen],
+		Pool:     opts[OptServerPool],
+		NoESP:    opts[OptServerNoESP] == "true",
+		TUNName:  opts[OptServerTUN],
+		Logger:   vlog.SlogText(logDest()),
+
 		PostQuantumOnly: pqpolicy.Requested(opts),
-		ListenIP:        opts[OptServerListen],
-		Pool:            opts[OptServerPool],
-		NoESP:           opts[OptServerNoESP] == "true",
-		TUNName:         opts[OptServerTUN],
-		Logger:          vlog.SlogText(logDest()),
 	}
 	user, pass := opts[OptServerUser], opts[OptServerPass]
 	if user != "" && pass == "" {

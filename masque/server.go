@@ -274,11 +274,12 @@ func (s *Server) Network() *net.IPNet { return s.pool.Network() }
 // serverDialer adapts ServerConfig to the registry.
 func parseServerOptions(opts map[string]string) (client.Server, error) {
 	cfg := ServerConfig{
+		ListenIP: opts[OptServerListen],
+		Pool:     opts[OptServerPool],
+		TUNName:  opts[OptServerTUN],
+		Logger:   vlog.SlogText(logDest()),
+
 		PostQuantumOnly: pqpolicy.Requested(opts),
-		ListenIP:        opts[OptServerListen],
-		Pool:            opts[OptServerPool],
-		TUNName:         opts[OptServerTUN],
-		Logger:          vlog.SlogText(logDest()),
 	}
 	if v := opts[OptServerPort]; v != "" {
 		p, err := strconv.Atoi(v)

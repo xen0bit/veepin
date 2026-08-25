@@ -1035,12 +1035,13 @@ func init() {
 // CA/cert/key from the paths given.
 func parseServerOptions(opts map[string]string) (client.Server, error) {
 	cfg := ServerConfig{
+		ListenIP: opts[OptServerListenIP],
+		Pool:     opts[OptServerPool],
+		Pool6:    opts[OptServerPool6],
+		TUNName:  opts[OptServerTUN],
+		Logger:   slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
+
 		PostQuantumOnly: pqpolicy.Requested(opts),
-		ListenIP:        opts[OptServerListenIP],
-		Pool:            opts[OptServerPool],
-		Pool6:           opts[OptServerPool6],
-		TUNName:         opts[OptServerTUN],
-		Logger:          slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
 	}
 	var err error
 	if cfg.CA, err = readFileOpt(opts[OptServerCA]); err != nil {

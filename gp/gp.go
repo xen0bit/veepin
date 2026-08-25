@@ -259,14 +259,15 @@ func (d dialer) Dial(ctx context.Context) (client.Session, client.Result, error)
 // parseOptions turns registry options into a Config.
 func parseOptions(opts map[string]string) (client.Dialer, error) {
 	cfg := Config{
+		Server:   opts[OptServer],
+		Username: opts[OptUser],
+		Password: opts[OptPassword],
+		Insecure: opts[OptInsecure] == "true",
+		NoESP:    opts[OptNoESP] == "true",
+		TUNName:  opts[OptTUN],
+		Logger:   slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
+
 		PostQuantumOnly: pqpolicy.Requested(opts),
-		Server:          opts[OptServer],
-		Username:        opts[OptUser],
-		Password:        opts[OptPassword],
-		Insecure:        opts[OptInsecure] == "true",
-		NoESP:           opts[OptNoESP] == "true",
-		TUNName:         opts[OptTUN],
-		Logger:          slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
 	}
 	if cfg.Server == "" {
 		return nil, fmt.Errorf("gp: server is required")

@@ -260,13 +260,14 @@ func (s *Server) Network() *net.IPNet { return s.pool.Network() }
 
 func parseServerOptions(opts map[string]string) (client.Server, error) {
 	cfg := ServerConfig{
+		ListenIP: opts[OptServerListen],
+		Pool:     opts[OptServerPool],
+		DNS:      parseIPList(opts[OptServerDNS]),
+		TUNName:  opts[OptServerTUN],
+		NoDTLS:   opts[OptServerNoDTLS] == "true",
+		Logger:   slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
+
 		PostQuantumOnly: pqpolicy.Requested(opts),
-		ListenIP:        opts[OptServerListen],
-		Pool:            opts[OptServerPool],
-		DNS:             parseIPList(opts[OptServerDNS]),
-		TUNName:         opts[OptServerTUN],
-		NoDTLS:          opts[OptServerNoDTLS] == "true",
-		Logger:          slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
 	}
 	if path := opts[OptServerCert]; path != "" {
 		pem, err := os.ReadFile(path)
