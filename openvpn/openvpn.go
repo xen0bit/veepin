@@ -61,9 +61,15 @@ const (
 	handshakeTimeout = 30 * time.Second
 	// controlTimeout is the control-channel retransmit interval (--tls-timeout).
 	controlTimeout = 2 * time.Second
-	// keepaliveInterval is how often the client sends a data-channel ping to hold
+	// keepaliveInterval is how often either role sends a data-channel ping to hold
 	// the tunnel and NAT binding open.
 	keepaliveInterval = 10 * time.Second
+	// pingRestart is how long a peer may be silent before it is considered gone.
+	// It is the second half of the `ping 10,ping-restart 60` the server pushes:
+	// the client is told to restart after 60s of silence, and the server holds
+	// itself to the same bound in the other direction. Reaping sooner than the
+	// client restarts would tear down a peer that is still trying.
+	pingRestart = 60 * time.Second
 	// dataTunnelKey is the pump demux key for the client's single data tunnel;
 	// the value is arbitrary since there is only one.
 	dataTunnelKey = 1

@@ -51,12 +51,12 @@ type ServerConfig struct {
 	// A client's v6 address is *derived* from its v4 one -- the v4 address's
 	// offset within Pool, added to this prefix's base -- rather than drawn from
 	// a second pool. That is a deliberate departure from OpenVPN's own
-	// --ifconfig-ipv6-pool, and the reason is lifecycle rather than taste: this
-	// server has one allocator and no path that ever releases from it (a UDP
-	// client simply stops answering), so a second allocator would be a second
-	// thing to leak and a second thing to desynchronise. Derivation is 1:1 with
-	// the v4 assignment by construction, needs no release, and makes the
-	// mapping legible -- 10.8.0.2 becomes fd00:8::2.
+	// --ifconfig-ipv6-pool, and the reason is lifecycle rather than taste: a
+	// second allocator is a second thing to release, on a path (reapClient)
+	// that has exactly one chance to run and no peer to confirm it with.
+	// Derivation is 1:1 with the v4 assignment by construction, so releasing
+	// the v4 address releases both, and it makes the mapping legible --
+	// 10.8.0.2 becomes fd00:8::2.
 	Pool6 string
 	// DNS servers pushed to clients.
 	DNS []net.IP
@@ -641,24 +641,40 @@ func (s *Server) handshake(cl *serverClient) {
 
 	cl.tunnel = tun
 	cl.assignedIP = ip
+	cl.upAt = time.Now()
 	s.pump.AddTunnel(tun)
 
 	s.logger.Printf("openvpn: client %s up, assigned %s (peer-id %d)", cl.addr, ip, peerID)
-	go s.keepalive(cl)
+	go s.serveClient(cl)
 }
 
-// keepalive sends a data-channel ping to the client on an interval, so an idle
-// tunnel is not torn down by the ping-restart timer pushed to the client.
-func (s *Server) keepalive(cl *serverClient) {
+// serveClient owns one established client for as long as it is alive. It sends
+// the data-channel ping the pushed keepalive promises, and it is the only thing
+// that ever notices the client is gone. Both are on one ticker because they are
+// the same question asked in opposite directions.
+//
+// A UDP client never says goodbye. It stops answering, and if nothing is
+// listening for that silence its address, its tunnel and its map entry stay
+// behind for the life of the process -- which is what this server did until
+// this function did more than ping.
+func (s *Server) serveClient(cl *serverClient) {
 	tick := time.NewTicker(keepaliveInterval)
 	defer tick.Stop()
 	for {
 		select {
 		case <-s.closed:
+			// The server is going away and is closing the pump and the TUN
+			// behind us. Reaping here would release into an allocator nobody
+			// will read again, through a pump that is already shutting down.
 			return
 		case <-cl.ch.Closed():
+			s.reapClient(cl, "control channel closed")
 			return
 		case <-tick.C:
+			if silent, gone := s.silentFor(cl); gone {
+				s.reapClient(cl, fmt.Sprintf("silent for %s", silent.Round(time.Second)))
+				return
+			}
 			pkt, err := cl.tunnel.cipher.Seal(data.Ping)
 			if err != nil {
 				return
@@ -668,6 +684,47 @@ func (s *Server) keepalive(cl *serverClient) {
 			}
 		}
 	}
+}
+
+// silentFor reports how long the client has been silent, and whether that is
+// past pingRestart.
+//
+// The clock is the pump's own per-tunnel LastSeen, which moves on any
+// authenticated inbound packet -- including a keepalive ping, which decapsulates
+// to nothing and is counted anyway for exactly this reason. So an idle tunnel
+// with a present client is never reaped, and the check costs the data path
+// nothing: it reads a counter the hot path was already writing.
+func (s *Server) silentFor(cl *serverClient) (time.Duration, bool) {
+	last := cl.upAt
+	if st, ok := s.pump.TunnelStats(cl.tunnel); ok && !st.LastSeen.IsZero() {
+		last = st.LastSeen
+	}
+	d := time.Since(last)
+	return d, d > pingRestart
+}
+
+// reapClient tears down an established client: the tail of handshake undone, in
+// reverse. It is idempotent -- the liveness tick and a closed control channel
+// can both reach it -- and it is the only path that releases an address.
+func (s *Server) reapClient(cl *serverClient, reason string) {
+	if !cl.reaped.CompareAndSwap(false, true) {
+		return
+	}
+	cl.ch.Close()
+	s.pump.RemoveTunnel(cl.tunnel)
+	s.pool.Release(cl.assignedIP)
+
+	s.mu.Lock()
+	// Only when the map still names THIS session. A client that reconnected
+	// from the same address before its old session was reaped owns the key now,
+	// and deleting it would strand the new session's control channel while
+	// leaving its tunnel in the pump -- a worse leak than the one being fixed.
+	if cur, ok := s.clients[cl.addr.String()]; ok && cur == cl {
+		delete(s.clients, cl.addr.String())
+	}
+	s.mu.Unlock()
+
+	s.logger.Printf("openvpn: client %s down, released %s: %s", cl.addr, cl.assignedIP, reason)
 }
 
 // dropClient tears down a half-open client after a handshake failure.
@@ -740,6 +797,15 @@ type serverClient struct {
 
 	tunnel     *serverTunnel
 	assignedIP net.IP
+	// upAt is when the client was established, and it is the liveness clock
+	// until the first inbound data packet moves the pump's own LastSeen. A
+	// client that completes the handshake and never speaks again is still on a
+	// clock; without this it would be silent since the zero time and reaped on
+	// the first tick.
+	upAt time.Time
+	// reaped guards the teardown, which the liveness tick and a closed control
+	// channel can both reach.
+	reaped atomic.Bool
 }
 
 // serverTunnel is the data-path view of one client, implementing dataplane.Tunnel:
