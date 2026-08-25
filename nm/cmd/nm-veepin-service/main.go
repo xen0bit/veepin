@@ -53,7 +53,7 @@ func main() {
 	flag.Parse()
 	_ = persist
 
-	logger := vlog.Text(os.Stderr)
+	logger := vlog.Text(os.Stderr).Prefixed("nm-veepin: ")
 
 	connect := dbus.ConnectSystemBus
 	if *session {

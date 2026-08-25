@@ -100,3 +100,16 @@ func TestAttributesAreNotDroppedSilently(t *testing.T) {
 		}
 	}
 }
+
+// TestAPrefixSurvivesEveryLevel covers the NetworkManager service, whose lines
+// are "ready" and "exiting" and whose only identity in the journal is the
+// prefix — the rest of this tree names its package in the message instead.
+func TestAPrefixSurvivesEveryLevel(t *testing.T) {
+	var buf bytes.Buffer
+	l := New(slog.New(NewPlainHandler(&buf, slog.LevelDebug))).Prefixed("nm-veepin: ")
+	l.Printf("ready")
+	l.Warnf("bad settings: %v", "no gateway")
+	if got := buf.String(); got != "nm-veepin: ready\nnm-veepin: bad settings: no gateway\n" {
+		t.Errorf("got %q, want both lines prefixed", got)
+	}
+}

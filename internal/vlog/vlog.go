@@ -43,6 +43,11 @@ import (
 // chooses. The zero value is not usable; a nil *Logger is, and discards.
 type Logger struct {
 	s *slog.Logger
+	// prefix goes in front of every message. Most of this tree needs none --
+	// its messages start with their own package name by convention -- but the
+	// NetworkManager service's lines are "ready" and "exiting", and their whole
+	// identity in the journal is the prefix.
+	prefix string
 }
 
 // New wraps an *slog.Logger. A nil argument yields a discarding Logger, which is
@@ -52,6 +57,16 @@ func New(s *slog.Logger) *Logger {
 		return Discard()
 	}
 	return &Logger{s: s}
+}
+
+// Prefixed returns a copy of l that writes prefix in front of every message.
+func (l *Logger) Prefixed(prefix string) *Logger {
+	if l == nil {
+		return nil
+	}
+	out := *l
+	out.prefix = prefix
+	return &out
 }
 
 // From is New, named for the direction it is used in: a facade takes an
@@ -114,7 +129,7 @@ func (l *Logger) logf(level slog.Level, format string, args ...any) {
 	if !l.s.Enabled(ctx, level) {
 		return
 	}
-	l.s.Log(ctx, level, fmt.Sprintf(format, args...))
+	l.s.Log(ctx, level, l.prefix+fmt.Sprintf(format, args...))
 }
 
 // discardHandler is what Slog returns for a nil Logger, so a caller reaching

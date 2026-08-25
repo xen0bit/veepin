@@ -107,7 +107,7 @@ const maxSecretsRounds = 3
 // hand-run process from claiming a protocol's name by accident.
 func New(conn *dbus.Conn, busName string, logger *vlog.Logger) *Plugin {
 	if logger == nil {
-		logger = vlog.Text(os.Stderr)
+		logger = vlog.Text(os.Stderr).Prefixed("nm-veepin: ")
 	}
 	if busName == "" {
 		busName = BusNamePrefix

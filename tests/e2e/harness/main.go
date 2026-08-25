@@ -135,7 +135,7 @@ func run() error {
 	// The supervisor's shared log ring, pre-filled with the seed's lines so the
 	// panel's log tail has something to show before the first mutation.
 	ring := mgmt.NewLogRing()
-	logger := vlog.Text(os.Stdout)
+	logger := vlog.Text(os.Stdout).Prefixed("harness: ")
 	for _, line := range s.Logs {
 		_, _ = ring.Write([]byte(line + "\n"))
 	}
