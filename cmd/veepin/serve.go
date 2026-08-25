@@ -46,7 +46,7 @@ func runServe(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: veepin serve <protocol> [flags]\nprotocols: %s\n"+
 			"       veepin serve -config <dir> [-listen <addr>]",
-			strings.Join(client.ServerProtocols(), ", "))
+			strings.Join(client.AllServerProtocols(), ", "))
 	}
 	protocol, args := args[0], args[1:]
 
@@ -166,7 +166,7 @@ func serveFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, er
 	specs, ok := client.ServerOptsFor(protocol)
 	if !ok {
 		return nil, fmt.Errorf("unknown server protocol %q (available: %s)",
-			protocol, strings.Join(client.ServerProtocols(), ", "))
+			protocol, strings.Join(client.AllServerProtocols(), ", "))
 	}
 	return bindSpecFlags(fs, specs), nil
 }

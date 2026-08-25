@@ -1,0 +1,12 @@
+PermitTunnel yes
+PermitRootLogin prohibit-password
+PasswordAuthentication no
+AuthorizedKeysFile /keys/authorized_keys
+StrictModes no
+
+# The peer requires the post-quantum key exchange, so this cell cannot pass on a
+# classical fallback. That is stronger than asserting a log line: there is no
+# path through the handshake that succeeds without it, so a veepin regression
+# that stopped pinning the kex fails here rather than passing quietly on
+# curve25519-sha256 -- which is precisely what the bookworm cell does today.
+KexAlgorithms mlkem768x25519-sha256

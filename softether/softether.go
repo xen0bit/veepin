@@ -22,6 +22,7 @@ import (
 
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/veepin/internal/pqpolicy"
 	"github.com/xen0bit/veepin/internal/softether"
 	"github.com/xen0bit/veepin/internal/vlog"
 )
@@ -75,6 +76,13 @@ type Config struct {
 	// encapsulation. 0 is off, which is the default. See
 	// doc/traffic-shaping.md.
 	Shape int
+
+	// PostQuantumOnly requires a post-quantum key exchange and ML-DSA
+	// authentication, refusing anything less rather than negotiating down. It is
+	// what the pq-softether registry name sets; see internal/pqpolicy for the
+	// contract and doc/pq-variants-plan.md for why it is a name rather than a
+	// flag.
+	PostQuantumOnly bool
 }
 
 // Session wraps a client connection.
@@ -167,6 +175,9 @@ func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
 	// use a self-signed certificate, so InsecureSkipVerify has to be reachable —
 	// but it is opt-in and named, not the silent default it was.
 	tlsCfg := &tls.Config{ServerName: cfg.Server, InsecureSkipVerify: cfg.InsecureSkipVerify} //nolint:gosec // gated on an explicit opt-in
+	if cfg.PostQuantumOnly {
+		pqpolicy.HardenTLS(tlsCfg)
+	}
 	addr := net.JoinHostPort(cfg.Server, strconv.Itoa(port))
 
 	cs, err := softether.Connect(addr, tlsCfg, cfg.User, cfg.Password, hub)
@@ -240,6 +251,7 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 	cfg.Hub = opts[OptHub]
 	cfg.TUNName = opts[OptTUN]
 	cfg.InsecureSkipVerify = opts[OptInsecure] == "true"
+	cfg.PostQuantumOnly = pqpolicy.Requested(opts)
 	if v := opts[OptShape]; v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 0 {
@@ -317,6 +329,13 @@ type ServerConfig struct {
 	// MTU. 0 is off, which is the default.
 	Shape  int
 	Logger *slog.Logger
+
+	// PostQuantumOnly requires a post-quantum key exchange and ML-DSA
+	// authentication, refusing anything less rather than negotiating down. It is
+	// what the pq-softether registry name sets; see internal/pqpolicy for the
+	// contract and doc/pq-variants-plan.md for why it is a name rather than a
+	// flag.
+	PostQuantumOnly bool
 }
 
 // NewServer creates a SoftEther VPN server.
@@ -335,6 +354,13 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("softether: load cert: %w", err)
 	}
 	tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}}
+	if cfg.PostQuantumOnly {
+		// Before the TAP is opened and before anything binds.
+		if err := pqpolicy.CheckCredential(cert); err != nil {
+			return nil, err
+		}
+		pqpolicy.HardenTLS(tlsCfg)
+	}
 
 	tap, err := dataplane.OpenTAP(cfg.TUNName)
 	if err != nil {
@@ -443,6 +469,8 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 		Key:     opts[OptServerKey],
 		Pool:    opts[OptServerPool],
 		TUNName: opts[OptServerTUN],
+
+		PostQuantumOnly: pqpolicy.Requested(opts),
 	}
 	if v := opts[OptServerShape]; v != "" {
 		n, err := strconv.Atoi(v)

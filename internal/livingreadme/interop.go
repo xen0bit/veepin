@@ -90,10 +90,12 @@ var interopMatrix = []interopRow{
 			"TestInteropStrongswanClientVeepinServerIPv6",
 			"TestInteropStrongswanClientVeepinServerShaped",
 			"TestInteropStrongswanClientVeepinServerPQ",
+			"TestInteropPQIKEv2ServerAcceptsAPostQuantumPeer",
+			"TestInteropPQIKEv2ServerRefusesAClassicalPeer",
 			"TestInteropStrongswanClientVeepinServerIPTFS",
 			"TestInteropLibreswanClientVeepinServer",
 			"TestInteropLibreswanClientVeepinServerTCP",
-		}, Label: "strongSwan (+ EAP-MSCHAPv2, pubkey RSA, RFC 7383 frag both ways, dual-stack, v6 underlay, TFC-padded, ML-KEM-768, IP-TFS) + libreswan (incl. RFC 8229/9329 over TCP)"},
+		}, Label: "strongSwan (+ EAP-MSCHAPv2, pubkey RSA, RFC 7383 frag both ways, dual-stack, v6 underlay, TFC-padded, ML-KEM-768 incl. pq-ikev2 required + a classical peer refused, IP-TFS) + libreswan (incl. RFC 8229/9329 over TCP)"},
 		Self: interopCell{Tests: []string{
 			"TestInteropSelf",
 			"TestInteropIKEv2ChildRekey",
@@ -142,11 +144,17 @@ var interopMatrix = []interopRow{
 			"TestInteropSSTPClientVeepinServer",
 			"TestInteropSSTPClientVeepinServerShaped",
 		}, Label: "`sstpc`/pppd (+ PPP-padded)"},
-		Self: interopCell{Tests: []string{"TestInteropSSTPSelf"}},
+		Self: interopCell{Tests: []string{
+			"TestInteropSSTPSelf",
+			"TestInteropPQSSTPSelf",
+		}, Label: "(+ pq-sstp, ML-DSA-65 — no third-party peer exists; see doc/security.md)"},
 	},
 	{
 		Protocol: "SSH",
-		Client:   interopCell{Tests: []string{"TestInteropVeepinClientSSHServer"}, Label: "`sshd` (PermitTunnel)"},
+		Client: interopCell{Tests: []string{
+			"TestInteropVeepinClientSSHServer",
+			"TestInteropPQSSHClientSSHD",
+		}, Label: "`sshd` (PermitTunnel; + OpenSSH 10.0 requiring mlkem768x25519-sha256 for pq-ssh)"},
 		Server: interopCell{Tests: []string{"TestInteropSSHClientVeepinServer",
 			"TestInteropSSHClientVeepinServerShaped"}, Label: "`ssh -w`"},
 		Self: interopCell{Tests: []string{"TestInteropSSHSelf"}},

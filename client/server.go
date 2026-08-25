@@ -180,11 +180,18 @@ func RegisterServerOpts(protocol string, opts []OptSpec) {
 // or nil/false when the facade did not declare any. Callers (the management API,
 // the panel) use the second result to pick between a typed form and a free-form
 // fallback; both paths are first-class.
+// A variant declares no table of its own and falls back to the protocol it
+// varies, which is what makes `veepin serve pq-sstp` generate byte-for-byte the
+// flag set of `veepin serve sstp` with no second table to keep in sync.
 func ServerOptsFor(protocol string) ([]OptSpec, bool) {
 	serverMu.RLock()
-	defer serverMu.RUnlock()
 	opts, ok := serverOpts[protocol]
-	return opts, ok
+	base, isVariant := serverVariantBase[protocol]
+	serverMu.RUnlock()
+	if ok || !isVariant {
+		return opts, ok
+	}
+	return ServerOptsFor(base)
 }
 
 // PeerInfo is one peer a server protocol can describe. Fields that a protocol
@@ -288,12 +295,10 @@ func ServerProtocols() []string {
 // has its TUN open but is not yet listening: the caller configures host
 // networking, then calls ListenAndServe.
 func NewServer(protocol string, opts map[string]string) (Server, error) {
-	serverMu.RLock()
-	parse, ok := serverParse[protocol]
-	serverMu.RUnlock()
+	parse, ok := lookupServerParse(protocol)
 	if !ok {
 		return nil, fmt.Errorf("client: %w %q (server protocols: %v)",
-			ErrUnknownProtocol, protocol, ServerProtocols())
+			ErrUnknownProtocol, protocol, AllServerProtocols())
 	}
 	srv, err := parse(opts)
 	if err != nil {

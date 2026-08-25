@@ -35,11 +35,18 @@ func RegisterClientOpts(protocol string, opts []OptSpec) {
 
 // ClientOptsFor returns the claimed metadata for a registered client protocol,
 // or nil/false when the facade did not declare any.
+// Like ServerOptsFor, a variant falls back to the protocol it varies.
 func ClientOptsFor(protocol string) ([]OptSpec, bool) {
 	clientOptsMu.RLock()
-	defer clientOptsMu.RUnlock()
 	opts, ok := clientOpts[protocol]
-	return opts, ok
+	clientOptsMu.RUnlock()
+	if ok {
+		return opts, true
+	}
+	if base := BaseOf(protocol); base != "" {
+		return ClientOptsFor(base)
+	}
+	return nil, false
 }
 
 // Redacted is the placeholder a redacted option value carries. It is part of
@@ -83,9 +90,7 @@ func Redact(specs []OptSpec, opts map[string]string) map[string]string {
 // TestRequiredClientOptsAreTheOnesTheParseRejects can hold each facade's
 // Required flags against the parse that enforces them.
 func ValidateOptions(protocol string, opts map[string]string) error {
-	mu.RLock()
-	parse, ok := protocols[protocol]
-	mu.RUnlock()
+	parse, ok := lookupParse(protocol)
 	if !ok {
 		return fmt.Errorf("client: %w %q", ErrUnknownProtocol, protocol)
 	}

@@ -524,13 +524,13 @@ type ProtocolDesc struct {
 }
 
 func (s *Server) handleProtocols(w http.ResponseWriter, r *http.Request) {
-	names := client.ServerProtocols()
+	names := client.AllServerProtocols()
 	out := ProtocolsResp{Protocols: make([]ProtocolDesc, 0, len(names))}
 	for _, name := range names {
 		opts, _ := client.ServerOptsFor(name)
 		out.Protocols = append(out.Protocols, ProtocolDesc{Name: name, Options: opts})
 	}
-	clientNames := client.Protocols()
+	clientNames := client.AllProtocols()
 	out.ClientProtocols = make([]ProtocolDesc, 0, len(clientNames))
 	for _, name := range clientNames {
 		opts, _ := client.ClientOptsFor(name)
@@ -1043,9 +1043,17 @@ func generateListenerKeys(configDir string, cfg *supervisor.ListenerConfig) (map
 				spec.Generate, strings.Join(got, ", "), strings.Join(want, ", "))
 		}
 
-		kv, err := keygen.Generate(cfg.Name, configDir, spec.Generate, spec.Key, cfg.Hostnames)
+		// A pq- listener needs an ML-DSA credential, not an ECDSA one: its own
+		// contract refuses a classical certificate at construction, so
+		// generating one would produce a listener that cannot start. The
+		// OptSpec tables are shared with the base protocol (a variant declares
+		// none of its own), so the generator is selected here from the
+		// listener's protocol rather than from the spec.
+		genType := keygen.PostQuantumType(spec.Generate, client.IsVariant(cfg.Protocol))
+
+		kv, err := keygen.Generate(cfg.Name, configDir, genType, spec.Key, cfg.Hostnames)
 		if err != nil {
-			return nil, fmt.Errorf("mgmt: keygen %q for %q: %w", spec.Generate, cfg.Name, err)
+			return nil, fmt.Errorf("mgmt: keygen %q for %q: %w", genType, cfg.Name, err)
 		}
 		for k, v := range kv {
 			if cfg.Options[k] == "" {

@@ -161,5 +161,5 @@ func ListenerPath(dir, name string) string {
 // registry check is applied at apply time, where a registration side-effect of
 // an imported facade is the only thing that could know.
 func KnownProtocol(protocol string) bool {
-	return slices.Contains(client.ServerProtocols(), protocol)
+	return slices.Contains(client.AllServerProtocols(), protocol)
 }

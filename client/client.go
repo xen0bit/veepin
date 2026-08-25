@@ -221,8 +221,10 @@ func Register(protocol string, parse ParseFunc) {
 	protocols[protocol] = parse
 }
 
-// Protocols lists the registered protocol names, sorted. Useful for CLI help
-// and error messages.
+// Protocols lists the registered protocol names, sorted. Variants are NOT
+// included: this is the list "how many protocols does veepin speak" is counted
+// from, and pq-ikev2 is ikev2 with a floor under it rather than a seventeenth
+// protocol. Use AllProtocols for a usage message or a validity check.
 func Protocols() []string {
 	mu.RLock()
 	defer mu.RUnlock()
@@ -240,12 +242,10 @@ func Protocols() []string {
 // The context bounds setup only; once Dial returns, the tunnel's lifetime is
 // the Session's.
 func Dial(ctx context.Context, protocol string, opts map[string]string) (Session, Result, error) {
-	mu.RLock()
-	parse, ok := protocols[protocol]
-	mu.RUnlock()
+	parse, ok := lookupParse(protocol)
 	if !ok {
 		return nil, Result{}, fmt.Errorf("client: %w %q (registered: %v)",
-			ErrUnknownProtocol, protocol, Protocols())
+			ErrUnknownProtocol, protocol, AllProtocols())
 	}
 	dialer, err := parse(opts)
 	if err != nil {

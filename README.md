@@ -90,9 +90,56 @@ Ivanti, SSTP, SoftEther and the OpenVPN client whenever the peer speaks TLS 1.3.
 **Authentication can be post-quantum too**, as of Go 1.27: point a server at an
 ML-DSA (FIPS 204) certificate and key and both halves of the handshake are
 post-quantum — key exchange and signature — with no dependency outside the
-standard library. It is opt-in because an ML-DSA certificate is only useful
-against a peer that accepts one. See [`doc/security.md`](doc/security.md) for
-what each half does and does not protect.
+standard library. See [`doc/security.md`](doc/security.md) for what each half
+does and does not protect.
+
+### Post-quantum by name: the `pq-` variants
+
+Everything above is a *default*, and a default can be negotiated away: a peer
+that offers only classical mechanisms still gets a working tunnel, just a weaker
+one. Ten protocols therefore carry a **second registry name** under which
+post-quantum cryptography is mandatory and anything less is **refused**:
+
+```sh
+veepin serve pq-ikev2  -psk … -identity vpn.example   # refuses a classical initiator
+veepin connect pq-sstp -server vpn.example -user alice
+```
+
+| Variant | Forces | Also forces |
+|---|---|---|
+| `pq-ikev2` | ML-KEM-768 via ADDKE1 (RFC 9370), ML-DSA in the RFC 7427 AUTH payload | refuses EAP-MSCHAPv2 |
+| `pq-openvpn`, `pq-masque` | TLS 1.3, ML-KEM key exchange, ML-DSA certificates **both ends** (mutual TLS) | |
+| `pq-sstp`, `pq-gp`, `pq-pulse`, `pq-softether` | TLS 1.3, ML-KEM key exchange, ML-DSA server certificate | |
+| `pq-anyconnect`, `pq-fortinet` | the same | `-no-dtls`, because the DTLS 1.2 data channel has no post-quantum path |
+| `pq-ssh` | `mlkem768x25519-sha256` | **key exchange only** — see below |
+
+They are names rather than flags for one reason: a flag is a modifier an
+operator can forget, and forgetting it yields the weaker behaviour silently.
+A name cannot be forgotten. It also earns each variant a row in the
+[interop matrix](#interoperability-matrix), which a flag would not get.
+
+Three things worth stating plainly:
+
+- **A `pq-` server refuses to start without an ML-DSA certificate**, before the
+  TUN is opened and before anything binds — not at the first client's handshake.
+  A listener created under a `pq-` name in the management panel generates an
+  ML-DSA-65 chain automatically.
+- **PSK authentication still works under `pq-ikev2`.** A pre-shared key is
+  symmetric and is not broken by a quantum adversary; that is the entire premise
+  of RFC 8784. What `pq-ikev2` refuses is classical *public-key* authentication.
+- **`pq-ssh` carries only half the contract**, because SSH has no post-quantum
+  signature algorithm in any specification or implementation —
+  [OpenSSH says so itself](https://www.openssh.org/pq.html). The exemption is
+  recorded by name in `internal/pqpolicy` and a test holds that list at one entry.
+
+Six protocols have **no** `pq-` variant and cannot have one. WireGuard and
+AmneziaWG fix X25519 in Noise_IKpsk2 and negotiate nothing; Nebula is plain
+Noise_IX; Cisco IPsec and L2TP/IPsec are IKEv1, which has no additional
+key-exchange mechanism; L2TPv3 has no cryptography at all. Those absences are
+structural, not a backlog. The variants are also **not** counted among the
+sixteen production protocols — `pq-ikev2` is IKEv2 with a floor under it, not a
+seventeenth protocol. The design and its evidence are in
+[`doc/pq-variants-plan.md`](doc/pq-variants-plan.md).
 
 AES from the standard library; ChaCha20-Poly1305 from `x/crypto` (the same AEAD
 WireGuard already pulls in). ChaCha20-Poly1305 for IKEv2/ESP shares AES-GCM-16's
@@ -352,6 +399,7 @@ formats, and what it interoperates with — has its own page:
 | SoftEther VPN | [doc/usage/softether.md](doc/usage/softether.md) |
 | AmneziaWG | [doc/usage/amneziawg.md](doc/usage/amneziawg.md) |
 | L2TPv3 Ethernet pseudowire | [doc/usage/l2tpv3.md](doc/usage/l2tpv3.md) |
+| The `pq-` variants (all ten) | [doc/usage/pq-variants.md](doc/usage/pq-variants.md) |
 
 ### More than one user
 

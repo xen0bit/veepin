@@ -1,0 +1,45 @@
+# veepin pq-sstp client <-> veepin pq-sstp server.
+#
+# Self-test, and honestly labelled as one. No third-party SSTP client can meet
+# this contract: sstp-client links OpenSSL 3.0, which has neither ML-KEM nor
+# ML-DSA, so there is nothing to test against and no prospect of one soon. See
+# the evidence table in doc/security.md -- this row is veepin-to-veepin, which
+# proves the two halves agree with each other and not that they are right.
+#
+# What it does prove, and what no unit test covers, is the whole facade path in
+# one piece: an ML-DSA-65 credential loaded from PEM through the real
+# parseServerOptions, pqpolicy.CheckCredential accepting it at construction,
+# HardenTLS pinning the curves on both ends, and PPP/IPCP carrying real packets
+# over the result. The certificate is minted per run by the test.
+name: veepin-interop-pq-sstp-self
+
+services:
+  veepin-pq-sstp-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      USER: "sstpuser"
+      PASS: "sstppass"
+      PROTOCOL: "pq-sstp"
+    volumes:
+      - ./sstp/pki-pq:/pki:ro
+      - ./veepin/pq-sstp-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-pq-sstp-client:
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-pq-sstp-server]
+    environment:
+      SERVER: "veepin-pq-sstp-server"
+      USER: "sstpuser"
+      PASS: "sstppass"
+      PROTOCOL: "pq-sstp"
+    volumes:
+      - ./veepin/pq-sstp-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

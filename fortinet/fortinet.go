@@ -26,6 +26,7 @@ import (
 	"github.com/xen0bit/veepin/dataplane"
 	ifortinet "github.com/xen0bit/veepin/internal/fortinet"
 	"github.com/xen0bit/veepin/internal/otp"
+	"github.com/xen0bit/veepin/internal/pqpolicy"
 	"github.com/xen0bit/veepin/internal/vlog"
 )
 
@@ -77,6 +78,12 @@ type Config struct {
 	TOTPSecret string
 	TUNName    string
 	Logger     *slog.Logger
+
+	// PostQuantumOnly requires a post-quantum key exchange and ML-DSA
+	// authentication, refusing anything less rather than negotiating down. It is
+	// what the pq-fortinet registry name sets; see internal/pqpolicy for the contract
+	// and doc/pq-variants-plan.md for why it is a name rather than a flag.
+	PostQuantumOnly bool
 }
 
 // Session is a running Fortinet client.
@@ -102,6 +109,9 @@ func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
 		MinVersion:         tls.VersionTLS12,
 		RootCAs:            cfg.RootCAs,
 		InsecureSkipVerify: cfg.Insecure,
+	}
+	if cfg.PostQuantumOnly {
+		pqpolicy.HardenTLS(tlsConfig)
 	}
 	if cfg.Insecure {
 		logger.Printf("fortinet: WARNING: server certificate verification disabled (insecure)")
@@ -297,6 +307,8 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 		TOTPSecret: opts[OptTOTP],
 		TUNName:    opts[OptTUN],
 		Logger:     slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
+
+		PostQuantumOnly: pqpolicy.Requested(opts),
 	}
 	if cfg.Server == "" {
 		return nil, fmt.Errorf("fortinet: server is required")

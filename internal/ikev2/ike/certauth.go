@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto"
 	"crypto/ecdsa"
+	"crypto/mldsa"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha1"
@@ -53,7 +54,7 @@ func newCertCredential(leaf *x509.Certificate, chain [][]byte, key crypto.Privat
 		return nil, fmt.Errorf("ike: certificate key does not implement crypto.Signer")
 	}
 	switch signer.Public().(type) {
-	case *rsa.PublicKey, *ecdsa.PublicKey:
+	case *rsa.PublicKey, *ecdsa.PublicKey, *mldsa.PublicKey:
 	default:
 		return nil, fmt.Errorf("ike: unsupported certificate key type %T", signer.Public())
 	}
@@ -79,7 +80,13 @@ func credentialFromTLS(c *tls.Certificate) (*certCredential, error) {
 
 // sigHashList is the set of hashes veepin advertises in (and accepts from) a
 // SIGNATURE_HASH_ALGORITHMS notify, strongest first.
-var sigHashList = []uint16{payload.HashSHA512, payload.HashSHA384, payload.HashSHA256}
+//
+// HashIdentity is first because it is the only one ML-DSA can use: ML-DSA
+// hashes the message itself, so "no external hash" is not a weaker option in
+// this list but a different kind of entry. Advertising it is what lets a peer
+// select ML-DSA at all (draft-ietf-ipsecme-ikev2-pqc-auth), and it costs a
+// classical peer nothing -- it simply picks a SHA-2 entry as before.
+var sigHashList = []uint16{payload.HashIdentity, payload.HashSHA512, payload.HashSHA384, payload.HashSHA256}
 
 // addSigHashNotify appends a SIGNATURE_HASH_ALGORITHMS notify (RFC 7427 §4) to
 // an IKE_SA_INIT builder, advertising the hashes we will use for a method-14
@@ -125,6 +132,20 @@ func signAuth(cred *certCredential, authOctets []byte, peerHashes []uint16) (pay
 	return signAuthRSALegacy(cred, authOctets)
 }
 
+// requirePostQuantumKey rejects a peer public key that is not ML-DSA.
+//
+// It is separate from verifyAuth because the check is about WHICH key was
+// presented rather than whether the signature is good: a perfectly valid ECDSA
+// signature is still a classical authentication, and under pq-ikev2 that is the
+// thing being refused.
+func requirePostQuantumKey(pub crypto.PublicKey) error {
+	if _, ok := pub.(*mldsa.PublicKey); !ok {
+		return fmt.Errorf("ike: peer authenticated with a %T key; this server requires "+
+			"ML-DSA (FIPS 204)", pub)
+	}
+	return nil
+}
+
 // verifyAuth checks a peer's AUTH payload (method 14 or legacy RSA) against its
 // certificate's public key.
 func verifyAuth(pub crypto.PublicKey, method payload.AuthMethod, authOctets, data []byte) error {
@@ -143,10 +164,29 @@ func verifyAuth(pub crypto.PublicKey, method payload.AuthMethod, authOctets, dat
 // whether it is an RSA or ECDSA scheme.
 type sigAlg struct {
 	hashID uint16
+	// hash is the external digest applied before signing, or crypto.Hash(0)
+	// for a scheme that hashes the message itself (ML-DSA).
 	hash   crypto.Hash
 	algID  []byte // DER AlgorithmIdentifier
-	isRSA  bool
+	family sigFamily
+	// params, for ML-DSA, is the parameter set the algID names. Verification
+	// needs it to reconstruct a public key from raw bytes.
+	params mldsa.Parameters
 }
+
+// sigFamily is which asymmetric family a scheme belongs to.
+//
+// This was an isRSA bool while there were two families. Three do not fit in a
+// bool, and the failure mode of extending it rather than replacing it is that
+// `isRSA == false` comes to mean "ECDSA or ML-DSA, look elsewhere" -- code that
+// compiles, passes, and is wrong to read.
+type sigFamily uint8
+
+const (
+	famRSA sigFamily = iota
+	famECDSA
+	famMLDSA
+)
 
 // DER AlgorithmIdentifier objects (RFC 5754 / RFC 5758). Each is a full
 // SEQUENCE as it appears in an X.509 signatureAlgorithm field, which is exactly
@@ -158,16 +198,33 @@ var (
 	algECDSA256  = []byte{0x30, 0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02}
 	algECDSA384  = []byte{0x30, 0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x03}
 	algECDSA512  = []byte{0x30, 0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x04}
+
+	// ML-DSA (FIPS 204), for draft-ietf-ipsecme-ikev2-pqc-auth. The OIDs are
+	// 2.16.840.1.101.3.4.3.{17,18,19} and these byte strings were extracted from
+	// certificates crypto/x509 actually minted, not transcribed from the draft.
+	//
+	// Note the length: THIRTEEN octets, with the parameters field ABSENT. The
+	// RSA entries above are fifteen because they carry an explicit NULL. Copying
+	// the RSA shape and appending 0x05 0x00 produces an identifier no peer
+	// recognises, and lookupSigAlg compares with bytes.Equal, so the failure is
+	// a clean "unrecognized signature AlgorithmIdentifier" rather than a silent
+	// mismatch. TestMLDSAAlgorithmIdentifiersHaveAbsentParameters pins it.
+	algMLDSA44 = []byte{0x30, 0x0b, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x11}
+	algMLDSA65 = []byte{0x30, 0x0b, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x12}
+	algMLDSA87 = []byte{0x30, 0x0b, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x13}
 )
 
 // knownSigAlgs is the set of RFC 7427 schemes veepin signs and verifies with.
 var knownSigAlgs = []sigAlg{
-	{payload.HashSHA256, crypto.SHA256, algRSASHA256, true},
-	{payload.HashSHA384, crypto.SHA384, algRSASHA384, true},
-	{payload.HashSHA512, crypto.SHA512, algRSASHA512, true},
-	{payload.HashSHA256, crypto.SHA256, algECDSA256, false},
-	{payload.HashSHA384, crypto.SHA384, algECDSA384, false},
-	{payload.HashSHA512, crypto.SHA512, algECDSA512, false},
+	{payload.HashSHA256, crypto.SHA256, algRSASHA256, famRSA, mldsa.Parameters{}},
+	{payload.HashSHA384, crypto.SHA384, algRSASHA384, famRSA, mldsa.Parameters{}},
+	{payload.HashSHA512, crypto.SHA512, algRSASHA512, famRSA, mldsa.Parameters{}},
+	{payload.HashSHA256, crypto.SHA256, algECDSA256, famECDSA, mldsa.Parameters{}},
+	{payload.HashSHA384, crypto.SHA384, algECDSA384, famECDSA, mldsa.Parameters{}},
+	{payload.HashSHA512, crypto.SHA512, algECDSA512, famECDSA, mldsa.Parameters{}},
+	{payload.HashIdentity, 0, algMLDSA44, famMLDSA, mldsa.MLDSA44()},
+	{payload.HashIdentity, 0, algMLDSA65, famMLDSA, mldsa.MLDSA65()},
+	{payload.HashIdentity, 0, algMLDSA87, famMLDSA, mldsa.MLDSA87()},
 }
 
 // lookupSigAlg matches a DER AlgorithmIdentifier from a received AUTH payload to
@@ -186,11 +243,28 @@ func lookupSigAlg(algID []byte) (sigAlg, bool) {
 // SIGNATURE_HASH_ALGORITHMS notify) that also suits the key. For ECDSA the hash
 // is matched to the curve; for RSA SHA-256 is the floor.
 func chooseSigAlg(pub crypto.PublicKey, peerHashes []uint16) (sigAlg, error) {
-	rsaKey := false
+	var fam sigFamily
 	pref := []uint16{payload.HashSHA256, payload.HashSHA384, payload.HashSHA512}
 	switch k := pub.(type) {
 	case *rsa.PublicKey:
-		rsaKey = true
+		fam = famRSA
+	case *mldsa.PublicKey:
+		// ML-DSA hashes the message internally, so the only acceptable "hash"
+		// is the Identity hash -- and the peer must have said it accepts it. A
+		// peer that advertised only SHA-2 gets a clean failure here rather than
+		// a signature it will reject. This arm returns directly: there is one
+		// scheme per parameter set, so there is nothing for the loop below to
+		// choose between.
+		for _, a := range knownSigAlgs {
+			if a.family == famMLDSA && a.params == k.Parameters() {
+				if len(peerHashes) > 0 && !slices.Contains(peerHashes, payload.HashIdentity) {
+					return sigAlg{}, fmt.Errorf(
+						"ike: peer does not accept the Identity hash, which ML-DSA requires (RFC 9593)")
+				}
+				return a, nil
+			}
+		}
+		return sigAlg{}, fmt.Errorf("ike: unsupported ML-DSA parameter set %v", k.Parameters())
 	case *ecdsa.PublicKey:
 		// Match the hash to the curve (FIPS 186-4): P-256→SHA-256, etc. Fall
 		// back through weaker hashes if the peer will not take the ideal one.
@@ -202,6 +276,7 @@ func chooseSigAlg(pub crypto.PublicKey, peerHashes []uint16) (sigAlg, error) {
 		default:
 			pref = []uint16{payload.HashSHA256, payload.HashSHA384, payload.HashSHA512}
 		}
+		fam = famECDSA
 	default:
 		return sigAlg{}, fmt.Errorf("ike: unsupported key type %T", pub)
 	}
@@ -210,7 +285,7 @@ func chooseSigAlg(pub crypto.PublicKey, peerHashes []uint16) (sigAlg, error) {
 			continue
 		}
 		for _, a := range knownSigAlgs {
-			if a.isRSA == rsaKey && a.hashID == want {
+			if a.family == fam && a.hashID == want {
 				return a, nil
 			}
 		}
@@ -226,8 +301,16 @@ func signAuthDigital(cred *certCredential, authOctets []byte, peerHashes []uint1
 	if err != nil {
 		return 0, nil, err
 	}
-	digest := hashOctets(alg.hash, authOctets)
-	sig, err := cred.signer.Sign(rand.Reader, digest, alg.hash)
+	// ML-DSA takes the message, not a digest, and signals that with a nil
+	// SignerOpts whose HashFunc is zero. Pre-hashing it would produce a
+	// signature over the wrong input that verifies against nothing.
+	signed, opts := authOctets, crypto.SignerOpts(alg.hash)
+	if alg.family != famMLDSA {
+		signed = hashOctets(alg.hash, authOctets)
+	} else {
+		opts = &mldsa.Options{}
+	}
+	sig, err := cred.signer.Sign(rand.Reader, signed, opts)
 	if err != nil {
 		return 0, nil, fmt.Errorf("ike: signing AUTH: %w", err)
 	}
@@ -255,21 +338,32 @@ func verifyAuthDigital(pub crypto.PublicKey, authOctets, data []byte) error {
 	if !ok {
 		return fmt.Errorf("ike: unrecognized signature AlgorithmIdentifier")
 	}
-	digest := hashOctets(alg.hash, authOctets)
 	switch p := pub.(type) {
 	case *rsa.PublicKey:
-		if !alg.isRSA {
+		if alg.family != famRSA {
 			return fmt.Errorf("ike: RSA key but non-RSA signature algorithm")
 		}
-		if err := rsa.VerifyPKCS1v15(p, alg.hash, digest, sig); err != nil {
+		if err := rsa.VerifyPKCS1v15(p, alg.hash, hashOctets(alg.hash, authOctets), sig); err != nil {
 			return fmt.Errorf("ike: RSA signature verify failed: %w", err)
 		}
 	case *ecdsa.PublicKey:
-		if alg.isRSA {
-			return fmt.Errorf("ike: ECDSA key but RSA signature algorithm")
+		if alg.family != famECDSA {
+			return fmt.Errorf("ike: ECDSA key but non-ECDSA signature algorithm")
 		}
-		if !ecdsa.VerifyASN1(p, digest, sig) {
+		if !ecdsa.VerifyASN1(p, hashOctets(alg.hash, authOctets), sig) {
 			return fmt.Errorf("ike: ECDSA signature verify failed")
+		}
+	case *mldsa.PublicKey:
+		if alg.family != famMLDSA {
+			return fmt.Errorf("ike: ML-DSA key but non-ML-DSA signature algorithm")
+		}
+		if p.Parameters() != alg.params {
+			return fmt.Errorf("ike: AUTH names %v but the certificate holds %v",
+				alg.params, p.Parameters())
+		}
+		// Over the octets themselves: ML-DSA does its own hashing.
+		if err := mldsa.Verify(p, authOctets, sig, &mldsa.Options{}); err != nil {
+			return fmt.Errorf("ike: ML-DSA signature verify failed: %w", err)
 		}
 	default:
 		return fmt.Errorf("ike: unsupported peer key type %T", pub)

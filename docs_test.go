@@ -77,7 +77,11 @@ func TestPackageDocNamesEveryProtocol(t *testing.T) {
 	}
 	doc := file.Doc.Text()
 
-	for _, name := range client.Protocols() {
+	// Variants are included deliberately. They live in their own registry
+	// namespace so they do not inflate the protocol COUNT, but they are still
+	// reachable names an operator can type, and a name the module's own
+	// documentation never mentions is one nobody will discover.
+	for _, name := range append(client.Protocols(), client.AllVariants()...) {
 		if !strings.Contains(doc, name) {
 			t.Errorf("doc.go's package comment never mentions the %q package, which is "+
 				"registered — the module's own documentation understates what it does",
@@ -91,6 +95,7 @@ func TestPackageDocNamesEveryProtocol(t *testing.T) {
 // counts are spelled differently: a cardinal for how many there are, an ordinal
 // for where TOY sits among them.
 var numberWords = map[int]string{
+	1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven",
 	8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve",
 	13: "thirteen", 14: "fourteen", 15: "fifteen", 16: "sixteen",
 	17: "seventeen", 18: "eighteen", 19: "nineteen",
@@ -191,6 +196,53 @@ var spelledOutNumbers = map[string]bool{
 var subsetProtocolCounts = map[string]string{
 	"fifteen": "the protocols that reach no further than x/crypto (all but MASQUE)",
 	"twelve":  "the protocols that register a shaping option",
+	// These two are not merely excused: TestREADMECountsPQVariantsCorrectly
+	// checks both against the registry, which is what an exemption should look
+	// like when the number happens to be derivable.
+	"ten": "the protocols that have a pq- variant",
+	"six": "the protocols that cannot have a pq- variant",
+}
+
+// TestREADMECountsPQVariantsCorrectly holds the README's two post-quantum
+// counts against the registry, so that adding an eleventh variant -- or finding
+// that a protocol nobody thought could carry the contract can -- fails here
+// rather than leaving the front page quietly wrong.
+//
+// The counts are exempted from the bare-count guard above because they are
+// subsets. That exemption would otherwise be a hole, since a subset count has no
+// checker at all; this is the checker.
+func TestREADMECountsPQVariantsCorrectly(t *testing.T) {
+	body, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatalf("reading README.md: %v", err)
+	}
+	readme := string(body)
+
+	variants := len(client.AllVariants())
+	if variants == 0 {
+		t.Skip("no variants registered in this binary")
+	}
+	without := len(productionProtocols()) - variants
+
+	for _, tc := range []struct {
+		phrase string
+		want   int
+		what   string
+	}{
+		{"protocols therefore carry a", variants, "protocols with a pq- variant"},
+		{"protocols have **no**", without, "protocols that cannot have one"},
+	} {
+		re := regexp.MustCompile(`(\w+) ` + regexp.QuoteMeta(tc.phrase))
+		m := re.FindStringSubmatch(readme)
+		if m == nil {
+			t.Errorf("README.md no longer says %q; the pq- variant section moved or was "+
+				"reworded, and this guard cannot see it any more", tc.phrase)
+			continue
+		}
+		if got, want := strings.ToLower(m[1]), numberWords[tc.want]; got != want {
+			t.Errorf("README.md says %q %s, but there are %d %s", got, tc.phrase, tc.want, tc.what)
+		}
+	}
 }
 
 // assertBareProtocolCounts requires a spelled-out number before "protocols" to

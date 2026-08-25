@@ -23,7 +23,16 @@ func init() {
 		{Key: OptRekey, Kind: client.OptInt, Default: "3600", Help: "Child SA rekey interval in seconds (0 = default 3600)"},
 		{Key: OptIKERekey, Kind: client.OptInt, Default: "14400", Help: "IKE SA rekey interval in seconds (0 = default 14400)"},
 		client.ShapeOpt(OptShape, "upstream"),
-		{Key: OptPQ, Kind: client.OptBool, Help: "offer ML-KEM-768 as an additional key exchange (RFC 9370)"},
+		// DEPRECATED, and kept for one release. `veepin connect pq-ikev2` is
+		// the replacement and is strictly stronger: -pq OFFERS ML-KEM and
+		// accepts a classical SA when the responder declines, which is a
+		// preference rather than a guarantee. The name refuses instead.
+		//
+		// It stays bound because it has shipped: it is in runbooks and in
+		// profiles on disk, and removing it in the same release that
+		// introduces the name would break both with no overlap. parseOptions
+		// warns when it is used. See doc/pq-variants-plan.md.
+		{Key: OptPQ, Kind: client.OptBool, Help: "DEPRECATED, use `veepin connect pq-ikev2`: offer (not require) ML-KEM-768 as an additional key exchange (RFC 9370)"},
 		{Key: OptIPTFS, Kind: client.OptBool, Help: "enable AGGFRAG aggregation and fragmentation (RFC 9347)"},
 		{Key: OptIPTFSRate, Kind: client.OptInt, Default: "0", Help: "constant-rate IP-TFS transmission in bytes/sec; 0 = aggregation only"},
 		{Key: OptTCP, Kind: client.OptBool, Help: "carry IKE and ESP over one TCP connection (RFC 8229/9329) instead of UDP"},

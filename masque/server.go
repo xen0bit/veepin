@@ -22,6 +22,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	imasque "github.com/xen0bit/veepin/internal/masque"
+	"github.com/xen0bit/veepin/internal/pqpolicy"
 	"github.com/xen0bit/veepin/internal/vlog"
 	"golang.org/x/net/quic"
 )
@@ -73,6 +74,12 @@ type ServerConfig struct {
 	Shape int
 	// Logger receives progress messages.
 	Logger *slog.Logger
+
+	// PostQuantumOnly requires a post-quantum key exchange and ML-DSA
+	// authentication, refusing anything less rather than negotiating down. It is
+	// what the pq-masque registry name sets; see internal/pqpolicy for the contract
+	// and doc/pq-variants-plan.md for why it is a name rather than a flag.
+	PostQuantumOnly bool
 }
 
 // Server is a MASQUE proxy.
@@ -115,13 +122,25 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("masque: opening TUN: %w", err)
 	}
 
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		NextProtos:   []string{"h3"},
+		MinVersion:   tls.VersionTLS13,
+	}
+	if cfg.PostQuantumOnly {
+		// Checked before the TUN is opened and before anything binds: an
+		// operator who pointed a pq- name at their existing RSA certificate
+		// learns it here, rather than from a listener that comes up and then
+		// refuses every client.
+		if err := pqpolicy.CheckCredential(cert); err != nil {
+			return nil, err
+		}
+		pqpolicy.HardenTLS(tlsCfg)
+	}
+
 	return &Server{
-		cfg: cfg,
-		tlsCfg: &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			NextProtos:   []string{"h3"},
-			MinVersion:   tls.VersionTLS13,
-		},
+		cfg:     cfg,
+		tlsCfg:  tlsCfg,
 		pool:    pool,
 		gateway: gateway,
 		tun:     tun,
@@ -259,6 +278,8 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 		Pool:     opts[OptServerPool],
 		TUNName:  opts[OptServerTUN],
 		Logger:   vlog.SlogText(logDest()),
+
+		PostQuantumOnly: pqpolicy.Requested(opts),
 	}
 	if v := opts[OptServerPort]; v != "" {
 		p, err := strconv.Atoi(v)

@@ -34,6 +34,12 @@ func runUDPProxy(args []string) error {
 		insecure  = fs.Bool("insecure", false, "skip proxy certificate verification (self-signed proxies)")
 		listen    = fs.String("listen", "", "local UDP address to bind, e.g. 127.0.0.1:5353 (required)")
 		target    = fs.String("target", "", "remote UDP target host:port to proxy to (required)")
+		// udp-proxy is a standalone subcommand rather than a registered
+		// protocol, so it has no pq- name to carry the guarantee and takes a
+		// flag instead. Everywhere a registry name exists, the name is the
+		// switch -- see doc/pq-variants-plan.md.
+		postQuantum = fs.Bool("post-quantum", false,
+			"require a post-quantum key exchange and an ML-DSA proxy certificate, refusing anything less")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -60,6 +66,8 @@ func runUDPProxy(args []string) error {
 		TargetHost: host,
 		TargetPort: targetPort,
 		Logger:     slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
+
+		PostQuantumOnly: *postQuantum,
 	}
 	if *ca != "" {
 		pem, err := os.ReadFile(*ca)

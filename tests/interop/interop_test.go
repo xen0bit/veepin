@@ -35,6 +35,12 @@ const pingDeadline = 100 * time.Second
 // slower on a loaded CI runner than on a developer's machine.
 const logDeadline = 60 * time.Second
 
+// refuseDeadline is how long a negative cell waits before concluding that a
+// tunnel really is not coming up. Shorter than pingDeadline on purpose: a
+// positive cell spends its budget waiting for something that should arrive,
+// while this one spends it proving a negative on every single run.
+const refuseDeadline = 45 * time.Second
+
 // TestInteropSelf is the infra sanity check: veepin client <-> veepin server.
 // It isolates the container/TUN/NAT-T/ping harness from strongSwan.
 func TestInteropSelf(t *testing.T) {
@@ -232,6 +238,37 @@ func TestInteropVeepinClientStrongswanServerPQ(t *testing.T) {
 // exchange: strongSwan initiates with ke1_mlkem768 and the veepin server must
 // select the ADDKE transform, answer the IKE_INTERMEDIATE, and fold the KEM
 // secret into SKEYSEED. Asserted on the server's log for the reason above.
+// TestInteropPQIKEv2ServerAcceptsAPostQuantumPeer is the positive half of the
+// pq-ikev2 pair: the SAME strongSwan configuration that the refusal cell below
+// uses, minus nothing, connecting to a server started as `pq-ikev2` rather than
+// `ikev2`.
+//
+// It shares its peer image and its swanctl config with the opportunistic PQ cell
+// above; what differs is one environment variable. That is deliberate -- it
+// means a failure here is about the variant and not about the post-quantum path,
+// which the older cell already covers.
+func TestInteropPQIKEv2ServerAcceptsAPostQuantumPeer(t *testing.T) {
+	runInteropRequiringLogFrom(t, "compose.server-ss-pqonly.yml", "strongswan-client", "veepin-server", "10.10.10.1",
+		"negotiated additional key exchange ML-KEM-768")
+}
+
+// TestInteropPQIKEv2ServerRefusesAClassicalPeer is the cell this whole variant
+// exists for.
+//
+// A real strongSwan initiator, proposing exactly what it proposes in the cell
+// above except for the ke1_mlkem768 additional key exchange, must be REFUSED.
+// A server that merely prefers post-quantum passes the positive cell
+// identically and fails here, so this is the only cell that distinguishes
+// pq-ikev2 from ikev2 -- and it is a real peer doing the distinguishing, not a
+// veepin-to-veepin agreement about what a refusal looks like.
+//
+// The required log line names WHICH refusal it was. Without that, a container
+// that failed to start for an unrelated reason would produce no tunnel and pass.
+func TestInteropPQIKEv2ServerRefusesAClassicalPeer(t *testing.T) {
+	runInteropRefusing(t, "compose.server-ss-pqrefuse.yml", "strongswan-client", "veepin-server", "10.10.10.1",
+		"post-quantum is required")
+}
+
 func TestInteropStrongswanClientVeepinServerPQ(t *testing.T) {
 	runInteropRequiringLogFrom(t, "compose.server-ss-pq.yml", "strongswan-client", "veepin-server", "10.10.10.1",
 		"negotiated additional key exchange ML-KEM-768")
@@ -552,6 +589,29 @@ func TestInteropVeepinClientSSTPServer(t *testing.T) {
 // responder end to end — the SSTP_DUPLEX_POST handshake, CALL_CONNECT_ACK nonce,
 // the server-role PPP/MS-CHAPv2 authentication, crypto-binding verification, and
 // IPCP address assignment — isolating a veepin break from an interop break.
+// TestInteropPQSSTPSelf exercises the whole TLS-family pq- path in one piece:
+// an ML-DSA-65 credential loaded from PEM through the real parseServerOptions,
+// pqpolicy.CheckCredential accepting it at construction, HardenTLS pinning the
+// curves at both ends, and PPP/IPCP carrying real packets over the result.
+//
+// It is a SELF cell and that is a limitation, not a choice. sstp-client links
+// OpenSSL 3.0, which has neither ML-KEM nor ML-DSA; there is no third-party SSTP
+// client that can meet this contract and none in prospect. Per AGENTS.md a
+// veepin-to-veepin cell proves the two halves agree with each other rather than
+// that they are right, and doc/security.md says so for this row rather than
+// implying more. What carries the cross-implementation weight for the pq- work
+// is TestInteropPQIKEv2ServerRefusesAClassicalPeer and TestInteropPQSSHClientSSHD,
+// both of which have real peers.
+func TestInteropPQSSTPSelf(t *testing.T) {
+	requireDocker(t)
+	pkiDir := filepath.Join("sstp", "pki-pq")
+	if err := generateSSTPServerCertMLDSA(pkiDir); err != nil {
+		t.Fatalf("generate ML-DSA SSTP cert: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
+	runInterop(t, "compose.pq-sstp-self.yml", "veepin-pq-sstp-client", "10.9.0.1")
+}
+
 func TestInteropSSTPSelf(t *testing.T) {
 	requireDocker(t)
 	pkiDir := filepath.Join("sstp", "pki")
@@ -657,6 +717,32 @@ func TestInteropSSHClientVeepinServer(t *testing.T) {
 // OpenSSH server (sshd with PermitTunnel yes): the client opens the
 // tun@openssh.com channel, requesting the remote unit sshd binds to its
 // pre-configured tun0, and pings the server's tunnel address across the tunnel.
+// TestInteropPQSSHClientSSHD drives pq-ssh against an OpenSSH 10.0 server whose
+// KexAlgorithms is pinned to mlkem768x25519-sha256, so the handshake has no
+// classical path to fall back to. A ping across the tunnel therefore proves the
+// post-quantum key exchange happened, with no log assertion needed -- the peer
+// itself is the assertion.
+//
+// The peer is a separate trixie image rather than a bump of the existing sshd
+// one, following the strongswan-pq precedent: the base ssh cells keep their
+// bookworm peer and their current results. That matters here because bookworm's
+// OpenSSH 9.2 offers only sntrup761x25519-sha512, which golang.org/x/crypto/ssh
+// does not implement -- so veepin and that peer share NO post-quantum mechanism,
+// and the base cell silently settles on curve25519-sha256.
+//
+// Key exchange only: SSH has no post-quantum signature algorithm in any
+// specification, so the host key is classical. That is upstream's limit rather
+// than veepin's; see https://www.openssh.org/pq.html and internal/pqpolicy.
+func TestInteropPQSSHClientSSHD(t *testing.T) {
+	requireDocker(t)
+	keyDir := filepath.Join("ssh", "keys")
+	if err := generateSSHKeys(keyDir); err != nil {
+		t.Fatalf("generate SSH keys: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(keyDir) })
+	runInterop(t, "compose.pq-ssh-sshd.yml", "veepin-ssh-client", "10.200.0.1")
+}
+
 func TestInteropVeepinClientSSHServer(t *testing.T) {
 	requireDocker(t)
 	keyDir := filepath.Join("ssh", "keys")
@@ -1585,6 +1671,75 @@ func waitPing(t *testing.T, composeFile, pingSvc, target string) bool {
 // bidirectional ESP. Passing both an IPv4 and an IPv6 target proves a dual-stack
 // tunnel carries both families (ping auto-selects the family from the literal).
 // The stack is always torn down; logs are dumped on failure.
+// tailLines returns the last n lines of s, so a failure message carries the end
+// of a container log -- where the reason is -- rather than all of it.
+func tailLines(s string, n int) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// runInteropRefusing is the negative counterpart of runInterop: it brings a cell
+// up and requires the tunnel NOT to come up, with logSvc explaining why.
+//
+// It exists because a refusal is a different claim from a success and cannot be
+// tested by the same shape. Every other helper here waits for a ping and fails
+// if it never arrives; that would pass against a server which simply never
+// started. What makes a refusal real is the pairing: the SAME peer configuration
+// must succeed against the permissive cell and fail here, and the failure must
+// be the one we meant rather than a container that died of something unrelated.
+// Hence both halves -- no ping, and a log line naming the reason.
+//
+// The ping window is deliberately short. runInterop waits pingDeadline for a
+// tunnel that should appear; here nothing should ever appear, so the whole
+// budget would be spent proving it on every run.
+func runInteropRefusing(t *testing.T, composeFile, pingSvc, logSvc, target string, wants ...string) {
+	t.Helper()
+	requireDocker(t)
+	if len(wants) == 0 {
+		t.Fatal("runInteropRefusing needs at least one required log line: a cell that only " +
+			"checks the ping never happened would pass against a server that failed to start")
+	}
+
+	composeUp(t, composeFile)
+	t.Cleanup(func() {
+		if t.Failed() {
+			if logs, err := compose(t, composeFile, "logs", "--no-color"); err == nil {
+				t.Logf("--- compose logs (%s) ---\n%s", composeFile, logs)
+			}
+		}
+		_, _ = compose(t, composeFile, "down", "-v", "--timeout", "5")
+	})
+
+	// Long enough that a tunnel which was going to come up would have.
+	deadline := time.Now().Add(refuseDeadline)
+	for time.Now().Before(deadline) {
+		out, err := compose(t, composeFile, "exec", "-T", pingSvc, "ping", "-c2", "-W2", target)
+		if err == nil && strings.Contains(out, "0% packet loss") {
+			t.Fatalf("%s reached %s across a tunnel that should have been refused.\n"+
+				"The post-quantum requirement is not being enforced: this peer offers no "+
+				"ML-KEM and was served anyway.", pingSvc, target)
+		}
+		time.Sleep(3 * time.Second)
+	}
+
+	// And the refusal has to be the one we meant.
+	logs, err := compose(t, composeFile, "logs", "--no-color", logSvc)
+	if err != nil {
+		t.Fatalf("reading %s logs: %v", logSvc, err)
+	}
+	for _, want := range wants {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("no tunnel came up, but %s never logged %q -- so this cell has not shown "+
+				"that the refusal was deliberate rather than a container that fell over:\n%s",
+				logSvc, want, tailLines(logs, 40))
+		}
+	}
+	t.Logf("refused as required: %s never reached %s, and %s said why", pingSvc, target, logSvc)
+}
+
 func runInterop(t *testing.T, composeFile, pingSvc string, targets ...string) {
 	t.Helper()
 	requireDocker(t)

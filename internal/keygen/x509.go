@@ -20,8 +20,10 @@ package keygen
 // files are all there, the permissions are right, and the handshake never works.
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/mldsa"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -40,6 +42,15 @@ import (
 type chainSpec struct {
 	caFile, certFile, keyFile string
 	caCN, leafCN              string
+
+	// postQuantum mints the CA and the leaf with ML-DSA-65 (FIPS 204) instead
+	// of ECDSA P-256, for the pq- protocol variants.
+	//
+	// 65 is the parameter set matching ML-KEM-768's security level, which is
+	// what the IETF hybrid drafts settled on and what veepin's IKEv2 already
+	// negotiates -- so the two halves of a pq- handshake are chosen at the same
+	// level rather than one being needlessly heavier than the other.
+	postQuantum bool
 }
 
 var (
@@ -51,7 +62,39 @@ var (
 		caFile: "ca.crt", certFile: "server.crt", keyFile: "server.key",
 		caCN: "veepin-generated OpenVPN CA", leafCN: "veepin-generated OpenVPN server",
 	}
+
+	// The pq- counterparts. Same files, same layout, ML-DSA keys -- so a
+	// listener created under a pq- name through the management panel comes up
+	// with a credential its own contract accepts, rather than with an ECDSA one
+	// that pqpolicy.CheckCredential then refuses at construction.
+	pqTLSSpec = chainSpec{
+		caFile: "ca.crt", certFile: "tls.crt", keyFile: "tls.key",
+		caCN: "veepin-generated ML-DSA CA", leafCN: "veepin-generated ML-DSA server",
+		postQuantum: true,
+	}
+	pqOpenVPNSpec = chainSpec{
+		caFile: "ca.crt", certFile: "server.crt", keyFile: "server.key",
+		caCN: "veepin-generated ML-DSA OpenVPN CA", leafCN: "veepin-generated ML-DSA OpenVPN server",
+		postQuantum: true,
+	}
 )
+
+// chainKey mints the key pair a chain is built from: ML-DSA-65 for a
+// post-quantum spec, ECDSA P-256 otherwise.
+func chainKey(spec chainSpec) (crypto.Signer, error) {
+	if spec.postQuantum {
+		k, err := mldsa.GenerateKey(mldsa.MLDSA65())
+		if err != nil {
+			return nil, fmt.Errorf("keygen: ML-DSA key: %w", err)
+		}
+		return k, nil
+	}
+	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("keygen: ECDSA key: %w", err)
+	}
+	return k, nil
+}
 
 // certLifetime is how long a generated chain is good for. Ten years is not a
 // defensible lifetime for a public CA and is the right one here: the CA exists
@@ -73,9 +116,9 @@ func genChain(dir string, hostnames []string, spec chainSpec) (map[string]string
 	}
 	now := time.Now()
 
-	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	caKey, err := chainKey(spec)
 	if err != nil {
-		return nil, fmt.Errorf("keygen: CA key: %w", err)
+		return nil, err
 	}
 	caSerial, err := serialNumber()
 	if err != nil {
@@ -91,7 +134,7 @@ func genChain(dir string, hostnames []string, spec chainSpec) (map[string]string
 		IsCA:                  true,
 		MaxPathLenZero:        true,
 	}
-	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, caKey.Public(), caKey)
 	if err != nil {
 		return nil, fmt.Errorf("keygen: CA cert: %w", err)
 	}
@@ -99,9 +142,9 @@ func genChain(dir string, hostnames []string, spec chainSpec) (map[string]string
 		return nil, err
 	}
 
-	srvKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	srvKey, err := chainKey(spec)
 	if err != nil {
-		return nil, fmt.Errorf("keygen: server key: %w", err)
+		return nil, err
 	}
 	leafSerial, err := serialNumber()
 	if err != nil {
@@ -125,7 +168,7 @@ func genChain(dir string, hostnames []string, spec chainSpec) (map[string]string
 		DNSNames:              dns,
 		IPAddresses:           ips,
 	}
-	srvDER, err := x509.CreateCertificate(rand.Reader, srvTmpl, caTmpl, &srvKey.PublicKey, caKey)
+	srvDER, err := x509.CreateCertificate(rand.Reader, srvTmpl, caTmpl, srvKey.Public(), caKey)
 	if err != nil {
 		return nil, fmt.Errorf("keygen: server cert: %w", err)
 	}
@@ -133,11 +176,14 @@ func genChain(dir string, hostnames []string, spec chainSpec) (map[string]string
 		return nil, err
 	}
 
-	keyDER, err := x509.MarshalECPrivateKey(srvKey)
+	// PKCS#8 for both, rather than SEC 1 for the ECDSA case: it is the one
+	// encoding that can carry an ML-DSA key (as its 32-octet seed), and
+	// tls.X509KeyPair reads either, so using it for both keeps one path.
+	keyDER, err := x509.MarshalPKCS8PrivateKey(srvKey)
 	if err != nil {
 		return nil, fmt.Errorf("keygen: marshalling server key: %w", err)
 	}
-	if err := writePEM(filepath.Join(dir, spec.keyFile), "EC PRIVATE KEY", keyDER); err != nil {
+	if err := writePEM(filepath.Join(dir, spec.keyFile), "PRIVATE KEY", keyDER); err != nil {
 		return nil, err
 	}
 

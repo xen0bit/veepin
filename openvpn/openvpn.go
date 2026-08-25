@@ -50,6 +50,7 @@ import (
 	"github.com/xen0bit/veepin/internal/openvpn/keys"
 	"github.com/xen0bit/veepin/internal/openvpn/tlswrap"
 	"github.com/xen0bit/veepin/internal/openvpn/wire"
+	"github.com/xen0bit/veepin/internal/pqpolicy"
 	"github.com/xen0bit/veepin/internal/vlog"
 )
 
@@ -101,6 +102,10 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
+	// After the overrides, deliberately. A -config <file> replaces cfg
+	// wholesale a few lines up, so setting this any earlier would let loading
+	// an .ovpn profile silently drop the guarantee the pq- name promised.
+	cfg.PostQuantumOnly = pqpolicy.Requested(opts)
 	return dialer{cfg}, nil
 }
 
@@ -224,12 +229,22 @@ func clientTLSConfig(cfg *Config) (*tls.Config, error) {
 	if !pool.AppendCertsFromPEM(cfg.CA) {
 		return nil, errors.New("ca: no certificates parsed")
 	}
-	return &tls.Config{
+	tlsCfg := &tls.Config{
 		Certificates:          []tls.Certificate{cert},
 		MinVersion:            tls.VersionTLS12,
 		InsecureSkipVerify:    true, // hostname is not verified; the chain check below is
 		VerifyPeerCertificate: verifyChainToCA(pool),
-	}, nil
+	}
+	if cfg.PostQuantumOnly {
+		// OpenVPN is mutual TLS, so this covers both directions at once: the
+		// client's own credential must be ML-DSA, and HardenTLS chains its peer
+		// check after verifyChainToCA so the server's must be too.
+		if err := pqpolicy.CheckCredential(cert); err != nil {
+			return nil, err
+		}
+		pqpolicy.HardenTLS(tlsCfg)
+	}
+	return tlsCfg, nil
 }
 
 // verifyChainToCA verifies the server certificate chains to the CA, ignoring the

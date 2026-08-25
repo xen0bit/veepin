@@ -10,11 +10,11 @@ set -u
 # TCP carries IKE and ESP over one connection (RFC 8229/9329) instead of UDP; the
 # port then names the TCP port rather than the port-500 phase, which is why the
 # TCP cells set PORT=4500.
-echo "veepin-client: connecting to $SERVER:${PORT:-500} as $CLIENT_ID (server-id=$SERVER_ID, tcp=${TCP:-false})"
+echo "veepin-client: connecting to $SERVER:${PORT:-500} as $CLIENT_ID (proto=${PROTOCOL:-ikev2}, server-id=$SERVER_ID, tcp=${TCP:-false})"
 
 i=1
 while [ "$i" -le 30 ]; do
-    veepin connect ikev2 \
+    veepin connect "${PROTOCOL:-ikev2}" \
         -server "$SERVER" \
         -port "${PORT:-500}" \
         -psk "$PSK" \

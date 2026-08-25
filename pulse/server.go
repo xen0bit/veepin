@@ -21,6 +21,7 @@ import (
 
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/veepin/internal/pqpolicy"
 	ipulse "github.com/xen0bit/veepin/internal/pulse"
 	"github.com/xen0bit/veepin/internal/userdb"
 	"github.com/xen0bit/veepin/internal/vlog"
@@ -99,6 +100,12 @@ type ServerConfig struct {
 	Shape int
 
 	Logger *slog.Logger
+
+	// PostQuantumOnly requires a post-quantum key exchange and ML-DSA
+	// authentication, refusing anything less rather than negotiating down. It is
+	// what the pq-pulse registry name sets; see internal/pqpolicy for the contract
+	// and doc/pq-variants-plan.md for why it is a name rather than a flag.
+	PostQuantumOnly bool
 }
 
 // Server is an Ivanti Connect Secure gateway.
@@ -168,9 +175,21 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, err
 	}
 
+	tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+	if cfg.PostQuantumOnly {
+		// Checked before the TUN is opened and before anything binds: an
+		// operator who pointed a pq- name at their existing RSA certificate
+		// learns it here, rather than from a listener that comes up and then
+		// refuses every client.
+		if err := pqpolicy.CheckCredential(cert); err != nil {
+			return nil, err
+		}
+		pqpolicy.HardenTLS(tlsCfg)
+	}
+
 	return &Server{
 		cfg:     cfg,
-		tlsCfg:  &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
+		tlsCfg:  tlsCfg,
 		pool:    pool,
 		gateway: gateway,
 		tun:     tun,
@@ -292,6 +311,8 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 		NoESP:    opts[OptServerNoESP] == "true",
 		TUNName:  opts[OptServerTUN],
 		Logger:   vlog.SlogText(logDest()),
+
+		PostQuantumOnly: pqpolicy.Requested(opts),
 	}
 	user, pass := opts[OptServerUser], opts[OptServerPass]
 	if user != "" && pass == "" {

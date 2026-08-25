@@ -1,0 +1,45 @@
+# The negative cell, and the one that carries pq-ikev2's whole claim.
+#
+# A real strongSwan initiator with a CLASSICAL-only proposal meets a veepin
+# pq-ikev2 server. The tunnel must NOT come up, and the server must say why.
+#
+# Every other cell in this matrix asserts that something works. This one asserts
+# that something is refused, which is a different kind of claim and the only kind
+# that distinguishes pq-ikev2 from ikev2: a server that merely PREFERS
+# post-quantum passes compose.server-ss-pqonly.yml identically and fails here.
+# Without this cell the variant would be untested in the only respect that makes
+# it a variant.
+name: veepin-interop-b-pqrefuse
+
+services:
+  veepin-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    environment:
+      PSK: "interop-test-psk"
+      SERVER_ID: "vpn.example.com"
+      PROTOCOL: "pq-ikev2"
+    volumes:
+      - ./veepin/server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  strongswan-client:
+    build:
+      context: strongswan-pq
+    image: interop-strongswan-pq
+    cap_add: [NET_ADMIN]
+    depends_on: [veepin-server]
+    sysctls:
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+    volumes:
+      - ./strongswan/swanctl-client-classical.conf:/etc/swanctl/swanctl.conf:ro
+      - ./strongswan-pq/99-stdout-log.conf:/etc/strongswan.d/99-stdout-log.conf:ro
+      - ./strongswan-pq/client-entrypoint.sh:/entrypoint.sh:ro
+    command: ["/bin/sh", "/entrypoint.sh"]

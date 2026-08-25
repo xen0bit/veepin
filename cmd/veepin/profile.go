@@ -113,9 +113,9 @@ func profileAdd(args []string) error {
 	// the same save-time validation, so a profile that cannot be dialed is
 	// refused here rather than surfacing at `veepin connect` time with a
 	// mystery parse error.
-	if !slices.Contains(client.Protocols(), cfg.Protocol) {
+	if !slices.Contains(client.AllProtocols(), cfg.Protocol) {
 		return fmt.Errorf("profile add: unknown protocol %q (available: %s)",
-			cfg.Protocol, strings.Join(client.Protocols(), ", "))
+			cfg.Protocol, strings.Join(client.AllProtocols(), ", "))
 	}
 	if err := client.ValidateOptions(cfg.Protocol, cfg.Options); err != nil {
 		return fmt.Errorf("profile add: %w", err)
@@ -138,9 +138,9 @@ func profileAddFlags(name, protocol string, args []string) error {
 	if !confstore.ValidName(name) {
 		return fmt.Errorf("profile add: name %q must match %s", name, confstore.NameGrammar())
 	}
-	if !slices.Contains(client.Protocols(), protocol) {
+	if !slices.Contains(client.AllProtocols(), protocol) {
 		return fmt.Errorf("profile add: unknown protocol %q (available: %s)",
-			protocol, strings.Join(client.Protocols(), ", "))
+			protocol, strings.Join(client.AllProtocols(), ", "))
 	}
 	fs := flag.NewFlagSet("profile add "+name, flag.ContinueOnError)
 	options, err := connectFlags(protocol, fs)

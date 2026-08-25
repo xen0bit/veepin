@@ -23,6 +23,7 @@ import (
 	"github.com/xen0bit/veepin/internal/debuglog"
 	"github.com/xen0bit/veepin/internal/mschap"
 	ppp "github.com/xen0bit/veepin/internal/ppp"
+	"github.com/xen0bit/veepin/internal/pqpolicy"
 	"github.com/xen0bit/veepin/internal/sstp/wire"
 	"github.com/xen0bit/veepin/internal/vlog"
 )
@@ -53,6 +54,13 @@ type Config struct {
 	// the self-signed certificates most SSTP servers ship with.
 	SkipVerify bool
 	Logger     *slog.Logger
+
+	// PostQuantumOnly requires a post-quantum key exchange and ML-DSA
+	// authentication, refusing anything less rather than negotiating down. It is
+	// what the pq-sstp registry name sets; see internal/pqpolicy for the
+	// contract and doc/pq-variants-plan.md for why it is a name rather than a
+	// flag.
+	PostQuantumOnly bool
 }
 
 func (c *Config) validate() error {
@@ -81,6 +89,7 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 	cfg.Password = opts[OptPassword]
 	cfg.TUNName = opts[OptTUNName]
 	cfg.SkipVerify = opts[OptInsecure] == "true"
+	cfg.PostQuantumOnly = pqpolicy.Requested(opts)
 	if cfg.Port == 0 {
 		cfg.Port = 443
 	}
@@ -109,6 +118,9 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	tlsCfg := &tls.Config{
 		ServerName:         cfg.Server,
 		InsecureSkipVerify: cfg.SkipVerify, //nolint:gosec // opt-in; MS-CHAPv2 mutually authenticates the peers.
+	}
+	if cfg.PostQuantumOnly {
+		pqpolicy.HardenTLS(tlsCfg)
 	}
 	tlsConn, err := dialTLS(ctx, addr, tlsCfg)
 	if err != nil {

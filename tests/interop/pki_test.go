@@ -3,6 +3,7 @@
 package interop
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -107,7 +108,11 @@ func writeCert(path string, der []byte) error {
 	return os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644)
 }
 
-func writeKey(path string, key *ecdsa.PrivateKey) error {
+// key is crypto.PrivateKey rather than *ecdsa.PrivateKey because PKCS#8 already
+// encodes anything the standard library can marshal -- including ML-DSA, whose
+// PKCS#8 form is its 32-octet seed. Narrowing the parameter would have forced a
+// second near-identical writer for the pq- cells.
+func writeKey(path string, key crypto.PrivateKey) error {
 	der, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
 		return err

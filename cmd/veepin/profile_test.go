@@ -135,7 +135,9 @@ func TestApplyOverrides(t *testing.T) {
 
 func TestConnectUsagePrintsProtocols(t *testing.T) {
 	err := runConnect(nil)
-	if err == nil || !strings.Contains(err.Error(), strings.Join(client.Protocols(), ", ")) {
+	// AllProtocols, because the usage message lists what `veepin connect` will
+	// actually accept -- which includes the pq- variants.
+	if err == nil || !strings.Contains(err.Error(), strings.Join(client.AllProtocols(), ", ")) {
 		t.Errorf("usage error does not list protocols: %v", err)
 	}
 }

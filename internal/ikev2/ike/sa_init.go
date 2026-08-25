@@ -140,6 +140,25 @@ func (s *Server) handleIKESAInit(pkt []byte, hdr payload.Header, remote *net.UDP
 		}
 	}
 
+	// Under RequirePostQuantum a classical-only initiator is refused here rather
+	// than served. Distinguishing the two ways it can fail is worth the extra
+	// branch: a peer that proposed ML-KEM without the intermediate exchange is
+	// misconfigured differently from one that proposed no ML-KEM at all, and an
+	// operator reading the log should not have to guess which.
+	if s.cfg.RequirePostQuantum && newSA.ADDKEGroup == 0 {
+		switch {
+		case !hasIntermediateSupport(msg):
+			s.log.Warnf("ikev2: refusing %s: post-quantum is required and the initiator "+
+				"did not advertise INTERMEDIATE_EXCHANGE_SUPPORTED (RFC 9242), which the "+
+				"ML-KEM exchange cannot be carried without", remote)
+		default:
+			s.log.Warnf("ikev2: refusing %s: post-quantum is required and the initiator "+
+				"proposed no ADDKE1 key exchange this server supports (RFC 9370, ML-KEM-768)", remote)
+		}
+		s.sendUnauthNotify(hdr, remote, on4500, payload.NoProposalChosen)
+		return
+	}
+
 	_, keys := DeriveIKEKeys(
 		suite.PRF, shared, newSA.Ni, newSA.Nr,
 		newSA.InitiatorSPI, newSA.ResponderSPI,

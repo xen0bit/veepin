@@ -46,6 +46,16 @@ func (s *Server) handleIKEAuth(sa *IKESA, hdr payload.Header, inners []payload.R
 
 	// No AUTH payload → the client wants EAP.
 	if authPay == nil {
+		if s.cfg.RequirePostQuantumAuth {
+			// Not a quantum argument: EAP-MSCHAPv2's own primitives are MD4 and
+			// single-DES, broken classically. A name promising maximum assurance
+			// should not accept it. PSK, which is also symmetric, IS accepted --
+			// see Config.RequirePostQuantumAuth.
+			s.log.Warnf("ikev2: refusing EAP from %s: this server requires post-quantum "+
+				"authentication and EAP-MSCHAPv2 is keyed by MD4 and single-DES", remote)
+			s.respondEncryptedNotify(sa, payload.IKE_AUTH, hdr.MessageID, payload.AuthenticationFailed, remote)
+			return
+		}
 		if s.cfg.EAPCredentials == nil {
 			s.log.Printf("ikev2: %s requested EAP but server has no credentials", remote)
 			s.respondEncryptedNotify(sa, payload.IKE_AUTH, hdr.MessageID, payload.AuthenticationFailed, remote)
@@ -64,6 +74,13 @@ func (s *Server) handleIKEAuth(sa *IKESA, hdr payload.Header, inners []payload.R
 	// Certificate path (RFC 7427 Digital Signature, or legacy RSA): the client
 	// signs its AUTH rather than MACing it, and presents a certificate chain.
 	if auth.Method == payload.AuthDigitalSig || auth.Method == payload.AuthRSASig {
+		if s.cfg.RequirePostQuantumAuth && auth.Method == payload.AuthRSASig {
+			// Method 1 is RSASSA-PKCS1-v1_5 over SHA-1 and names no algorithm,
+			// so there is no post-quantum spelling of it to accept.
+			s.log.Warnf("ikev2: refusing %s: legacy RSA AUTH (method 1) cannot be post-quantum", remote)
+			s.respondEncryptedNotify(sa, payload.IKE_AUTH, hdr.MessageID, payload.AuthenticationFailed, remote)
+			return
+		}
 		s.handleCertAuth(sa, hdr, inners, auth, remote)
 		return
 	}
@@ -130,6 +147,13 @@ func (s *Server) handleCertAuth(sa *IKESA, hdr payload.Header, inners []payload.
 
 	// The initiator signs InitiatorSAInit | {Intermediate} | Nr | prf(SK_pi, IDi').
 	octets := AuthOctets(sa.Suite.PRF, sa.InitiatorSAInit, sa.Nr, sa.Keys.SKpi, sa.IDiForAuth, sa.intAuth(sa.IKEAuthMsgID))
+	if s.cfg.RequirePostQuantumAuth {
+		if err := requirePostQuantumKey(leaf.PublicKey); err != nil {
+			s.log.Warnf("ikev2: refusing %s: %v", remote, err)
+			s.respondEncryptedNotify(sa, payload.IKE_AUTH, hdr.MessageID, payload.AuthenticationFailed, remote)
+			return
+		}
+	}
 	if err := verifyAuth(leaf.PublicKey, auth.Method, octets, auth.Data); err != nil {
 		s.log.Warnf("ikev2: %s certificate AUTH failed: %v", remote, err)
 		s.respondEncryptedNotify(sa, payload.IKE_AUTH, hdr.MessageID, payload.AuthenticationFailed, remote)
