@@ -14,7 +14,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"strconv"
@@ -23,6 +23,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/softether"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // Opt* constants for CLI option parsing.
@@ -268,7 +269,7 @@ type Server struct {
 	tlsCfg     *tls.Config
 	listenIP   string
 	listenPort int
-	log        *log.Logger
+	log        *vlog.Logger
 	closed     chan struct{}
 }
 
@@ -315,7 +316,7 @@ type ServerConfig struct {
 	// Shape pads the first N bytes of each inner flow out towards the frame
 	// MTU. 0 is off, which is the default.
 	Shape  int
-	Logger *log.Logger
+	Logger *slog.Logger
 }
 
 // NewServer creates a SoftEther VPN server.
@@ -347,9 +348,9 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	srv := softether.NewServer(tlsCfg, bridge, gatewayMAC, gatewayIP,
 		softether.SingleUser(cfg.User, cfg.Pass))
 
-	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(os.Stderr, "", log.LstdFlags)
+	logger := vlog.From(cfg.Logger)
+	if cfg.Logger == nil {
+		logger = vlog.Text(os.Stderr)
 	}
 	srv.SetLogger(logger.Printf)
 

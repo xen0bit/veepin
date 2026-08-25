@@ -10,8 +10,8 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"log"
 	"net"
+	"os"
 	"strings"
 	"sync"
 
@@ -19,6 +19,7 @@ import (
 	"github.com/godbus/dbus/v5/introspect"
 	"github.com/godbus/dbus/v5/prop"
 	"github.com/xen0bit/veepin/client"
+	"github.com/xen0bit/veepin/internal/vlog"
 	"github.com/xen0bit/veepin/nm/internal/nmconfig"
 )
 
@@ -68,7 +69,7 @@ type Settings = nmconfig.Settings
 type Plugin struct {
 	conn    *dbus.Conn
 	busName string
-	log     *log.Logger
+	log     *vlog.Logger
 	props   *prop.Properties
 	quit    chan struct{}
 	closer  sync.Once
@@ -104,9 +105,9 @@ const maxSecretsRounds = 3
 // --bus-name — so one binary serves every per-protocol VPN type. An empty
 // busName falls back to the bare prefix, which owns no VPN type but keeps a
 // hand-run process from claiming a protocol's name by accident.
-func New(conn *dbus.Conn, busName string, logger *log.Logger) *Plugin {
+func New(conn *dbus.Conn, busName string, logger *vlog.Logger) *Plugin {
 	if logger == nil {
-		logger = log.New(log.Writer(), "nm-veepin: ", log.LstdFlags)
+		logger = vlog.Text(os.Stderr)
 	}
 	if busName == "" {
 		busName = BusNamePrefix
@@ -348,7 +349,7 @@ func (p *Plugin) dial(ctx context.Context, conn nmconfig.Connection) {
 		if aborted {
 			p.log.Printf("Connect: aborted by disconnect")
 		} else {
-			p.log.Printf("Connect: handshake failed: %v", err)
+			p.log.Warnf("Connect: handshake failed: %v", err)
 			p.fail(classifyFailure(err))
 		}
 		return
@@ -368,7 +369,7 @@ func (p *Plugin) dial(ctx context.Context, conn nmconfig.Connection) {
 	p.mu.Unlock()
 
 	if cerr := p.emitConfig(res, conn.FullTunnel, conn.MTU); cerr != nil {
-		p.log.Printf("Connect: emit config failed: %v", cerr)
+		p.log.Warnf("Connect: emit config failed: %v", cerr)
 		p.mu.Lock()
 		p.session = nil
 		p.mu.Unlock()

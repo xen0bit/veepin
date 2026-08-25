@@ -23,8 +23,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"io"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"strconv"
@@ -35,6 +34,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/ikev2/ike"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 func init() { client.Register("ikev2", parseOptions) }
@@ -121,7 +121,7 @@ type Config struct {
 	Shape int
 
 	// Logger receives progress logs; nil discards them.
-	Logger *log.Logger
+	Logger *slog.Logger
 }
 
 // defaultRekeyInterval is the Child SA soft lifetime when Config.RekeyInterval
@@ -195,7 +195,7 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 		// a negotiated option actually came up, and a ping passes just as
 		// happily on the fallback -- which for IP-TFS is strongSwan silently
 		// dropping to plain tunnel mode.
-		Logger: log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds),
+		Logger: slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
 	}
 	if v := opts[OptIPTFSRate]; v != "" {
 		n, err := strconv.Atoi(v)
@@ -298,10 +298,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	if err := cfg.validate(); err != nil {
 		return nil, client.Result{}, fmt.Errorf("ikev2: %w", err)
 	}
-	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
+	logger := vlog.From(cfg.Logger)
 
 	ikeCfg := ike.ClientConfig{
 		ServerHost:  cfg.Server,
@@ -407,7 +404,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 		// reason.
 		send = func(esp []byte, _ *net.UDPAddr) {
 			if werr := stream.WriteESP(esp); werr != nil && !s.closing.Load() {
-				logger.Printf("ikev2: ESP send error: %v", werr)
+				logger.Warnf("ikev2: ESP send error: %v", werr)
 			}
 		}
 		// A stream has no datagram boundary to preserve, so a GSO burst becomes
@@ -415,7 +412,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 		// and the reason the batch sender is wired here rather than dropped.
 		batchSend = func(pkts [][]byte, _ *net.UDPAddr) {
 			if werr := stream.WriteESPBatch(pkts); werr != nil && !s.closing.Load() {
-				logger.Printf("ikev2: ESP batch send error: %v", werr)
+				logger.Warnf("ikev2: ESP batch send error: %v", werr)
 			}
 		}
 	} else {
@@ -427,21 +424,21 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 		// The socket is connected to the server, so the destination is implicit.
 		send = func(esp []byte, _ *net.UDPAddr) {
 			if _, werr := s.conn.Load().Write(esp); werr != nil && !s.roaming.Load() {
-				logger.Printf("ikev2: ESP send error: %v", werr)
+				logger.Warnf("ikev2: ESP send error: %v", werr)
 			}
 		}
 		// GSO bursts flush with one sendmmsg on the connected socket, via the
 		// swappable BatchConn.
 		batchSend = func(pkts [][]byte, _ *net.UDPAddr) {
 			if _, werr := s.sendBC.Load().WriteBatch(pkts, nil); werr != nil && !s.roaming.Load() {
-				logger.Printf("ikev2: ESP batch send error: %v", werr)
+				logger.Warnf("ikev2: ESP batch send error: %v", werr)
 			}
 		}
 	}
 
 	// The tunnel reports 0.0.0.0/0 as its route, so everything leaving the TUN is
 	// routed to the server; no separate default-route call is needed.
-	pump := dataplane.NewPump(tun, send, dataplane.SPIDemux, logger)
+	pump := dataplane.NewPump(tun, send, dataplane.SPIDemux, logger.Slog())
 	if cfg.Shape > 0 {
 		pump.SetShaper(dataplane.NewShaper(dataplane.ShapeConfig{Bytes: cfg.Shape}))
 		logger.Printf("ikev2: upstream shaping on, %d bytes per flow", cfg.Shape)
@@ -490,7 +487,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 					if err := s.rekeyChild(); err != nil {
 						// A failed rekey leaves the current SA in place; the next
 						// tick retries. Liveness (Probe) catches a truly dead peer.
-						logger.Printf("ikev2: Child SA rekey failed: %v", err)
+						logger.Warnf("ikev2: Child SA rekey failed: %v", err)
 					}
 				}
 			}
@@ -516,7 +513,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 					if err := s.rekeyIKE(); err != nil {
 						// A failed IKE rekey leaves the current SA in place; the
 						// next tick retries. Liveness catches a truly dead peer.
-						logger.Printf("ikev2: IKE SA rekey failed: %v", err)
+						logger.Warnf("ikev2: IKE SA rekey failed: %v", err)
 					}
 				}
 			}
@@ -555,7 +552,7 @@ type session struct {
 	// apply to a stream — the connection IS the address binding, so an address
 	// change breaks it and the answer is to reconnect.
 	stream *ike.TCPStream
-	logger *log.Logger
+	logger *vlog.Logger
 
 	roamMu  sync.Mutex  // serializes Roam
 	roaming atomic.Bool // a socket swap is in progress
@@ -755,7 +752,7 @@ func (s *session) rekeyChild() error {
 	// unregisters by identity — both tunnels claim the same 0.0.0.0/0 route, and
 	// the successor already owns it — so this drops only the old inbound SPI.
 	if err := s.ike.DeleteChildSA(ctx, oldInSPI); err != nil {
-		s.logger.Printf("ikev2: delete of rekeyed-out Child SA failed: %v", err)
+		s.logger.Warnf("ikev2: delete of rekeyed-out Child SA failed: %v", err)
 	}
 	s.pump.RemoveTunnel(oldTunnel)
 	s.logger.Printf("ikev2: Child SA rekeyed (in=%#x out=%#x)", newRes.InboundSPI, newRes.OutboundSPI)

@@ -3,10 +3,10 @@ package ike
 import (
 	"bytes"
 	"context"
-	"io"
-	"log"
 	"testing"
 	"time"
+
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // TestClientRekeyChild is the rekey proof: a connected client negotiates a fresh
@@ -21,7 +21,7 @@ func TestClientRekeyChild(t *testing.T) {
 		ServerHost: "127.0.0.1", ServerPort: p500, NATTPort: p4500,
 		PSK:     []byte("mobike-psk"),
 		LocalID: FQDNIdentity("client.example"),
-		Logger:  log.New(io.Discard, "", 0),
+		Logger:  vlog.Discard(),
 	})
 	res, err := client.Connect()
 	if err != nil {
@@ -95,7 +95,7 @@ func TestClientRekeyIKE(t *testing.T) {
 		ServerHost: "127.0.0.1", ServerPort: p500, NATTPort: p4500,
 		PSK:     []byte("mobike-psk"),
 		LocalID: FQDNIdentity("client.example"),
-		Logger:  log.New(io.Discard, "", 0),
+		Logger:  vlog.Discard(),
 	})
 	res, err := client.Connect()
 	if err != nil {
@@ -171,7 +171,7 @@ func TestRekeyIKERequiresAttach(t *testing.T) {
 		ServerHost: "127.0.0.1", ServerPort: 500,
 		PSK:     []byte("x"),
 		LocalID: FQDNIdentity("client.example"),
-		Logger:  log.New(io.Discard, "", 0),
+		Logger:  vlog.Discard(),
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -187,7 +187,7 @@ func TestRekeyChildRequiresAttach(t *testing.T) {
 		ServerHost: "127.0.0.1", ServerPort: 500,
 		PSK:     []byte("x"),
 		LocalID: FQDNIdentity("client.example"),
-		Logger:  log.New(io.Discard, "", 0),
+		Logger:  vlog.Discard(),
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()

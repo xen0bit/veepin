@@ -11,7 +11,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"strconv"
 	"sync"
@@ -24,6 +24,7 @@ import (
 	"github.com/xen0bit/veepin/internal/mschap"
 	ppp "github.com/xen0bit/veepin/internal/ppp"
 	"github.com/xen0bit/veepin/internal/sstp/wire"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 func init() { client.Register("sstp", parseOptions) }
@@ -51,7 +52,7 @@ type Config struct {
 	// cannot complete the handshake even without a trusted certificate. Needed for
 	// the self-signed certificates most SSTP servers ship with.
 	SkipVerify bool
-	Logger     *log.Logger
+	Logger     *slog.Logger
 }
 
 func (c *Config) validate() error {
@@ -98,9 +99,9 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	if err := cfg.validate(); err != nil {
 		return nil, client.Result{}, err
 	}
-	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(debuglog.Writer(), "", log.LstdFlags|log.Lmicroseconds)
+	logger := vlog.From(cfg.Logger)
+	if cfg.Logger == nil {
+		logger = vlog.Text(debuglog.Writer())
 	}
 
 	addr := net.JoinHostPort(cfg.Server, strconv.Itoa(cfg.Port))
@@ -205,7 +206,7 @@ type session struct {
 	tlsConn     *tls.Conn
 	ppp         *ppp.Session
 	tun         atomic.Pointer[dataplane.TUN]
-	logger      *log.Logger
+	logger      *vlog.Logger
 	cfg         Config
 	serverNonce []byte
 	debug       bool

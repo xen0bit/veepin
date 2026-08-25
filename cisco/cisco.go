@@ -16,8 +16,7 @@ package cisco
 import (
 	"context"
 	"fmt"
-	"io"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"strconv"
@@ -25,6 +24,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	icisco "github.com/xen0bit/veepin/internal/cisco"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 func init() { client.Register("cisco", parseOptions) }
@@ -56,7 +56,7 @@ type Config struct {
 	// Shape enables outbound traffic shaping: how much padded output each inner
 	// flow is given before shaping stops for that flow. Zero disables it.
 	Shape  int
-	Logger *log.Logger
+	Logger *slog.Logger
 }
 
 // Session is a running Cisco IPsec client.
@@ -71,10 +71,7 @@ func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
 	if cfg.Server == "" || cfg.Group == "" || len(cfg.GroupPSK) == 0 || cfg.Username == "" {
 		return nil, client.Result{}, fmt.Errorf("cisco: server, group, group-psk and user are required")
 	}
-	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
+	logger := vlog.From(cfg.Logger)
 	port := cfg.Port
 	if port == 0 {
 		port = icisco.DefaultIKEPort
@@ -226,7 +223,7 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 		Username: opts[OptUser],
 		Password: opts[OptPassword],
 		TUNName:  opts[OptTUN],
-		Logger:   log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds),
+		Logger:   slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
 	}
 	if cfg.Server == "" {
 		return nil, fmt.Errorf("cisco: server is required")

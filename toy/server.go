@@ -11,7 +11,7 @@ package toy
 import (
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/netip"
 	"os"
@@ -22,6 +22,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	itoy "github.com/xen0bit/veepin/internal/toy"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 func init() {
@@ -67,7 +68,7 @@ type ServerConfig struct {
 	// TUNName is the interface to open.
 	TUNName string
 	// Logger receives progress messages.
-	Logger *log.Logger
+	Logger *slog.Logger
 }
 
 // Server is a TOY server.
@@ -154,7 +155,7 @@ func (s *Server) ListenAndServe() error {
 		Pool:   s.pool,
 		DNS:    s.cfg.DNS,
 		MTU:    uint16(mtu),
-		Logger: s.cfg.Logger,
+		Logger: vlog.From(s.cfg.Logger),
 	})
 	if err != nil {
 		_ = conn.Close()
@@ -256,7 +257,7 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 		Pool:     opts[OptServerPool],
 		Users:    map[string]string{user: secret},
 		TUNName:  opts[OptServerTUN],
-		Logger:   log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds),
+		Logger:   slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
 	}
 	if cfg.Pool == "" {
 		cfg.Pool = "10.9.0.0/24"

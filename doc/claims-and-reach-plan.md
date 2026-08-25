@@ -43,7 +43,8 @@ what each row cost against what it was predicted to cost.
 
 What remains, and why each stopped where it did:
 
-- **Item 12 (`slog`)** is unstarted, and is the lowest-value row left.
+- **Item 12 (`slog`)** has landed, and cost about a fifth of what this page
+  estimated — see [what it cost](#what-it-actually-cost-and-what-it-found-1).
 - **H4 (inner IPv6 beyond IKEv2)** did its two — WireGuard and OpenVPN, and
   AmneziaWG for free. The decision on the rest has since been made and written
   down: no campaign, MASQUE next because most of it is already written, and two
@@ -101,7 +102,7 @@ kernel does not produce the super-frame at all).
 |---|------|-------|------|---------|--------|
 | 10 | An abandoned listener leaks its pump goroutine and its TUN fd | **High** | Low | **Do** | ✅ landed (visibility half) |
 | 11 | No kill switch on macOS | Medium | **Medium** | Decided: **no** — see below | ✅ resolved |
-| 12 | `-log-level` gates the stream, not the call site | Low | Medium | Do last | ☐ |
+| 12 | `-log-level` gates the stream, not the call site | Low | Medium | Do last | ✅ landed |
 
 **If only three things happen: 1, 2 and 10.** One and two are a defect that
 every passing test agrees is fine; ten is a resource leak that compounds with
@@ -854,6 +855,42 @@ same window as anything in Part 1.
 If it happens, it happens as a mechanical pass with `slog.Logger` behind the
 same field name, one package per commit, with the `AllocsPerRun` guards run
 without `-race` after each.
+
+### What it actually cost, and what it found
+
+**A fifth of the estimate, because the premise was wrong.** "Several hundred
+call sites" is the right count — 482 — but they did not need rewriting. What the
+tree needs from a logger is a level, not attributes, and `internal/vlog` is
+`log/slog` with the `Printf` shape kept: every existing call compiles unchanged
+and becomes an Info line. Going straight to `*slog.Logger` would have meant
+`Info(fmt.Sprintf(...))` at all 482, which is worse code and a diff nobody could
+review. Wrapping costs one type, and the diff that changes *behaviour* is then
+only the lines that changed level — which is the diff worth reading.
+
+**The public surface is `*slog.Logger` even so.** Every facade's `Config.Logger`
+takes the standard-library type and wraps it internally, so nobody outside this
+module learns the wrapper. `dataplane` does the same, for the stronger reason
+that an internal type in an exported signature is one no external caller could
+satisfy at all.
+
+**The risk this page named was real, and is now pinned.** slog's attribute API
+allocates; the drop path on every data path logs through this. `logf` checks
+`Enabled` before it formats, a suppressed line costs 4.5ns and zero allocations,
+and `TestASuppressedLineAllocatesNothing` is what stops that ordering being
+tidied away.
+
+**The risk it did not name was bigger.** Twenty-eight interop cells assert
+substrings of veepin's own log output, the panel serves the stream as free text,
+and the runbooks quote lines from it. A `slog.TextHandler` renders
+`time=... level=INFO msg="..."` and would have broken all of them at once —
+silently, as lines that stopped matching. So the text format is a handler of our
+own that emits exactly what `log.LstdFlags|log.Lmicroseconds` did, with a test
+comparing it against `log.Logger` character class by character class.
+
+That is also why the reclassification rule is **never downward**: Info→Warn keeps
+a line visible at the default level, Info→Debug hides it from everyone who has
+not asked. Seventy-eight lines whose own text says "failed", "refusing",
+"rejected" or "dropped" moved up; nothing moved down.
 
 ---
 

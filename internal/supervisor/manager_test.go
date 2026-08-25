@@ -8,8 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -23,6 +21,7 @@ import (
 
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/internal/hostnet"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // fakeServer is an injectable client.Server for manager tests. It blocks in
@@ -1015,10 +1014,10 @@ func TestStatusOfUnknownListener(t *testing.T) {
 }
 
 // testLogger produces a discard logger for tests that do not care about output;
-// the manager accepts a *log.Logger so failing tests surface a real logger.
-func testLogger(t *testing.T) *log.Logger {
+// the manager accepts a *vlog.Logger so failing tests surface a real logger.
+func testLogger(t *testing.T) *vlog.Logger {
 	_ = t
-	return log.New(io.Discard, "", 0)
+	return vlog.Discard()
 }
 
 // TestPeersReturnsTheLiveGeneration's peers under lock, and a concurrent

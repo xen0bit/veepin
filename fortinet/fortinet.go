@@ -14,7 +14,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -26,6 +26,7 @@ import (
 	"github.com/xen0bit/veepin/dataplane"
 	ifortinet "github.com/xen0bit/veepin/internal/fortinet"
 	"github.com/xen0bit/veepin/internal/otp"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 func init() { client.Register("fortinet", parseOptions) }
@@ -75,7 +76,7 @@ type Config struct {
 	// a single Token would not.
 	TOTPSecret string
 	TUNName    string
-	Logger     *log.Logger
+	Logger     *slog.Logger
 }
 
 // Session is a running Fortinet client.
@@ -88,10 +89,7 @@ func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
 	if cfg.Server == "" || cfg.Username == "" {
 		return nil, client.Result{}, fmt.Errorf("fortinet: server and user are required")
 	}
-	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
+	logger := vlog.From(cfg.Logger)
 	port := cfg.Port
 	if port == 0 {
 		port = defaultPort
@@ -159,7 +157,7 @@ func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
 // secret generates a code whenever the gateway asks, a literal token answers
 // once, and neither means a challenge fails the login rather than hanging on a
 // prompt this client has no way to show.
-func tokenFunc(cfg Config, logger *log.Logger) (ifortinet.TokenFunc, error) {
+func tokenFunc(cfg Config, logger *vlog.Logger) (ifortinet.TokenFunc, error) {
 	if cfg.TOTPSecret != "" {
 		secret, err := otp.DecodeSecret(cfg.TOTPSecret)
 		if err != nil {
@@ -189,7 +187,7 @@ func tokenFunc(cfg Config, logger *log.Logger) (ifortinet.TokenFunc, error) {
 // the TLS carrier stays open underneath, so a UDP path that fails or later dies
 // costs nothing but the datagrams in flight.
 func dialDataPath(host, cookie string, fcfg ifortinet.Config, tlsConfig *tls.Config,
-	tun io.ReadWriteCloser, logger *log.Logger, wantDTLS bool,
+	tun io.ReadWriteCloser, logger *vlog.Logger, wantDTLS bool,
 ) (*ifortinet.Client, error) {
 	c, err := dialTLSPath(host, cookie, fcfg, tlsConfig, tun, logger)
 	if err != nil {
@@ -224,7 +222,7 @@ func dialDTLSChannel(host, cookie string, tlsConfig *tls.Config) (net.Conn, erro
 }
 
 func dialTLSPath(host, cookie string, fcfg ifortinet.Config, tlsConfig *tls.Config,
-	tun io.ReadWriteCloser, logger *log.Logger,
+	tun io.ReadWriteCloser, logger *vlog.Logger,
 ) (*ifortinet.Client, error) {
 	conn, err := tls.Dial("tcp", host, tlsConfig)
 	if err != nil {
@@ -298,7 +296,7 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 		Token:      opts[OptToken],
 		TOTPSecret: opts[OptTOTP],
 		TUNName:    opts[OptTUN],
-		Logger:     log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds),
+		Logger:     slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
 	}
 	if cfg.Server == "" {
 		return nil, fmt.Errorf("fortinet: server is required")

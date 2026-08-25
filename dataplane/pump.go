@@ -2,12 +2,14 @@ package dataplane
 
 import (
 	"encoding/binary"
-	"log"
+	"log/slog"
 	"net"
 	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // Tunnel is the data-path view of one established security association. A
@@ -132,7 +134,7 @@ type tunIO interface {
 // Pump moves packets between a TUN device and a set of tunnels.
 type Pump struct {
 	tun   tunIO
-	log   *log.Logger
+	log   *vlog.Logger
 	send  Sender
 	demux Demux
 
@@ -222,13 +224,16 @@ type gsoTUN interface {
 // NewPump creates a data-path pump over tun. send transmits encapsulated
 // packets to peers; demux extracts the tunnel key from inbound packets, and a
 // nil demux defaults to SPIDemux (ESP).
-func NewPump(tun tunIO, send Sender, demux Demux, logger *log.Logger) *Pump {
+func NewPump(tun tunIO, send Sender, demux Demux, logger *slog.Logger) *Pump {
 	if demux == nil {
 		demux = SPIDemux
 	}
 	p := &Pump{
-		tun:   tun,
-		log:   logger,
+		tun: tun,
+		// Wrapped here rather than taken as a vlog.Logger: dataplane is a
+		// public package, and an internal type in an exported signature is one
+		// no caller outside this module could satisfy.
+		log:   vlog.From(logger),
 		send:  send,
 		demux: demux,
 		byKey: make(map[uint32]bound),
@@ -404,7 +409,7 @@ func (p *Pump) HandleInbound(pkt []byte, from *net.UDPAddr) {
 	if _, err := p.writeTUN(inner); err != nil {
 		p.drops[DropTUNWrite].Add(1)
 		if p.log != nil {
-			p.log.Printf("dataplane: TUN write failed: %v", err)
+			p.log.Warnf("dataplane: TUN write failed: %v", err)
 		}
 	}
 }
@@ -443,7 +448,7 @@ func (p *Pump) handleInboundMulti(t MultiTunnel, c *TunnelCounters, pkt []byte) 
 	if err != nil {
 		p.drops[DropDecapFailed].Add(1)
 		if p.log != nil {
-			p.log.Printf("dataplane: aggregated decap failed: %v", err)
+			p.log.Warnf("dataplane: aggregated decap failed: %v", err)
 		}
 		return
 	}
@@ -460,7 +465,7 @@ func (p *Pump) handleInboundMulti(t MultiTunnel, c *TunnelCounters, pkt []byte) 
 		if _, err := p.writeTUN(inner); err != nil {
 			p.drops[DropTUNWrite].Add(1)
 			if p.log != nil {
-				p.log.Printf("dataplane: TUN write failed: %v", err)
+				p.log.Warnf("dataplane: TUN write failed: %v", err)
 			}
 			return
 		}
@@ -514,7 +519,7 @@ func (p *Pump) decapInbound(pkt []byte, from *net.UDPAddr) ([]byte, *TunnelCount
 	if err != nil {
 		p.drops[DropDecapFailed].Add(1)
 		if p.log != nil {
-			p.log.Printf("dataplane: decap key %#x failed: %v", key, err)
+			p.log.Warnf("dataplane: decap key %#x failed: %v", key, err)
 		}
 		return nil, nil, false
 	}
@@ -552,7 +557,7 @@ func (p *Pump) Run() {
 				return
 			}
 			if p.log != nil {
-				p.log.Printf("dataplane: TUN read error: %v", err)
+				p.log.Warnf("dataplane: TUN read error: %v", err)
 			}
 			return
 		}
@@ -625,7 +630,7 @@ func (p *Pump) routeOutbound(pkt []byte) {
 	if err != nil {
 		p.drops[DropEncapFailed].Add(1)
 		if p.log != nil {
-			p.log.Printf("dataplane: encap failed: %v", err)
+			p.log.Warnf("dataplane: encap failed: %v", err)
 		}
 		return
 	}

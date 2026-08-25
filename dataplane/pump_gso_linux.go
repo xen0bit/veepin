@@ -27,7 +27,7 @@ func (p *Pump) runVnet() {
 				return
 			}
 			if p.log != nil {
-				p.log.Printf("dataplane: TUN read error: %v", err)
+				p.log.Warnf("dataplane: TUN read error: %v", err)
 			}
 			return
 		}
@@ -49,7 +49,7 @@ func (p *Pump) runVnet() {
 			nseg, err := segmentTSO4(pkt, hdr, &segs)
 			if err != nil {
 				if p.log != nil {
-					p.log.Printf("dataplane: dropping TSO super-frame: %v", err)
+					p.log.Warnf("dataplane: dropping TSO super-frame: %v", err)
 				}
 				continue
 			}
@@ -58,7 +58,7 @@ func (p *Pump) runVnet() {
 			// Not negotiated in TUNSETOFFLOAD (TSO6, USO, ECN), so the kernel
 			// should never send it; drop rather than corrupt.
 			if p.log != nil {
-				p.log.Printf("dataplane: dropping unnegotiated GSO type %#x", hdr.gsoType)
+				p.log.Warnf("dataplane: dropping unnegotiated GSO type %#x", hdr.gsoType)
 			}
 		}
 	}
@@ -113,7 +113,7 @@ func (p *Pump) sendSegments(segs [][]byte, outs [][]byte) [][]byte {
 		if err != nil {
 			p.drops[DropEncapFailed].Add(1)
 			if p.log != nil {
-				p.log.Printf("dataplane: encap failed: %v", err)
+				p.log.Warnf("dataplane: encap failed: %v", err)
 			}
 			continue
 		}

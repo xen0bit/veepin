@@ -50,7 +50,7 @@ func (s *Server) handleSecured(pkt []byte, hdr payload.Header, remote *net.UDPAd
 		}
 		fragNum, total, fi, chunk, derr := decryptSKF(pkt, *skfPay, sa.Suite, sa.Keys, sa.dirForInbound())
 		if derr != nil {
-			s.log.Printf("ikev2: %s from %s SKF decrypt failed: %v", ex, remote, derr)
+			s.log.Warnf("ikev2: %s from %s SKF decrypt failed: %v", ex, remote, derr)
 			return
 		}
 		reasm, rfi, complete, rerr := sa.fragReasm.add(hdr.MessageID, fragNum, total, fi, chunk)
@@ -70,7 +70,7 @@ func (s *Server) handleSecured(pkt []byte, hdr payload.Header, remote *net.UDPAd
 		}
 		fi, in, derr := decryptSK(pkt, hdr, *skPay, sa.Suite, sa.Keys, sa.dirForInbound())
 		if derr != nil {
-			s.log.Printf("ikev2: %s from %s decrypt failed: %v", ex, remote, derr)
+			s.log.Warnf("ikev2: %s from %s decrypt failed: %v", ex, remote, derr)
 			return
 		}
 		firstInner, inner = fi, in

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"log"
 	"log/slog"
 	"strings"
 	"testing"
@@ -67,10 +68,10 @@ func TestJSONFormatEmitsOneRecordPerLine(t *testing.T) {
 	}
 }
 
-// Above info the informational stream goes nowhere. This is the whole of what
-// the level can mean while the tree logs through *log.Logger, and it is honest
-// because a fatal error returns to main and reaches stderr through run(),
-// never through this logger.
+// Above info the informational stream goes nowhere -- and now only the
+// informational stream does. TestTheLevelFiltersPerLineNotPerStream below is
+// the other half, and it is the one that would have failed before internal/vlog
+// existed.
 func TestAboveInfoTheInformationalStreamIsSuppressed(t *testing.T) {
 	for _, level := range []string{"warn", "error"} {
 		t.Run(level, func(t *testing.T) {
@@ -180,3 +181,90 @@ func TestParseLevelAcceptsTheUsualSpellings(t *testing.T) {
 		}
 	}
 }
+
+// TestTheLevelFiltersPerLineNotPerStream is what item 12 of the claims-and-reach
+// plan was about, and it is the assertion that says the fix landed.
+//
+// Before internal/vlog the tree logged through *log.Logger, which has no
+// per-call level: -log-level=warn could only point the whole logger at
+// io.Discard, so a protocol reporting a real problem was suppressed along with
+// the chatter. Now the level is chosen at the call site and warn means what it
+// says.
+func TestTheLevelFiltersPerLineNotPerStream(t *testing.T) {
+	fs := newTestFlagSet()
+	l := bindLogFlags(fs)
+	if err := fs.Parse([]string{"-log-level", "warn"}); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	logger, err := l.loggerTo(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	logger.Printf("connected on tun0")
+	if buf.Len() != 0 {
+		t.Errorf("-log-level=warn printed an informational line: %q", buf.String())
+	}
+
+	logger.Warnf("peer %s rejected our proposal", "198.51.100.7")
+	if !strings.Contains(buf.String(), "rejected our proposal") {
+		t.Errorf("-log-level=warn dropped a warning too (%q); the level is still a gate on the "+
+			"whole stream rather than a filter within it", buf.String())
+	}
+
+	buf.Reset()
+	logger.Errorf("tunnel down: %v", "no route")
+	if !strings.Contains(buf.String(), "tunnel down") {
+		t.Errorf("-log-level=warn dropped an error: %q", buf.String())
+	}
+}
+
+// TestTheTextLineIsByteForByteWhatLogPackagePrinted is the guard on the format
+// itself, and it is not a stylistic preference.
+//
+// Twenty-eight interop cells assert substrings of veepin's own log output, the
+// management panel serves the stream to a browser as free text, and every
+// runbook in doc/usage quotes lines from it. A slog.TextHandler would render
+// `time=... level=INFO msg="connected on tun0"` -- quoting the message and
+// moving the timestamp -- and every one of those would break at once, quietly,
+// as a line that stopped matching rather than a test that failed here.
+func TestTheTextLineIsByteForByteWhatLogPackagePrinted(t *testing.T) {
+	var ours bytes.Buffer
+	fs := newTestFlagSet()
+	l := bindLogFlags(fs)
+	if err := fs.Parse(nil); err != nil {
+		t.Fatal(err)
+	}
+	logger, err := l.loggerTo(&ours)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var theirs bytes.Buffer
+	stdlib := log.New(&theirs, "", log.LstdFlags|log.Lmicroseconds)
+
+	const msg = "ikev2: client 10.0.0.2 up, assigned 10.0.0.2 (peer-id 3)"
+	logger.Printf("%s", msg)
+	stdlib.Printf("%s", msg)
+
+	// The timestamps differ in their last digits, so compare the shape: same
+	// length, same field layout, same message tail.
+	got, want := ours.String(), theirs.String()
+	if len(got) != len(want) {
+		t.Fatalf("line length %d, want %d\n got: %q\nwant: %q", len(got), len(want), got, want)
+	}
+	gotStamp, wantStamp := got[:len("2006/01/02 15:04:05.000000")], want[:len("2006/01/02 15:04:05.000000")]
+	for i := range gotStamp {
+		gc, wc := gotStamp[i], wantStamp[i]
+		sameShape := gc == wc || (isDigit(gc) && isDigit(wc))
+		if !sameShape {
+			t.Fatalf("timestamp differs at %d: got %q, want %q", i, got, want)
+		}
+	}
+	if got[len(gotStamp):] != want[len(wantStamp):] {
+		t.Errorf("after the timestamp: got %q, want %q", got[len(gotStamp):], want[len(wantStamp):])
+	}
+}
+
+func isDigit(b byte) bool { return b >= '0' && b <= '9' }

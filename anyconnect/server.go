@@ -3,8 +3,7 @@ package anyconnect
 import (
 	"crypto/tls"
 	"fmt"
-	"io"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"strconv"
@@ -14,6 +13,7 @@ import (
 	"github.com/xen0bit/veepin/dataplane"
 	engine "github.com/xen0bit/veepin/internal/anyconnect"
 	"github.com/xen0bit/veepin/internal/userdb"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 func init() {
@@ -86,7 +86,7 @@ type ServerConfig struct {
 	// as every IP stack must. dataplane.DefaultShapeBytes is a reasonable value.
 	Shape int
 
-	Logger *log.Logger
+	Logger *slog.Logger
 }
 
 func (c *ServerConfig) validate() error {
@@ -108,7 +108,7 @@ type Server struct {
 	pool     *dataplane.AddrPool
 	gateway  net.IP
 	listener net.Listener
-	logger   *log.Logger
+	logger   *vlog.Logger
 	gate     *dataplane.Gate
 
 	closeOnce sync.Once
@@ -120,10 +120,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
-	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
+	logger := vlog.From(cfg.Logger)
 	cert, err := tls.X509KeyPair(cfg.Cert, cfg.Key)
 	if err != nil {
 		return nil, fmt.Errorf("anyconnect: server keypair: %w", err)
@@ -195,7 +192,7 @@ func (s *Server) ListenAndServe() error {
 		// The XML credential exchange and CONNECT that follow are performed for
 		// an unauthenticated peer, so the bound belongs at accept.
 		if r := s.gate.Admit(conn.RemoteAddr()); r != dataplane.Admitted {
-			s.logger.Printf("anyconnect: refusing connection from %s: %v", conn.RemoteAddr(), r)
+			s.logger.Warnf("anyconnect: refusing connection from %s: %v", conn.RemoteAddr(), r)
 			_ = conn.Close()
 			continue
 		}
@@ -250,7 +247,7 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 		DNS:      parseIPList(opts[OptServerDNS]),
 		TUNName:  opts[OptServerTUN],
 		NoDTLS:   opts[OptServerNoDTLS] == "true",
-		Logger:   log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds),
+		Logger:   slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
 	}
 	if path := opts[OptServerCert]; path != "" {
 		pem, err := os.ReadFile(path)

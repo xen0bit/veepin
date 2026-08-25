@@ -14,7 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"strconv"
@@ -25,6 +25,7 @@ import (
 	"github.com/xen0bit/veepin/dataplane"
 	igp "github.com/xen0bit/veepin/internal/gp"
 	"github.com/xen0bit/veepin/internal/userdb"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 func init() {
@@ -99,7 +100,7 @@ type ServerConfig struct {
 	// dataplane.DefaultShapeBytes is a reasonable value.
 	Shape int
 
-	Logger *log.Logger
+	Logger *slog.Logger
 }
 
 // Server is a GlobalProtect gateway.
@@ -154,7 +155,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		Domain:   cfg.Domain,
 		NoESP:    cfg.NoESP,
 		ESPPort:  cfg.ESPPort,
-		Logger:   cfg.Logger,
+		Logger:   vlog.From(cfg.Logger),
 		Shape:    cfg.Shape,
 		MTU:      client.DefaultTunnelMTU,
 	}, tun)
@@ -287,7 +288,7 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 		Pool:     opts[OptServerPool],
 		NoESP:    opts[OptServerNoESP] == "true",
 		TUNName:  opts[OptServerTUN],
-		Logger:   log.New(logDest(), "", log.LstdFlags|log.Lmicroseconds),
+		Logger:   vlog.SlogText(logDest()),
 	}
 	user, pass := opts[OptServerUser], opts[OptServerPass]
 	if user != "" && pass == "" {

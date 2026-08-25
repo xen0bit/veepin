@@ -3,14 +3,13 @@ package ike
 import (
 	"bytes"
 	"crypto/mlkem"
-	"io"
-	"log"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/xen0bit/veepin/internal/ikev2/payload"
 	"github.com/xen0bit/veepin/internal/ikev2/transform"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // TestIntermediateNotifyIsTheIANAValue pins INTERMEDIATE_EXCHANGE_SUPPORTED to
@@ -249,7 +248,7 @@ func TestPostQuantumHandshakeCompletes(t *testing.T) {
 		PSK:         []byte("test-psk"),
 		LocalID:     FQDNIdentity("client.example"),
 		PostQuantum: true,
-		Logger:      log.New(io.Discard, "", 0),
+		Logger:      vlog.Discard(),
 	})
 	res, err := client.Connect()
 	if err != nil {
@@ -297,7 +296,7 @@ func TestPostQuantumClientFallsBackAgainstAClassicalServer(t *testing.T) {
 		ServerHost: "127.0.0.1", ServerPort: p500, NATTPort: p4500,
 		PSK:     []byte("test-psk"),
 		LocalID: FQDNIdentity("client.example"),
-		Logger:  log.New(io.Discard, "", 0),
+		Logger:  vlog.Discard(),
 	})
 	if _, err := client.Connect(); err != nil {
 		t.Fatalf("classical connect: %v", err)

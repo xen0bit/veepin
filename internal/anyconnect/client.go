@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"sync"
@@ -16,6 +15,7 @@ import (
 	"time"
 
 	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // tunIO is the userspace TUN the data path reads IP from and writes IP to.
@@ -57,7 +57,7 @@ type ClientConfig struct {
 	BaseMTU int
 	// NoDTLS keeps the tunnel on TLS even when the server offers a UDP channel.
 	NoDTLS bool
-	Logger *log.Logger
+	Logger *vlog.Logger
 }
 
 // Client is a running AnyConnect tunnel over one TLS connection: it
@@ -68,7 +68,7 @@ type Client struct {
 	conn   net.Conn
 	br     *bufio.Reader
 	tun    tunIO
-	logger *log.Logger
+	logger *vlog.Logger
 
 	// writeMu serializes writes: the TUN pump, the keepalive timer and DPD
 	// replies all send on the same connection.
@@ -102,9 +102,6 @@ type Client struct {
 // HTTP exchange on top of it.
 func NewClient(conn net.Conn, tun tunIO, cfg ClientConfig) *Client {
 	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
 	return &Client{
 		cfg:    cfg,
 		conn:   conn,
@@ -398,7 +395,7 @@ func (c *Client) tunLoop() {
 				continue
 			}
 			if ch.up.Swap(false) {
-				c.logger.Printf("anyconnect: DTLS send failed, falling back to TLS")
+				c.logger.Warnf("anyconnect: DTLS send failed, falling back to TLS")
 				c.dtls.CompareAndSwap(ch, nil)
 				ch.close()
 			}
@@ -416,7 +413,7 @@ func (c *Client) tunLoop() {
 // trickle cannot flood the log.
 func (c *Client) noteDrop(err error) {
 	if c.drops.Add(1) == 1 {
-		c.logger.Printf("anyconnect: dropping inbound packet: %v "+
+		c.logger.Warnf("anyconnect: dropping inbound packet: %v "+
 			"(expected until the interface is configured)", err)
 	}
 }

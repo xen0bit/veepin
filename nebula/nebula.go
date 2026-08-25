@@ -47,8 +47,7 @@ import (
 	"crypto/ecdh"
 	"errors"
 	"fmt"
-	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/netip"
 	"os"
@@ -59,6 +58,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	inebula "github.com/xen0bit/veepin/internal/nebula"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 func init() { client.Register("nebula", parseOptions) }
@@ -154,7 +154,7 @@ type Config struct {
 	Shape int
 
 	// Logger receives operational messages. Nil discards them.
-	Logger *log.Logger
+	Logger *slog.Logger
 }
 
 // Session is a running nebula host.
@@ -319,11 +319,11 @@ func loadIdentity(cfg Config) (*inebula.Identity, *inebula.CAPool, error) {
 	return identity, pool, nil
 }
 
-func loggerOrDiscard(l *log.Logger) inebula.Logger {
+func loggerOrDiscard(l *slog.Logger) inebula.Logger {
 	if l == nil {
-		return log.New(io.Discard, "", 0)
+		return vlog.Discard()
 	}
-	return l
+	return vlog.From(l)
 }
 
 // dialer adapts Config to the client registry.
@@ -352,7 +352,7 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 		// packets being dropped. None of that is visible any other way -- there
 		// is no connect/disconnect moment to infer it from -- so a host dialed
 		// through the registry logs to stdout, as the other protocols here do.
-		Logger: log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds),
+		Logger: slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
 	}
 
 	if v := opts[OptMTU]; v != "" {

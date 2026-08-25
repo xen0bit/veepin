@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/netip"
 	"strconv"
@@ -18,6 +17,7 @@ import (
 	"github.com/xen0bit/veepin/internal/openvpn/control"
 	"github.com/xen0bit/veepin/internal/openvpn/data"
 	"github.com/xen0bit/veepin/internal/openvpn/wire"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // muxer owns the single UDP socket and splits inbound datagrams by opcode:
@@ -27,7 +27,7 @@ import (
 type muxer struct {
 	conn    *net.UDPConn
 	control *control.Channel
-	logger  *log.Logger
+	logger  *vlog.Logger
 
 	mu   sync.Mutex
 	pump *dataplane.Pump // nil until the data path is established
@@ -160,7 +160,7 @@ type session struct {
 	pump   *dataplane.Pump
 	tunnel *tunnel
 	conn   *net.UDPConn
-	logger *log.Logger
+	logger *vlog.Logger
 
 	// deadline is how long inbound silence may last before Probe calls the peer
 	// gone, derived from what the server promised in its PUSH_REPLY. Zero means

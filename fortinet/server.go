@@ -13,7 +13,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
@@ -25,6 +25,7 @@ import (
 	ifortinet "github.com/xen0bit/veepin/internal/fortinet"
 	"github.com/xen0bit/veepin/internal/otp"
 	"github.com/xen0bit/veepin/internal/userdb"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 func init() {
@@ -94,7 +95,7 @@ type ServerConfig struct {
 	// dataplane.DefaultShapeBytes is a reasonable value.
 	Shape int
 
-	Logger *log.Logger
+	Logger *slog.Logger
 }
 
 // Server is a Fortinet SSL VPN server.
@@ -155,7 +156,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		Pool:        pool,
 		ServerIP:    gateway,
 		DNS:         cfg.DNS,
-		Logger:      cfg.Logger,
+		Logger:      vlog.From(cfg.Logger),
 		TOTPSecrets: cfg.TOTPSecrets,
 		Shape:       cfg.Shape,
 		MTU:         client.DefaultTunnelMTU,
@@ -167,7 +168,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		if _, ok := cert.PrivateKey.(*ecdsa.PrivateKey); ok {
 			engineCfg.Certificate = &cert
 		} else if cfg.Logger != nil {
-			cfg.Logger.Printf("fortinet: server key is not ECDSA; the DTLS data channel is disabled")
+			vlog.From(cfg.Logger).Printf("fortinet: server key is not ECDSA; the DTLS data channel is disabled")
 		}
 	}
 	engine, err := ifortinet.NewServer(engineCfg, tun)
@@ -305,7 +306,7 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 		Pool:     opts[OptServerPool],
 		NoDTLS:   opts[OptServerNoDTLS] == "true",
 		TUNName:  opts[OptServerTUN],
-		Logger:   log.New(logDest(), "", log.LstdFlags|log.Lmicroseconds),
+		Logger:   vlog.SlogText(logDest()),
 	}
 	user, pass := opts[OptServerUser], opts[OptServerPass]
 	if user != "" && pass == "" {

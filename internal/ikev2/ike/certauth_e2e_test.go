@@ -3,11 +3,11 @@ package ike
 import (
 	"crypto"
 	"crypto/elliptic"
-	"io"
-	"log"
 	"net"
 	"testing"
 	"time"
+
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // certAuthServer starts a server configured for mutual certificate
@@ -25,7 +25,7 @@ func certAuthServer(t *testing.T, ca *testCA, serverKey crypto.Signer) (p500, p4
 		ServerCert: ca.issueTLS(t, "vpn.example", serverKey),
 		ClientCAs:  ca.pool,
 		PublicIP:   net.ParseIP("127.0.0.1"),
-		Logger:     log.New(io.Discard, "", 0),
+		Logger:     vlog.Discard(),
 		AssignAddr: func(AddressRequest) (Assignment, error) {
 			return Assignment{IP4: net.IPv4(10, 9, 9, 9), Netmask: net.IPv4(255, 255, 255, 0)}, nil
 		},
@@ -68,7 +68,7 @@ func TestCertAuthHandshake(t *testing.T) {
 				RemoteID:   ptrID(FQDNIdentity("vpn.example")),
 				ClientCert: ca.issueTLS(t, "client.example", tc.clientKey),
 				CARoots:    ca.pool,
-				Logger:     log.New(io.Discard, "", 0),
+				Logger:     vlog.Discard(),
 			})
 			res, err := client.Connect()
 			if err != nil {
@@ -106,7 +106,7 @@ func TestCertAuthUntrustedClientRejected(t *testing.T) {
 		RemoteID:   ptrID(FQDNIdentity("vpn.example")),
 		ClientCert: strangerCA.issueTLS(t, "client.example", ecKey(t, elliptic.P256())),
 		CARoots:    serverCA.pool,
-		Logger:     log.New(io.Discard, "", 0),
+		Logger:     vlog.Discard(),
 	})
 	if _, err := client.Connect(); err == nil {
 		client.Close()
@@ -127,7 +127,7 @@ func TestCertAuthWrongServerIDRejected(t *testing.T) {
 		RemoteID:   ptrID(FQDNIdentity("not-the-server.example")),
 		ClientCert: ca.issueTLS(t, "client.example", ecKey(t, elliptic.P256())),
 		CARoots:    ca.pool,
-		Logger:     log.New(io.Discard, "", 0),
+		Logger:     vlog.Discard(),
 	})
 	if _, err := client.Connect(); err == nil {
 		client.Close()

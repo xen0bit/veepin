@@ -12,7 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"strconv"
@@ -23,6 +23,7 @@ import (
 	"github.com/xen0bit/veepin/dataplane"
 	ipulse "github.com/xen0bit/veepin/internal/pulse"
 	"github.com/xen0bit/veepin/internal/userdb"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 func init() {
@@ -97,7 +98,7 @@ type ServerConfig struct {
 	// which every IP stack trims by the packet's own header length.
 	Shape int
 
-	Logger *log.Logger
+	Logger *slog.Logger
 }
 
 // Server is an Ivanti Connect Secure gateway.
@@ -160,7 +161,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		ESPPort:  cfg.ESPPort,
 		Shape:    cfg.Shape,
 		MTU:      client.DefaultTunnelMTU,
-		Logger:   cfg.Logger,
+		Logger:   vlog.From(cfg.Logger),
 	}, tun)
 	if err != nil {
 		_ = tun.Close()
@@ -290,7 +291,7 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 		Domain:   opts[OptServerDomain],
 		NoESP:    opts[OptServerNoESP] == "true",
 		TUNName:  opts[OptServerTUN],
-		Logger:   log.New(logDest(), "", log.LstdFlags|log.Lmicroseconds),
+		Logger:   vlog.SlogText(logDest()),
 	}
 	user, pass := opts[OptServerUser], opts[OptServerPass]
 	if user != "" && pass == "" {

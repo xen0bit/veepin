@@ -1,7 +1,6 @@
 package openvpn
 
 import (
-	"log"
 	"net"
 	"net/netip"
 	"sync"
@@ -12,6 +11,7 @@ import (
 	"github.com/xen0bit/veepin/internal/openvpn/control"
 	"github.com/xen0bit/veepin/internal/openvpn/data"
 	"github.com/xen0bit/veepin/internal/openvpn/keys"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // discardTUN is a tunIO that answers the pump's Read forever and records what
@@ -57,11 +57,11 @@ func testServer(t *testing.T, cidr string) (*Server, *discardTUN) {
 	s := &Server{
 		pool:    pool,
 		gateway: gw,
-		logger:  log.New(&testWriter{t}, "", 0),
+		logger:  vlog.Plain(&testWriter{t}),
 		clients: make(map[string]*serverClient),
 		closed:  make(chan struct{}),
 	}
-	s.pump = dataplane.NewPump(tun, func([]byte, *net.UDPAddr) {}, serverDataDemux, s.logger)
+	s.pump = dataplane.NewPump(tun, func([]byte, *net.UDPAddr) {}, serverDataDemux, s.logger.Slog())
 	t.Cleanup(func() { close(tun.block) })
 	return s, tun
 }

@@ -1,13 +1,13 @@
 package l2tpv3
 
 import (
-	"log"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // The L2TPv3 data path.
@@ -47,7 +47,7 @@ type tapIO interface {
 // sessions.
 type Pump struct {
 	tap    tapIO
-	log    *log.Logger
+	log    *vlog.Logger
 	send   Sender
 	shaper *dataplane.Shaper
 	// frameMTU is the largest frame that fits the path, Ethernet header
@@ -75,7 +75,7 @@ type Pump struct {
 }
 
 // NewPump creates a pump for a static L2TPv3 Ethernet pseudowire.
-func NewPump(tap tapIO, send Sender, cfg *SessionConfig, logger *log.Logger) *Pump {
+func NewPump(tap tapIO, send Sender, cfg *SessionConfig, logger *vlog.Logger) *Pump {
 	p := &Pump{
 		tap:    tap,
 		log:    logger,

@@ -14,11 +14,11 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"net/netip"
 	"sync"
 
 	"github.com/xen0bit/veepin/internal/masque/http3"
+	"github.com/xen0bit/veepin/internal/vlog"
 	"golang.org/x/net/quic"
 )
 
@@ -40,7 +40,7 @@ type ClientConfig struct {
 	// host, which it may use to select a tunnel endpoint.
 	Authority string
 	// Logger receives progress messages; nil discards them.
-	Logger *log.Logger
+	Logger *vlog.Logger
 }
 
 // Client is an established CONNECT-IP tunnel.
@@ -48,7 +48,7 @@ type Client struct {
 	h3  *http3.Conn
 	rs  *http3.RequestStream
 	tun tunDevice
-	log *log.Logger
+	log *vlog.Logger
 
 	assigned netip.Prefix
 	routes   []RouteEntry
@@ -133,9 +133,9 @@ func readAssignment(rs *http3.RequestStream) (netip.Prefix, []RouteEntry, error)
 }
 
 // StartClient runs the data path over an established tunnel and TUN.
-func StartClient(h3conn *http3.Conn, rs *http3.RequestStream, tun tunDevice, assigned netip.Prefix, routes []RouteEntry, logger *log.Logger) *Client {
+func StartClient(h3conn *http3.Conn, rs *http3.RequestStream, tun tunDevice, assigned netip.Prefix, routes []RouteEntry, logger *vlog.Logger) *Client {
 	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
+		logger = vlog.Discard()
 	}
 	c := &Client{
 		h3:       h3conn,

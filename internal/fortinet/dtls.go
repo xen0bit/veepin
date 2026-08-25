@@ -91,13 +91,13 @@ func (s *Server) serveDTLSPeer(p *udpmux.Conn) {
 		HandshakeTimeout: dtlsHandshakeTimeout,
 	})
 	if err != nil {
-		s.log.Printf("fortinet: DTLS handshake with %s failed: %v", p.RemoteAddr(), err)
+		s.log.Warnf("fortinet: DTLS handshake with %s failed: %v", p.RemoteAddr(), err)
 		mux.Drop(p)
 		return
 	}
 
 	if err := s.dtlsAuthorize(conn); err != nil {
-		s.log.Printf("fortinet: DTLS session from %s rejected: %v", p.RemoteAddr(), err)
+		s.log.Warnf("fortinet: DTLS session from %s rejected: %v", p.RemoteAddr(), err)
 		_ = conn.Close()
 		mux.Drop(p)
 	}

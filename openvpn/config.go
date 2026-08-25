@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -64,7 +64,7 @@ type Config struct {
 	Shape int
 
 	// Logger receives progress logs; nil discards them.
-	Logger *log.Logger
+	Logger *slog.Logger
 }
 
 // Option keys accepted by client.Dial(ctx, "openvpn", opts). OptConfig points at

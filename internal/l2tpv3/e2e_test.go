@@ -3,12 +3,12 @@ package l2tpv3
 import (
 	"bytes"
 	"io"
-	"log"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // fakeTAP is a tapIO backed by two channels, standing in for a TAP device: what
@@ -59,7 +59,7 @@ type pair struct {
 
 func newPair(t *testing.T, aCfg, bCfg *SessionConfig) *pair {
 	t.Helper()
-	logger := log.New(io.Discard, "", 0)
+	logger := vlog.Discard()
 	p := &pair{aTAP: newFakeTAP(), bTAP: newFakeTAP()}
 
 	addrA := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1701}

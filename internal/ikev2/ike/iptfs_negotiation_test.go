@@ -1,14 +1,13 @@
 package ike
 
 import (
-	"io"
-	"log"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/xen0bit/veepin/internal/ikev2/aggfrag"
 	"github.com/xen0bit/veepin/internal/ikev2/payload"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // The USE_AGGFRAG negotiation had no test at all, on either side, which is how
@@ -39,7 +38,7 @@ func startIPTFSServer(t *testing.T) (p500, p4500 int, srv *Server, childCh chan 
 		PSK:      []byte("test-psk"),
 		LocalID:  FQDNIdentity("vpn.example"),
 		PublicIP: net.ParseIP("127.0.0.1"),
-		Logger:   log.New(io.Discard, "", 0),
+		Logger:   vlog.Discard(),
 		IPTFS:    true,
 		AssignAddr: func(AddressRequest) (Assignment, error) {
 			return Assignment{
@@ -64,7 +63,7 @@ func iptfsClient(t *testing.T, p500, p4500 int) *Client {
 		PSK:     []byte("test-psk"),
 		LocalID: FQDNIdentity("client.example"),
 		IPTFS:   true,
-		Logger:  log.New(io.Discard, "", 0),
+		Logger:  vlog.Discard(),
 	})
 }
 
@@ -76,7 +75,7 @@ func iptfsClient(t *testing.T, p500, p4500 int) *Client {
 func TestUseAggFragNotifyCarriesOneOctetOfFlags(t *testing.T) {
 	c := NewClient(ClientConfig{
 		PSK: []byte("x"), LocalID: FQDNIdentity("client.example"),
-		IPTFS: true, Logger: log.New(io.Discard, "", 0),
+		IPTFS: true, Logger: vlog.Discard(),
 	})
 	b, _ := c.buildAuthInner(idPayloadBody(FQDNIdentity("client.example")), nil)
 
@@ -152,7 +151,7 @@ func TestAResponderThatNeverAskedIsNotGivenAggFrag(t *testing.T) {
 		ServerHost: "127.0.0.1", ServerPort: p500, NATTPort: p4500,
 		PSK:     []byte("test-psk"),
 		LocalID: FQDNIdentity("client.example"),
-		Logger:  log.New(io.Discard, "", 0),
+		Logger:  vlog.Discard(),
 		// IPTFS deliberately unset.
 	})
 	res, err := c.Connect()

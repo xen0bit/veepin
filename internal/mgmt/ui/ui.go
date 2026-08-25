@@ -18,10 +18,10 @@ import (
 	"embed"
 	"fmt"
 	"html/template"
-	"io"
-	"log"
 	"net/http"
 	"strings"
+
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 //go:embed templates/*
@@ -31,7 +31,7 @@ var templatesFS embed.FS
 type Handler struct {
 	token string
 	tmpl  *template.Template
-	log   *log.Logger
+	log   *vlog.Logger
 }
 
 // NewHandler parses the embedded templates once and stores the bearer token
@@ -43,13 +43,13 @@ type Handler struct {
 // render failure shows up in the panel's own /api/logs tail. It was an
 // fmt.Printf to stdout, which meant the panel's one failure mode was the one
 // thing the panel could not show you. A nil logger discards.
-func NewHandler(token string, logger *log.Logger) (*Handler, error) {
+func NewHandler(token string, logger *vlog.Logger) (*Handler, error) {
 	tmpl, err := template.ParseFS(templatesFS, "templates/*.html")
 	if err != nil {
 		return nil, fmt.Errorf("ui: parsing embedded templates: %w", err)
 	}
 	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
+		logger = vlog.Discard()
 	}
 	return &Handler{token: token, tmpl: tmpl, log: logger}, nil
 }
@@ -130,7 +130,7 @@ func (h *Handler) render(w http.ResponseWriter, name string, data ...pageData) {
 
 	var buf bytes.Buffer
 	if err := h.tmpl.ExecuteTemplate(&buf, name, ctx); err != nil {
-		h.log.Printf("ui: template %s failed: %v", name, err)
+		h.log.Warnf("ui: template %s failed: %v", name, err)
 		http.Error(w, "panel template failed to render; see the supervisor log",
 			http.StatusInternalServerError)
 		return

@@ -18,8 +18,7 @@ package l2tp
 import (
 	"context"
 	"fmt"
-	"io"
-	"log"
+	"log/slog"
 	"net"
 	"strconv"
 	"strings"
@@ -30,6 +29,7 @@ import (
 	"github.com/xen0bit/veepin/internal/ikev1"
 	engine "github.com/xen0bit/veepin/internal/l2tp"
 	"github.com/xen0bit/veepin/internal/ppp"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 func init() { client.Register("l2tp", parseOptions) }
@@ -64,7 +64,7 @@ type Config struct {
 	Password string // MS-CHAPv2 password (required)
 	DNS      []net.IP
 	TUNName  string
-	Logger   *log.Logger
+	Logger   *slog.Logger
 }
 
 func (c *Config) validate() error {
@@ -112,10 +112,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	if err := cfg.validate(); err != nil {
 		return nil, client.Result{}, err
 	}
-	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
+	logger := vlog.From(cfg.Logger)
 
 	port := cfg.Port
 	if port == 0 {

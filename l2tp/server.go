@@ -2,8 +2,7 @@ package l2tp
 
 import (
 	"fmt"
-	"io"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"strconv"
@@ -12,6 +11,7 @@ import (
 	"github.com/xen0bit/veepin/dataplane"
 	engine "github.com/xen0bit/veepin/internal/l2tp"
 	"github.com/xen0bit/veepin/internal/userdb"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 func init() {
@@ -83,7 +83,7 @@ type ServerConfig struct {
 	// dataplane.DefaultShapeBytes is a reasonable value.
 	Shape int
 
-	Logger *log.Logger
+	Logger *slog.Logger
 }
 
 // Server is a running L2TP/IPsec responder. It owns the TUN and the UDP socket
@@ -105,10 +105,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	case len(cfg.Users) == 0:
 		return nil, fmt.Errorf("l2tp: at least one user is required")
 	}
-	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
+	logger := vlog.From(cfg.Logger)
 	poolCIDR := cfg.Pool
 	if poolCIDR == "" {
 		poolCIDR = defaultPool
@@ -202,7 +199,7 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 		Pool:     opts[OptServerPool],
 		DNS:      parseIPList(opts[OptServerDNS]),
 		TUNName:  opts[OptServerTUN],
-		Logger:   log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds),
+		Logger:   slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
 	}
 	if cfg.ListenIP == "" {
 		cfg.ListenIP = "0.0.0.0"

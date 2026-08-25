@@ -3,8 +3,6 @@ package l2tp
 import (
 	"encoding/binary"
 	"errors"
-	"io"
-	"log"
 	"net"
 	"sync"
 
@@ -13,6 +11,7 @@ import (
 	"github.com/xen0bit/veepin/internal/ikev2/esp"
 	"github.com/xen0bit/veepin/internal/mschap"
 	"github.com/xen0bit/veepin/internal/ppp"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // ServerConfig configures the L2TP/IPsec server engine.
@@ -31,7 +30,7 @@ type ServerConfig struct {
 	// defaults to the PPP MRU this package negotiates.
 	Shape  int
 	MTU    int
-	Logger *log.Logger
+	Logger *vlog.Logger
 }
 
 // defaultShapeMTU is the inner size shaping pads towards when ServerConfig.MTU
@@ -57,7 +56,7 @@ type Server struct {
 	tun      tunIO
 	pool     *dataplane.AddrPool
 	gateway  net.IP
-	logger   *log.Logger
+	logger   *vlog.Logger
 	gate     *dataplane.Gate
 	// shaper pads outbound PPP frames so the ESP packet carrying them says less
 	// about the inner packet (dataplane/shape.go); nil disables shaping.
@@ -80,9 +79,6 @@ func NewServer(rawIKE, rawNATT *net.UDPConn, tun tunIO, cfg ServerConfig) *Serve
 	ikeConn := dataplane.NewPacketConn(rawIKE)
 	nattConn := dataplane.NewPacketConn(rawNATT)
 	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
 	var shaper *dataplane.Shaper
 	if cfg.Shape > 0 {
 		shaper = dataplane.NewShaper(dataplane.ShapeConfig{Bytes: cfg.Shape})
@@ -208,7 +204,7 @@ func (s *Server) peerFor(cookie [8]byte, addr *net.UDPAddr) *serverPeer {
 	}
 
 	if r := s.gate.Admit(addr); r != dataplane.Admitted {
-		s.logger.Printf("l2tp: refusing new peer %s: %v", addr, r)
+		s.logger.Warnf("l2tp: refusing new peer %s: %v", addr, r)
 		return nil
 	}
 

@@ -37,7 +37,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/netip"
 	"strconv"
@@ -51,6 +50,7 @@ import (
 	"github.com/xen0bit/veepin/internal/openvpn/keys"
 	"github.com/xen0bit/veepin/internal/openvpn/tlswrap"
 	"github.com/xen0bit/veepin/internal/openvpn/wire"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 func init() { client.Register("openvpn", parseOptions) }
@@ -119,10 +119,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	if err := cfg.validate(); err != nil {
 		return nil, client.Result{}, fmt.Errorf("openvpn: %w", err)
 	}
-	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
+	logger := vlog.From(cfg.Logger)
 
 	tlsCfg, err := clientTLSConfig(&cfg)
 	if err != nil {
@@ -185,7 +182,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 			logger.Printf("openvpn: send: %v", werr)
 		}
 	}
-	pump := dataplane.NewPump(tun, send, dataDemux, logger)
+	pump := dataplane.NewPump(tun, send, dataDemux, logger.Slog())
 	// GSO bursts flush with one sendmmsg on the connected socket. This
 	// BatchConn is the pump goroutine's own; the muxer read loop has another.
 	sendBC := dataplane.NewBatchConn(conn)
@@ -262,7 +259,7 @@ func verifyChainToCA(pool *x509.CertPool) func([][]byte, [][]*x509.Certificate) 
 // negotiate runs the post-connect handshake over the control channel: TLS, the
 // key_method_2 exchange, key derivation, and the config pull. It returns the
 // Result (minus the TUN name) and the built data tunnel.
-func negotiate(ctx context.Context, cfg *Config, ch *control.Channel, tlsCfg *tls.Config, endpoint *net.UDPAddr, logger *log.Logger) (client.Result, *tunnel, time.Duration, error) {
+func negotiate(ctx context.Context, cfg *Config, ch *control.Channel, tlsCfg *tls.Config, endpoint *net.UDPAddr, logger *vlog.Logger) (client.Result, *tunnel, time.Duration, error) {
 	tlsConn := tls.Client(ch, tlsCfg)
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
 		return client.Result{}, nil, 0, fmt.Errorf("tls handshake: %w", err)

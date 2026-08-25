@@ -18,8 +18,6 @@ package cisco
 import (
 	"errors"
 	"fmt"
-	"io"
-	"log"
 	"net"
 	"net/netip"
 	"sync"
@@ -27,6 +25,7 @@ import (
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/ikev1"
 	"github.com/xen0bit/veepin/internal/userdb"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // ServerConfig configures the gateway.
@@ -55,7 +54,7 @@ type ServerConfig struct {
 	Shape int
 	// MTU is the largest inner packet the tunnel carries.
 	MTU    int
-	Logger *log.Logger
+	Logger *vlog.Logger
 }
 
 // Server is a running gateway.
@@ -65,7 +64,7 @@ type Server struct {
 	nattConn *dataplane.PacketConn // port 4500: floated IKE + UDP-encapsulated ESP
 	tun      tunIO
 	pump     *dataplane.Pump
-	logger   *log.Logger
+	logger   *vlog.Logger
 	gate     *dataplane.Gate
 
 	mu       sync.Mutex
@@ -87,9 +86,6 @@ func NewServer(rawIKE, rawNATT *net.UDPConn, tun tunIO, cfg ServerConfig) (*Serv
 		return nil, errors.New("cisco: an address pool is required")
 	}
 	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
 	s := &Server{
 		cfg:      cfg,
 		ikeConn:  dataplane.NewPacketConn(rawIKE),
@@ -100,7 +96,7 @@ func NewServer(rawIKE, rawNATT *net.UDPConn, tun tunIO, cfg ServerConfig) (*Serv
 		byCookie: map[[8]byte]*serverPeer{},
 		done:     make(chan struct{}),
 	}
-	s.pump = dataplane.NewPump(tun, s.sendESP, dataplane.SPIDemux, logger)
+	s.pump = dataplane.NewPump(tun, s.sendESP, dataplane.SPIDemux, logger.Slog())
 	if cfg.MTU > 0 {
 		s.pump.SetInnerMTU(cfg.MTU)
 	}
@@ -217,7 +213,7 @@ func (s *Server) peerFor(cookie [8]byte, addr *net.UDPAddr) *serverPeer {
 		return p
 	}
 	if r := s.gate.Admit(addr); r != dataplane.Admitted {
-		s.logger.Printf("cisco: refusing new peer %s: %v", addr, r)
+		s.logger.Warnf("cisco: refusing new peer %s: %v", addr, r)
 		return nil
 	}
 

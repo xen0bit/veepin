@@ -18,8 +18,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"io"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"strconv"
@@ -27,6 +26,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	ipulse "github.com/xen0bit/veepin/internal/pulse"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 func init() { client.Register("pulse", parseOptions) }
@@ -66,13 +66,13 @@ type Config struct {
 	// Shape enables outbound traffic shaping: how much padded output each inner
 	// flow is given before shaping stops for that flow. Zero disables it.
 	Shape  int
-	Logger *log.Logger
+	Logger *slog.Logger
 }
 
 // Session is a running Pulse client.
 type Session struct {
 	client *ipulse.Client
-	logger *log.Logger
+	logger *vlog.Logger
 }
 
 // Dial authenticates, brings a data path up, and returns what the caller must
@@ -81,10 +81,7 @@ func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
 	if cfg.Server == "" || cfg.Username == "" {
 		return nil, client.Result{}, fmt.Errorf("pulse: server and user are required")
 	}
-	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
+	logger := vlog.From(cfg.Logger)
 	port := cfg.Port
 	if port == 0 {
 		port = defaultPort
@@ -219,7 +216,7 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 		Insecure: opts[OptInsecure] == "true",
 		NoESP:    opts[OptNoESP] == "true",
 		TUNName:  opts[OptTUN],
-		Logger:   log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds),
+		Logger:   slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
 	}
 	if cfg.Server == "" {
 		return nil, fmt.Errorf("pulse: server is required")

@@ -6,8 +6,8 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"log"
 	"net"
+	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -20,6 +20,7 @@ import (
 	"github.com/xen0bit/veepin/internal/ikev2/esp"
 	"github.com/xen0bit/veepin/internal/ikev2/payload"
 	"github.com/xen0bit/veepin/internal/ikev2/transform"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // ErrAuthFailed indicates the peer's authentication could not be verified —
@@ -84,7 +85,7 @@ type ClientConfig struct {
 	// the stream from the first octet. See tcpstream.go.
 	TCP bool
 
-	Logger *log.Logger
+	Logger *vlog.Logger
 }
 
 // ClientResult holds the outcome of a successful handshake: the assigned
@@ -126,7 +127,7 @@ type ClientResult struct {
 // a single IKE SA.
 type Client struct {
 	cfg  ClientConfig
-	log  *log.Logger
+	log  *vlog.Logger
 	conn *net.UDPConn
 	// tcp is set instead of conn when cfg.TCP is on. The two are exclusive:
 	// exactly one of them carries this SA, and every accessor below picks.
@@ -205,7 +206,7 @@ func NewClient(cfg ClientConfig) *Client {
 	}
 	logger := cfg.Logger
 	if logger == nil {
-		logger = log.New(log.Writer(), "", log.LstdFlags)
+		logger = vlog.Text(os.Stderr)
 	}
 	c := &Client{cfg: cfg, log: logger}
 	if cfg.ClientCert != nil {

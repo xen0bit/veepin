@@ -122,7 +122,7 @@ func (p *Pump) handleInboundBatchGRO(pkts [][]byte, froms []*net.UDPAddr) bool {
 			if _, err := p.writeTUN(inner); err != nil {
 				p.drops[DropTUNWrite].Add(1)
 				if p.log != nil {
-					p.log.Printf("dataplane: TUN write failed: %v", err)
+					p.log.Warnf("dataplane: TUN write failed: %v", err)
 				}
 			}
 		}
@@ -141,7 +141,7 @@ func (p *Pump) groMulti(t *groTable, mt MultiTunnel, c *TunnelCounters, pkt []by
 	if err != nil {
 		p.drops[DropDecapFailed].Add(1)
 		if p.log != nil {
-			p.log.Printf("dataplane: aggregated decap failed: %v", err)
+			p.log.Warnf("dataplane: aggregated decap failed: %v", err)
 		}
 		return
 	}
@@ -160,7 +160,7 @@ func (p *Pump) groMulti(t *groTable, mt MultiTunnel, c *TunnelCounters, pkt []by
 		if _, err := p.writeTUN(inner); err != nil {
 			p.drops[DropTUNWrite].Add(1)
 			if p.log != nil {
-				p.log.Printf("dataplane: TUN write failed: %v", err)
+				p.log.Warnf("dataplane: TUN write failed: %v", err)
 			}
 			return
 		}
@@ -331,7 +331,7 @@ func (g *groGroup) flush(p *Pump) {
 	defer func() { g.segs, g.length = 0, 0 }()
 	if g.segs == 1 {
 		if _, err := p.writeTUN(g.buf[:g.length]); err != nil && p.log != nil {
-			p.log.Printf("dataplane: TUN write failed: %v", err)
+			p.log.Warnf("dataplane: TUN write failed: %v", err)
 		}
 		return
 	}
@@ -356,6 +356,6 @@ func (g *groGroup) flush(p *Pump) {
 		csumOffset: 16,
 	})
 	if _, err := p.vnetWriteGSO(hdr, frame); err != nil && p.log != nil {
-		p.log.Printf("dataplane: TUN GSO write failed: %v", err)
+		p.log.Warnf("dataplane: TUN GSO write failed: %v", err)
 	}
 }

@@ -1,12 +1,11 @@
 package ike
 
 import (
-	"io"
-	"log"
 	"net"
 	"testing"
 
 	"github.com/xen0bit/veepin/internal/ikev2/payload"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // TestACFGRequestNamingOneFamilyIsAnsweredWithOnlyThatFamily is written from
@@ -64,7 +63,7 @@ func TestACFGRequestNamingOneFamilyIsAnsweredWithOnlyThatFamily(t *testing.T) {
 			// CFG_REPLY builder alone, and NewServer binds UDP 500.
 			var asked AddressRequest
 			srv := &Server{
-				log: log.New(io.Discard, "", 0),
+				log: vlog.Discard(),
 				cfg: Config{
 					AssignAddr: func(want AddressRequest) (Assignment, error) {
 						asked = want

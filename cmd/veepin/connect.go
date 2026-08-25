@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io/fs"
-	"log"
 	"maps"
 	"math/rand/v2"
 	"os/signal"
@@ -19,6 +18,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/profile"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // runConnect brings up a tunnel and applies the negotiated configuration to the
@@ -197,7 +197,7 @@ func (s *setList) Set(v string) error {
 // Three things decide whether this is any good, and each is enforced below:
 // a rejected credential is never retried, the host's routing state comes all
 // the way down between attempts, and a signal during a backoff exits now.
-func dialConnect(protocol string, opts map[string]string, netCfg netFlags, logger *log.Logger) error {
+func dialConnect(protocol string, opts map[string]string, netCfg netFlags, logger *vlog.Logger) error {
 	// One signal context for the whole command, not one per session: a Ctrl-C
 	// during a sixty-second backoff has to exit immediately, and a per-attempt
 	// context cannot see it.
@@ -286,7 +286,7 @@ func oneSession(
 	protocol string,
 	opts map[string]string,
 	netCfg netFlags,
-	logger *log.Logger,
+	logger *vlog.Logger,
 	killer **dataplane.KillSwitch,
 ) (time.Duration, error) {
 	fullTunnel, noRoute := netCfg.fullTunnel, netCfg.noRoute
@@ -398,7 +398,7 @@ func armKillSwitch(
 	killer **dataplane.KillSwitch,
 	res client.Result,
 	fullTunnel bool,
-	logger *log.Logger,
+	logger *vlog.Logger,
 ) error {
 	if *killer != nil {
 		return nil

@@ -76,7 +76,7 @@ func (s *Server) handleIKEAuth(sa *IKESA, hdr payload.Header, inners []payload.R
 	if err := verifyPeerPSKAuth(sa.Suite.PRF, s.cfg.PSK,
 		sa.InitiatorSAInit, sa.Nr, sa.Keys.SKpi, sa.IDiForAuth,
 		sa.intAuth(sa.IKEAuthMsgID), auth.Data); err != nil {
-		s.log.Printf("ikev2: IKE_AUTH (PSK) from %s failed: %v", remote, err)
+		s.log.Warnf("ikev2: IKE_AUTH (PSK) from %s failed: %v", remote, err)
 		s.respondEncryptedNotify(sa, payload.IKE_AUTH, hdr.MessageID, payload.AuthenticationFailed, remote)
 		return
 	}
@@ -118,7 +118,7 @@ func (s *Server) handleCertAuth(sa *IKESA, hdr payload.Header, inners []payload.
 	}
 	leaf, err := verifyPeerCertChain(leafDER, intermediates, s.cfg.ClientCAs)
 	if err != nil {
-		s.log.Printf("ikev2: %s certificate chain rejected: %v", remote, err)
+		s.log.Warnf("ikev2: %s certificate chain rejected: %v", remote, err)
 		s.respondEncryptedNotify(sa, payload.IKE_AUTH, hdr.MessageID, payload.AuthenticationFailed, remote)
 		return
 	}
@@ -131,7 +131,7 @@ func (s *Server) handleCertAuth(sa *IKESA, hdr payload.Header, inners []payload.
 	// The initiator signs InitiatorSAInit | {Intermediate} | Nr | prf(SK_pi, IDi').
 	octets := AuthOctets(sa.Suite.PRF, sa.InitiatorSAInit, sa.Nr, sa.Keys.SKpi, sa.IDiForAuth, sa.intAuth(sa.IKEAuthMsgID))
 	if err := verifyAuth(leaf.PublicKey, auth.Method, octets, auth.Data); err != nil {
-		s.log.Printf("ikev2: %s certificate AUTH failed: %v", remote, err)
+		s.log.Warnf("ikev2: %s certificate AUTH failed: %v", remote, err)
 		s.respondEncryptedNotify(sa, payload.IKE_AUTH, hdr.MessageID, payload.AuthenticationFailed, remote)
 		return
 	}
@@ -228,7 +228,7 @@ func (s *Server) handleEAPContinue(sa *IKESA, hdr payload.Header, inners []paylo
 
 	next, done, err := sa.eapServer.HandlePeer(resp)
 	if err != nil {
-		s.log.Printf("ikev2: EAP with %s failed: %v", remote, err)
+		s.log.Warnf("ikev2: EAP with %s failed: %v", remote, err)
 		// Send the EAP failure/next packet then an auth failure.
 		b := payload.NewBuilder()
 		b.Add(payload.TypeEAP, false, next.Marshal())
@@ -244,7 +244,7 @@ func (s *Server) handleEAPContinue(sa *IKESA, hdr payload.Header, inners []paylo
 	if done {
 		out := sa.eapServer.Outcome()
 		if !out.Success {
-			s.log.Printf("ikev2: EAP authentication failed for %q from %s", out.Username, remote)
+			s.log.Warnf("ikev2: EAP authentication failed for %q from %s", out.Username, remote)
 			return
 		}
 		// EAP succeeded: stash the MSK. The client will now send a final
@@ -274,7 +274,7 @@ func (s *Server) handleEAPFinalAuth(sa *IKESA, hdr payload.Header, inners []payl
 	octets := AuthOctets(sa.Suite.PRF, sa.InitiatorSAInit, sa.Nr, sa.Keys.SKpi, sa.IDiForAuth, sa.intAuth(sa.IKEAuthMsgID))
 	want := PSKAuth(sa.Suite.PRF, sa.eapMSK, octets)
 	if !equalBytes(want, auth.Data) {
-		s.log.Printf("ikev2: EAP final AUTH from %s failed", remote)
+		s.log.Warnf("ikev2: EAP final AUTH from %s failed", remote)
 		s.respondEncryptedNotify(sa, payload.IKE_AUTH, hdr.MessageID, payload.AuthenticationFailed, remote)
 		return
 	}
@@ -506,7 +506,7 @@ func (s *Server) buildCPReply(sa *IKESA, cpPay *payload.RawPayload) *payload.CPP
 	}
 	a, err := s.cfg.AssignAddr(requestedFamilies(req))
 	if err != nil || (a.IP4 == nil && a.IP6 == nil) {
-		s.log.Printf("ikev2: address assignment failed: %v", err)
+		s.log.Warnf("ikev2: address assignment failed: %v", err)
 		return nil
 	}
 	sa.ClientIP = a.IP4

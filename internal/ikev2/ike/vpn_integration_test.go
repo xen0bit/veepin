@@ -3,8 +3,7 @@ package ike
 import (
 	"bytes"
 	"encoding/binary"
-	"io"
-	"log"
+	"log/slog"
 	"net"
 	"sync"
 	"testing"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/ikev2/esp"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // memTUN is an in-memory TUN device for the integration test: packets the
@@ -64,7 +64,7 @@ func TestFullVPNFlow(t *testing.T) {
 		PSK:      psk,
 		LocalID:  FQDNIdentity("vpn.example"),
 		PublicIP: net.ParseIP("127.0.0.1"),
-		Logger:   log.New(io.Discard, "", 0),
+		Logger:   vlog.Discard(),
 		AssignAddr: func(AddressRequest) (Assignment, error) {
 			ip, aerr := pool.Allocate()
 			return Assignment{IP4: ip, Netmask: pool.Netmask(), DNS: []net.IP{net.ParseIP("1.1.1.1")}}, aerr
@@ -77,7 +77,7 @@ func TestFullVPNFlow(t *testing.T) {
 	}
 
 	tun := newMemTUN()
-	pump := dataplane.NewPump(tun, srv.SendESP, dataplane.SPIDemux, log.New(io.Discard, "", 0))
+	pump := dataplane.NewPump(tun, srv.SendESP, dataplane.SPIDemux, slog.New(slog.DiscardHandler))
 	srv.SetDataPath(NewPumpDataPath(pump))
 	go pump.Run()
 	defer pump.Close()

@@ -14,14 +14,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"log"
 	"net"
 	"sync"
 	"time"
 
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/ikev1"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // tunIO is the userspace TUN the data path reads IP from and writes IP to.
@@ -52,7 +51,7 @@ type ClientConfig struct {
 	Shape int
 	// MTU is the largest inner packet the tunnel carries.
 	MTU    int
-	Logger *log.Logger
+	Logger *vlog.Logger
 }
 
 // Client is a running Cisco IPsec client.
@@ -60,7 +59,7 @@ type Client struct {
 	cfg    ClientConfig
 	conn   *net.UDPConn
 	tun    tunIO
-	logger *log.Logger
+	logger *vlog.Logger
 
 	ikeAddr  *net.UDPAddr // the gateway's IKE port, used until the float
 	nattAddr *net.UDPAddr // its NAT-T port: IKE after the float, and all ESP
@@ -80,9 +79,6 @@ type Client struct {
 // nothing until Handshake.
 func NewClient(conn *net.UDPConn, tun tunIO, cfg ClientConfig) *Client {
 	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
 	ikePort := cfg.IKEPort
 	if ikePort == 0 {
 		ikePort = DefaultIKEPort
@@ -252,7 +248,7 @@ func (c *Client) Established(r ikev1.Result) {
 			c.fail(fmt.Errorf("cisco: send: %w", err))
 		}
 	}
-	p := dataplane.NewPump(c.tun, send, dataplane.SPIDemux, c.logger)
+	p := dataplane.NewPump(c.tun, send, dataplane.SPIDemux, c.logger.Slog())
 	if c.cfg.MTU > 0 {
 		p.SetInnerMTU(c.cfg.MTU)
 	}

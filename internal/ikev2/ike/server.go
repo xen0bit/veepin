@@ -4,14 +4,15 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"log"
 	"net"
+	"os"
 	"strconv"
 	"sync"
 
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/ikev2/eap"
 	"github.com/xen0bit/veepin/internal/ikev2/payload"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // Config configures the IKEv2 server.
@@ -88,7 +89,7 @@ type Config struct {
 	DataPath DataPath
 
 	// Logger is optional; defaults to the standard logger.
-	Logger *log.Logger
+	Logger *vlog.Logger
 
 	// OnChildSA is invoked when a Child SA is established (in addition to
 	// DataPath). Useful for tests and logging.
@@ -105,7 +106,7 @@ type DataPath interface {
 // Server is a userspace IKEv2 responder with NAT-T support.
 type Server struct {
 	cfg Config
-	log *log.Logger
+	log *vlog.Logger
 
 	tr *transport
 
@@ -141,7 +142,7 @@ func NewServer(cfg Config) (*Server, error) {
 		serverCred = cred
 	}
 	if cfg.Logger == nil {
-		cfg.Logger = log.Default()
+		cfg.Logger = vlog.Text(os.Stderr)
 	}
 	if cfg.ListenIP == "" {
 		cfg.ListenIP = "0.0.0.0"
@@ -351,7 +352,7 @@ func (s *Server) SendESP(esp []byte, to *net.UDPAddr) {
 		return
 	}
 	if err := s.tr.sendESP(esp, to); err != nil {
-		s.log.Printf("ikev2: ESP send error: %v", err)
+		s.log.Warnf("ikev2: ESP send error: %v", err)
 	}
 }
 
@@ -364,7 +365,7 @@ func (s *Server) SendESPBatch(esp [][]byte, to *net.UDPAddr) {
 		return
 	}
 	if err := s.tr.sendESPBatch(esp, to); err != nil {
-		s.log.Printf("ikev2: ESP batch send error: %v", err)
+		s.log.Warnf("ikev2: ESP batch send error: %v", err)
 	}
 }
 
@@ -403,7 +404,7 @@ func tcpNote(on bool, port int) string {
 // send transmits an IKE message to a peer on the correct port.
 func (s *Server) send(pkt []byte, remote *net.UDPAddr, on4500 bool) {
 	if err := s.tr.sendIKE(pkt, remote, on4500); err != nil {
-		s.log.Printf("ikev2: send error: %v", err)
+		s.log.Warnf("ikev2: send error: %v", err)
 	}
 }
 

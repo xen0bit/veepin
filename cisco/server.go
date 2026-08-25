@@ -11,7 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"strconv"
@@ -22,6 +22,7 @@ import (
 	"github.com/xen0bit/veepin/dataplane"
 	icisco "github.com/xen0bit/veepin/internal/cisco"
 	"github.com/xen0bit/veepin/internal/userdb"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 func init() {
@@ -100,7 +101,7 @@ type ServerConfig struct {
 	// unmodified. dataplane.DefaultShapeBytes is a reasonable value.
 	Shape int
 
-	Logger *log.Logger
+	Logger *slog.Logger
 }
 
 // Server is a Cisco IPsec gateway.
@@ -192,7 +193,7 @@ func (s *Server) ListenAndServe() error {
 		SplitInclude: s.cfg.SplitInclude,
 		Shape:        s.cfg.Shape,
 		MTU:          client.DefaultTunnelMTU,
-		Logger:       s.cfg.Logger,
+		Logger:       vlog.From(s.cfg.Logger),
 	})
 	if err != nil {
 		_ = ikeConn.Close()
@@ -263,7 +264,7 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 		Domain:   opts[OptServerDomain],
 		Banner:   opts[OptServerBanner],
 		TUNName:  opts[OptServerTUN],
-		Logger:   log.New(logDest(), "", log.LstdFlags|log.Lmicroseconds),
+		Logger:   vlog.SlogText(logDest()),
 	}
 	group, psk := opts[OptServerGroup], opts[OptServerGroupPSK]
 	if group == "" || psk == "" {

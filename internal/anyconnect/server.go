@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -19,6 +18,7 @@ import (
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/dtls"
 	"github.com/xen0bit/veepin/internal/userdb"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // handshakeTimeout bounds the HTTP authentication and CONNECT exchange. Once the
@@ -48,7 +48,7 @@ type ServerConfig struct {
 	// only, which is a complete tunnel — the protocol treats TLS as the fallback
 	// whenever UDP is unavailable.
 	DTLSConn *net.UDPConn
-	Logger   *log.Logger
+	Logger   *vlog.Logger
 }
 
 // Server is a running AnyConnect responder. Like SSTP it is connection-oriented:
@@ -59,7 +59,7 @@ type Server struct {
 	tun     tunIO
 	pool    *dataplane.AddrPool
 	gateway net.IP
-	logger  *log.Logger
+	logger  *vlog.Logger
 
 	sessions sync.Map
 
@@ -81,9 +81,6 @@ type Server struct {
 // caller, which owns the listener.
 func NewServer(tun tunIO, cfg ServerConfig) *Server {
 	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
 	s := &Server{
 		cfg:     cfg,
 		tun:     tun,
@@ -140,12 +137,12 @@ func (s *Server) ServeConn(conn net.Conn) {
 	}
 	cookie, err := s.serveAuth(conn, br)
 	if err != nil {
-		s.logger.Printf("anyconnect: %s: authentication failed: %v", conn.RemoteAddr(), err)
+		s.logger.Warnf("anyconnect: %s: authentication failed: %v", conn.RemoteAddr(), err)
 		return
 	}
 	c, err := s.serveConnect(conn, br, cookie)
 	if err != nil {
-		s.logger.Printf("anyconnect: %s: CONNECT failed: %v", conn.RemoteAddr(), err)
+		s.logger.Warnf("anyconnect: %s: CONNECT failed: %v", conn.RemoteAddr(), err)
 		return
 	}
 	defer s.removeClient(c)

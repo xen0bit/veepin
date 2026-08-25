@@ -2,13 +2,12 @@ package ike
 
 import (
 	"bytes"
-	"io"
-	"log"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/xen0bit/veepin/internal/ikev2/payload"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // capturingDataPath records Child SA lifecycle and MOBIKE peer-address updates,
@@ -43,7 +42,7 @@ func mobikeServer(t *testing.T) (p500, p4500 int, srv *Server, dp *capturingData
 		PSK:      []byte("mobike-psk"),
 		LocalID:  FQDNIdentity("vpn.example"),
 		PublicIP: net.ParseIP("127.0.0.1"),
-		Logger:   log.New(io.Discard, "", 0),
+		Logger:   vlog.Discard(),
 		AssignAddr: func(AddressRequest) (Assignment, error) {
 			return Assignment{IP4: net.IPv4(10, 9, 9, 9), Netmask: net.IPv4(255, 255, 255, 0)}, nil
 		},
@@ -241,7 +240,7 @@ func TestClientRoam(t *testing.T) {
 		ServerHost: "127.0.0.1", ServerPort: p500, NATTPort: p4500,
 		PSK:     []byte("mobike-psk"),
 		LocalID: FQDNIdentity("client.example"),
-		Logger:  log.New(io.Discard, "", 0),
+		Logger:  vlog.Discard(),
 	})
 	if _, err := client.Connect(); err != nil {
 		t.Fatalf("connect: %v", err)
@@ -286,7 +285,7 @@ func TestClientRoamRequiresNegotiation(t *testing.T) {
 		ServerHost: "127.0.0.1", ServerPort: 500,
 		PSK:     []byte("x"),
 		LocalID: FQDNIdentity("client.example"),
-		Logger:  log.New(io.Discard, "", 0),
+		Logger:  vlog.Discard(),
 	})
 	if err := client.Roam(); err == nil {
 		t.Fatal("Roam should fail before a MOBIKE-enabled connect")

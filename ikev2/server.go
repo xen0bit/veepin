@@ -4,8 +4,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/netip"
 	"os"
@@ -17,6 +16,7 @@ import (
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/ikev2/eap"
 	"github.com/xen0bit/veepin/internal/ikev2/ike"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // ServerConfig configures an IKEv2 responder and its userspace data path.
@@ -92,7 +92,7 @@ type ServerConfig struct {
 	IPTFSRate int
 
 	// Logger receives progress logs; nil discards them.
-	Logger *log.Logger
+	Logger *slog.Logger
 }
 
 // Server is a running IKEv2 responder: the IKE SAs, a TUN device, an address
@@ -137,10 +137,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 			"transmission already fixes every datagram at one size, so %s would "+
 			"have nothing to pad", OptServerShape, OptServerIPTFSRate, OptServerShape)
 	}
-	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
+	logger := vlog.From(cfg.Logger)
 
 	var serverCert *tls.Certificate
 	if cfg.CertFile != "" {
@@ -249,7 +246,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 
 	// The pump sends through the server's own NAT-T socket, and the server
 	// hands it inbound ESP — hence SetDataPath after both exist.
-	pump := dataplane.NewPump(tun, srv.SendESP, dataplane.SPIDemux, logger)
+	pump := dataplane.NewPump(tun, srv.SendESP, dataplane.SPIDemux, logger.Slog())
 	pump.SetBatchSender(srv.SendESPBatch)
 	if cfg.Shape > 0 {
 		pump.SetShaper(dataplane.NewShaper(dataplane.ShapeConfig{Bytes: cfg.Shape}))
@@ -421,7 +418,7 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 		KeyFile:      opts[OptServerKey],
 		ClientCAFile: opts[OptServerClientCA],
 		TCP:          opts[OptServerTCP] == "true",
-		Logger:       log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds),
+		Logger:       slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
 	}
 	if cfg.ListenIP == "" {
 		cfg.ListenIP = "0.0.0.0"

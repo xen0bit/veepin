@@ -4,7 +4,7 @@
 // It is stdlib-only by design: the strict-dependency contract (golang.org/x/*
 // and nothing else at runtime) forbids a router library, so net/http.ServeMux
 // pattern matching is enough for the surface below. The same contract forbids
-// a logging library: a single *log.Logger writes a line per request.
+// a logging library: a single *vlog.Logger writes a line per request.
 //
 // Auth is a bearer token generated on first run and stored at <config>/mgmt/token
 // mode 0600 root-only, the same filesystem-protection posture the protocol
@@ -29,7 +29,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log"
 	"maps"
 	"net"
 	"net/http"
@@ -46,6 +45,7 @@ import (
 	"github.com/xen0bit/veepin/internal/confstore"
 	"github.com/xen0bit/veepin/internal/keygen"
 	"github.com/xen0bit/veepin/internal/supervisor"
+	"github.com/xen0bit/veepin/internal/vlog"
 	"github.com/xen0bit/veepin/wireguard"
 )
 
@@ -97,7 +97,7 @@ type Server struct {
 	mgr   ManagerBackend
 	dir   string
 	token []byte
-	log   *log.Logger
+	log   *vlog.Logger
 	mux   *http.ServeMux
 
 	// audit is the bounded, in-memory mutation log (see audit.go). Every
@@ -136,7 +136,7 @@ type Server struct {
 // PATCH/DELETE endpoints persist to. NewServer is the canonical place the token
 // is generated; it writes the token file once and reads it thereafter, so the
 // operator can extract it from disk if the once-only log line was missed.
-func NewServer(dir string, mgr ManagerBackend, logger *log.Logger, opts ...Option) (*Server, error) {
+func NewServer(dir string, mgr ManagerBackend, logger *vlog.Logger, opts ...Option) (*Server, error) {
 	if dir == "" {
 		return nil, errors.New("mgmt: config dir is required")
 	}
@@ -152,7 +152,7 @@ func NewServer(dir string, mgr ManagerBackend, logger *log.Logger, opts ...Optio
 		return nil, fmt.Errorf("mgmt: token boot: %w", err)
 	}
 	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
+		logger = vlog.Discard()
 	}
 	s := &Server{
 		mgr:   mgr,
@@ -959,7 +959,7 @@ func (s *Server) handlePeerDelete(w http.ResponseWriter, r *http.Request) {
 	if err := s.mgr.Rebuild(name); err != nil {
 		cfg.Options = prevOptions
 		if rerr := supervisor.WriteListenerFile(s.dir, cfg); rerr != nil {
-			s.log.Printf("mgmt: %s: rolling back a failed peer removal: %v", name, rerr)
+			s.log.Warnf("mgmt: %s: rolling back a failed peer removal: %v", name, rerr)
 		}
 		res = err
 		http.Error(w, err.Error(), http.StatusInternalServerError)

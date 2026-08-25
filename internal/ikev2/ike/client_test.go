@@ -4,13 +4,12 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
-	"io"
-	"log"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/xen0bit/veepin/internal/ikev2/esp"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // startTestServer spins up a real server on loopback and returns its ports.
@@ -25,7 +24,7 @@ func startTestServer(t *testing.T, eapUsers map[string]string) (p500, p4500 int,
 		PSK:      []byte("test-psk"),
 		LocalID:  FQDNIdentity("vpn.example"),
 		PublicIP: net.ParseIP("127.0.0.1"),
-		Logger:   log.New(io.Discard, "", 0),
+		Logger:   vlog.Discard(),
 		AssignAddr: func(AddressRequest) (Assignment, error) {
 			return Assignment{
 				IP4:     net.IPv4(10, 8, 8, 8),
@@ -59,7 +58,7 @@ func TestClientConnectPSK(t *testing.T) {
 		ServerHost: "127.0.0.1", ServerPort: p500, NATTPort: p4500,
 		PSK:     []byte("test-psk"),
 		LocalID: FQDNIdentity("client.example"),
-		Logger:  log.New(io.Discard, "", 0),
+		Logger:  vlog.Discard(),
 	})
 	res, err := client.Connect()
 	if err != nil {
@@ -132,7 +131,7 @@ func TestClientConnectEAP(t *testing.T) {
 		PSK:         []byte("test-psk"),
 		LocalID:     FQDNIdentity("alice"),
 		EAPUsername: "alice", EAPPassword: "wonderland",
-		Logger: log.New(io.Discard, "", 0),
+		Logger: vlog.Discard(),
 	})
 	res, err := client.Connect()
 	if err != nil {
@@ -159,7 +158,7 @@ func TestClientWrongPSK(t *testing.T) {
 		ServerHost: "127.0.0.1", ServerPort: p500, NATTPort: p4500,
 		PSK:     []byte("WRONG-psk"),
 		LocalID: FQDNIdentity("client.example"),
-		Logger:  log.New(io.Discard, "", 0),
+		Logger:  vlog.Discard(),
 	})
 	_, err := client.Connect()
 	if err == nil {

@@ -13,11 +13,11 @@ import (
 	"context"
 	"errors"
 	"io"
-	"log"
 	"net"
 	"sync"
 
 	"github.com/xen0bit/veepin/internal/ppp"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // maxInnerPacket bounds a packet read from the TUN.
@@ -28,7 +28,7 @@ type pppLink struct {
 	conn   net.Conn
 	reader io.Reader // read side; nil means read from conn (a hijacked server conn sets it)
 	tun    io.ReadWriteCloser
-	logger *log.Logger
+	logger *vlog.Logger
 
 	// ownsTUN is true for a client, which has the TUN to itself; false for a
 	// server link, which shares one TUN across clients and must not close it.

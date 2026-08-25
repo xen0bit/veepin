@@ -13,13 +13,14 @@ import (
 	"crypto/x509"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"os/signal"
 	"strconv"
 	"syscall"
 
+	"github.com/xen0bit/veepin/internal/vlog"
 	"github.com/xen0bit/veepin/masque"
 )
 
@@ -58,7 +59,7 @@ func runUDPProxy(args []string) error {
 		Listen:     *listen,
 		TargetHost: host,
 		TargetPort: targetPort,
-		Logger:     log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds),
+		Logger:     slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
 	}
 	if *ca != "" {
 		pem, err := os.ReadFile(*ca)

@@ -6,8 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/netip"
 	"os"
@@ -24,6 +23,7 @@ import (
 	"github.com/xen0bit/veepin/internal/openvpn/keys"
 	"github.com/xen0bit/veepin/internal/openvpn/tlswrap"
 	"github.com/xen0bit/veepin/internal/openvpn/wire"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // ServerConfig configures an OpenVPN responder and its userspace data path. It
@@ -108,7 +108,7 @@ type ServerConfig struct {
 	Shape int
 
 	// Logger receives progress logs; nil discards them.
-	Logger *log.Logger
+	Logger *slog.Logger
 }
 
 func (c *ServerConfig) validate() error {
@@ -192,7 +192,7 @@ type Server struct {
 	dns      []net.IP
 	mtu      int
 	shape    int
-	logger   *log.Logger
+	logger   *vlog.Logger
 	gate     *dataplane.Gate
 
 	listenAddr *net.UDPAddr
@@ -269,10 +269,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("openvpn: invalid listen IP %q", cfg.ListenIP)
 	}
 
-	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
+	logger := vlog.From(cfg.Logger)
 	mtu := cfg.MTU
 	if mtu == 0 {
 		mtu = defaultMTU
@@ -398,7 +395,7 @@ func (s *Server) ListenAndServe() error {
 			s.logger.Printf("openvpn: send to %s: %v", to, werr)
 		}
 	}
-	s.pump = dataplane.NewPump(s.tun, send, serverDataDemux, s.logger)
+	s.pump = dataplane.NewPump(s.tun, send, serverDataDemux, s.logger.Slog())
 	// GSO bursts flush with one sendmmsg, source-pinned like every send.
 	s.pump.SetBatchSender(func(pkts [][]byte, to *net.UDPAddr) {
 		if to == nil {
@@ -493,7 +490,7 @@ func (s *Server) handleControl(op, keyID uint8, pkt []byte, from *net.UDPAddr) {
 		// all for an unauthenticated peer on a spoofable UDP source.
 		if r := s.gate.Admit(from); r != dataplane.Admitted {
 			s.mu.Unlock()
-			s.logger.Printf("openvpn: refusing new client %s: %v", from, r)
+			s.logger.Warnf("openvpn: refusing new client %s: %v", from, r)
 			return
 		}
 		cl, err := s.newClient(from, keyID)
@@ -729,7 +726,7 @@ func (s *Server) reapClient(cl *serverClient, reason string) {
 
 // dropClient tears down a half-open client after a handshake failure.
 func (s *Server) dropClient(cl *serverClient, reason string) {
-	s.logger.Printf("openvpn: client %s dropped: %s", cl.addr, reason)
+	s.logger.Warnf("openvpn: client %s dropped: %s", cl.addr, reason)
 	cl.ch.Close()
 	s.mu.Lock()
 	delete(s.clients, cl.addr.String())
@@ -1035,7 +1032,7 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 		Pool:     opts[OptServerPool],
 		Pool6:    opts[OptServerPool6],
 		TUNName:  opts[OptServerTUN],
-		Logger:   log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds),
+		Logger:   slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
 	}
 	var err error
 	if cfg.CA, err = readFileOpt(opts[OptServerCA]); err != nil {

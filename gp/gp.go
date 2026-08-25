@@ -18,7 +18,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -28,6 +28,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	igp "github.com/xen0bit/veepin/internal/gp"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 func init() { client.Register("gp", parseOptions) }
@@ -68,7 +69,7 @@ type Config struct {
 	// Shape enables outbound traffic shaping: how much padded output each inner
 	// flow is given before shaping stops for that flow. Zero disables it.
 	Shape  int
-	Logger *log.Logger
+	Logger *slog.Logger
 }
 
 // Session is a running GlobalProtect client.
@@ -78,7 +79,7 @@ type Session struct {
 	base     string
 	info     igp.LoginInfo
 	computer string
-	logger   *log.Logger
+	logger   *vlog.Logger
 }
 
 // Dial authenticates, brings a data path up, and returns what the caller must
@@ -87,10 +88,7 @@ func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
 	if cfg.Server == "" || cfg.Username == "" {
 		return nil, client.Result{}, fmt.Errorf("gp: server and user are required")
 	}
-	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
+	logger := vlog.From(cfg.Logger)
 	port := cfg.Port
 	if port == 0 {
 		port = defaultPort
@@ -169,7 +167,7 @@ func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
 // the tunnel first would have nothing left to fall back to. Trying ESP first
 // costs a few seconds when UDP is blocked and nothing at all when it is not.
 func dialDataPath(host string, info igp.LoginInfo, gwCfg igp.Config, tlsConfig *tls.Config,
-	tun io.ReadWriteCloser, logger *log.Logger, wantESP bool, shape, mtu int,
+	tun io.ReadWriteCloser, logger *vlog.Logger, wantESP bool, shape, mtu int,
 ) (*igp.Client, error) {
 	if wantESP && gwCfg.ESP != nil {
 		c, err := igp.RunESP(gwCfg, tun, logger, shape, mtu)
@@ -183,7 +181,7 @@ func dialDataPath(host string, info igp.LoginInfo, gwCfg igp.Config, tlsConfig *
 
 // dialSSL opens the framed layer-3 tunnel over a fresh TLS connection.
 func dialSSL(host string, info igp.LoginInfo, gwCfg igp.Config, tlsConfig *tls.Config,
-	tun io.ReadWriteCloser, logger *log.Logger,
+	tun io.ReadWriteCloser, logger *vlog.Logger,
 ) (*igp.Client, error) {
 	conn, err := tls.Dial("tcp", host, tlsConfig)
 	if err != nil {
@@ -257,7 +255,7 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 		Insecure: opts[OptInsecure] == "true",
 		NoESP:    opts[OptNoESP] == "true",
 		TUNName:  opts[OptTUN],
-		Logger:   log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds),
+		Logger:   slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
 	}
 	if cfg.Server == "" {
 		return nil, fmt.Errorf("gp: server is required")

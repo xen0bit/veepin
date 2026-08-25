@@ -14,8 +14,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -27,6 +25,7 @@ import (
 
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/internal/hostnet"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // Constructor turns a ListenerConfig into a constructed (not yet listening)
@@ -104,7 +103,7 @@ func (r *running) setState(cfg ListenerConfig, state string, err error) {
 type Manager struct {
 	dir  string
 	ctor Constructor
-	log  *log.Logger
+	log  *vlog.Logger
 	// run is the commander hostnet shells out through. Nil means the real
 	// ip/iptables/sysctl; tests set it with SetCommander so the host-networking
 	// half of a build is exercised without privileges, the same way ctor covers
@@ -165,18 +164,18 @@ func (m *Manager) Abandoned() (current int, total uint64) {
 func (m *Manager) reap(name string, closed <-chan struct{}, started time.Time) {
 	<-closed
 	m.abandoned.Add(-1)
-	m.log.Printf("supervisor: %s: abandoned listener's Close finally returned after %s; "+
+	m.log.Warnf("supervisor: %s: abandoned listener's Close finally returned after %s; "+
 		"its goroutine and TUN fd are released", name, time.Since(started).Round(time.Millisecond))
 }
 
 // NewManager returns a Manager whose ctor is real if none is supplied.
-func NewManager(dir string, logger *log.Logger, ctor Constructor) *Manager {
+func NewManager(dir string, logger *vlog.Logger, ctor Constructor) *Manager {
 	if ctor == nil {
 		// DefaultConstructor is the production path: client.NewServer.
 		ctor = client.NewServer
 	}
 	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
+		logger = vlog.Discard()
 	}
 	return &Manager{
 		dir:       dir,
@@ -881,7 +880,7 @@ func (m *Manager) stopListenerLocked(r *running) {
 				released = "it does not implement client.AbandonableServer, so its " +
 					"packet pump goroutine and TUN fd are leaked until Close returns"
 			}
-			m.log.Printf("supervisor: %s: Close did not return within %s; abandoning the listener "+
+			m.log.Warnf("supervisor: %s: Close did not return within %s; abandoning the listener "+
 				"(%s). %d listener(s) abandoned now, %d since start -- see Manager.Abandoned",
 				cfg.Name, stopGrace, released, current, total)
 			go m.reap(cfg.Name, closed, time.Now())
@@ -940,7 +939,7 @@ func (m *Manager) stopListenerLocked(r *running) {
 // still being this generation's channel, so a goroutine that returns after its
 // server was replaced (or after stopListener gave up waiting) cannot overwrite the
 // live listener's state with its own stale outcome.
-func serve(r *running, logger *log.Logger, srv client.Server, done chan struct{}) {
+func serve(r *running, logger *vlog.Logger, srv client.Server, done chan struct{}) {
 	defer close(done)
 	err := srv.ListenAndServe()
 

@@ -9,8 +9,6 @@ package main
 import (
 	"encoding/json"
 	"errors"
-	"io"
-	"log"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -20,6 +18,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/internal/mgmt"
 	"github.com/xen0bit/veepin/internal/supervisor"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // cliFakeMgr mirrors internal/mgmt's fakeMgr but in package main (the CLI test
@@ -82,7 +81,7 @@ func startMgmtTestServerWithDir(t *testing.T, statuses map[string]supervisor.Sta
 		_ = os.WriteFile(filepath.Join(dir, name+".json"), body, 0o600)
 	}
 	mgr := &cliFakeMgr{statuses: statuses}
-	srv, err := mgmt.NewServer(dir, mgr, log.New(io.Discard, "", 0))
+	srv, err := mgmt.NewServer(dir, mgr, vlog.Discard())
 	if err != nil {
 		t.Fatalf("mgmt.NewServer: %v", err)
 	}
@@ -210,7 +209,7 @@ func TestMgmtEditSurfacesABuildError(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(dir, "site-a.json"), body, 0o600)
 	mgr := &cliFakeMgr{statuses: map[string]supervisor.Status{"site-a": {Name: "site-a", State: "running"}}}
 	mgr.rebuildErr = errors.New("wireguard: listen udp 51820: address in use")
-	srv, err := mgmt.NewServer(dir, mgr, log.New(io.Discard, "", 0))
+	srv, err := mgmt.NewServer(dir, mgr, vlog.Discard())
 	if err != nil {
 		t.Fatalf("mgmt.NewServer: %v", err)
 	}
@@ -374,7 +373,7 @@ func TestMgmtClientConfigWritesBundle(t *testing.T) {
 	body, _ := json.Marshal(cfg)
 	_ = os.WriteFile(filepath.Join(dir, "site-a.json"), body, 0o600)
 	mgr := &cliFakeMgr{statuses: map[string]supervisor.Status{}}
-	srv, err := mgmt.NewServer(dir, mgr, log.New(io.Discard, "", 0))
+	srv, err := mgmt.NewServer(dir, mgr, vlog.Discard())
 	if err != nil {
 		t.Fatalf("mgmt.NewServer: %v", err)
 	}
@@ -421,7 +420,7 @@ func TestMgmtClientConfigRedactsOnStdoutUnlessAsked(t *testing.T) {
 	body, _ := json.Marshal(cfg)
 	_ = os.WriteFile(filepath.Join(dir, "site-a.json"), body, 0o600)
 	mgr := &cliFakeMgr{statuses: map[string]supervisor.Status{}}
-	srv, err := mgmt.NewServer(dir, mgr, log.New(io.Discard, "", 0))
+	srv, err := mgmt.NewServer(dir, mgr, vlog.Discard())
 	if err != nil {
 		t.Fatalf("mgmt.NewServer: %v", err)
 	}

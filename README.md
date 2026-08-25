@@ -521,10 +521,14 @@ replacing the `VEEPIN_SSTP_DEBUG`-shaped environment variables that had started
 to accumulate one per protocol (the old spellings still work, and `VEEPIN_DEBUG`
 is the general one, for a Go program embedding a protocol package directly).
 
-Above `info` the informational stream is suppressed. That is the whole of what
-the level can mean while the tree logs through `*log.Logger`, which has no
-per-call level — and it is useful rather than half-implemented because a fatal
-error returns to `main` and reaches stderr directly, never through the logger.
+The level filters **per line**, not per stream: at `-log-level warn` the
+informational stream goes away and a protocol reporting a real problem still
+prints. That is `internal/vlog`, which is `log/slog` with the `Printf`-shaped
+calls the data paths make and a level chosen at the call site. A fatal error
+never depends on any of it — it returns to `main` and reaches stderr directly.
+
+A facade's `Logger` field is an `*slog.Logger`, so a Go program embedding a
+protocol package hands in a standard-library logger and nothing else.
 
 ### Process hardening
 

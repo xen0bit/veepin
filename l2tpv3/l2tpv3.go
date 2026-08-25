@@ -21,14 +21,15 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log"
 	"net"
+	"os"
 	"strconv"
 	"time"
 
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/l2tpv3"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // Client option keys.
@@ -130,7 +131,7 @@ func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
 		return nil, client.Result{}, fmt.Errorf("l2tpv3: open TAP: %w", err)
 	}
 
-	logger := log.New(log.Writer(), "", log.LstdFlags)
+	logger := vlog.Text(os.Stderr)
 	pump := l2tpv3.NewPump(tap, func(pkt []byte, _ *net.UDPAddr) {
 		// The socket is connected, so the destination is already fixed and the
 		// pump's learned reply address is unused on this side.

@@ -1,14 +1,13 @@
 package ike
 
 import (
-	"io"
-	"log"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/xen0bit/veepin/internal/ikev2/eap"
 	"github.com/xen0bit/veepin/internal/ikev2/payload"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // TestEAPMSCHAPv2Flow drives a full IKEv2 + EAP-MSCHAPv2 handshake against the
@@ -29,7 +28,7 @@ func TestEAPMSCHAPv2Flow(t *testing.T) {
 		PSK:            psk,
 		LocalID:        FQDNIdentity("vpn.example"),
 		PublicIP:       net.ParseIP("127.0.0.1"),
-		Logger:         log.New(io.Discard, "", 0),
+		Logger:         vlog.Discard(),
 		EAPCredentials: func(u string) (string, bool) { p, ok := users[u]; return p, ok },
 		EAPServerName:  "vpn.example",
 		AssignAddr: func(AddressRequest) (Assignment, error) {
@@ -180,7 +179,7 @@ func TestEAPWrongPassword(t *testing.T) {
 		PSK:            psk,
 		LocalID:        FQDNIdentity("vpn.example"),
 		PublicIP:       net.ParseIP("127.0.0.1"),
-		Logger:         log.New(io.Discard, "", 0),
+		Logger:         vlog.Discard(),
 		EAPCredentials: func(u string) (string, bool) { p, ok := users[u]; return p, ok },
 		EAPServerName:  "vpn.example",
 	}

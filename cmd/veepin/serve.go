@@ -6,7 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -22,6 +22,7 @@ import (
 	"github.com/xen0bit/veepin/internal/mgmt"
 	"github.com/xen0bit/veepin/internal/mgmt/ui"
 	"github.com/xen0bit/veepin/internal/supervisor"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // runServe runs a VPN server. Everything protocol-specific is in the flag set
@@ -247,16 +248,22 @@ func runSupervisorMode(args []string) error {
 	var allowHosts stringList
 	fs.Var(&allowHosts, "allow-host", "additional Host header value the panel answers on (repeatable); "+
 		"loopback and the -listen address are always allowed")
+	logCfg := bindLogFlags(fs)
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
 
 	// The shared log ring captures every line the supervisor and the API write,
-	// for GET /api/logs. Both logger consumers below get the SAME *log.Logger,
-	// so a single ring at the source captures listener events, hostnet
-	// messages, and the per-request API log alike.
+	// for GET /api/logs. Both logger consumers below get the SAME logger, so a
+	// single ring at the source captures listener events, hostnet messages, and
+	// the per-request API log alike. It is built from the same flags as every
+	// other logger here, so -log-level filters what reaches the panel too.
 	logRing := mgmt.NewLogRing()
-	logger := log.New(io.MultiWriter(os.Stdout, logRing), "", log.LstdFlags|log.Lmicroseconds)
+	logHandler, err := logCfg.handlerTo(io.MultiWriter(os.Stdout, logRing))
+	if err != nil {
+		return err
+	}
+	logger := vlog.New(slog.New(logHandler))
 	mgr := supervisor.NewManager(configDir, logger, nil)
 	if err := mgr.Apply(); err != nil {
 		// A listener that will not start is left tracked in "error" state with
@@ -324,7 +331,10 @@ func runSupervisorMode(args []string) error {
 			ReadTimeout:       30 * time.Second,
 			WriteTimeout:      60 * time.Second,
 			IdleTimeout:       120 * time.Second,
-			ErrorLog:          logger,
+			// net/http wants a *log.Logger, which is the one place left that
+			// does. NewLogLogger bridges it onto the same handler, so its lines
+			// land in the ring with everything else.
+			ErrorLog: slog.NewLogLogger(logHandler, slog.LevelError),
 		}
 		go func() {
 			logger.Printf("management API + panel at http://%s/", *listenAddr)

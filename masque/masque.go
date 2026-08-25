@@ -27,8 +27,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"io"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"strconv"
@@ -36,6 +35,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	imasque "github.com/xen0bit/veepin/internal/masque"
+	"github.com/xen0bit/veepin/internal/vlog"
 	"golang.org/x/net/quic"
 )
 
@@ -79,7 +79,7 @@ type Config struct {
 	// TUNName is the interface to open; empty picks the next free one.
 	TUNName string
 	// Logger receives progress messages; nil discards them.
-	Logger *log.Logger
+	Logger *slog.Logger
 }
 
 // Session is a running MASQUE client.
@@ -94,10 +94,7 @@ func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
 	if cfg.Server == "" {
 		return nil, client.Result{}, fmt.Errorf("masque: server is required")
 	}
-	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
+	logger := vlog.From(cfg.Logger)
 
 	port := cfg.Port
 	if port == 0 {
@@ -187,7 +184,7 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 		Authority: opts[OptAuthority],
 		TUNName:   opts[OptTUN],
 		Insecure:  opts[OptInsecure] == "true",
-		Logger:    log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds),
+		Logger:    slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
 	}
 	if cfg.Server == "" {
 		return nil, fmt.Errorf("masque: server is required")

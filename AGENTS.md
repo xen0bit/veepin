@@ -272,6 +272,12 @@ The code reads like prose and the comments carry the reasoning. Match it.
 - **Errors are lower-case, prefixed with the package name**, and the drop path on
   a data path uses pre-built sentinels so a flood of bad packets allocates
   nothing.
+- **Logging goes through `internal/vlog`** — `log/slog` with `Printf`-shaped
+  calls. `Printf` is Info, and `Warnf`/`Errorf` exist so `-log-level warn` means
+  something. A line may only ever be reclassified **upward**: Info→Warn keeps it
+  visible at the default level, Info→Debug hides it from everyone who has not
+  asked, and twenty-eight interop cells read this stream. A facade's public
+  `Logger` field is an `*slog.Logger`, wrapped on the way in.
 - **Every `internal/<proto>/README.md` ends with an honest caveats section.**
   Missing forward secrecy, unimplemented modes, protocol weaknesses veepin
   inherits — state them plainly. `doc/security.md` carries the longer form.

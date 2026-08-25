@@ -18,8 +18,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"log"
 	"net"
 	"net/netip"
 	"strconv"
@@ -27,6 +25,7 @@ import (
 
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/masque/http3"
+	"github.com/xen0bit/veepin/internal/vlog"
 	"golang.org/x/net/quic"
 )
 
@@ -38,7 +37,7 @@ type ServerConfig struct {
 	// carry it, but it bounds the TUN read buffer.
 	MTU int
 	// Logger receives progress messages; nil discards them.
-	Logger *log.Logger
+	Logger *vlog.Logger
 	// Gate bounds unauthenticated work. Nil installs one with the package
 	// defaults; an unbounded server is not a supported configuration.
 	Gate *dataplane.Gate
@@ -67,7 +66,7 @@ type Server struct {
 	tun  tunDevice
 	gate *dataplane.Gate
 	cfg  ServerConfig
-	log  *log.Logger
+	log  *vlog.Logger
 
 	// shaper pads outbound inner packets so the inner traffic's size pattern
 	// does not survive encapsulation. Owned by tunLoop, the only writer, the
@@ -90,9 +89,6 @@ func NewServer(end *quic.Endpoint, tun tunDevice, cfg ServerConfig) (*Server, er
 		return nil, errors.New("masque: no address pool configured")
 	}
 	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
 	gate := cfg.Gate
 	if gate == nil {
 		gate = dataplane.NewGate(dataplane.AdmissionConfig{})
@@ -146,7 +142,7 @@ func (s *Server) Run() error {
 func (s *Server) handleConn(qc *quic.Conn) {
 	remote := udpAddrOf(qc.RemoteAddr())
 	if r := s.gate.Admit(remote); r != dataplane.Admitted {
-		s.log.Printf("masque: refusing connection from %v: %v", remote, r)
+		s.log.Warnf("masque: refusing connection from %v: %v", remote, r)
 		qc.Abort(errServerBusy)
 		return
 	}

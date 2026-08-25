@@ -19,8 +19,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"io"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"strconv"
@@ -30,6 +29,7 @@ import (
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	engine "github.com/xen0bit/veepin/internal/anyconnect"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 func init() { client.Register("anyconnect", parseOptions) }
@@ -64,7 +64,7 @@ type Config struct {
 	// NoDTLS keeps the tunnel on TLS even when the server offers a UDP channel.
 	NoDTLS  bool
 	TUNName string
-	Logger  *log.Logger
+	Logger  *slog.Logger
 }
 
 func (c *Config) validate() error {
@@ -85,7 +85,7 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 		// operationally significant — it is the difference between a tunnel that
 		// performs and one that does not — so the engine's log is surfaced rather
 		// than discarded. The other client protocols predate this and stay quiet.
-		Logger:   log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds),
+		Logger:   slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
 		Server:   opts[OptServer],
 		Username: opts[OptUser],
 		Password: opts[OptPassword],
@@ -115,10 +115,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	if err := cfg.validate(); err != nil {
 		return nil, client.Result{}, err
 	}
-	logger := cfg.Logger
-	if logger == nil {
-		logger = log.New(io.Discard, "", 0)
-	}
+	logger := vlog.From(cfg.Logger)
 	port := cfg.Port
 	if port == 0 {
 		port = defaultPort

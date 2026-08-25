@@ -3,14 +3,15 @@ package l2tpv3
 import (
 	"errors"
 	"fmt"
-	"log"
 	"net"
+	"os"
 	"sync/atomic"
 	"time"
 
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/l2tpv3"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // ServerConfig configures an L2TPv3 Ethernet pseudowire server.
@@ -42,7 +43,7 @@ type Server struct {
 	pump   *l2tpv3.Pump
 	cfg    ServerConfig
 	sess   *l2tpv3.SessionConfig
-	logger *log.Logger
+	logger *vlog.Logger
 
 	// conn is written by ListenAndServe and read by the pump's send callback on
 	// another goroutine, so it is atomic rather than a plain field.
@@ -71,7 +72,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		tap:    tap,
 		cfg:    cfg,
 		sess:   sessCfg,
-		logger: log.New(log.Writer(), "", log.LstdFlags),
+		logger: vlog.Text(os.Stderr),
 	}
 	s.pump = l2tpv3.NewPump(tap, s.send, sessCfg, s.logger)
 	if cfg.CCID != 0 && cfg.PeerCCID != 0 {

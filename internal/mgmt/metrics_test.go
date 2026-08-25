@@ -2,8 +2,6 @@ package mgmt
 
 import (
 	"encoding/json"
-	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +9,7 @@ import (
 
 	"github.com/xen0bit/veepin/client"
 	"github.com/xen0bit/veepin/internal/supervisor"
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // metricsServer builds an API over one running wireguard listener with the
@@ -28,7 +27,7 @@ func metricsServer(t *testing.T, peers []client.PeerInfo) *Server {
 		statuses:   map[string]supervisor.Status{"site-a": {Name: "site-a", Protocol: "wireguard", State: "running"}},
 		peerServer: &fakePeerDescriber{peers: peers},
 	}
-	srv, err := NewServer(dir, mgr, log.New(io.Discard, "", 0))
+	srv, err := NewServer(dir, mgr, vlog.Discard())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +117,7 @@ func TestMetricsOmitListenersThatCannotReportPeers(t *testing.T) {
 	mgr := &fakeMgr{statuses: map[string]supervisor.Status{
 		"site-a": {Name: "site-a", Protocol: "masque", State: "running"},
 	}}
-	srv, err := NewServer(dir, mgr, log.New(io.Discard, "", 0))
+	srv, err := NewServer(dir, mgr, vlog.Discard())
 	if err != nil {
 		t.Fatal(err)
 	}
