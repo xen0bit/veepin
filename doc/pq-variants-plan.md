@@ -574,7 +574,75 @@ One commit per phase; they serialise where they touch `doc.go` and the README.
    *without* changing its counts; each `internal/<proto>/README.md` caveats
    section gains a line.
 
-## 11. Open questions for a person
+## 11. Outcome — what was built, and how the open questions were answered
+
+Everything in phases 1–10 landed. The four questions §11 left to a person were
+answered as this page recommended, and the reasoning is recorded here rather
+than in a commit message nobody will find:
+
+1. **`pq-ssh` ships**, as the single named exception in `pqpolicy.SSHKeyExchangeOnly`,
+   with `TestSSHIsTheOnlyPQAuthException` holding that list at one entry. It
+   turned out to be worth more than expected: veepin's SSH cell had **no**
+   post-quantum key exchange in common with its peer at all, so the variant is
+   the difference between a post-quantum key exchange and none, not between two
+   grades of one.
+2. **NetworkManager does not offer the variants.** The CLI, the supervisor and
+   the management panel carry them; `nm/` follows if someone asks.
+3. **`ikev2 -pq` is deprecated rather than removed**, warning at Warn level for
+   one release. It has shipped, so it is in runbooks and in profiles on disk.
+4. **The six no-peer variants ship**, with `—†` on both directional cells and a
+   sentence in `doc/security.md` saying no third-party implementation has
+   verified them.
+
+### What the implementation changed about the plan
+
+- **§8's two surveys were not needed to start.** `pq-openvpn` and `pq-masque`
+  landed with the same seam as the rest; whether their peers accept ML-DSA is
+  now a question about a cell rather than about whether the code exists.
+- **The `<proto>/pq/` placement paid for itself twice.** `interop.yml` needed no
+  new path filters, because `ikev2/**` already matches `ikev2/pq/`. And the
+  blank imports read as what they are.
+- **The OptSpec fallback held**, which was the plan's own named risk. No variant
+  needed a table of its own, so the cost estimate did not triple.
+- **`sigAlg`'s `isRSA` bool was replaced rather than extended**, per §6.2 step 4.
+- **keygen gained ML-DSA chains**, which the plan did not anticipate. Without it
+  a listener created under a `pq-` name in the panel would generate an ECDSA
+  credential that the same listener then refuses at construction — a trap laid
+  by two correct pieces of code meeting.
+
+### Three things the tests caught that review would not have
+
+- **`connect.go` decided protocol-vs-profile with `client.Protocols()`**, which
+  excludes variants by design. So every `pq-` name was unreachable from `veepin
+  connect` while `veepin serve` worked perfectly. Found by an interop cell, not
+  by any unit test — none of them went through that gate.
+  `TestEveryDialableNameResolvesAsAProtocol` now does.
+- **`newCertCredential` rejected ML-DSA keys outright**, so the whole IKEv2 AUTH
+  path would have been unreachable through any real credential.
+- **`net.Pipe` deadlocks when a client rejects a certificate mid-flight** — both
+  ends end up writing, neither reading. The refusal tests hang rather than fail
+  without deadlines on the pipe.
+
+### The evidence, as it actually stands
+
+| Cell | Peer | Result |
+|---|---|---|
+| `TestInteropPQIKEv2ServerAcceptsAPostQuantumPeer` | strongSwan (sid) | ✓ ML-KEM-768 negotiated |
+| `TestInteropPQIKEv2ServerRefusesAClassicalPeer` | strongSwan (sid), classical proposal | ✓ **refused**, with the reason logged |
+| `TestInteropPQSSHClientSSHD` | OpenSSH 10.0p2 (trixie), kex pinned | ✓ no classical path existed |
+| `TestInteropPQSSTPSelf` | veepin | ✓ — and labelled self-only |
+
+The second row is the one that matters. Everything else in this matrix asserts
+that something works; that cell asserts that something is refused, which is the
+only claim that distinguishes `pq-ikev2` from `ikev2` — and a real third-party
+implementation is what does the distinguishing.
+
+**Still outstanding**, and deliberately: `pq-ikev2`'s ML-DSA *authentication*
+has no third-party peer until strongSwan 6.1.0 ships, and the four
+openconnect-backed variants have none at all while openconnect links GnuTLS.
+Neither is a code gap.
+
+## 12. The original open questions
 
 1. **Does `pq-ssh` ship?** It cannot meet D1 — SSH has no post-quantum signature
    algorithm anywhere. Ship it as a named exception (recommended: it is a real
@@ -597,7 +665,7 @@ One commit per phase; they serialise where they touch `doc.go` and the README.
    veepin↔veepin usable today, which is a real deployment for anyone running both
    ends, and they are the thing that is already correct when GnuTLS moves.
 
-## 12. Risks
+## 13. Risks
 
 - **The naming implies a promise about class D.** "Where is `pq-wireguard`?" is
   the first question this scheme invites. `doc/security.md` must answer it in the
