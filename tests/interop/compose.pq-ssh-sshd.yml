@@ -1,0 +1,43 @@
+# veepin's pq-ssh CLIENT -> a real OpenSSH server that REQUIRES a post-quantum
+# key exchange.
+#
+# Two things make this cell worth more than the base ssh-sshd one it is forked
+# from. The peer is OpenSSH 10.0 rather than bookworm's 9.2, which is the first
+# version that speaks mlkem768x25519-sha256 -- the only post-quantum key exchange
+# golang.org/x/crypto/ssh implements, since it has no sntrup761. And the peer's
+# KexAlgorithms is pinned to that one name, so there is no classical path through
+# this handshake at all: a veepin regression that stopped pinning the kex fails
+# here rather than passing quietly on curve25519-sha256, which is exactly what
+# the bookworm cell does today.
+#
+# pq-ssh carries only the key-exchange half of the pq- contract. SSH has no
+# post-quantum signature algorithm in any specification, so the host key here is
+# classical and that is upstream's limit rather than veepin's -- see
+# https://www.openssh.org/pq.html and internal/pqpolicy.
+name: veepin-interop-pq-ssh-sshd
+
+services:
+  sshd-pq:
+    build:
+      context: sshd-pq
+    image: interop-sshd-pq
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    volumes:
+      - ./ssh/keys:/keys:ro
+
+  veepin-ssh-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [sshd-pq]
+    environment:
+      SERVER: "sshd-pq"
+      PROTOCOL: "pq-ssh"
+    volumes:
+      - ./ssh/keys:/keys:ro
+      - ./veepin/pq-ssh-client-sshd-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

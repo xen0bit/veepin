@@ -33,7 +33,7 @@ import (
 func runConnect(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: veepin connect <protocol|profile> [flags]\nprotocols: %s",
-			strings.Join(client.Protocols(), ", "))
+			strings.Join(client.AllProtocols(), ", "))
 	}
 	name := args[0]
 
@@ -57,7 +57,7 @@ func runConnect(args []string) error {
 			// operator looking for a file that is sitting right there.
 			if errors.Is(err, fs.ErrNotExist) {
 				return fmt.Errorf("connect: %q is neither a protocol nor a saved profile\nprotocols: %s",
-					name, strings.Join(client.Protocols(), ", "))
+					name, strings.Join(client.AllProtocols(), ", "))
 			}
 			return fmt.Errorf("connect: profile %q: %w", name, err)
 		}
@@ -70,7 +70,7 @@ func runConnect(args []string) error {
 // knownProtocol reports whether name is in the client registry. It is the
 // gate between bare mode (name = protocol) and profile mode (name = profile).
 func knownProtocol(name string) bool {
-	return slices.Contains(client.Protocols(), name)
+	return slices.Contains(client.AllProtocols(), name)
 }
 
 // runConnectBare is the existing single-protocol dial path, kept identical
@@ -460,7 +460,7 @@ func connectFlags(protocol string, fs *flag.FlagSet) (func() map[string]string, 
 	specs, ok := client.ClientOptsFor(protocol)
 	if !ok {
 		return nil, fmt.Errorf("unknown protocol %q (available: %s)",
-			protocol, strings.Join(client.Protocols(), ", "))
+			protocol, strings.Join(client.AllProtocols(), ", "))
 	}
 	return bindSpecFlags(fs, specs), nil
 }

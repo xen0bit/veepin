@@ -53,4 +53,8 @@ if [ -n "${WAN:-}" ]; then
     set -- "$@" -wan "$WAN"
 fi
 
-exec veepin serve ikev2 "$@"
+# PROTOCOL selects ikev2 or its post-quantum variant pq-ikev2. The variant takes
+# byte-for-byte the same flags, which is exactly why one entrypoint can serve
+# both -- a second script here would be the duplication the variant scheme is
+# built to avoid.
+exec veepin serve "${PROTOCOL:-ikev2}" "$@"

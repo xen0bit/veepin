@@ -138,5 +138,5 @@ Usage:
   veepin version                                print build information
 
 Protocols: %s
-`, version, strings.Join(client.Protocols(), ", "))
+`, version, strings.Join(client.AllProtocols(), ", "))
 }
