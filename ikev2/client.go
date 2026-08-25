@@ -173,6 +173,17 @@ const (
 // parseOptions turns string-keyed options into a Dialer. It is what the registry
 // calls for client.Dial(ctx, "ikev2", opts).
 func parseOptions(opts map[string]string) (client.Dialer, error) {
+	// The deprecation, said once and where the operator will see it. -pq only
+	// ever OFFERED ML-KEM and fell back silently when the responder declined,
+	// which is the downgrade the pq-ikev2 name exists to close. Warnf rather
+	// than Printf so it survives -log-level warn: a line telling somebody their
+	// post-quantum protection is optional should not be hidden at the level
+	// they turned logging down to.
+	if opts[OptPQ] == "true" && !pqpolicy.Requested(opts) {
+		vlog.Text(os.Stdout).Warnf("ikev2: -pq is deprecated and will be removed. It OFFERS " +
+			"ML-KEM-768 and silently accepts a classical SA if the responder declines. " +
+			"Use `veepin connect pq-ikev2`, which refuses instead.")
+	}
 	cfg := Config{
 		Server:          opts[OptGateway],
 		PSK:             opts[OptPSK],

@@ -54,7 +54,7 @@ func newCertCredential(leaf *x509.Certificate, chain [][]byte, key crypto.Privat
 		return nil, fmt.Errorf("ike: certificate key does not implement crypto.Signer")
 	}
 	switch signer.Public().(type) {
-	case *rsa.PublicKey, *ecdsa.PublicKey:
+	case *rsa.PublicKey, *ecdsa.PublicKey, *mldsa.PublicKey:
 	default:
 		return nil, fmt.Errorf("ike: unsupported certificate key type %T", signer.Public())
 	}
