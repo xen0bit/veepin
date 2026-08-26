@@ -79,7 +79,7 @@ func (m *Mux) maybeStart(addr *net.UDPAddr, pkt []byte) {
 	if handler == nil {
 		return
 	}
-	p := &Conn{m: m, peer: addr, queue: make(chan []byte, queueDepth)}
+	p := &Conn{m: m, peer: addr, queue: make(chan []byte, queueDepth), done: make(chan struct{})}
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
@@ -92,14 +92,14 @@ func (m *Mux) maybeStart(addr *net.UDPAddr, pkt []byte) {
 	go handler(p)
 }
 
-// Drop forgets a peer and closes its queue. It is idempotent.
+// Drop forgets a peer and ends its reads. It is idempotent.
 func (m *Mux) Drop(p *Conn) {
 	m.mu.Lock()
 	if m.peers[p.peer.String()] == p {
 		delete(m.peers, p.peer.String())
 	}
 	m.mu.Unlock()
-	p.closeQueue()
+	p.stop()
 }
 
 func (m *Mux) shutdown() {
@@ -112,7 +112,7 @@ func (m *Mux) shutdown() {
 	m.peers = map[string]*Conn{}
 	m.mu.Unlock()
 	for _, p := range peers {
-		p.closeQueue()
+		p.stop()
 	}
 }
 
@@ -126,9 +126,18 @@ type Conn struct {
 	peer *net.UDPAddr
 
 	queue chan []byte
+	// done is closed when the peer is dropped, and it -- not closing queue -- is
+	// what ends a Read.
+	//
+	// Serve looks a peer up under the Mux lock and then delivers outside it, so a
+	// Drop can land in between: closing queue would then be a close racing a
+	// send, which is a "send on closed channel" panic taking the whole gateway
+	// down because one peer went away. Leaving queue open costs the buffered
+	// datagrams a GC cycle and nothing else.
+	done      chan struct{}
+	closeOnce sync.Once
 
 	mu       sync.Mutex
-	closed   bool
 	deadline time.Time
 }
 
@@ -153,22 +162,20 @@ func (p *Conn) Read(b []byte) (int, error) {
 		timeout = t.C
 	}
 	select {
-	case pkt, ok := <-p.queue:
-		if !ok {
-			return 0, io.EOF
-		}
+	case pkt := <-p.queue:
 		return copy(b, pkt), nil
+	case <-p.done:
+		return 0, io.EOF
 	case <-timeout:
 		return 0, ErrTimeout{}
 	}
 }
 
 func (p *Conn) Write(b []byte) (int, error) {
-	p.mu.Lock()
-	closed := p.closed
-	p.mu.Unlock()
-	if closed {
+	select {
+	case <-p.done:
 		return 0, net.ErrClosed
+	default:
 	}
 	return p.m.conn.WriteToUDP(b, p.peer)
 }
@@ -178,14 +185,10 @@ func (p *Conn) Close() error {
 	return nil
 }
 
-func (p *Conn) closeQueue() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.closed {
-		return
-	}
-	p.closed = true
-	close(p.queue)
+// stop ends the peer's reads and refuses its writes. It is idempotent, because
+// both Drop and the Mux shutdown reach it and either may be first.
+func (p *Conn) stop() {
+	p.closeOnce.Do(func() { close(p.done) })
 }
 
 func (p *Conn) LocalAddr() net.Addr  { return p.m.conn.LocalAddr() }
