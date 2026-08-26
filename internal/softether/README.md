@@ -159,3 +159,9 @@ State these plainly rather than discovering them later.
   it is, that a peer which never signs is cut off, and that the 403 page escapes
   the peer-supplied target it reflects.
 - `fuzz_test.go` — the PACK decoder.
+- **`pq-softether` will not start on SoftEther's own certificate.** The daemon
+  ships a self-signed RSA one by default, and `pqpolicy.CheckCredential` refuses
+  it at construction, before the TAP is opened. That is deliberate — the name
+  promises ML-DSA authentication — but it means the variant cannot talk to a real
+  SoftEther peer at all, which is why both its directional cells carry the
+  no-peer label and `TestInteropPQSoftEtherSelf` is the whole of the evidence.

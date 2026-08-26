@@ -409,18 +409,43 @@ ecosystem in 2026, not a gap in the test suite.
 
 | Variant | Cross-implementation evidence |
 |---|---|
-| `pq-ikev2` | strongSwan proves the **key exchange** half (RFC 9370). Its ML-DSA authentication is on an `ml-dsa` branch targeted at 6.1.0, so the **authentication** half has no peer yet. |
-| `pq-openvpn` | `openvpn` 2.6.14 links OpenSSL 3.5.6, which does both ML-KEM and ML-DSA. |
-| `pq-ssh` | OpenSSH 10.0 speaks `mlkem768x25519-sha256`. Key exchange only, per above. |
+| `pq-openvpn` | **Both halves, both directions.** `openvpn` 2.6.14 on trixie links OpenSSL 3.5.7, and OpenVPN authenticates both ends by certificate — so each side's ML-DSA-65 signature is verified by the other implementation, over an ML-KEM-only group list. The peer configs pin `tls-version-min 1.3` and `tls-groups`, so neither cell can pass on a classical fallback. |
+| `pq-ikev2` | strongSwan proves the **key exchange** half (RFC 9370), and — the cell that matters — **refuses** a classical initiator proposing everything the passing cell proposes minus `ke1_mlkem768`. Its ML-DSA authentication is on an `ml-dsa` branch targeted at 6.1.0, so the **authentication** half has no peer yet, which is why the client direction carries `—†`. |
+| `pq-ssh` | OpenSSH 10.0 on trixie, both directions, with `KexAlgorithms` pinned to `mlkem768x25519-sha256` at each end so no classical path through the handshake exists. Key exchange only, per above. |
 | `pq-anyconnect`, `pq-fortinet`, `pq-gp`, `pq-pulse` | **None, and none in prospect.** openconnect links GnuTLS, and GnuTLS 3.8.9 has no ML-KEM group at all — measured, not assumed. |
-| `pq-sstp`, `pq-softether`, `pq-masque` | **None.** `sstp-client` is older still, SoftEther has its own stack, and aioquic brings its own TLS. |
+| `pq-sstp`, `pq-softether` | **None.** `sstp-client` links OpenSSL 3.0, which has neither primitive, and SoftEther has its own stack and ships a self-signed RSA certificate a `pq-` name refuses outright. |
+| `pq-masque` | **None**, measured on 2026-08-25 against aioquic 1.3.0 (the latest release): it brings its own hand-written TLS 1.3 in Python, whose `Group` enum holds SECP256R1/384R1/521R1, X25519, X448 and GREASE — no ML-KEM member — and whose `SignatureAlgorithm` enum has no ML-DSA. |
 
-Where a cell has no peer it takes the fixed `—†` label the interop matrix
-already carries for this situation, rather than a false ✗. Read those rows as
-what they are: **veepin↔veepin evidence only**, which proves the two halves agree
-with each other and not that they are right. That is the weaker standard this
-tree normally refuses, accepted here because the alternative is not shipping the
-guarantee at all — and it is stated rather than glossed.
+Each variant has **its own row** in the interop matrix, and where a cell has no
+peer it takes the fixed `—†` label the matrix already carried for this situation
+rather than a false ✗. Read those rows as what they are: **veepin↔veepin evidence
+only**, which proves the two halves agree with each other and not that they are
+right. That is the weaker standard this tree normally refuses, accepted here
+because the alternative is not shipping the guarantee at all — and it is stated
+rather than glossed.
+
+A veepin↔veepin cell needs one extra precaution to be worth anything here, and
+it is the reason `pqpolicy.Announce` exists. Both ends of a self cell apply the
+same policy from the same package, so if the hardening silently stopped
+applying, **both** would drop to a classical handshake, agree with each other
+perfectly, and the cell's ping would pass — the mutually-consistent failure
+`AGENTS.md` names as the dangerous class. Every `pq-` self cell therefore
+requires the contract line in *both* services' logs, which only the variant's own
+dial and serve paths can produce. See `runInteropPQSelf`.
+
+Two enforcement bugs were found by building those cells and the guards beside
+them, and both are worth recording because neither broke a test that existed at
+the time. **`veepin serve pq-openvpn` enforced nothing at all**: the server
+declared `PostQuantumOnly`, set it from the registry and never read it, so it
+accepted a classical peer, an RSA certificate and TLS 1.2 while its name promised
+a refusal. The client half had always hardened, so the self cell passed by
+driving the correct half from both ends. And **three facades judged the
+credential after opening the TUN** — `fortinet`, `gp` and `pulse`, each under a
+comment stating the opposite — so the refusal still happened but leaked a file
+descriptor and arrived after the listener had acquired something. Both classes
+are now held by `TestEveryPQVariantAppliesThePolicyInBothRoles`, which walks each
+facade's own call graph out from `Dial` and from `NewServer` separately, and by
+`TestPQServerRefusesAClassicalCredential`.
 
 ## SoftEther is layer 2, and shares a broadcast domain between clients
 

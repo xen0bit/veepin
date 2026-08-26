@@ -72,3 +72,13 @@ Total Length, so the filler is never seen above IP.
 evidence — and the final frame's filler trailing until the next read is correct
 rather than a leak, which `TestFillerIsSkippedAndTheStreamStaysInSync` states
 explicitly so nobody "fixes" it.
+- **`pq-ssh` carries only half the post-quantum contract, and cannot carry the
+  other half.** SSH has no post-quantum signature algorithm in any specification
+  or implementation, so host keys and user keys stay classical;
+  [OpenSSH says so itself](https://www.openssh.org/pq.html) and calls signature
+  support future work. It is the single named exception in
+  `pqpolicy.SSHKeyExchangeOnly`, held at one entry by
+  `TestSSHIsTheOnlyPQAuthException`. It ships anyway because the alternative is
+  worse: `golang.org/x/crypto/ssh` implements no `sntrup761`, so against any peer
+  older than OpenSSH 9.9 veepin silently settles for `curve25519-sha256`, and
+  `mlkem768x25519-sha256` is the only mechanism the two stacks share.

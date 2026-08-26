@@ -501,20 +501,47 @@ Mechanics that are not optional:
   peers and their current results; nothing in the 103-cell matrix is revalidated
   as a side effect of this work.
 
-## 8. Two surveys to run before promising the class-A rows
+## 8. Two surveys to run before promising the class-A rows — **both run**
 
-Both are half a day and both are genuinely half a day either way.
+Measured on 2026-08-25, and they came back opposite ways.
 
-1. **Does `openvpn` 2.6.14 accept an ML-DSA certificate?** It links OpenSSL
-   3.5.6, so the library can. Whether OpenVPN's own certificate handling,
-   `--tls-cert-profile` logic and key-type checks accept one is a separate
-   question with a real chance of "no". Run it before `pq-openvpn` is promised
-   as class A; if it fails, `pq-openvpn` is class B and says so.
-2. **What does aioquic do?** `tests/interop/masque` is Python; aioquic brings its
-   own TLS 1.3 and the odds of ML-KEM support are low and of ML-DSA lower. If
-   both are absent, `pq-masque` is class B. MASQUE is TLS-1.3-only already, so
-   the *key exchange* half may pass where the auth half does not — which is
-   exactly the partial result worth publishing.
+### 1. Does `openvpn` 2.6.14 accept an ML-DSA certificate? **Yes, entirely.**
+
+Not inferred from OpenSSL's algorithm list, which was the whole point of asking:
+whether OpenVPN's own certificate handling and key-type checks accept an ML-DSA
+leaf is a separate question from whether the library can. Run end to end, an
+ML-DSA-65 CA signing an ML-DSA-65 server and client leaf, `tls-version-min 1.3`
+and a `tls-groups` list with no classical member:
+
+```
+Control Channel: TLSv1.3, cipher TLSv1.3 TLS_AES_256_GCM_SHA384,
+  peer certificate: 15616 bits ML-DSA-65, signature: id-ml-dsa-65,
+  peer temporary key: 768 bits X25519MLKEM768
+Initialization Sequence Completed
+```
+
+Both halves, and — because OpenVPN authenticates both ends by certificate —
+**mutually**. `pq-openvpn` is class A, and it is the strongest evidence in this
+work: two post-quantum signatures on one connection, each verified by the other
+implementation. The peer is a new `tests/interop/openvpn-pq/` image on trixie
+(OpenSSL 3.5.7), because `tests/interop/openvpn` is alpine:3.20 on OpenSSL 3.3,
+which has neither primitive.
+
+### 2. What does aioquic do? **Nothing. `pq-masque` is class B.**
+
+aioquic brings its own hand-written TLS 1.3 in Python rather than linking a
+library, so the question was never about OpenSSL. Measured against 1.3.0, which
+`pip index versions` confirms is the latest release:
+
+```
+Group:              SECP256R1 SECP384R1 SECP521R1 X25519 X448 GREASE
+SignatureAlgorithm: ECDSA_* ED25519 ED448 RSA_* SHA1_DSA
+mlkem/mldsa in aioquic.tls source: []
+```
+
+No ML-KEM member in the group enum at all, so not even the partial "key exchange
+passes, auth does not" result the plan hoped for. `pq-masque` ships with `—†` on
+both directional cells.
 
 ## 9. The guards, and what each needs
 
@@ -597,8 +624,11 @@ than in a commit message nobody will find:
 ### What the implementation changed about the plan
 
 - **§8's two surveys were not needed to start.** `pq-openvpn` and `pq-masque`
-  landed with the same seam as the rest; whether their peers accept ML-DSA is
-  now a question about a cell rather than about whether the code exists.
+  landed with the same seam as the rest; whether their peers accept ML-DSA
+  became a question about a cell rather than about whether the code exists. Both
+  surveys have since been run — see §8, now answered — and they went opposite
+  ways: `pq-openvpn` is class A with mutual ML-DSA against a real peer, and
+  `pq-masque` is class B with none.
 - **The `<proto>/pq/` placement paid for itself twice.** `interop.yml` needed no
   new path filters, because `ikev2/**` already matches `ikev2/pq/`. And the
   blank imports read as what they are.
@@ -625,22 +655,65 @@ than in a commit message nobody will find:
 
 ### The evidence, as it actually stands
 
+Each variant now has **its own row** in `internal/livingreadme/interop.go`, which
+is what §1 said the naming scheme was for and what the first pass did not do: the
+four original cells were appended into the IKEv2, SSTP and SSH rows instead, so
+no `pq-` name appeared in either README table and none of them could carry a
+throughput figure. Ten rows, ten shards, sixteen cells:
+
 | Cell | Peer | Result |
 |---|---|---|
-| `TestInteropPQIKEv2ServerAcceptsAPostQuantumPeer` | strongSwan (sid) | ✓ ML-KEM-768 negotiated |
+| `TestInteropPQOpenVPNVeepinClientRealServer` | `openvpn` 2.6.14 (trixie, OpenSSL 3.5.7) | ✓ **mutual ML-DSA-65** over X25519MLKEM768 |
+| `TestInteropPQOpenVPNRealClientVeepinServer` | as above, reversed | ✓ veepin's ML-DSA leaf verified by OpenVPN |
 | `TestInteropPQIKEv2ServerRefusesAClassicalPeer` | strongSwan (sid), classical proposal | ✓ **refused**, with the reason logged |
+| `TestInteropPQIKEv2ServerAcceptsAPostQuantumPeer` | strongSwan (sid) | ✓ ML-KEM-768 negotiated |
 | `TestInteropPQSSHClientSSHD` | OpenSSH 10.0p2 (trixie), kex pinned | ✓ no classical path existed |
-| `TestInteropPQSSTPSelf` | veepin | ✓ — and labelled self-only |
+| `TestInteropPQSSHClientVeepinServer` | as above, reversed | ✓ the responder's pinning proven too |
+| ten `…Self` cells | veepin | ✓ — each labelled self-only, each requiring the contract line at **both** ends |
 
-The second row is the one that matters. Everything else in this matrix asserts
-that something works; that cell asserts that something is refused, which is the
-only claim that distinguishes `pq-ikev2` from `ikev2` — and a real third-party
-implementation is what does the distinguishing.
+Two rows carry the weight, for opposite reasons. The **refusal** cell is the only
+claim that distinguishes `pq-ikev2` from `ikev2` at all — a server that merely
+*prefers* post-quantum passes the positive cell identically — and a real
+third-party implementation is what does the distinguishing. And the
+**pq-openvpn** pair is the only cross-implementation evidence anywhere in this
+tree for the *authentication* half of the contract, which was scoped as having no
+peer at all.
 
-**Still outstanding**, and deliberately: `pq-ikev2`'s ML-DSA *authentication*
-has no third-party peer until strongSwan 6.1.0 ships, and the four
-openconnect-backed variants have none at all while openconnect links GnuTLS.
-Neither is a code gap.
+### What building the cells found
+
+Three enforcement defects, none of which broke a test that existed at the time.
+
+- **`veepin serve pq-openvpn` enforced nothing.** `openvpn/server.go` declared
+  `PostQuantumOnly`, set it from the registry at line 1044, and never read it. It
+  accepted a classical peer, an RSA certificate and TLS 1.2 under a name
+  promising a refusal. The client half had always hardened, so the self cell
+  passed by driving the correct half from both ends — the exact
+  mutually-consistent shape §7 warned about, one layer up from where it was
+  expected.
+- **Three facades judged the credential after opening the TUN** — `fortinet`,
+  `gp`, `pulse` — each under a comment saying "checked before the TUN is opened".
+  The refusal still happened; it just leaked a file descriptor and arrived after
+  the listener had acquired something. `masque` had the same ordering.
+- **`pqpolicy.Announce` did not exist**, and `Describe` — whose doc comment
+  promised an operator "can see in the server's own output which guarantee is in
+  force" — was called from nowhere but a test. That gap is what made the self
+  cells vacuous: with no line to assert on, a bare ping passes just as happily
+  when both ends have quietly stopped hardening.
+
+The first two are found by `TestEveryPQVariantAppliesThePolicyInBothRoles`, which
+is §9's `TestPQVariantsRefuseAClassicalPeer` in the only form that can actually
+work. There is no seam to drive a facade's `tls.Config` through, so it walks each
+package's own call graph out from `Dial` and from `NewServer` **separately** —
+per role, because written against the package as a whole it passed while
+pq-openvpn's server enforced nothing, one call in `openvpn.go` satisfying a
+question about `server.go`.
+
+**Still outstanding**, and deliberately: `pq-ikev2`'s ML-DSA *authentication* has
+no third-party peer until strongSwan 6.1.0 ships, and the four
+openconnect-backed variants plus `pq-sstp`, `pq-softether` and `pq-masque` have
+none at all — GnuTLS has no ML-KEM group, `sstp-client` links OpenSSL 3.0,
+SoftEther has its own stack, and aioquic brings its own TLS. Neither is a code
+gap.
 
 ## 12. The original open questions
 

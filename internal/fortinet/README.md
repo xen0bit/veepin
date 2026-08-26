@@ -64,3 +64,9 @@ flowchart TD
   data path; the independent-implementation proof is real openconnect *client* ↔
   veepin server (see the interop-matrix note in the root README). RSA-key gateways
   fall back to TLS-only since the DTLS channel needs an ECDSA cert.
+- **`pq-fortinet` loses the DTLS data channel**, for the reason `pq-anyconnect`
+  does: `internal/dtls` has no post-quantum key exchange, so a bound UDP channel
+  under a post-quantum name would leave the bulk traffic classical. The variant
+  forces `-no-dtls`. Its only evidence is `TestInteropPQFortinetSelf` —
+  openconnect links GnuTLS, which has no ML-KEM group — which is
+  veepin↔veepin and proves the two halves agree, not that they are right.

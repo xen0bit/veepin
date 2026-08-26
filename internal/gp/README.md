@@ -87,3 +87,10 @@ left to fall back to.
 - **No SAML.** A gateway configured for browser-based authentication is detected at
   prelogin and reported as `ErrSAML`, so the failure does not look like a wrong
   password.
+- **`pq-gp` keeps the ESP data path, unlike the DTLS protocols.** The ESP keys
+  are derived and delivered inside the TLS control channel, so hardening that
+  channel is what protects them; ESP's own AES-GCM is symmetric and is not a
+  quantum-broken primitive. DTLS differs because it negotiates its *own* key
+  exchange, which `internal/dtls` has no post-quantum spelling for. There is no
+  third-party peer — openconnect links GnuTLS — so `TestInteropPQGPSelf` is the
+  whole of the evidence.
