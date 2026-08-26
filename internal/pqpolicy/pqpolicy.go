@@ -32,8 +32,11 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"os"
 	"sort"
 	"strings"
+
+	"github.com/xen0bit/veepin/internal/vlog"
 )
 
 // OptKey is the option-map key a variant injects to put the base facade into
@@ -284,4 +287,26 @@ func Describe(variant string) string {
 	}
 	b.WriteString("and authentication; classical peers are refused")
 	return b.String()
+}
+
+// Announce writes the contract to the process log, so an operator starting a
+// pq- listener or dialling a pq- name sees which guarantee is in force in the
+// server's own output.
+//
+// Describe existed from the first commit of this package with that promise in
+// its doc comment, and nothing called it. The gap was not cosmetic in two ways.
+// An operator had no way to tell a `pq-` process from its base at runtime; and
+// the veepin<->veepin interop cells had no line to assert on, which matters more
+// than it sounds. Both ends of a self cell harden, so if the hardening silently
+// stopped applying, BOTH would drop to a classical handshake, agree with each
+// other perfectly, and the cell's ping would pass -- the mutually-consistent
+// failure class AGENTS.md names, and exactly what runInteropRequiringLog exists
+// to catch.
+//
+// It goes to stdout at Info rather than through a facade's Logger because it is
+// a statement about the process's configuration, made before any facade is
+// constructed and while the option map is still the only thing that exists.
+// ikev2's -pq deprecation notice is written the same way, for the same reason.
+func Announce(variant string) {
+	vlog.Text(os.Stdout).Printf("%s", Describe(variant))
 }
