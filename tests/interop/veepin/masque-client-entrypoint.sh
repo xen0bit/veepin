@@ -14,7 +14,7 @@ set -u
 i=1
 while [ "$i" -le 40 ]; do
     echo "veepin-masque-client: connecting to ${SERVER}:${PORT:-443} (attempt $i)"
-    veepin connect masque \
+    veepin connect "${PROTOCOL:-masque}" \
         -server "$SERVER" \
         -port "${PORT:-443}" \
         -insecure \

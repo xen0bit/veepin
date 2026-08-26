@@ -117,25 +117,30 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("masque: address pool %q: %w", poolCIDR, err)
 	}
 
-	tun, err := dataplane.OpenTUN(cfg.TUNName)
-	if err != nil {
-		return nil, fmt.Errorf("masque: opening TUN: %w", err)
-	}
-
 	tlsCfg := &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		NextProtos:   []string{"h3"},
 		MinVersion:   tls.VersionTLS13,
 	}
 	if cfg.PostQuantumOnly {
-		// Checked before the TUN is opened and before anything binds: an
-		// operator who pointed a pq- name at their existing RSA certificate
-		// learns it here, rather than from a listener that comes up and then
-		// refuses every client.
+		// Before the TUN is opened and before anything binds: an operator who
+		// pointed a pq- name at their existing RSA certificate learns it here,
+		// rather than from a listener that comes up and then refuses every
+		// client.
+		//
+		// This block used to sit AFTER the OpenTUN below, with this same
+		// comment above it saying otherwise. The refusal still happened, so
+		// nothing failed -- it just leaked a TUN file descriptor on the way out
+		// and reported the wrong thing to anyone reading the code.
 		if err := pqpolicy.CheckCredential(cert); err != nil {
 			return nil, err
 		}
 		pqpolicy.HardenTLS(tlsCfg)
+	}
+
+	tun, err := dataplane.OpenTUN(cfg.TUNName)
+	if err != nil {
+		return nil, fmt.Errorf("masque: opening TUN: %w", err)
 	}
 
 	return &Server{

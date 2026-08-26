@@ -10,9 +10,20 @@ set -eu
 
 [ -c /dev/net/tun ] || { mkdir -p /dev/net; mknod /dev/net/tun c 10 200; }
 
-openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
-    -keyout /tmp/proxy.key -out /tmp/proxy.crt -days 1 -nodes \
-    -subj "/CN=veepin-masque-proxy" >/dev/null 2>&1
+# A pq- cell bind-mounts an ML-DSA credential at /pki, and this branch uses it
+# instead of minting one. The runtime image is bookworm, whose OpenSSL 3.0 has no
+# ML-DSA, so the test mints it in Go -- see generateMLDSAServerCert. With /pki
+# unmounted the classical cells mint exactly what they always did.
+if [ -d /pki ]; then
+    CERT=/pki/server.crt
+    KEY=/pki/server.key
+else
+    CERT=/tmp/proxy.crt
+    KEY=/tmp/proxy.key
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+        -keyout "$KEY" -out "$CERT" -days 1 -nodes \
+        -subj "/CN=veepin-masque-proxy" >/dev/null 2>&1
+fi
 
 # SHAPE pads the first N bytes of each inner flow out to the inner MTU. The
 # filler goes inside the DATAGRAM capsule's value, after the IP packet: RFC
@@ -20,12 +31,12 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
 # everything after the context ID to its TUN and the kernel delimits the real
 # packet by the inner header's Total Length. The shaped cell exists to prove
 # aioquic does exactly that without being told anything.
-echo "veepin-masque-server: starting on 0.0.0.0:${PORT:-443}, pool ${POOL}, shape ${SHAPE:-0}"
-exec veepin serve masque \
+echo "veepin-masque-server: serving ${PROTOCOL:-masque} on 0.0.0.0:${PORT:-443}, pool ${POOL}, shape ${SHAPE:-0}"
+exec veepin serve "${PROTOCOL:-masque}" \
     -listen 0.0.0.0 \
     -port "${PORT:-443}" \
     -pool "$POOL" \
     -shape "${SHAPE:-0}" \
-    -cert /tmp/proxy.crt -key /tmp/proxy.key \
+    -cert "$CERT" -key "$KEY" \
     -tun masque0 \
     -setup-nat -wan eth0

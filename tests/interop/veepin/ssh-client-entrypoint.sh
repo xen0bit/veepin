@@ -9,7 +9,7 @@ mkdir -p /dev/net
 echo "ssh-client: connecting to ${SERVER}"
 i=1
 while [ "$i" -le 40 ]; do
-    veepin connect ssh \
+    veepin connect "${PROTOCOL:-ssh}" \
         -server "$SERVER" -user root \
         -identity /keys/client_key -insecure \
         -address 10.200.0.2/30 -peer 10.200.0.1 \

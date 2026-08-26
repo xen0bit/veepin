@@ -39,7 +39,7 @@ if ! getent hosts "$SERVER" >/dev/null 2>&1; then
 fi
 
 echo "veepin-softether-client: connecting to $SERVER:$PORT"
-veepin connect softether \
+veepin connect "${PROTOCOL:-softether}" \
     -server "$SERVER" \
     -port "$PORT" \
     -user "$USER" \

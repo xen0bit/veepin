@@ -1,0 +1,46 @@
+# veepin pq-openvpn client <-> veepin pq-openvpn server.
+#
+# OpenVPN authenticates BOTH ends by certificate, so this is the one variant
+# where the authentication half is mutual: the client's ML-DSA-65 leaf is
+# checked by the server's pqpolicy hook and the server's by the client's. A PKI
+# with one classical half would leave the name describing one direction only,
+# which is why generateMLDSAPKI mints every key and every signature ML-DSA --
+# CA included.
+#
+# The attribution cell for the two real-peer directions
+# (TestInteropPQOpenVPNVeepinClientRealServer and its reverse), which run
+# against openvpn 2.6.14 on trixie. If those fail and this passes, veepin and
+# OpenVPN have diverged rather than veepin being broken.
+#
+# No -tls-auth or -tls-crypt here. Both are HMAC over a symmetric key, which no
+# quantum adversary breaks, so the variant neither needs nor forbids them; the
+# pq- profile simply does not carry one.
+name: veepin-interop-pq-openvpn-self
+
+services:
+  veepin-pq-ovpn-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      PROTOCOL: "pq-openvpn"
+    volumes:
+      - ./openvpn/pki-pq:/pki:ro
+      - ./veepin/openvpn-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-pq-ovpn-client:
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-pq-ovpn-server]
+    environment:
+      SERVER: "veepin-pq-ovpn-server"
+      PROTOCOL: "pq-openvpn"
+    volumes:
+      - ./openvpn/pki-pq:/pki:ro
+      - ./veepin/openvpn-client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

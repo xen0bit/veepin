@@ -122,17 +122,35 @@ func recordMarker(out Throughput, text string) {
 //     measurement that is broken rather than absent.
 //   - a rate — the measurement.
 func benchCell(c interopCell, tp Throughput) string {
-	if len(c.Tests) == 0 {
-		return "—"
+	// Scan the whole cell rather than reading Tests[0].
+	//
+	// The convention is that a cell's first test is the one that calls
+	// runInteropBench, and every cell in the manifest honours it today -- so
+	// this changes no rendered value. What it removes is a positional trap:
+	// inserting a test at the front of a cell used to blank its throughput
+	// column silently, reporting a measured tunnel as one iperf3 does not apply
+	// to. That is exactly how the pq- cells' numbers went missing while they
+	// were still folded into their base protocols' rows.
+	//
+	// Order still decides which number wins when several tests measured, and
+	// order is the convention's priority order: the plain cell first, its
+	// variants after. So the plain cell's figure is preferred wherever it
+	// exists, and a variant's is used only when the plain one measured nothing.
+	attempted := false
+	for _, name := range c.Tests {
+		m, ok := tp[name]
+		if !ok {
+			continue
+		}
+		attempted = true
+		if !m.Failed && m.BitsPerSec > 0 {
+			return formatBits(m.BitsPerSec)
+		}
 	}
-	m, ok := tp[c.Tests[0]]
-	if !ok {
-		return "—"
-	}
-	if m.Failed || m.BitsPerSec <= 0 {
+	if attempted {
 		return "✗"
 	}
-	return formatBits(m.BitsPerSec)
+	return "—"
 }
 
 // RenderInteropBench renders the interop throughput table: the same protocol ×

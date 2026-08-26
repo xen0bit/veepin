@@ -10,8 +10,8 @@ mkdir -p /dev/net
 # delimits the real packet by the inner header's Total Length and never sees the
 # filler. That reasoning is what the shaped cell exists to check against a real
 # `ssh -w` rather than against our own reader.
-echo "veepin-ssh-server: serving ssh on tcp/22, gateway 10.200.0.1, shape ${SHAPE:-0}"
-exec veepin serve ssh \
+echo "veepin-ssh-server: serving ${PROTOCOL:-ssh} on tcp/22, gateway 10.200.0.1, shape ${SHAPE:-0}"
+exec veepin serve "${PROTOCOL:-ssh}" \
     -host-key /keys/host_key \
     -authorized-keys /keys/authorized_keys \
     -pool 10.200.0.0/24 \

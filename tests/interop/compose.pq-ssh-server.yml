@@ -1,0 +1,44 @@
+# A real OpenSSH client that REQUIRES a post-quantum key exchange -> veepin's
+# pq-ssh server.
+#
+# The reverse of compose.pq-ssh-sshd.yml, and it earns its place separately: the
+# two roles pin the kex in different code (ssh/ssh.go and ssh/server.go), and a
+# cell that only ever drove the client would leave the responder's pinning
+# unproven against anything but veepin itself.
+#
+# Both ends offer exactly one mechanism, so there is no classical path through
+# this handshake. That is stronger than asserting a log line -- a regression that
+# stopped pinning fails here rather than passing quietly on curve25519-sha256,
+# which is what the base ssh-server cell does today against bookworm's 9.2p1.
+#
+# Key exchange only: SSH has no post-quantum signature algorithm in any
+# specification, so the host key stays classical. That is upstream's limit rather
+# than veepin's -- see https://www.openssh.org/pq.html and internal/pqpolicy.
+name: veepin-interop-pq-ssh-server
+
+services:
+  veepin-pq-ssh-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      PROTOCOL: "pq-ssh"
+    volumes:
+      - ./ssh/keys:/keys:ro
+      - ./veepin/ssh-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  ssh-client-pq:
+    build:
+      context: ssh-client-pq
+    image: interop-ssh-client-pq
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-pq-ssh-server]
+    environment:
+      SERVER: "veepin-pq-ssh-server"
+    volumes:
+      - ./ssh/keys:/keys:ro

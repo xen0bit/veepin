@@ -46,6 +46,7 @@ func dial(opts map[string]string) (client.Dialer, error) {
 	if err != nil {
 		return nil, err
 	}
+	pqpolicy.Announce(name)
 	return client.ParseWithBase(base, o)
 }
 
@@ -54,5 +55,6 @@ func serve(opts map[string]string) (client.Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	pqpolicy.Announce(name)
 	return client.ParseServerWithBase(base, o)
 }

@@ -42,3 +42,10 @@ flowchart TD
   so SSTP's MS-CHAPv2 is not an unauthenticated tunnel even with a self-signed cert.
   This package only lays the attribute out; the binding computation lives above.
 - Data packets carry PPP frames handed to [`internal/ppp`](../../ppp).
+- **`pq-sstp` has no third-party peer and none in prospect.** `sstp-client` links
+  OpenSSL 3.0, which has neither ML-KEM nor ML-DSA, so `TestInteropPQSSTPSelf` is
+  the whole of its evidence: veepin↔veepin, which proves the two halves agree
+  with each other and not that they are right. What it does cover, and no unit
+  test does, is the whole facade path at once — an ML-DSA-65 credential through
+  the real parse, `CheckCredential` at construction, `HardenTLS` on both ends,
+  and PPP over the result.

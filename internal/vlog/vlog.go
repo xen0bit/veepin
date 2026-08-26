@@ -27,7 +27,7 @@
 // **Never reclassify a line downward.** Moving a line from Info to Warn or Error
 // keeps it visible at the default level and makes it survive `-log-level warn`;
 // moving one to Debug hides it from everybody who has not asked for debug. There
-// are twenty-eight interop cells asserting substrings of veepin's own log output
+// are thirty-two interop cells asserting substrings of veepin's own log output
 // and a management panel that shows the stream as free text, and neither of them
 // would fail loudly — they would fail as a line that stopped appearing.
 package vlog

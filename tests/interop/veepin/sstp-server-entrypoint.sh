@@ -10,8 +10,8 @@ set -eu
 SHAPE="${SHAPE:-0}"
 mkdir -p /dev/net
 [ -c /dev/net/tun ] || mknod /dev/net/tun c 10 200
-echo "veepin-sstp-server: serving sstp on tcp/443, gateway 10.9.0.1, shape $SHAPE"
-exec veepin serve sstp \
+echo "veepin-sstp-server: serving ${PROTOCOL:-sstp} on tcp/443, gateway 10.9.0.1, shape $SHAPE"
+exec veepin serve "${PROTOCOL:-sstp}" \
     -cert /pki/server.crt \
     -key /pki/server.key \
     -user "${USER:-sstpuser}" \

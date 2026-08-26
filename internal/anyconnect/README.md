@@ -58,3 +58,11 @@ UDP is unavailable; DTLS is the faster optional path.
   datagram to a CSTP session).
 - Addressing comes entirely from response headers — there is no IPCP here, so the
   client applies the header-derived config directly.
+- **`pq-anyconnect` loses the DTLS data channel, and that is the contract rather
+  than a shortcut.** `internal/dtls` is a from-scratch DTLS 1.2 with two fixed
+  suites and no post-quantum key exchange at all, so leaving the UDP channel
+  bound under a post-quantum name would describe the handshake while the bulk
+  traffic stayed classical. The variant forces `-no-dtls`; the cost is
+  head-of-line blocking on TLS. No third-party peer can verify it — openconnect
+  links GnuTLS, which has no ML-KEM group — so the evidence is
+  `TestInteropPQAnyConnectSelf` and nothing more. See `doc/security.md`.

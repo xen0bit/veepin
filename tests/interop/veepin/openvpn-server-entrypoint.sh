@@ -11,8 +11,8 @@ set -eu
 SHAPE="${SHAPE:-0}"
 mkdir -p /dev/net
 [ -c /dev/net/tun ] || mknod /dev/net/tun c 10 200
-echo "veepin-ovpn-server: serving openvpn on udp/1194, gateway 10.8.0.1, shape $SHAPE"
-exec veepin serve openvpn \
+echo "veepin-ovpn-server: serving ${PROTOCOL:-openvpn} on udp/1194, gateway 10.8.0.1, shape $SHAPE"
+exec veepin serve "${PROTOCOL:-openvpn}" \
     -ca /pki/ca.crt \
     -cert /pki/server.crt \
     -key /pki/server.key \

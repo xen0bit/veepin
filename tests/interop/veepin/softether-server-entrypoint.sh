@@ -16,20 +16,29 @@ PORT="${PORT:-443}"
 # A self-signed certificate: the client passes -insecure, since SoftEther ships
 # a self-signed certificate by default and that is the configuration this cell
 # reproduces.
+# A pq- cell bind-mounts an ML-DSA credential at /pki, and this branch uses it
+# instead of minting one. The runtime image is bookworm, whose OpenSSL 3.0 has no
+# ML-DSA, so the test mints it in Go -- see generateMLDSAServerCert. With /pki
+# unmounted the classical cells mint exactly what they always did.
 mkdir -p /certs
-if [ ! -f /certs/server.crt ]; then
+CERT=/certs/server.crt
+KEY=/certs/server.key
+if [ -d /pki ]; then
+    CERT=/pki/server.crt
+    KEY=/pki/server.key
+elif [ ! -f "$CERT" ]; then
     openssl req -x509 -newkey rsa:2048 -nodes \
-        -keyout /certs/server.key -out /certs/server.crt \
+        -keyout "$KEY" -out "$CERT" \
         -days 2 -subj "/CN=veepin-softether-server" \
         -addext "subjectAltName=DNS:veepin-softether-server" >/dev/null 2>&1
 fi
 
 echo "veepin-softether-server: listening on :$PORT"
-veepin serve softether \
+veepin serve "${PROTOCOL:-softether}" \
     -listen 0.0.0.0 \
     -port "$PORT" \
-    -cert /certs/server.crt \
-    -key /certs/server.key \
+    -cert "$CERT" \
+    -key "$KEY" \
     -user "$USER" \
     -pass "$PASSWORD" \
     -shape "${SHAPE:-0}" \

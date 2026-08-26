@@ -118,3 +118,8 @@ sequenceDiagram
 - `datapath_test.go` — the per-packet allocation guard and the framing
   benchmarks.
 - `fuzz_test.go` — five targets over the four codecs.
+- **`pq-pulse` keeps the ESP data path**, for the reason `pq-gp` does: the ESP
+  keys travel inside the IF-T/TLS control channel, so hardening that channel is
+  what protects them. No third-party peer exists — openconnect links GnuTLS,
+  which has no ML-KEM group — so `TestInteropPQPulseSelf` is the whole of the
+  evidence and the matrix marks both directional cells accordingly.

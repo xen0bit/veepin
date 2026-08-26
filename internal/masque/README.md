@@ -79,3 +79,10 @@ ordering the tunnelled traffic never asked for.
   behaviour every IP stack already has. `compose.masque-server-shaped.yml`
   proves aioquic accepts and trims the padding having been told nothing about
   it.
+- **`pq-masque` has no third-party peer, and this one was measured rather than
+  assumed.** aioquic brings its own hand-written TLS 1.3 in Python: at 1.3.0, the
+  latest release, its `Group` enum holds SECP256R1/384R1/521R1, X25519, X448 and
+  GREASE — no ML-KEM member — and its `SignatureAlgorithm` enum has no ML-DSA.
+  MASQUE is already TLS 1.3 unconditionally, so what the variant adds over the
+  base is the *refusal*, and `TestInteropPQMasqueSelf` is the whole of its
+  evidence.

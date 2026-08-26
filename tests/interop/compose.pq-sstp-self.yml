@@ -27,7 +27,7 @@ services:
       PROTOCOL: "pq-sstp"
     volumes:
       - ./sstp/pki-pq:/pki:ro
-      - ./veepin/pq-sstp-server-entrypoint.sh:/entrypoint.sh:ro
+      - ./veepin/sstp-server-entrypoint.sh:/entrypoint.sh:ro
     entrypoint: ["/bin/sh", "/entrypoint.sh"]
 
   veepin-pq-sstp-client:
@@ -41,5 +41,5 @@ services:
       PASS: "sstppass"
       PROTOCOL: "pq-sstp"
     volumes:
-      - ./veepin/pq-sstp-entrypoint.sh:/entrypoint.sh:ro
+      - ./veepin/sstp-entrypoint.sh:/entrypoint.sh:ro
     entrypoint: ["/bin/sh", "/entrypoint.sh"]

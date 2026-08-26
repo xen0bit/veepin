@@ -10,8 +10,8 @@ set -eu
 SHAPE="${SHAPE:-0}"
 mkdir -p /dev/net
 [ -c /dev/net/tun ] || mknod /dev/net/tun c 10 200
-echo "veepin-anyconnect-server: serving anyconnect on tcp/443, gateway 10.11.0.1, shape $SHAPE"
-exec veepin serve anyconnect \
+echo "veepin-anyconnect-server: serving ${PROTOCOL:-anyconnect} on tcp/443, gateway 10.11.0.1, shape $SHAPE"
+exec veepin serve "${PROTOCOL:-anyconnect}" \
     -cert /pki/server.crt \
     -key /pki/server.key \
     -user "${USER:-ocuser}" \

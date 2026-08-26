@@ -13,7 +13,7 @@ echo "veepin-ovpn-client: connecting to ${SERVER}:1194 ${CLIENT_ARGS:-}"
 i=1
 while [ "$i" -le 30 ]; do
     # shellcheck disable=SC2086 # CLIENT_ARGS is intentionally word-split into flags
-    veepin connect openvpn \
+    veepin connect "${PROTOCOL:-openvpn}" \
         -remote "$SERVER" -port 1194 \
         -ca /pki/ca.crt \
         -cert /pki/client.crt \

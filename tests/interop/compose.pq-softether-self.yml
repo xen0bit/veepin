@@ -1,0 +1,58 @@
+# veepin pq-softether client <-> veepin pq-softether server.
+#
+# SoftEther is layer 2, so neither end assigns an address through the protocol
+# and the harness puts one on each TAP afterwards -- exactly as the classical
+# self cell does. What differs is the credential and the refusal: SoftEther
+# ships a self-signed RSA certificate by default, and pq-softether will not
+# start on one.
+#
+# Self-test, and labelled as one in the matrix. No third-party peer exists for this one and none is in prospect; see the
+# evidence table in doc/security.md. A veepin<->veepin cell proves the two
+# halves agree with each other, not that they are right.
+#
+# What it proves that no unit test does is the whole facade path in one piece:
+# an ML-DSA-65 credential through the real parseServerOptions, CheckCredential
+# accepting it at construction, HardenTLS pinning curves and leaf algorithm on
+# both ends, and the data path carrying real packets over the result. Both
+# clients pass -insecure, which skips chain building but NOT pqpolicy's
+# VerifyPeerCertificate hook -- crypto/tls calls that even with
+# InsecureSkipVerify, which is what lets a self cell prove the authentication
+# half at all.
+name: veepin-interop-pq-softether-self
+
+services:
+  veepin-pq-softether-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      USER: "alice"
+      PASSWORD: "s3cret"
+      TUN_IP: "10.70.0.1"
+      PROTOCOL: "pq-softether"
+    volumes:
+      - ./softether/pki-pq:/pki:ro
+      - ./veepin/softether-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-pq-softether-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-pq-softether-server]
+    environment:
+      SERVER: "veepin-pq-softether-server"
+      USER: "alice"
+      PASSWORD: "s3cret"
+      TUN_IP: "10.70.0.2"
+      PEER_IP: "10.70.0.1"
+      PROTOCOL: "pq-softether"
+    volumes:
+      - ./veepin/softether-client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

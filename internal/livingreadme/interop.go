@@ -90,12 +90,10 @@ var interopMatrix = []interopRow{
 			"TestInteropStrongswanClientVeepinServerIPv6",
 			"TestInteropStrongswanClientVeepinServerShaped",
 			"TestInteropStrongswanClientVeepinServerPQ",
-			"TestInteropPQIKEv2ServerAcceptsAPostQuantumPeer",
-			"TestInteropPQIKEv2ServerRefusesAClassicalPeer",
 			"TestInteropStrongswanClientVeepinServerIPTFS",
 			"TestInteropLibreswanClientVeepinServer",
 			"TestInteropLibreswanClientVeepinServerTCP",
-		}, Label: "strongSwan (+ EAP-MSCHAPv2, pubkey RSA, RFC 7383 frag both ways, dual-stack, v6 underlay, TFC-padded, ML-KEM-768 incl. pq-ikev2 required + a classical peer refused, IP-TFS) + libreswan (incl. RFC 8229/9329 over TCP)"},
+		}, Label: "strongSwan (+ EAP-MSCHAPv2, pubkey RSA, RFC 7383 frag both ways, dual-stack, v6 underlay, TFC-padded, ML-KEM-768, IP-TFS) + libreswan (incl. RFC 8229/9329 over TCP)"},
 		Self: interopCell{Tests: []string{
 			"TestInteropSelf",
 			"TestInteropIKEv2ChildRekey",
@@ -144,17 +142,11 @@ var interopMatrix = []interopRow{
 			"TestInteropSSTPClientVeepinServer",
 			"TestInteropSSTPClientVeepinServerShaped",
 		}, Label: "`sstpc`/pppd (+ PPP-padded)"},
-		Self: interopCell{Tests: []string{
-			"TestInteropSSTPSelf",
-			"TestInteropPQSSTPSelf",
-		}, Label: "(+ pq-sstp, ML-DSA-65 — no third-party peer exists; see doc/security.md)"},
+		Self: interopCell{Tests: []string{"TestInteropSSTPSelf"}},
 	},
 	{
 		Protocol: "SSH",
-		Client: interopCell{Tests: []string{
-			"TestInteropVeepinClientSSHServer",
-			"TestInteropPQSSHClientSSHD",
-		}, Label: "`sshd` (PermitTunnel; + OpenSSH 10.0 requiring mlkem768x25519-sha256 for pq-ssh)"},
+		Client:   interopCell{Tests: []string{"TestInteropVeepinClientSSHServer"}, Label: "`sshd` (PermitTunnel)"},
 		Server: interopCell{Tests: []string{"TestInteropSSHClientVeepinServer",
 			"TestInteropSSHClientVeepinServerShaped"}, Label: "`ssh -w`"},
 		Self: interopCell{Tests: []string{"TestInteropSSHSelf"}},
@@ -308,6 +300,105 @@ var interopMatrix = []interopRow{
 			Label: "Linux kernel (`ip l2tp`)"},
 		Self:    interopCell{Tests: []string{"TestInteropL2TPv3Self"}, Label: "(shaped)"},
 		Modules: []string{"l2tp_eth", "l2tp_netlink"},
+	},
+	// The ten pq- variants, each a second registry name under which post-quantum
+	// cryptography is mandatory rather than negotiated. They are rows rather than
+	// footnotes on their base protocols' rows for the reason
+	// doc/pq-variants-plan.md gives for the naming scheme itself: this matrix is
+	// keyed by protocol name, so a variant with a row gets a published,
+	// CI-verified claim and its own shard, and a variant folded into its base's
+	// row gets a sentence in a label and no throughput figure.
+	//
+	// They are NOT counted in "sixteen production protocols" -- client.Variants()
+	// is a separate namespace from client.Protocols(), and pq-ikev2 is IKEv2 with
+	// a floor under it rather than a seventeenth protocol.
+	//
+	// Read the "—†" cells as what doc/security.md says they are: for most of
+	// these variants no third-party peer exists to test against, and that is a
+	// fact about the ecosystem in 2026 rather than a gap in this suite. Those
+	// rows are veepin↔veepin evidence only.
+	{
+		Protocol: "pq-ikev2",
+		// strongSwan proves the KEY EXCHANGE half. Its ML-DSA authentication is
+		// on a branch targeted at 6.1.0, so the AUTH half has no peer yet --
+		// which is why the client direction, where veepin would present the
+		// ML-DSA certificate, has none.
+		Client: interopCell{Label: "—†"},
+		Server: interopCell{Tests: []string{
+			"TestInteropPQIKEv2ServerAcceptsAPostQuantumPeer",
+			"TestInteropPQIKEv2ServerRefusesAClassicalPeer",
+		}, Label: "strongSwan (ML-KEM-768 required, **and a classical initiator refused**)"},
+		Self: interopCell{Tests: []string{"TestInteropPQIKEv2Self"}},
+	},
+	{
+		Protocol: "pq-openvpn",
+		// The only variant with a third-party peer for BOTH halves, and the only
+		// one where authentication is mutual -- so each end's ML-DSA-65
+		// signature is verified by the other implementation. openvpn 2.6.14
+		// links OpenSSL 3.5.7.
+		Client: interopCell{Tests: []string{"TestInteropPQOpenVPNVeepinClientRealServer"},
+			Label: "`openvpn` 2.6.14 (ML-DSA-65 mutual, ML-KEM-only groups)"},
+		Server: interopCell{Tests: []string{"TestInteropPQOpenVPNRealClientVeepinServer"},
+			Label: "`openvpn` 2.6.14 (ML-DSA-65 mutual, ML-KEM-only groups)"},
+		Self: interopCell{Tests: []string{"TestInteropPQOpenVPNSelf"}},
+	},
+	{
+		Protocol: "pq-ssh",
+		// Key exchange only, by the single named exception in
+		// pqpolicy.SSHKeyExchangeOnly: SSH has no post-quantum signature
+		// algorithm anywhere. Both peers pin KexAlgorithms to one name, so
+		// neither cell can pass on a classical fallback.
+		Client: interopCell{Tests: []string{"TestInteropPQSSHClientSSHD"},
+			Label: "OpenSSH 10.0 requiring `mlkem768x25519-sha256` (kex only)"},
+		Server: interopCell{Tests: []string{"TestInteropPQSSHClientVeepinServer"},
+			Label: "OpenSSH 10.0 requiring `mlkem768x25519-sha256` (kex only)"},
+		Self: interopCell{Tests: []string{"TestInteropPQSSHSelf"}},
+	},
+	{
+		Protocol: "pq-anyconnect",
+		Client:   interopCell{Label: "—†"},
+		Server:   interopCell{Label: "—†"},
+		Self:     interopCell{Tests: []string{"TestInteropPQAnyConnectSelf"}, Label: "(over TLS: `-no-dtls` is forced)"},
+	},
+	{
+		Protocol: "pq-fortinet",
+		Client:   interopCell{Label: "—†"},
+		Server:   interopCell{Label: "—†"},
+		Self:     interopCell{Tests: []string{"TestInteropPQFortinetSelf"}, Label: "(over TLS: `-no-dtls` is forced)"},
+	},
+	{
+		Protocol: "pq-gp",
+		Client:   interopCell{Label: "—†"},
+		Server:   interopCell{Label: "—†"},
+		Self:     interopCell{Tests: []string{"TestInteropPQGPSelf"}, Label: "(over ESP)"},
+	},
+	{
+		Protocol: "pq-pulse",
+		Client:   interopCell{Label: "—†"},
+		Server:   interopCell{Label: "—†"},
+		Self:     interopCell{Tests: []string{"TestInteropPQPulseSelf"}, Label: "(over ESP)"},
+	},
+	{
+		Protocol: "pq-sstp",
+		Client:   interopCell{Label: "—†"},
+		Server:   interopCell{Label: "—†"},
+		Self:     interopCell{Tests: []string{"TestInteropPQSSTPSelf"}},
+	},
+	{
+		Protocol: "pq-masque",
+		// aioquic brings its own hand-written TLS 1.3 in Python: measured at
+		// 1.3.0, its Group enum has no ML-KEM member and its
+		// SignatureAlgorithm enum no ML-DSA. There is no peer and none in
+		// prospect.
+		Client: interopCell{Label: "—†"},
+		Server: interopCell{Label: "—†"},
+		Self:   interopCell{Tests: []string{"TestInteropPQMasqueSelf"}},
+	},
+	{
+		Protocol: "pq-softether",
+		Client:   interopCell{Label: "—†"},
+		Server:   interopCell{Label: "—†"},
+		Self:     interopCell{Tests: []string{"TestInteropPQSoftEtherSelf"}, Label: "(layer 2, switched)"},
 	},
 	{
 		Protocol: "TOY*",

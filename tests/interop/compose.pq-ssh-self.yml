@@ -1,0 +1,45 @@
+# veepin pq-ssh client <-> veepin pq-ssh server.
+#
+# Both ends pin KexAlgorithms to mlkem768x25519-sha256 and offer nothing else,
+# so there is no classical path through this handshake -- a regression that
+# stopped pinning fails the cell rather than passing quietly on
+# curve25519-sha256, which is exactly what the classical ssh cells do today.
+#
+# Key exchange only, and the host and client keys here are Ed25519. That is not
+# an oversight in this cell: SSH has no post-quantum signature algorithm in any
+# specification or implementation, which is the single named exception in
+# pqpolicy.SSHKeyExchangeOnly and is held at one entry by
+# TestSSHIsTheOnlyPQAuthException. See https://www.openssh.org/pq.html.
+#
+# The real-peer evidence for pq-ssh is TestInteropPQSSHClientSSHD and
+# TestInteropPQSSHClientVeepinServer, both against OpenSSH 10.0 on trixie. This
+# cell is the attribution half.
+name: veepin-interop-pq-ssh-self
+
+services:
+  veepin-pq-ssh-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      PROTOCOL: "pq-ssh"
+    volumes:
+      - ./ssh/keys:/keys:ro
+      - ./veepin/ssh-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-pq-ssh-client:
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-pq-ssh-server]
+    environment:
+      SERVER: "veepin-pq-ssh-server"
+      PROTOCOL: "pq-ssh"
+    volumes:
+      - ./ssh/keys:/keys:ro
+      - ./veepin/ssh-client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
