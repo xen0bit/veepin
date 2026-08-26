@@ -54,6 +54,13 @@ to run in its own goroutine for that new peer.
 - **`Drop` is how a session is reclaimed** — the handler calls it (directly or via
   `Conn.Close`) when the peer is gone, so a new datagram from that address is
   treated as a fresh peer rather than delivered to a dead queue.
+- **`Drop` closes a `done` channel; it does *not* close the queue.** `Serve` looks
+  a peer up under the mux lock and delivers outside it, so a `Drop` completing in
+  that gap is an ordinary interleaving — and closing the queue made the delivery
+  that followed a `send on closed channel` panic, killing the gateway because one
+  peer went away. A peer keeping datagrams coming while its handshake times out
+  was enough to reach it. `TestADeliveryAfterDropIsDiscarded` pins the fix; the
+  cost is that a dropped peer's buffered datagrams wait for the GC instead.
 - Source-address routing is a *pre-authentication* convenience only; it grants no
   trust. All security still rests on the handshake the session runs over the
   returned `Conn`.
