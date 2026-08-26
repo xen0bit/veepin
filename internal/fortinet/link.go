@@ -79,14 +79,29 @@ func (l *pppLink) rd() io.Reader {
 // SendPPP writes one PPP frame to the tunnel, wrapped in the Fortinet header. It
 // is the ppp.Transport the session calls, and the TUN loop uses it too, so it
 // holds the write lock.
+//
+// A failure of the DTLS carrier is not a failure of the send. The whole point of
+// keeping the TLS connection open underneath is that losing UDP costs the
+// carrier and not the tunnel, so a write that fails there detaches and goes out
+// over TLS instead. Reporting the error would defeat that: tunLoop reads any
+// SendPPP error as the link ending, so a single packet unlucky enough to be in
+// the TUN loop when the UDP socket died would tear down a tunnel that still has
+// a perfectly good carrier. Only a failure of the TLS carrier is fatal.
 func (l *pppLink) SendPPP(frame []byte) error {
+	rec := EncodeFrame(frame)
 	l.writeMu.Lock()
 	defer l.writeMu.Unlock()
-	w := l.conn
-	if l.alt != nil {
-		w = l.alt
+	if alt := l.alt; alt != nil {
+		if _, err := alt.Write(rec); err == nil {
+			return nil
+		}
+		l.alt = nil
+		// readAlt is still blocked on this conn; closing it is what wakes it, and
+		// its own detachDTLS then finds it is no longer the carrier and does
+		// nothing. Closing twice is harmless, losing the wake-up would not be.
+		_ = alt.Close()
 	}
-	_, err := w.Write(EncodeFrame(frame))
+	_, err := l.conn.Write(rec)
 	return err
 }
 
@@ -108,11 +123,13 @@ func (l *pppLink) attachDTLS(conn net.Conn) {
 // detachDTLS drops a DTLS carrier, returning the egress to TLS. It is a no-op if
 // conn is not the current carrier, so a losing race cannot unseat its successor.
 //
-// Recovery is eventual: the far end does not learn the carrier is gone until its
-// own read loop sees the close, and a frame written to the dead carrier before
-// then is lost. That is ordinary datagram loss, which is what the traffic inside
-// the tunnel already copes with -- and it is why the TLS carrier is kept rather
-// than replaced, so the loss is a gap rather than the end of the tunnel.
+// This side's egress recovers at once -- SendPPP falls back to TLS the moment a
+// write to the carrier fails. The far end's does not: a datagram sent to a dead
+// peer is dropped by the network rather than refused, so it keeps using UDP
+// until its own read loop sees the close, and the frames it sends meanwhile are
+// lost. That is ordinary datagram loss, which the traffic inside the tunnel
+// already copes with -- and it is why the TLS carrier is kept rather than
+// replaced, so the loss is a gap rather than the end of the tunnel.
 func (l *pppLink) detachDTLS(conn net.Conn) {
 	l.writeMu.Lock()
 	if l.alt == conn {

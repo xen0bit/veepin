@@ -43,8 +43,10 @@ flowchart TD
 - **The DTLS channel is cert-based and attaches *alongside* the TLS tunnel.** It is
   not a replacement: both carriers move packets for the same session. **Detaching a
   DTLS carrier loses in-flight datagrams by design** — the peer can't know until its
-  read loop sees the close — so tests assert eventual recovery, not zero loss. See
-  [[fortinet-dtls-channel]].
+  read loop sees the close — so tests assert eventual recovery, not zero loss. The
+  side that *notices* recovers at once, though: a write that fails on the carrier
+  detaches and goes out over TLS, because a lost UDP socket must cost the carrier
+  and not the tunnel. See [[fortinet-dtls-channel]].
 - **The GFtype ClientHello cookie requires a trailing NUL.** Without it there were
   two encodings for one cookie (a fuzz crash); `ParseDTLSClientHello` now requires
   the NUL terminator.
