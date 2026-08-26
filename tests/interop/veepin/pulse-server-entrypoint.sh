@@ -13,12 +13,23 @@ SHAPE="${SHAPE:-0}"
 
 [ -c /dev/net/tun ] || { mkdir -p /dev/net; mknod /dev/net/tun c 10 200; }
 
+# A pq- cell bind-mounts an ML-DSA credential at /pki, and this branch uses it
+# instead of minting one. The runtime image is bookworm, whose OpenSSL 3.0 has no
+# ML-DSA, so the test mints it in Go -- see generateMLDSAServerCert. With /pki
+# unmounted the classical cells mint exactly what they always did.
 mkdir -p /certs
-openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
-    -keyout /certs/key.pem -out /certs/cert.pem -days 1 -nodes \
-    -subj "/CN=veepin-pulse-server" \
-    -addext "subjectAltName=DNS:veepin-pulse-server" >/dev/null 2>&1
-chmod 0644 /certs/cert.pem
+if [ -d /pki ]; then
+    CERT=/pki/server.crt
+    KEY=/pki/server.key
+else
+    CERT=/certs/cert.pem
+    KEY=/certs/key.pem
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+        -keyout "$KEY" -out "$CERT" -days 1 -nodes \
+        -subj "/CN=veepin-pulse-server" \
+        -addext "subjectAltName=DNS:veepin-pulse-server" >/dev/null 2>&1
+    chmod 0644 "$CERT"
+fi
 touch /certs/ready
 
 ESP_FLAG=""
@@ -31,13 +42,13 @@ PUBLIC=$(ip -4 -o addr show dev eth0 | awk '{print $4}' | cut -d/ -f1)
 
 echo "veepin-pulse-server: starting on 0.0.0.0:${PORT:-443}, pool ${POOL}, public ${PUBLIC}, shape ${SHAPE}"
 # shellcheck disable=SC2086 # ESP_FLAG is deliberately word-split
-exec veepin serve pulse \
+exec veepin serve "${PROTOCOL:-pulse}" \
     $ESP_FLAG \
     -listen 0.0.0.0 \
     -port "${PORT:-443}" \
     -public "$PUBLIC" \
     -pool "$POOL" \
-    -cert /certs/cert.pem -key /certs/key.pem \
+    -cert "$CERT" -key "$KEY" \
     -user "$USER" -pass "$PASSWORD" \
     -tun pulse0 \
     -shape "$SHAPE" \

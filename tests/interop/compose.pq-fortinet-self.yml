@@ -1,0 +1,57 @@
+# veepin pq-fortinet client <-> veepin pq-fortinet server.
+#
+# pq-fortinet forces -no-dtls for the reason pq-anyconnect does: internal/dtls
+# has no post-quantum path, so the UDP data channel would be classical behind
+# a post-quantum handshake. The classical fortinet self cell runs over DTLS;
+# this one runs over TLS, which is the cost the name pays for the guarantee.
+#
+# Self-test, and labelled as one in the matrix. No third-party peer exists for this one and none is in prospect; see the
+# evidence table in doc/security.md. A veepin<->veepin cell proves the two
+# halves agree with each other, not that they are right.
+#
+# What it proves that no unit test does is the whole facade path in one piece:
+# an ML-DSA-65 credential through the real parseServerOptions, CheckCredential
+# accepting it at construction, HardenTLS pinning curves and leaf algorithm on
+# both ends, and the data path carrying real packets over the result. Both
+# clients pass -insecure, which skips chain building but NOT pqpolicy's
+# VerifyPeerCertificate hook -- crypto/tls calls that even with
+# InsecureSkipVerify, which is what lets a self cell prove the authentication
+# half at all.
+name: veepin-interop-pq-fortinet-self
+
+services:
+  veepin-pq-fortinet-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    environment:
+      USER: "alice"
+      PASSWORD: "s3cret"
+      POOL: "10.40.0.0/24"
+      PROTOCOL: "pq-fortinet"
+    volumes:
+      - ./fortinet/pki-pq:/pki:ro
+      - ./veepin/fortinet-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-pq-fortinet-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-pq-fortinet-server]
+    environment:
+      SERVER: "veepin-pq-fortinet-server"
+      USER: "alice"
+      PASSWORD: "s3cret"
+      PROTOCOL: "pq-fortinet"
+    volumes:
+      - ./veepin/fortinet-client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

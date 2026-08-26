@@ -2,6 +2,11 @@ package livingreadme
 
 import (
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -151,4 +156,173 @@ func TestBenchCellStates(t *testing.T) {
 	if got := benchCell(noTest, tp); got != "—" {
 		t.Errorf("cell with no test = %q, want —", got)
 	}
+}
+
+// TestBenchCellScansTheWholeCell pins the three states against a cell whose
+// measured test is not its first.
+//
+// The old benchCell read Tests[0] and nothing else, so a cell like this rendered
+// an em dash — "iperf3 does not apply here" — while holding a real measurement.
+// It is not a hypothetical: every pq- cell was appended after its row's existing
+// tests, which is precisely this shape, and their throughput went unpublished
+// for exactly that reason.
+func TestBenchCellScansTheWholeCell(t *testing.T) {
+	cases := []struct {
+		name string
+		cell interopCell
+		tp   Throughput
+		want string
+	}{
+		{
+			"a measurement behind an unmeasured test still renders",
+			interopCell{Tests: []string{"A", "B"}},
+			Throughput{"B": {BitsPerSec: 1e9}},
+			"1 Gbit/s",
+		},
+		{
+			"the first measured test wins, not the largest",
+			interopCell{Tests: []string{"A", "B"}},
+			Throughput{"A": {BitsPerSec: 1e6}, "B": {BitsPerSec: 1e9}},
+			"1 Mbit/s",
+		},
+		{
+			"a failed measurement behind an unmeasured test is a cross",
+			interopCell{Tests: []string{"A", "B"}},
+			Throughput{"B": {Failed: true}},
+			"✗",
+		},
+		{
+			"a success anywhere beats a failure before it",
+			interopCell{Tests: []string{"A", "B"}},
+			Throughput{"A": {Failed: true}, "B": {BitsPerSec: 5e8}},
+			"500 Mbit/s",
+		},
+		{
+			"nothing measured at all is an em dash",
+			interopCell{Tests: []string{"A", "B"}},
+			Throughput{},
+			"—",
+		},
+		{
+			"a cell with no tests is an em dash",
+			interopCell{Label: "—†"},
+			Throughput{"A": {BitsPerSec: 1e9}},
+			"—",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := benchCell(tc.cell, tc.tp); got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestEveryMatrixCellNamesItsBenchTestFirst holds the convention benchCell's
+// ordering relies on: within a cell, the test that measures comes before any
+// that do not.
+//
+// benchCell no longer BREAKS when that is violated — it scans past the gap — but
+// it does then publish a variant's number where the plain cell's belongs, and a
+// shaped variant's throughput is deliberately far lower than its unshaped
+// sibling's. Presenting that as the cell's rate would be wrong in a way nobody
+// would notice, so the ordering stays a rule and this is what enforces it.
+func TestEveryMatrixCellNamesItsBenchTestFirst(t *testing.T) {
+	benched := benchedInteropTests(t)
+	for _, row := range interopMatrix {
+		for _, c := range []interopCell{row.Client, row.Server, row.Self} {
+			if len(c.Tests) < 2 {
+				continue
+			}
+			if benched[c.Tests[0]] {
+				continue
+			}
+			for _, later := range c.Tests[1:] {
+				if benched[later] {
+					t.Errorf("%s: %q measures throughput but %q is listed first, so the "+
+						"table would publish a later cell's rate as this one's. Put the "+
+						"measuring test first.", row.Protocol, later, c.Tests[0])
+				}
+			}
+		}
+	}
+}
+
+// benchedInteropTests reports which TestInterop* functions end up measuring
+// throughput, following calls through the harness's own helpers.
+//
+// The indirection is real and has to be followed: some cells call
+// runInteropBench directly, some go through runOpenVPNInterop, and the pq- ones
+// through runInteropPQSelf. A check that grepped for runInteropBench in a test's
+// own body would call two thirds of the measured cells unmeasured and then
+// enforce an ordering rule against the wrong set.
+func benchedInteropTests(t *testing.T) map[string]bool {
+	t.Helper()
+	const dir = "../../tests/interop"
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("reading %s: %v", dir, err)
+	}
+	fset := token.NewFileSet()
+	calls := map[string]map[string]bool{}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, filepath.Join(dir, entry.Name()), nil, 0)
+		if err != nil {
+			t.Fatalf("parsing %s/%s: %v", dir, entry.Name(), err)
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			out := map[string]bool{}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				if id, ok := call.Fun.(*ast.Ident); ok {
+					out[id.Name] = true
+				}
+				return true
+			})
+			calls[fn.Name.Name] = out
+		}
+	}
+
+	// The two leaves that actually log a throughput marker.
+	measures := map[string]bool{"runInteropBench": true, "measureThroughput": true}
+	// Closure: a helper that calls a measuring function measures. Iterating to a
+	// fixed point rather than recursing keeps it obviously terminating.
+	for changed := true; changed; {
+		changed = false
+		for name, callees := range calls {
+			if measures[name] {
+				continue
+			}
+			for callee := range callees {
+				if measures[callee] {
+					measures[name] = true
+					changed = true
+					break
+				}
+			}
+		}
+	}
+
+	benched := map[string]bool{}
+	for name := range calls {
+		if strings.HasPrefix(name, "TestInterop") && measures[name] {
+			benched[name] = true
+		}
+	}
+	if len(benched) == 0 {
+		t.Fatal("no TestInterop* function was found to measure throughput; this check covers nothing")
+	}
+	return benched
 }

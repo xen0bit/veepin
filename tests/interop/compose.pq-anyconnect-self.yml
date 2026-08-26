@@ -1,0 +1,51 @@
+# veepin pq-anyconnect client <-> veepin pq-anyconnect server.
+#
+# pq-anyconnect additionally forces -no-dtls: internal/dtls is a from-scratch
+# DTLS 1.2 with two fixed suites and no post-quantum path, so leaving the UDP
+# data channel bound would put a classical data path behind a post-quantum
+# handshake. This cell therefore runs over TLS, and that is the contract.
+#
+# Self-test, and labelled as one in the matrix. No third-party peer exists for this one and none is in prospect; see the
+# evidence table in doc/security.md. A veepin<->veepin cell proves the two
+# halves agree with each other, not that they are right.
+#
+# What it proves that no unit test does is the whole facade path in one piece:
+# an ML-DSA-65 credential through the real parseServerOptions, CheckCredential
+# accepting it at construction, HardenTLS pinning curves and leaf algorithm on
+# both ends, and the data path carrying real packets over the result. Both
+# clients pass -insecure, which skips chain building but NOT pqpolicy's
+# VerifyPeerCertificate hook -- crypto/tls calls that even with
+# InsecureSkipVerify, which is what lets a self cell prove the authentication
+# half at all.
+name: veepin-interop-pq-anyconnect-self
+
+services:
+  veepin-pq-anyconnect-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      USER: "ocuser"
+      PASS: "ocpass"
+      PROTOCOL: "pq-anyconnect"
+    volumes:
+      - ./anyconnect/pki-pq:/pki:ro
+      - ./veepin/anyconnect-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-pq-anyconnect-client:
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-pq-anyconnect-server]
+    environment:
+      SERVER: "veepin-pq-anyconnect-server"
+      USER: "ocuser"
+      PASS: "ocpass"
+      PROTOCOL: "pq-anyconnect"
+    volumes:
+      - ./veepin/anyconnect-client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

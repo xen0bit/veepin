@@ -12,7 +12,7 @@ echo "sstp-client: connecting to ${SERVER}:${PORT:-443}"
 
 i=1
 while [ "$i" -le 40 ]; do
-    veepin connect sstp \
+    veepin connect "${PROTOCOL:-sstp}" \
         -server "$SERVER" \
         -port "${PORT:-443}" \
         -user "$USER" \

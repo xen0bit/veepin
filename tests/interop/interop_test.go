@@ -47,6 +47,24 @@ func TestInteropSelf(t *testing.T) {
 	runInteropBench(t, "compose.selftest.yml", "client", "server", "10.10.10.1")
 }
 
+// TestInteropPQIKEv2Self is the attribution half of the pq-ikev2 row: both ends
+// veepin, both REQUIRING ML-KEM-768 as an additional key exchange rather than
+// offering it.
+//
+// The strongSwan pair carries the cross-implementation claim. What this adds is
+// the ability to tell a veepin break from a disagreement: if this passes while
+// TestInteropPQIKEv2ServerAcceptsAPostQuantumPeer fails, veepin and strongSwan
+// have diverged rather than veepin being broken.
+//
+// PSK authentication, deliberately. A pre-shared key is symmetric and is not
+// broken by a quantum adversary -- the premise of RFC 8784 -- so pq-ikev2
+// accepts it; what it refuses is classical public-key authentication and
+// EAP-MSCHAPv2. See doc/security.md.
+func TestInteropPQIKEv2Self(t *testing.T) {
+	runInteropPQSelf(t, "compose.pq-ikev2-self.yml", "pq-ikev2",
+		"veepin-pq-ikev2-client", "veepin-pq-ikev2-server", "10.10.10.1")
+}
+
 // TestInteropVeepinClientStrongswanServer is Direction A: the veepin client
 // (ikev2) tunnels to a strongSwan responder and pings a strongSwan-side address.
 func TestInteropVeepinClientStrongswanServer(t *testing.T) {
@@ -250,6 +268,7 @@ func TestInteropVeepinClientStrongswanServerPQ(t *testing.T) {
 func TestInteropPQIKEv2ServerAcceptsAPostQuantumPeer(t *testing.T) {
 	runInteropRequiringLogFrom(t, "compose.server-ss-pqonly.yml", "strongswan-client", "veepin-server", "10.10.10.1",
 		"negotiated additional key exchange ML-KEM-768")
+	measureThroughput(t, "compose.server-ss-pqonly.yml", "veepin-server", "strongswan-client", "10.10.10.1")
 }
 
 // TestInteropPQIKEv2ServerRefusesAClassicalPeer is the cell this whole variant
@@ -609,7 +628,8 @@ func TestInteropPQSSTPSelf(t *testing.T) {
 		t.Fatalf("generate ML-DSA SSTP cert: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
-	runInterop(t, "compose.pq-sstp-self.yml", "veepin-pq-sstp-client", "10.9.0.1")
+	runInteropPQSelf(t, "compose.pq-sstp-self.yml", "pq-sstp",
+		"veepin-pq-sstp-client", "veepin-pq-sstp-server", "10.9.0.1")
 }
 
 func TestInteropSSTPSelf(t *testing.T) {
@@ -740,7 +760,48 @@ func TestInteropPQSSHClientSSHD(t *testing.T) {
 		t.Fatalf("generate SSH keys: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(keyDir) })
-	runInterop(t, "compose.pq-ssh-sshd.yml", "veepin-ssh-client", "10.200.0.1")
+	runInteropBench(t, "compose.pq-ssh-sshd.yml", "veepin-ssh-client", "sshd-pq", "10.200.0.1")
+}
+
+// TestInteropPQSSHSelf is the attribution half of the pq-ssh row: both ends
+// veepin, both offering exactly one key exchange.
+//
+// Key exchange only, and the keys here are Ed25519 -- that is the single named
+// exception in pqpolicy.SSHKeyExchangeOnly, not an oversight in this cell. SSH
+// has no post-quantum signature algorithm in any specification; see
+// https://www.openssh.org/pq.html.
+func TestInteropPQSSHSelf(t *testing.T) {
+	requireDocker(t)
+	keyDir := filepath.Join("ssh", "keys")
+	if err := generateSSHKeys(keyDir); err != nil {
+		t.Fatalf("generate SSH keys: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(keyDir) })
+	runInteropPQSelf(t, "compose.pq-ssh-self.yml", "pq-ssh",
+		"veepin-pq-ssh-client", "veepin-pq-ssh-server", "10.200.0.1")
+}
+
+// TestInteropPQSSHClientVeepinServer is the reverse of TestInteropPQSSHClientSSHD:
+// a real OpenSSH 10.0 client whose KexAlgorithms holds exactly
+// mlkem768x25519-sha256, against veepin's pq-ssh server.
+//
+// It earns a separate cell rather than being implied by the other direction
+// because the two roles pin the kex in different code -- ssh/ssh.go line 291 and
+// ssh/server.go line 396 -- and a matrix that only ever drove the client would
+// leave the responder proven against nothing but veepin itself.
+//
+// Neither end offers a classical mechanism, so there is no handshake here that
+// succeeds without ML-KEM. That is stronger than asserting a log line: a
+// regression fails the cell rather than passing quietly on curve25519-sha256,
+// which is exactly what the bookworm cell below does today.
+func TestInteropPQSSHClientVeepinServer(t *testing.T) {
+	requireDocker(t)
+	keyDir := filepath.Join("ssh", "keys")
+	if err := generateSSHKeys(keyDir); err != nil {
+		t.Fatalf("generate SSH keys: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(keyDir) })
+	runInteropBench(t, "compose.pq-ssh-server.yml", "ssh-client-pq", "veepin-pq-ssh-server", "10.200.0.1")
 }
 
 func TestInteropVeepinClientSSHServer(t *testing.T) {
@@ -885,6 +946,75 @@ func TestInteropOpenVPNSelf(t *testing.T) {
 	runInteropBench(t, "compose.openvpn-self.yml", "veepin-ovpn-client", "veepin-ovpn-server", "10.8.0.1")
 }
 
+// The pq-openvpn cells. OpenVPN is the one variant with a third-party peer for
+// BOTH halves of the contract -- openvpn 2.6.14 links OpenSSL 3.5.7, which has
+// ML-DSA and ML-KEM both -- and the one where authentication is mutual, so each
+// end's ML-DSA-65 signature is verified by the other implementation.
+//
+// Both peer configs pin `tls-version-min 1.3` and a `tls-groups` list with no
+// classical member. Without that the handshake would still very likely negotiate
+// X25519MLKEM768, because OpenSSL 3.5 offers it first -- and would fall back
+// silently if veepin ever stopped requiring it, which is a cell that passes
+// while testing nothing.
+
+// TestInteropPQOpenVPNVeepinClientRealServer runs veepin's pq-openvpn client
+// against that peer as the server.
+func TestInteropPQOpenVPNVeepinClientRealServer(t *testing.T) {
+	requireDocker(t)
+	pkiDir := filepath.Join("openvpn", "pki-pq")
+	if err := generateMLDSAPKI(pkiDir); err != nil {
+		t.Fatalf("generate ML-DSA PKI: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
+	// The peer's own report of what it negotiated, which is worth more than any
+	// assertion veepin could make about itself: OpenVPN naming ML-DSA-65 and
+	// X25519MLKEM768 is a third-party implementation confirming BOTH halves of
+	// the contract on one connection. The tls-groups pin already makes a
+	// classical fallback impossible; this is the cell publishing what happened
+	// rather than inferring it.
+	runInteropRequiringLogFrom(t, "compose.pq-openvpn-client.yml",
+		"veepin-pq-ovpn-client", "openvpn-pq-server", "10.8.0.1",
+		"peer certificate: 15616 bits ML-DSA-65, signature: id-ml-dsa-65",
+		"peer temporary key: 768 bits X25519MLKEM768")
+	measureThroughput(t, "compose.pq-openvpn-client.yml",
+		"openvpn-pq-server", "veepin-pq-ovpn-client", "10.8.0.1")
+}
+
+// TestInteropPQOpenVPNRealClientVeepinServer is the direction that proves veepin
+// can PRESENT an ML-DSA leaf to a third-party verifier: OpenVPN checks the
+// chain, the EKU via remote-cert-tls, and the key type, and refuses what it does
+// not like. It also exercises pqpolicy.CheckCredential, which only the server
+// role runs.
+func TestInteropPQOpenVPNRealClientVeepinServer(t *testing.T) {
+	requireDocker(t)
+	pkiDir := filepath.Join("openvpn", "pki-pq")
+	if err := generateMLDSAPKI(pkiDir); err != nil {
+		t.Fatalf("generate ML-DSA PKI: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
+	// The peer verifying VEEPIN's leaf, in its own words. OpenVPN's client role
+	// does not print the negotiated group -- only the server role does, which
+	// the cell above asserts -- so the key-exchange half here rests on the
+	// tls-groups pin in client-pq.conf having no classical member at all.
+	runInteropRequiringLogFrom(t, "compose.pq-openvpn-server.yml",
+		"openvpn-pq-client", "openvpn-pq-client", "10.8.0.1",
+		"peer certificate: 15616 bits ML-DSA-65, signature: id-ml-dsa-65")
+	measureThroughput(t, "compose.pq-openvpn-server.yml",
+		"veepin-pq-ovpn-server", "openvpn-pq-client", "10.8.0.1")
+}
+
+// TestInteropPQOpenVPNSelf is the attribution half of the two cells above.
+func TestInteropPQOpenVPNSelf(t *testing.T) {
+	requireDocker(t)
+	pkiDir := filepath.Join("openvpn", "pki-pq")
+	if err := generateMLDSAPKI(pkiDir); err != nil {
+		t.Fatalf("generate ML-DSA PKI: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
+	runInteropPQSelf(t, "compose.pq-openvpn-self.yml", "pq-openvpn",
+		"veepin-pq-ovpn-client", "veepin-pq-ovpn-server", "10.8.0.1")
+}
+
 // TestInteropWireguardRekey proves the client rekey loop end to end: the veepin
 // client re-runs the handshake every few seconds (a shrunk REKEY_SECONDS),
 // rotating a fresh keypair and receiver index into a live tunnel, while a
@@ -1016,6 +1146,31 @@ func TestInteropAnyConnectClientVeepinServerShaped(t *testing.T) {
 // TestInteropAnyConnectSelf is the veepin<->veepin AnyConnect sanity check: both
 // ends over a real TLS connection and TUNs, isolating a veepin break from an
 // interop break.
+// TestInteropPQAnyConnectSelf covers pq-anyconnect end to end: an ML-DSA-65
+// credential through the real parseServerOptions, CheckCredential accepting it
+// at construction, HardenTLS on both ends, and CSTP carrying packets over the
+// result.
+//
+// It runs over TLS rather than DTLS, and that is the contract rather than a
+// simplification: pq-anyconnect forces -no-dtls because internal/dtls is a
+// from-scratch DTLS 1.2 with two fixed suites and no post-quantum path, so a
+// bound UDP data channel would put classical bulk traffic behind a post-quantum
+// handshake.//
+// There is no third-party peer for this variant and none in prospect, so this is
+// the whole of its evidence and the matrix says so with the fixed no-peer label
+// on both directional cells. Read it as what it is: proof that the two halves
+// agree with each other, not that they are right.
+func TestInteropPQAnyConnectSelf(t *testing.T) {
+	requireDocker(t)
+	pkiDir := filepath.Join("anyconnect", "pki-pq")
+	if err := generateMLDSAServerCert(pkiDir, "veepin-pq-anyconnect-server"); err != nil {
+		t.Fatalf("generate ML-DSA cert: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
+	runInteropPQSelf(t, "compose.pq-anyconnect-self.yml", "pq-anyconnect",
+		"veepin-pq-anyconnect-client", "veepin-pq-anyconnect-server", "10.11.0.1")
+}
+
 func TestInteropAnyConnectSelf(t *testing.T) {
 	requireDocker(t)
 	pkiDir := filepath.Join("anyconnect", "pki")
@@ -1177,6 +1332,31 @@ func TestInteropAioquicClientVeepinProxyShaped(t *testing.T) {
 // TestInteropMasqueSelf is the veepin<->veepin sanity check over real QUIC. Its
 // value is attribution: if it passes while the two cross-implementation cells
 // fail, veepin and the RFC have diverged rather than veepin being broken.
+// TestInteropPQMasqueSelf covers pq-masque. MASQUE is TLS 1.3 unconditionally,
+// so the version floor the variant imposes changes nothing here; what it adds is
+// the refusal, and an ML-DSA certificate on a QUIC handshake.
+//
+// The peer for the classical MASQUE cells is aioquic, which brings its own
+// hand-written TLS 1.3 in Python. Measured on 2026-08-25 against aioquic 1.3.0,
+// the latest release: its Group enum holds SECP256R1/384R1/521R1, X25519, X448
+// and GREASE -- no ML-KEM member at all -- and its SignatureAlgorithm enum has
+// no ML-DSA. doc/pq-variants-plan.md §8 scoped that as a survey to run before
+// promising a class-A row; it came back no, so pq-masque is class B.//
+// There is no third-party peer for this variant and none in prospect, so this is
+// the whole of its evidence and the matrix says so with the fixed no-peer label
+// on both directional cells. Read it as what it is: proof that the two halves
+// agree with each other, not that they are right.
+func TestInteropPQMasqueSelf(t *testing.T) {
+	requireDocker(t)
+	pkiDir := filepath.Join("masque", "pki-pq")
+	if err := generateMLDSAServerCert(pkiDir, "veepin-pq-masque-server"); err != nil {
+		t.Fatalf("generate ML-DSA cert: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
+	runInteropPQSelf(t, "compose.pq-masque-self.yml", "pq-masque",
+		"veepin-pq-masque-client", "veepin-pq-masque-server", "10.30.0.1")
+}
+
 func TestInteropMasqueSelf(t *testing.T) {
 	runInteropBench(t, "compose.masque-self.yml", "veepin-masque-client", "veepin-masque-server", "10.30.0.1")
 }
@@ -1229,6 +1409,25 @@ func TestInteropOpenconnectFortinetClientVeepinServerShaped(t *testing.T) {
 // TestInteropFortinetSelf is the veepin<->veepin sanity check. veepin's client
 // prefers the DTLS data channel where the gateway offers one, so this also
 // exercises the certificate-based DTLS handshake between the two veepin roles.
+// TestInteropPQFortinetSelf is pq-anyconnect's cell one protocol along, and
+// carries the same -no-dtls consequence for the same reason. The classical
+// fortinet self cell asserts "data channel over DTLS"; this one cannot, because
+// the variant refuses to bind it.//
+// There is no third-party peer for this variant and none in prospect, so this is
+// the whole of its evidence and the matrix says so with the fixed no-peer label
+// on both directional cells. Read it as what it is: proof that the two halves
+// agree with each other, not that they are right.
+func TestInteropPQFortinetSelf(t *testing.T) {
+	requireDocker(t)
+	pkiDir := filepath.Join("fortinet", "pki-pq")
+	if err := generateMLDSAServerCert(pkiDir, "veepin-pq-fortinet-server"); err != nil {
+		t.Fatalf("generate ML-DSA cert: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
+	runInteropPQSelf(t, "compose.pq-fortinet-self.yml", "pq-fortinet",
+		"veepin-pq-fortinet-client", "veepin-pq-fortinet-server", "10.40.0.1")
+}
+
 func TestInteropFortinetSelf(t *testing.T) {
 	runInteropRequiringLog(t, "compose.fortinet-self.yml", "veepin-fortinet-client", "10.40.0.1",
 		"data channel over DTLS")
@@ -1292,6 +1491,28 @@ func TestInteropOpenconnectGPClientVeepinServerShaped(t *testing.T) {
 // TestInteropGPSelf is the veepin<->veepin sanity check. veepin's client prefers
 // the ESP path wherever the gateway hands out keys for one, so this also
 // exercises the activation exchange between the two veepin roles.
+// TestInteropPQGPSelf keeps the ESP data path, unlike the two DTLS variants,
+// and the difference is worth stating because it looks inconsistent otherwise.
+// GlobalProtect derives its ESP keys inside the TLS control channel and delivers
+// them there, so hardening that channel is what protects them -- an adversary
+// recording today cannot recover them later. ESP itself is AES-GCM, symmetric,
+// and not a quantum-broken primitive. DTLS is different because it negotiates
+// its OWN key exchange, which internal/dtls has no post-quantum spelling for.//
+// There is no third-party peer for this variant and none in prospect, so this is
+// the whole of its evidence and the matrix says so with the fixed no-peer label
+// on both directional cells. Read it as what it is: proof that the two halves
+// agree with each other, not that they are right.
+func TestInteropPQGPSelf(t *testing.T) {
+	requireDocker(t)
+	pkiDir := filepath.Join("gp", "pki-pq")
+	if err := generateMLDSAServerCert(pkiDir, "veepin-pq-gp-server"); err != nil {
+		t.Fatalf("generate ML-DSA cert: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
+	runInteropPQSelf(t, "compose.pq-gp-self.yml", "pq-gp",
+		"veepin-pq-gp-client", "veepin-pq-gp-server", "10.50.0.1")
+}
+
 func TestInteropGPSelf(t *testing.T) {
 	runInteropRequiringLog(t, "compose.gp-self.yml", "veepin-gp-client", "10.50.0.1",
 		"tunnel up over ESP")
@@ -1364,6 +1585,24 @@ func TestInteropOpenconnectPulseClientVeepinServerShaped(t *testing.T) {
 
 // TestInteropPulseSelf is the veepin<->veepin sanity check, over the ESP path
 // both ends prefer.
+// TestInteropPQPulseSelf keeps the ESP data path for the reason
+// TestInteropPQGPSelf does: Ivanti delivers its ESP keys inside the IF-T/TLS
+// control channel, so hardening that channel is what protects them.//
+// There is no third-party peer for this variant and none in prospect, so this is
+// the whole of its evidence and the matrix says so with the fixed no-peer label
+// on both directional cells. Read it as what it is: proof that the two halves
+// agree with each other, not that they are right.
+func TestInteropPQPulseSelf(t *testing.T) {
+	requireDocker(t)
+	pkiDir := filepath.Join("pulse", "pki-pq")
+	if err := generateMLDSAServerCert(pkiDir, "veepin-pq-pulse-server"); err != nil {
+		t.Fatalf("generate ML-DSA cert: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
+	runInteropPQSelf(t, "compose.pq-pulse-self.yml", "pq-pulse",
+		"veepin-pq-pulse-client", "veepin-pq-pulse-server", "10.70.0.1")
+}
+
 func TestInteropPulseSelf(t *testing.T) {
 	runInterop(t, "compose.pulse-self.yml", "veepin-pulse-client", "10.70.0.1")
 	measureThroughput(t, "compose.pulse-self.yml", "veepin-pulse-server", "veepin-pulse-client", "10.70.0.1")
@@ -1425,6 +1664,29 @@ func TestInteropVeepinClientSoftEtherServer(t *testing.T) {
 // and the receiver trimmed it.
 func TestInteropSoftEtherShaped(t *testing.T) {
 	runInterop(t, "compose.softether-shaped.yml", "veepin-softether-client", "10.70.0.1")
+}
+
+// TestInteropPQSoftEtherSelf covers pq-softether, and layer 2 is the only thing
+// that makes it look different from its neighbours: neither end assigns an
+// address through the protocol, so the harness puts one on each TAP afterwards,
+// exactly as the classical cell does.
+//
+// SoftEther ships a self-signed RSA certificate by default and pq-softether will
+// not start on one -- CheckCredential refuses at construction, before the TAP is
+// opened. That refusal is why this cell needs a minted ML-DSA credential at all.//
+// There is no third-party peer for this variant and none in prospect, so this is
+// the whole of its evidence and the matrix says so with the fixed no-peer label
+// on both directional cells. Read it as what it is: proof that the two halves
+// agree with each other, not that they are right.
+func TestInteropPQSoftEtherSelf(t *testing.T) {
+	requireDocker(t)
+	pkiDir := filepath.Join("softether", "pki-pq")
+	if err := generateMLDSAServerCert(pkiDir, "veepin-pq-softether-server"); err != nil {
+		t.Fatalf("generate ML-DSA cert: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(pkiDir) })
+	runInteropPQSelf(t, "compose.pq-softether-self.yml", "pq-softether",
+		"veepin-pq-softether-client", "veepin-pq-softether-server", "10.70.0.1")
 }
 
 func TestInteropSoftEtherSelf(t *testing.T) {
@@ -1937,7 +2199,19 @@ func runInteropRequiringLogFrom(t *testing.T, composeFile, pingSvc, logSvc, targ
 		t.Fatal("runInteropRequiringLogFrom needs at least one required log line")
 	}
 	runInterop(t, composeFile, pingSvc, target)
+	requireLogFrom(t, composeFile, logSvc, wants...)
+}
 
+// requireLogFrom waits for every wanted line to appear in one service's logs,
+// and fails naming the ones that never did.
+//
+// Split out of runInteropRequiringLogFrom so a cell can assert on a SECOND
+// service without running the tunnel twice. The pq- self cells need exactly
+// that: both ends announce the contract, and a cell that checked only one would
+// leave the other's enforcement unproven -- which is the whole hazard in a
+// veepin<->veepin cell, where both halves fail together and agree about it.
+func requireLogFrom(t *testing.T, composeFile, logSvc string, wants ...string) {
+	t.Helper()
 	deadline := time.Now().Add(logDeadline)
 	var logs string
 	for time.Now().Before(deadline) {
@@ -1967,6 +2241,34 @@ func runInteropRequiringLogFrom(t *testing.T, composeFile, pingSvc, logSvc, targ
 	}
 	t.Fatalf("the tunnel came up but %s never appeared in %s's logs within %s:\n%s",
 		quoteAll(absent), logSvc, logDeadline, logs)
+}
+
+// runInteropPQSelf is the shape every pq- veepin<->veepin cell takes.
+//
+// A bare ping is worth almost nothing here, and it is worth spelling out why.
+// Both ends of a self cell apply the same policy from the same package, so if
+// the hardening silently stopped applying, BOTH would drop to a classical
+// handshake, agree with each other perfectly, and the ping would pass. That is
+// the mutually-consistent failure AGENTS.md names as the dangerous class and the
+// one that made the Pulse ESP key directions pass every self-test while being
+// wrong at both ends.
+//
+// So the cell requires the contract line from pqpolicy.Announce in BOTH
+// services' logs. Neither end can have quietly reverted to its base protocol and
+// still produce it: the line is written by the variant's own dial/serve, which
+// is the only code path that sets the marker the base reads.
+//
+// Then it measures, so every pq- row carries a throughput figure rather than the
+// em dash that says iperf3 does not apply here.
+func runInteropPQSelf(t *testing.T, composeFile, variant, clientSvc, serverSvc, target string) {
+	t.Helper()
+	// ASCII-only prefix of the announcement: the full line carries an em dash,
+	// and a cell should not fail on how a log line is punctuated. Naming the
+	// variant is what makes it specific -- the base protocol cannot print it.
+	want := variant + ": post-quantum enforced"
+	runInteropRequiringLogFrom(t, composeFile, clientSvc, clientSvc, target, want)
+	requireLogFrom(t, composeFile, serverSvc, want)
+	measureThroughput(t, composeFile, serverSvc, clientSvc, target)
 }
 
 // quoteAll renders a set of required log lines for a message: `"a" and "b"`.

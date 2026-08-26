@@ -11,7 +11,7 @@ set -u
 i=1
 while [ "$i" -le 40 ]; do
     echo "veepin-fortinet-client: connecting to ${SERVER}:${PORT:-443} (attempt $i)"
-    veepin connect fortinet \
+    veepin connect "${PROTOCOL:-fortinet}" \
         -server "$SERVER" \
         -port "${PORT:-443}" \
         -user "$USER" -pass "$PASSWORD" \

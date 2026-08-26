@@ -1,0 +1,52 @@
+# veepin pq-ikev2 client <-> veepin pq-ikev2 server.
+#
+# Both ends require ML-KEM-768 as an additional key exchange (RFC 9370 ADDKE1)
+# rather than offering it, so the SA either carries the post-quantum secret or
+# there is no SA. The strongSwan cells are what prove that against a real peer;
+# this one is the attribution cell -- if it passes while those fail, veepin and
+# strongSwan have diverged rather than veepin being broken.
+#
+# Authentication is PSK, which is deliberate rather than a shortcut. A
+# pre-shared key is symmetric and is not broken by a quantum adversary -- that
+# is the whole premise of RFC 8784 -- so pq-ikev2 accepts it. What it refuses is
+# classical PUBLIC-KEY authentication and EAP-MSCHAPv2. See doc/security.md.
+#
+# The entrypoints are the classical cell's, unchanged: pq-ikev2 takes
+# byte-for-byte the same flags as ikev2, which is the OptSpec fallback working
+# and is worth having a cell notice.
+name: veepin-interop-pq-ikev2-self
+
+services:
+  veepin-pq-ikev2-server:
+    image: veepin:interop
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      PSK: "interop-test-psk"
+      SERVER_ID: "vpn.example.com"
+      POOL: "10.10.10.0/24"
+      PROTOCOL: "pq-ikev2"
+    volumes:
+      - ./veepin/server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  veepin-pq-ikev2-client:
+    image: veepin:interop
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-pq-ikev2-server]
+    environment:
+      SERVER: "veepin-pq-ikev2-server"
+      PSK: "interop-test-psk"
+      CLIENT_ID: "client.example.com"
+      SERVER_ID: "vpn.example.com"
+      PROTOCOL: "pq-ikev2"
+    volumes:
+      - ./veepin/client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

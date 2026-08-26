@@ -18,7 +18,7 @@ i=1
 while [ "$i" -le 40 ]; do
     echo "veepin-pulse-client: connecting to ${SERVER}:${PORT:-443} (attempt $i)"
     # shellcheck disable=SC2086 # ESP_FLAG is deliberately word-split
-    veepin connect pulse \
+    veepin connect "${PROTOCOL:-pulse}" \
         -server "$SERVER" \
         -port "${PORT:-443}" \
         -user "$USER" -pass "$PASSWORD" \

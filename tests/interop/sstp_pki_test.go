@@ -5,7 +5,7 @@ package interop
 import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
-	"crypto/mldsa"
+
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -55,35 +55,9 @@ func generateSSTPServerCert(dir string) error {
 // is meant to leave the existing matrix untouched, and sharing a code path here
 // would be one edit away from changing what those cells prove.
 //
-// 65 is the parameter set matching ML-KEM-768's security level, which is what
-// pqpolicy uses everywhere else.
+// The minting itself now lives in pq_pki_test.go, shared with the nine other
+// pq- self cells; what stays here is the name this cell calls and the reason it
+// does not share with its classical neighbour above.
 func generateSSTPServerCertMLDSA(dir string) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	key, err := mldsa.GenerateKey(mldsa.MLDSA65())
-	if err != nil {
-		return err
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "veepin-pq-sstp-server"},
-		DNSNames:     []string{"veepin-pq-sstp-server"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(24 * time.Hour),
-		// No KeyEncipherment: it is an RSA key-transport usage, meaningless for
-		// a signature-only algorithm and grounds for rejection in a strict
-		// validator.
-		KeyUsage:              x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.PublicKey(), key)
-	if err != nil {
-		return err
-	}
-	if err := writeCert(filepath.Join(dir, "server.crt"), der); err != nil {
-		return err
-	}
-	return writeKey(filepath.Join(dir, "server.key"), key)
+	return generateMLDSAServerCert(dir, "veepin-pq-sstp-server")
 }

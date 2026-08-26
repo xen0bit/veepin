@@ -1,0 +1,43 @@
+# A real OpenVPN client requiring both halves of the post-quantum contract ->
+# veepin's pq-openvpn SERVER.
+#
+# The reverse of compose.pq-openvpn-client.yml, and it earns a separate cell for
+# the reason the SSH pair does: the two roles harden in different code
+# (openvpn/openvpn.go and openvpn/server.go), and the server half additionally
+# runs pqpolicy.CheckCredential at construction. A cell that only drove the
+# client would leave all of that unproven against anything but veepin itself.
+#
+# It is also the direction that proves veepin can PRESENT an ML-DSA leaf to a
+# third-party verifier: OpenVPN checks the chain, the EKU via remote-cert-tls,
+# and the key type, and refuses what it does not like.
+#
+# Data-path check: the OpenVPN client pings 10.8.0.1, the veepin server's tunnel
+# gateway.
+name: veepin-interop-pq-openvpn-server
+
+services:
+  veepin-pq-ovpn-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      PROTOCOL: "pq-openvpn"
+    volumes:
+      - ./openvpn/pki-pq:/pki:ro
+      - ./veepin/openvpn-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  openvpn-pq-client:
+    build:
+      context: openvpn-pq
+    image: interop-openvpn-pq
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-pq-ovpn-server]
+    environment:
+      ROLE: "client"
+    volumes:
+      - ./openvpn/pki-pq:/pki:ro
