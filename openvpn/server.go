@@ -884,7 +884,7 @@ func serverTLSConfig(cfg *ServerConfig) (*tls.Config, error) {
 	if !pool.AppendCertsFromPEM(cfg.CA) {
 		return nil, errors.New("ca: no certificates parsed")
 	}
-	return &tls.Config{
+	tlsCfg := &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS12,
 		MaxVersion:   tls.VersionTLS13,
@@ -915,7 +915,29 @@ func serverTLSConfig(cfg *ServerConfig) (*tls.Config, error) {
 		SessionTicketsDisabled: true,
 		ClientAuth:             tls.RequireAndVerifyClientCert,
 		ClientCAs:              pool,
-	}, nil
+	}
+	if cfg.PostQuantumOnly {
+		// This was declared, set from the registry, and never read: `veepin
+		// serve pq-openvpn` built exactly the config above and accepted a
+		// classical peer, an RSA certificate and TLS 1.2, while its name
+		// promised a refusal. The client half (clientTLSConfig) had always
+		// hardened, so the veepin<->veepin cell passed and so did every unit
+		// test -- the one direction that mattered was the one nothing drove.
+		//
+		// Checked before the TUN is opened and before anything binds: NewServer
+		// calls this first, so an operator who pointed a pq- name at their
+		// existing RSA certificate learns it here rather than from a listener
+		// that comes up and then refuses every client.
+		if err := pqpolicy.CheckCredential(cert); err != nil {
+			return nil, err
+		}
+		// Mutual TLS, so HardenTLS covers both directions at once: it raises
+		// the floor to 1.3, pins the curves, and chains RequireMLDSALeaf onto
+		// the peer check -- which here runs against the CLIENT's certificate,
+		// since this is the side that asked for one.
+		pqpolicy.HardenTLS(tlsCfg)
+	}
+	return tlsCfg, nil
 }
 
 // readClientKeys reads TLS bytes until a complete client key_method_2 message is

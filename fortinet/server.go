@@ -136,6 +136,19 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("fortinet: server keypair: %w", err)
 	}
 
+	if cfg.PostQuantumOnly {
+		// Here, next to the parse, rather than beside the HardenTLS call below:
+		// this is the last point before dataplane.OpenTUN, and the promise the
+		// check exists to keep is that an operator who pointed a pq- name at
+		// their existing RSA certificate learns it before the listener acquires
+		// anything. It used to sit below, under a comment saying it was here --
+		// which also meant the refusal returned without closing the TUN it had
+		// by then opened, leaking a file descriptor per attempt.
+		if err := pqpolicy.CheckCredential(cert); err != nil {
+			return nil, err
+		}
+	}
+
 	poolCIDR := cfg.Pool
 	if poolCIDR == "" {
 		poolCIDR = defaultPool
@@ -186,13 +199,8 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 
 	tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
 	if cfg.PostQuantumOnly {
-		// Checked before the TUN is opened and before anything binds: an
-		// operator who pointed a pq- name at their existing RSA certificate
-		// learns it here, rather than from a listener that comes up and then
-		// refuses every client.
-		if err := pqpolicy.CheckCredential(cert); err != nil {
-			return nil, err
-		}
+		// The credential was judged above, before the TUN. What is left here is
+		// the config, which cannot be hardened before it exists.
 		pqpolicy.HardenTLS(tlsCfg)
 	}
 
