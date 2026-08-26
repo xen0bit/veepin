@@ -426,50 +426,54 @@ var pqPolicyExemptFacades = map[string]string{
 // "pqpolicy.HardenTLS" is what the caller asks about.
 func pqCallsReachableFrom(t *testing.T, pkg string) map[string]map[string]bool {
 	t.Helper()
-	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, pkg, func(fi os.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
+	entries, err := os.ReadDir(pkg)
 	if err != nil {
-		t.Fatalf("parsing %s: %v", pkg, err)
+		t.Fatalf("reading %s: %v", pkg, err)
 	}
+	fset := token.NewFileSet()
 
 	// funcName -> the set of things its body calls, by local name for a
 	// package-local function and "pkg.Func" for a selector.
 	calls := map[string]map[string]bool{}
-	for _, astPkg := range pkgs {
-		for _, file := range astPkg.Files {
-			for _, decl := range file.Decls {
-				fn, ok := decl.(*ast.FuncDecl)
-				if !ok || fn.Body == nil {
-					continue
-				}
-				// Methods and functions share a namespace here. That is
-				// imprecise and harmless: a false edge can only make a call
-				// look REACHABLE, and every assertion below is that something
-				// is reachable, so imprecision cannot manufacture a pass for a
-				// facade that calls nothing.
-				out := calls[fn.Name.Name]
-				if out == nil {
-					out = map[string]bool{}
-					calls[fn.Name.Name] = out
-				}
-				ast.Inspect(fn.Body, func(n ast.Node) bool {
-					call, ok := n.(*ast.CallExpr)
-					if !ok {
-						return true
-					}
-					switch f := call.Fun.(type) {
-					case *ast.Ident:
-						out[f.Name] = true
-					case *ast.SelectorExpr:
-						if x, ok := f.X.(*ast.Ident); ok {
-							out[x.Name+"."+f.Sel.Name] = true
-						}
-					}
-					return true
-				})
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, filepath.Join(pkg, name), nil, 0)
+		if err != nil {
+			t.Fatalf("parsing %s/%s: %v", pkg, name, err)
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
 			}
+			// Methods and functions share a namespace here. That is imprecise
+			// and harmless: a false edge can only make a call look REACHABLE,
+			// and every assertion is that something IS reachable, so
+			// imprecision cannot manufacture a pass for a facade that calls
+			// nothing.
+			out := calls[fn.Name.Name]
+			if out == nil {
+				out = map[string]bool{}
+				calls[fn.Name.Name] = out
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				switch f := call.Fun.(type) {
+				case *ast.Ident:
+					out[f.Name] = true
+				case *ast.SelectorExpr:
+					if x, ok := f.X.(*ast.Ident); ok {
+						out[x.Name+"."+f.Sel.Name] = true
+					}
+				}
+				return true
+			})
 		}
 	}
 
