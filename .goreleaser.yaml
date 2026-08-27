@@ -38,6 +38,12 @@ builds:
     # riscv64, s390x.
     goarch: [amd64, arm64, arm, "386", ppc64le, riscv64, s390x]
     goarm: ["5", "7"]
+    # softfloat, not Go's default sse2: Debian's i386 baseline does not include
+    # SSE2, and the default emits unguarded scalar SSE2 (movsd/mulsd/ucomisd)
+    # for every float64 operation, which SIGILLs on a CPU without it. The nm
+    # plugin's cross build already pins this (release.yml); veepin ships to the
+    # same i386 users out of the same apt repo, so it has to agree.
+    go386: [softfloat]
     mod_timestamp: "{{ .CommitTimestamp }}"
     flags:
       - -trimpath
