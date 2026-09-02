@@ -25,7 +25,7 @@ flowchart TD
 
 ## Why capsule mode (and not QUIC datagrams)
 
-`x/net/quic` (v0.56.0) has **no** RFC 9221 QUIC DATAGRAM frames — `dgram.go` in its
+`x/net/quic` (v0.57.0) has **no** RFC 9221 QUIC DATAGRAM frames — `dgram.go` in its
 internals is an unrelated UDP type, a false signal. So every inner packet rides as
 a **DATAGRAM capsule on the request stream** rather than an unreliable QUIC
 datagram. This is a documented **performance** boundary, not a correctness one: the
