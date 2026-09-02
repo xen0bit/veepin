@@ -17,8 +17,10 @@
 #
 # Requirements: dpkg-dev (dpkg-scanpackages), apt-utils (apt-ftparchive), gpg
 # with the signing secret key already imported (see APT_SIGNING_KEY in
-# release.yml). Fails loudly if no secret key is available — an unsigned apt
-# repo is worse than none, because users would have to disable verification.
+# release.yml, which also checks the imported key against the fingerprint
+# pinned in packaging/apt-signing-key.asc). Fails loudly if no secret key is
+# available — an unsigned apt repo is worse than none, because users would have
+# to disable verification.
 set -euo pipefail
 
 debs_dir=${1:?usage: build-apt-repo.sh <debs-dir> <out-dir>}
@@ -106,6 +108,11 @@ echo "deb [signed-by=/usr/share/keyrings/veepin-archive-keyring.gpg] https://xen
 sudo apt update
 sudo apt install veepin veepin-nm
 </pre>
+<p>The keyring holds one key, fingerprint
+<code>EE96 B9F0 28F5 7D11 5A8D  1509 889E D9E8 95D7 E72C</code>, which replaced
+the previous signing key on 2026-09-02. If you added this repository before
+then, re-fetch the keyring with the command above — the old one cannot verify
+the current <code>InRelease</code>, and <code>apt update</code> will say so.</p>
 HTML
 
 echo "build-apt-repo: repository built in $out_dir"

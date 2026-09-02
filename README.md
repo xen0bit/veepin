@@ -308,7 +308,18 @@ macOS, all of which are part of the base system); `veepin-nm`
 adds the NetworkManager desktop integration (built for the same architectures;
 the amd64/arm64 builds load on Ubuntu 22.04+, the cross-built rest on
 Debian 12+ / Ubuntu 24.04+). The repository signing
-key's fingerprint is pinned in [packaging/apt-signing-key.asc](packaging/apt-signing-key.asc).
+key ships in [packaging/apt-signing-key.asc](packaging/apt-signing-key.asc) as
+the out-of-band trust anchor, and the release workflow refuses to publish a
+repository signed by anything else:
+
+```
+EE96 B9F0 28F5 7D11 5A8D  1509 889E D9E8 95D7 E72C
+```
+
+That key replaced the previous one on 2026-09-02. If you added the repository
+before then, re-run the `curl` above; the old keyring cannot verify the current
+`InRelease`, and `apt update` will say so.
+
 The package ships a systemd template unit — drop arguments in
 `/etc/veepin/<name>.conf` and `systemctl enable --now veepin@<name>` (see
 `/usr/share/doc/veepin/veepin.conf.example`); it grants the daemon the
