@@ -320,6 +320,46 @@ git log -1 --format=%s origin/main    # must not contain [skip ci]
 
 If the tip does carry it, land a real commit first and tag that.
 
+### Rotating the APT signing key
+
+The `apt-repo` job signs the Pages repository with the armored private key in
+the `APT_SIGNING_KEY` Actions secret, and `packaging/apt-signing-key.asc` is the
+public half users pin with `signed-by=`. The two live in different places and
+are rotated by hand, so the job compares their fingerprints before signing
+anything — a drifted pair would otherwise produce a repository that verifies for
+nobody who fetched the keyring earlier, and no red build to say so.
+
+Same parameters every time: ed25519, sign-only, **no expiry** (an expired
+archive key breaks `apt update` for every existing installation on a date nobody
+is watching), UID on the GitHub noreply address so public Actions logs carry no
+personal email.
+
+```sh
+export GNUPGHOME=$(mktemp -d)   # a scratch keyring: one key in it, so the
+chmod 700 "$GNUPGHOME"          # bare exports below are unambiguous
+gpg --batch --passphrase '' --quick-generate-key \
+  'veepin APT repository (release signing) <21974988+xen0bit@users.noreply.github.com>' \
+  ed25519 sign never
+gpg --armor --export             > packaging/apt-signing-key.asc
+gpg --armor --export-secret-keys | gh secret set APT_SIGNING_KEY
+cp "$GNUPGHOME"/openpgp-revocs.d/*.rev ~/somewhere-safe/
+```
+
+No passphrase, deliberately: the job imports the secret unattended, and a
+passphrase in a second secret protects nothing that `secrets.APT_SIGNING_KEY`
+does not already hold.
+
+Then commit the public key with the new fingerprint in the message, and update
+the fingerprint in **both** places it is written out for humans: the README's
+install section and the landing page heredoc in
+`.github/scripts/build-apt-repo.sh`. Rotation is a breaking change for anyone
+already subscribed — the repository is re-signed at the next release and their
+keyring stops verifying it — so both of those say to re-fetch the keyring.
+
+Keep the private key and its revocation certificate somewhere outside the repo.
+There is no recovery if it is lost: the only remedy is another rotation, and
+every subscriber re-fetches.
+
 ## Sequencing several protocols
 
 They serialise, because they all touch `doc.go`, the README protocol table and

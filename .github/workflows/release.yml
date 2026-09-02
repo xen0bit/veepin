@@ -252,6 +252,19 @@ jobs:
             exit 1
           fi
           printf '%s' "$APT_SIGNING_KEY" | gpg --batch --import
+          # The secret and the in-repo public key are rotated by hand, in two
+          # different places, so they can drift apart. Nothing downstream would
+          # notice: the repo would be signed by the new key and the site would
+          # publish it, while every client that fetched the keyring earlier
+          # fails `apt update` with a bad signature. Compare fingerprints here,
+          # where the mismatch is still a red build rather than a broken repo.
+          pinned=$(gpg --show-keys --with-colons packaging/apt-signing-key.asc | awk -F: '/^fpr:/ {print $10; exit}')
+          imported=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/ {print $10; exit}')
+          if [ "$pinned" != "$imported" ]; then
+            echo "::error::APT_SIGNING_KEY holds $imported but packaging/apt-signing-key.asc pins $pinned; re-export the public key or fix the secret"
+            exit 1
+          fi
+          echo "signing key $imported matches packaging/apt-signing-key.asc"
 
       - name: Build the signed repository
         run: .github/scripts/build-apt-repo.sh debs site

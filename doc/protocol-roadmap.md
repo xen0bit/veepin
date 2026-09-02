@@ -740,10 +740,12 @@ The per-protocol detail is in
   capability it would bring that the tree lacks, at an eighth of the cost.**
 - **MASQUE QUIC DATAGRAM (RFC 9221)** — would fix the documented
   single-reliable-stream weakness in `internal/masque`, but `x/net/quic` does
-  not export it. Verified by reading `x/net@v0.56.0/quic/dgram.go` directly: it
+  not export it. Verified by reading `x/net@v0.57.0/quic/dgram.go` directly: it
   contains only `type datagram struct`, `type ecnBits byte`, `newDatagram()` and
   `(m *datagram) recycle()` — all lowercase, an internal UDP buffer type, not
   RFC 9221. Recorded here so nobody re-searches it; recheck when `x/net` bumps.
+  Rechecked at the v0.56.0 → v0.57.0 bump: the file is byte-identical and the
+  package still exports no datagram API.
 - **NordWhisper / Proton Stealth** — proprietary servers, no open-source peer,
   so no interop cell can be built. Same shape of rejection as ZeroTier.
 - **tinc** — SPTPS ships only in Debian *experimental*, as a decade-old
