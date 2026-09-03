@@ -306,19 +306,30 @@ Tags drive it: `.github/workflows/release.yml` runs GoReleaser on any pushed
 `v*` tag, and the changelog is generated from `feat:`/`fix:` commits (the
 `docs`/`test`/`chore`/`ci` types, scoped forms included, are filtered out).
 
-**Do not tag the tip of `main` blindly.** The living-README workflow commits its
-regenerated tables with `[skip ci]` in the message, and GitHub skips *every*
-workflow for a push whose head commit carries that marker — the tag push
-included. The tag lands, the workflow never runs, and no release appears. There
-is no error anywhere; `gh release list` simply does not show it.
+Any commit on `main` is taggable now. It was not always: the living-README
+workflow used to commit its regenerated tables with `[skip ci]` in the message,
+and GitHub skips *every* workflow for a push whose head commit carries that
+marker — the tag push included. Tagging the tip of `main` therefore produced a
+tag, no run, no release, and no error anywhere. The marker is gone
+(`living-readme-commit.sh` says why the loop stays prevented without it), so do
+not reintroduce it, and do not add it to any commit that could end up as a tag's
+target.
 
-Check before tagging, and tag a commit without the marker:
+Two things that will still bite:
 
-```sh
-git log -1 --format=%s origin/main    # must not contain [skip ci]
-```
-
-If the tip does carry it, land a real commit first and tag that.
+- **A tag push is a one-shot event.** If Actions drops it, nothing reports an
+  error. Re-run with `gh workflow run release.yml --ref v<x.y.z>` rather than
+  deleting and re-pushing the tag; `replace_existing_artifacts` in
+  `.goreleaser.yaml` and `--clobber` on the `gh release upload` steps are there
+  so a second attempt against a half-published release converges instead of
+  dying on `422 already_exists`.
+- **The Debian archive moves under the cross-build job.** `nm-packages-cross`
+  installs target dev libraries out of a Debian container, and when bookworm
+  entered LTS its security suite dropped `armel` and `s390x` while `main` kept
+  them — which desynchronises the version of every `Multi-Arch: same` library
+  between the container's amd64 and the target arch, and apt then refuses to
+  install anything. The step detects the case from the security suite's own
+  `Architectures:` line; expect the next architecture to fall off the same way.
 
 ### Rotating the APT signing key
 
