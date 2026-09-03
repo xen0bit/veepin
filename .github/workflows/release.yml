@@ -151,13 +151,45 @@ jobs:
     steps:
       - name: Install cross toolchain and target dev libraries
         run: |
-          dpkg --add-architecture ${{ matrix.arch }}
+          arch=${{ matrix.arch }}
+          dpkg --add-architecture "$arch"
           apt-get update
+
+          # Debian 12 has moved to LTS, and LTS carries fewer architectures
+          # than the release did: bookworm-security's Release file lists
+          # "amd64 arm64 armhf i386 ppc64el" and no longer armel or s390x,
+          # while bookworm main still carries all of them. The container's own
+          # amd64 does get security updates, so a Multi-Arch: same library ends
+          # up wanted at two versions at once -- libexpat1:amd64 at
+          # 2.5.0-1+deb12u3 from security, libexpat1:armel at 2.5.0-1+deb12u2
+          # from main -- and apt requires those to be equal. It reports the
+          # foreign one as "libexpat1:armel ... but it is not installable",
+          # installs nothing, and exits 100. Nothing about this repo changed;
+          # the archive did, on a date nobody was watching.
+          #
+          # So when the security suite has no index for the target
+          # architecture, demote it below main and let both architectures
+          # resolve out of one suite at one version. Demote rather than remove,
+          # so a package that only ever lived in security is still reachable.
+          # This costs nothing in the artifact: the .so links dynamically
+          # against the *target's* libnm/GTK, which come from main either way.
+          #
+          # The alternative -- moving these two to trixie, as riscv64 already
+          # does -- also resolves, but it would raise the runtime GLib/glibc
+          # floor for armel and s390x users from Debian 12 to Debian 13, which
+          # is exactly what the bookworm baseline exists to prevent.
+          release=$(ls /var/lib/apt/lists/*-security_InRelease 2>/dev/null | head -1)
+          if [ -n "$release" ] && ! sed -n 's/^Architectures: //p' "$release" | tr ' ' '\n' | grep -qx "$arch"; then
+            echo "::notice::security suite carries no $arch index; resolving out of main only"
+            printf 'Package: *\nPin: release l=Debian-Security\nPin-Priority: 100\n' \
+              > /etc/apt/preferences.d/no-partial-security
+          fi
+
           apt-get install -y --no-install-recommends \
-            make dpkg-dev crossbuild-essential-${{ matrix.arch }} pkg-config \
+            make dpkg-dev crossbuild-essential-"$arch" pkg-config \
             ca-certificates git \
-            libnm-dev:${{ matrix.arch }} libnma-dev:${{ matrix.arch }} \
-            libgtk-3-dev:${{ matrix.arch }}
+            libnm-dev:"$arch" libnma-dev:"$arch" \
+            libgtk-3-dev:"$arch"
 
       - name: Checkout
         uses: actions/checkout@v7
