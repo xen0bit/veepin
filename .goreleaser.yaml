@@ -146,6 +146,18 @@ signs:
 # to trust.
 sboms:
   - artifacts: binary
+    # Explicit, because the default document name drops the ARM variant:
+    # goreleaser's built-in template for `artifacts: binary` is
+    # `{{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}.sbom.json`, and this
+    # build matrix has two GOARM values. Both armv5 and armv7 catalogued to
+    # `veepin_<v>_linux_arm.sbom.json`, goreleaser warned "artifact already
+    # present in the list" and carried on, and the release then died on the
+    # second upload with a 422 already_exists -- after every other asset had
+    # been published. Name it the way the archives are named, variant included.
+    documents:
+      - >-
+        {{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+        {{- if .Arm }}v{{ .Arm }}{{ end }}.sbom.json
 
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
@@ -182,6 +194,13 @@ release:
     name: veepin
   draft: false
   prerelease: auto
+  # A re-dispatch of this workflow against an already-released tag must
+  # converge, not collide. Without this, every asset the first (failed) attempt
+  # managed to upload makes the retry fail with a 422 already_exists, so the
+  # one recovery path the workflow documents -- dispatching against the tag --
+  # works exactly once. The nm jobs already upload with `gh release upload
+  # --clobber` for the same reason.
+  replace_existing_artifacts: true
   name_template: "v{{ .Version }}"
   footer: |
     ---

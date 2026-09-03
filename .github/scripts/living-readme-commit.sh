@@ -47,8 +47,16 @@ fi
 git config user.name "github-actions[bot]"
 git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 git add "$file"
-# [skip ci] so the commit-back does not retrigger this workflow into a loop.
-git commit -m "docs(readme): refresh $label from CI [skip ci]"
+# No [skip ci] marker, deliberately, and nothing here needs one. A push made
+# with the default GITHUB_TOKEN — which is what actions/checkout leaves in the
+# credentials here — triggers no workflow run at all, and both workflows that
+# call this script are path-filtered to code paths that a README.md or
+# doc/benchmarks.md commit does not touch. So the loop is already prevented
+# twice over, and the marker only did harm: GitHub skips *every* workflow for a
+# push whose head commit carries it, tag pushes included, so a release tagged at
+# the tip of main queued no run, reported no error, and produced no release.
+# If this ever pushes with a PAT instead, the token half of that stops holding.
+git commit -m "docs(readme): refresh $label from CI"
 
 # The interop and benchmark workflows can both push their (disjoint) regions to
 # main at once, so rebase-and-retry rather than fail on a lost race.
