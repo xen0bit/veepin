@@ -20,10 +20,7 @@ func (p *Pump) runVnet() {
 	for {
 		n, err := p.tun.Read(buf)
 		if err != nil {
-			p.mu.RLock()
-			closing := p.closing
-			p.mu.RUnlock()
-			if closing {
+			if p.closing.Load() {
 				return
 			}
 			if p.log != nil {
@@ -74,13 +71,8 @@ func (p *Pump) sendSegments(segs [][]byte, outs [][]byte) [][]byte {
 		p.drops[DropNotIP].Add(1)
 		return outs[:0]
 	}
-	p.mu.RLock()
-	t := p.routes.lookup(dst)
-	var c *TunnelCounters
-	if t != nil {
-		c = p.stats[t]
-	}
-	p.mu.RUnlock()
+	b := p.tables.Load().routes.lookup(dst)
+	t, c := b.t, b.c
 	if t == nil {
 		p.drops[DropNoRoute].Add(1)
 		return outs[:0] // no tunnel carries this destination

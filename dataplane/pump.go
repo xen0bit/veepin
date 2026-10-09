@@ -185,29 +185,86 @@ type Pump struct {
 	retired   TunnelStats
 	retiredMu sync.Mutex
 
-	mu     sync.RWMutex
-	byKey  map[uint32]bound // inbound demux, with that tunnel's counters
-	stats  map[Tunnel]*TunnelCounters
-	routes routeTable // outbound, by longest-prefix match
-	// mtu is the largest inner packet this path can carry; zero disables the
-	// check entirely.
-	mtu int
+	// tables is the snapshot the packet path reads: inbound demux and outbound
+	// routes, swapped whole on every registration change and never modified
+	// once published. See view.
+	tables atomic.Pointer[view]
+	// mu serialises the writers that build the next snapshot, and guards stats,
+	// which only writers and the management API read.
+	mu    sync.Mutex
+	stats map[Tunnel]*TunnelCounters
 
-	closing bool
+	// mtu is the largest inner packet this path can carry; zero disables the
+	// check entirely. Atomic for the same reason as tables: it is read per
+	// outbound packet and written by an ICMP arriving on another goroutine.
+	mtu atomic.Int64
+
+	closing atomic.Bool
 }
 
-// bound is a registered tunnel and its counters, held together in the inbound
-// demux map so that counting an inbound packet costs nothing beyond the lookup
-// decapInbound was already doing.
+// view is one immutable snapshot of the pump's tables.
 //
-// The Tunnel is a field rather than an embedded interface deliberately. The
-// inbound path type-asserts it for SetPeerAddr and MultiTunnel, and embedding
-// an interface promotes only that interface's own methods -- so a wrapper would
-// silently stop satisfying both, turning an aggregating tunnel into one that
+// The packet path used to take an RWMutex read lock for every lookup -- twice
+// per inbound packet and twice per outbound one -- and an uncontended RLock
+// was 5% of the profile on its own. Worse, it is the cost that grows as
+// readers are added, which is the change doc/scaling-the-data-path.md is
+// building towards. Registration changes happen at SA-lifetime rate, so the
+// trade is made in their favour: a writer copies the demux map and path-copies
+// the route trie (routeTable is persistent), then publishes the result with one
+// atomic store, and a reader loads one pointer and takes no lock at all.
+//
+// The copy is O(keys) per change. A concentrator with a thousand WireGuard
+// peers rekeying every two minutes makes about sixteen changes a second over a
+// few thousand keys, which is noise.
+type view struct {
+	byKey  map[uint32]bound // inbound demux, with that tunnel's counters
+	routes routeTable       // outbound, by longest-prefix match
+}
+
+// clone returns a copy of v that a writer may modify before publishing it.
+// The route table copies by value: its nodes are never written in place, so
+// sharing them with the published snapshot is safe.
+func (v *view) clone() *view {
+	n := &view{byKey: make(map[uint32]bound, len(v.byKey)+1), routes: v.routes}
+	for k, b := range v.byKey {
+		n.byKey[k] = b
+	}
+	return n
+}
+
+// publish installs a writer's new snapshot. Called with mu held.
+func (p *Pump) publish(v *view) { p.tables.Store(v) }
+
+// bound is a registered tunnel and its counters, held together in both of the
+// pump's tables so that counting a packet costs nothing beyond the lookup the
+// packet path was already doing.
+//
+// It also carries the tunnel's optional capabilities, each resolved once at
+// registration rather than by a type assertion per packet. The Tunnel is a
+// field rather than an embedded interface deliberately: embedding an interface
+// promotes only that interface's own methods, so a wrapper would silently stop
+// satisfying the optional ones -- turning an aggregating tunnel into one that
 // delivers the first inner packet and drops the rest.
 type bound struct {
 	t Tunnel
 	c *TunnelCounters
+
+	multi MultiTunnel // t, when it aggregates; see MultiTunnel
+	paced PacedTunnel // t, when it transmits on its own schedule
+	roam  peerRoamer  // t, when its peer's address can move
+}
+
+// peerRoamer is a Tunnel whose return address follows its peer. The pump calls
+// it only for a datagram that has authenticated; see roam.
+type peerRoamer interface{ SetPeerAddr(*net.UDPAddr) }
+
+// bind resolves t's capabilities once, for both tables.
+func bind(t Tunnel, c *TunnelCounters) bound {
+	b := bound{t: t, c: c}
+	b.multi, _ = t.(MultiTunnel)
+	b.paced, _ = t.(PacedTunnel)
+	b.roam, _ = t.(peerRoamer)
+	return b
 }
 
 // gsoTUN is the optional GSO surface of the TUN device. *TUN provides it on
@@ -236,9 +293,9 @@ func NewPump(tun tunIO, send Sender, demux Demux, logger *slog.Logger) *Pump {
 		log:   vlog.From(logger),
 		send:  send,
 		demux: demux,
-		byKey: make(map[uint32]bound),
 		stats: make(map[Tunnel]*TunnelCounters),
 	}
+	p.tables.Store(&view{byKey: map[uint32]bound{}})
 	// Seed the liveness clock so a freshly-built tunnel does not read as idle
 	// before its first inbound packet arrives.
 	p.lastInbound.Store(time.Now().UnixNano())
@@ -294,11 +351,13 @@ func (p *Pump) writeTUN(pkt []byte) (int, error) {
 // demux, and its routes for outbound.
 func (p *Pump) AddTunnel(t Tunnel) {
 	p.mu.Lock()
-	c := p.counters(t)
-	p.byKey[t.InboundKey()] = bound{t: t, c: c}
+	b := bind(t, p.counters(t))
+	v := p.tables.Load().clone()
+	v.byKey[t.InboundKey()] = b
 	for _, r := range t.Routes() {
-		p.routes.insert(r, t)
+		v.routes.insert(r, b)
 	}
+	p.publish(v)
 	p.mu.Unlock()
 
 	// Started outside the lock: StartPacing spawns a goroutine that sends, and
@@ -333,14 +392,16 @@ func (p *Pump) counters(t Tunnel) *TunnelCounters {
 // successor's routes with it.
 func (p *Pump) RemoveTunnel(t Tunnel) {
 	p.mu.Lock()
-	for key, reg := range p.byKey {
+	v := p.tables.Load().clone()
+	for key, reg := range v.byKey {
 		if reg.t == t {
-			delete(p.byKey, key)
+			delete(v.byKey, key)
 		}
 	}
 	for _, r := range t.Routes() {
-		p.routes.removeOwned(r, t)
+		v.routes.removeOwned(r, t)
 	}
+	p.publish(v)
 	// Fold the departing tunnel's counts into the retired total before dropping
 	// them, so the pump-wide figure keeps growing across a peer's whole life
 	// rather than resetting when it disconnects.
@@ -366,7 +427,9 @@ func (p *Pump) RemoveTunnel(t Tunnel) {
 // must keep decrypting in-flight packets until it is removed.
 func (p *Pump) AddInboundKey(key uint32, t Tunnel) {
 	p.mu.Lock()
-	p.byKey[key] = bound{t: t, c: p.counters(t)}
+	v := p.tables.Load().clone()
+	v.byKey[key] = bind(t, p.counters(t))
+	p.publish(v)
 	p.mu.Unlock()
 }
 
@@ -374,7 +437,9 @@ func (p *Pump) AddInboundKey(key uint32, t Tunnel) {
 // WireGuard keypair's receiver index once its keys are no longer live.
 func (p *Pump) RemoveInboundKey(key uint32) {
 	p.mu.Lock()
-	delete(p.byKey, key)
+	v := p.tables.Load().clone()
+	delete(v.byKey, key)
+	p.publish(v)
 	p.mu.Unlock()
 }
 
@@ -398,15 +463,30 @@ func (p *Pump) IdleFor() time.Duration {
 // valid ESP return address). Pass nil on a connected socket where the source is
 // implicit (client mode).
 func (p *Pump) HandleInbound(pkt []byte, from *net.UDPAddr) {
-	if t, c, ok := p.multiTunnelFor(pkt); ok {
-		p.handleInboundMulti(t, c, pkt, from)
-		return
-	}
-	inner, c, ok := p.decapInbound(pkt, from)
+	p.handleInbound(p.tables.Load(), pkt, from, time.Now().UnixNano())
+}
+
+// handleInbound is HandleInbound against one table snapshot and one clock
+// reading, which a batch shares.
+//
+// One reading per call rather than per packet, and one for a whole batch: the
+// clock feeds the liveness check and a tunnel's LastSeen, both judged in tens
+// of seconds, and reading it twice per packet was 7.5% of the inbound profile
+// -- nanosecond precision bought and thrown away.
+func (p *Pump) handleInbound(v *view, pkt []byte, from *net.UDPAddr, now int64) {
+	b, key, ok := p.lookupInbound(v, pkt)
 	if !ok {
 		return
 	}
-	c.countRx(len(inner))
+	if b.multi != nil {
+		p.handleInboundMulti(b, pkt, from, now)
+		return
+	}
+	inner, ok := p.decapInbound(b, key, pkt, from, now)
+	if !ok {
+		return
+	}
+	b.c.countRx(len(inner), now)
 	if _, err := p.writeTUN(inner); err != nil {
 		p.drops[DropTUNWrite].Add(1)
 		if p.log != nil {
@@ -415,26 +495,27 @@ func (p *Pump) HandleInbound(pkt []byte, from *net.UDPAddr) {
 	}
 }
 
-// multiTunnelFor resolves an inbound datagram to a MultiTunnel, if its tunnel is
-// one. It is the only extra work an ordinary tunnel pays for the aggregating
-// case: one map lookup that decapInbound would have done anyway.
-func (p *Pump) multiTunnelFor(pkt []byte) (MultiTunnel, *TunnelCounters, bool) {
+// lookupInbound resolves a datagram to its registered tunnel, counting the
+// drop when it has none. It is the one demux and the one map read an inbound
+// packet costs, whichever kind of tunnel it turns out to be for; the
+// aggregating branch used to repeat both before the ordinary path did them
+// again.
+func (p *Pump) lookupInbound(v *view, pkt []byte) (bound, uint32, bool) {
 	key, ok := p.demux(pkt)
 	if !ok {
-		return nil, nil, false
+		p.drops[DropNoKey].Add(1)
+		return bound{}, 0, false // no tunnel key in this packet
 	}
-	p.mu.RLock()
-	b := p.byKey[key]
-	p.mu.RUnlock()
-	mt, ok := b.t.(MultiTunnel)
-	if !ok {
-		return nil, nil, false
+	b := v.byKey[key]
+	if b.t == nil {
+		p.drops[DropUnknownKey].Add(1)
+		return bound{}, 0, false // unknown key
 	}
-	return mt, b.c, true
+	return b, key, true
 }
 
-// roam repoints t's return path at from, the source of a datagram that has
-// just authenticated under t's keys. It is how a server follows a client whose
+// roam repoints b's return path at from, the source of a datagram that has
+// just authenticated under b's keys. It is how a server follows a client whose
 // NAT rebinds or whose network changes.
 //
 // The order is the whole of the security property, and it is called only after
@@ -448,33 +529,18 @@ func (p *Pump) multiTunnelFor(pkt []byte) (MultiTunnel, *TunnelCounters, bool) {
 // also covers a replay: a genuine datagram captured and resent from elsewhere
 // fails the anti-replay check inside Decapsulate, so it cannot move the peer
 // either.
-func roam(t Tunnel, from *net.UDPAddr) {
-	if from == nil {
-		return
-	}
-	if u, ok := t.(interface{ SetPeerAddr(*net.UDPAddr) }); ok {
-		u.SetPeerAddr(from)
+func roam(b bound, from *net.UDPAddr) {
+	if from != nil && b.roam != nil {
+		b.roam.SetPeerAddr(from)
 	}
 }
 
-// noteInbound records authenticated inbound activity for the liveness check.
-// It exists so the two aggregated-decap paths -- the plain one here and the GRO
-// one in gro_linux.go -- cannot drift on which of them remembers to.
-func (p *Pump) noteInbound() { p.lastInbound.Store(time.Now().UnixNano()) }
-
 // handleInboundMulti delivers every inner packet one aggregated datagram holds.
-func (p *Pump) handleInboundMulti(t MultiTunnel, c *TunnelCounters, pkt []byte, from *net.UDPAddr) {
-	inners, err := t.DecapsulateMulti(pkt, p.multiScratch[:0])
-	if err != nil {
-		p.drops[DropDecapFailed].Add(1)
-		if p.log != nil {
-			p.log.Warnf("dataplane: aggregated decap failed: %v", err)
-		}
+func (p *Pump) handleInboundMulti(b bound, pkt []byte, from *net.UDPAddr, now int64) {
+	inners, ok := p.decapMulti(b, pkt, from, now)
+	if !ok {
 		return
 	}
-	p.multiScratch = inners[:0]
-	roam(t, from)
-	p.noteInbound()
 	for _, inner := range inners {
 		if len(inner) == 0 {
 			continue
@@ -482,7 +548,7 @@ func (p *Pump) handleInboundMulti(t MultiTunnel, c *TunnelCounters, pkt []byte, 
 		// Counted per inner packet, not per datagram: an aggregating format
 		// carries several, and counting the datagram would make an IP-TFS
 		// tunnel report a fraction of the packets it actually delivered.
-		c.countRx(len(inner))
+		b.c.countRx(len(inner), now)
 		if _, err := p.writeTUN(inner); err != nil {
 			p.drops[DropTUNWrite].Add(1)
 			if p.log != nil {
@@ -493,6 +559,26 @@ func (p *Pump) handleInboundMulti(t MultiTunnel, c *TunnelCounters, pkt []byte, 
 	}
 }
 
+// decapMulti opens one aggregated datagram, roaming and recording liveness
+// only once it has authenticated. It exists so the two aggregated-decap paths
+// -- the plain one above and the GRO one in gro_linux.go -- cannot drift on
+// which of them remembers to. The returned packets are valid until the next
+// call.
+func (p *Pump) decapMulti(b bound, pkt []byte, from *net.UDPAddr, now int64) ([][]byte, bool) {
+	inners, err := b.multi.DecapsulateMulti(pkt, p.multiScratch[:0])
+	if err != nil {
+		p.drops[DropDecapFailed].Add(1)
+		if p.log != nil {
+			p.log.Warnf("dataplane: aggregated decap failed: %v", err)
+		}
+		return nil, false
+	}
+	p.multiScratch = inners[:0]
+	roam(b, from)
+	p.lastInbound.Store(now)
+	return inners, true
+}
+
 // HandleInboundBatch processes one read batch of inbound protected datagrams —
 // the same contract as HandleInbound per packet, with froms[i] as packet i's
 // source (froms may be nil for a connected socket). On a GSO device it also
@@ -500,10 +586,16 @@ func (p *Pump) handleInboundMulti(t MultiTunnel, c *TunnelCounters, pkt []byte, 
 // to the TUN once (gro_linux.go); the batch is the coalescing window, so
 // nothing is ever held past this call and idle traffic gains no latency.
 //
+// The batch shares one table snapshot and one clock reading. A tunnel
+// registered while it runs is seen by the next batch, which is the same
+// guarantee a lock held per packet gave: no packet ever saw a half-made
+// registration either way.
+//
 // Like HandleInbound, it must be called from the transport's single inbound
 // goroutine.
 func (p *Pump) HandleInboundBatch(pkts [][]byte, froms []*net.UDPAddr) {
-	if p.vnet && p.handleInboundBatchGRO(pkts, froms) {
+	v, now := p.tables.Load(), time.Now().UnixNano()
+	if p.vnet && p.handleInboundBatchGRO(v, pkts, froms, now) {
 		return
 	}
 	for i, pkt := range pkts {
@@ -511,50 +603,39 @@ func (p *Pump) HandleInboundBatch(pkts [][]byte, froms []*net.UDPAddr) {
 		if froms != nil {
 			from = froms[i]
 		}
-		p.HandleInbound(pkt, from)
+		p.handleInbound(v, pkt, from, now)
 	}
 }
 
-// decapInbound demuxes and decapsulates one inbound protected datagram,
-// updating the tunnel's return address from from when given. It returns the
-// inner IP packet and whether there is one to deliver.
-func (p *Pump) decapInbound(pkt []byte, from *net.UDPAddr) ([]byte, *TunnelCounters, bool) {
-	key, ok := p.demux(pkt)
-	if !ok {
-		p.drops[DropNoKey].Add(1)
-		return nil, nil, false // no tunnel key in this packet
-	}
-	p.mu.RLock()
-	b := p.byKey[key]
-	p.mu.RUnlock()
-	if b.t == nil {
-		p.drops[DropUnknownKey].Add(1)
-		return nil, nil, false // unknown key
-	}
+// decapInbound decapsulates one inbound protected datagram for its resolved
+// tunnel, updating the tunnel's return address from from once it has
+// authenticated. It returns the inner IP packet and whether there is one to
+// deliver.
+func (p *Pump) decapInbound(b bound, key uint32, pkt []byte, from *net.UDPAddr, now int64) ([]byte, bool) {
 	inner, err := b.t.Decapsulate(pkt)
 	if err != nil {
 		p.drops[DropDecapFailed].Add(1)
 		if p.log != nil {
 			p.log.Warnf("dataplane: decap key %#x failed: %v", key, err)
 		}
-		return nil, nil, false
+		return nil, false
 	}
 	// Only now has the datagram proved it came from the peer. A keepalive
 	// counts: it authenticated, and following a roaming peer that is otherwise
 	// idle is exactly what WireGuard's keepalives are for.
-	roam(b.t, from)
+	roam(b, from)
 	// Authenticated inbound activity — record it for liveness before the
 	// keepalive short-circuit below, so a keepalive counts as proof of life.
-	p.lastInbound.Store(time.Now().UnixNano())
+	p.lastInbound.Store(now)
 	if len(inner) == 0 {
 		// An authenticated packet with no inner payload: a WireGuard keepalive.
 		// It kept the tunnel and any NAT binding alive by arriving; there is
 		// nothing to deliver to the TUN -- but it is proof of life, so the
 		// tunnel's last-seen moves even though its byte count does not.
-		b.c.countRx(0)
-		return nil, nil, false
+		b.c.countRx(0, now)
+		return nil, false
 	}
-	return inner, b.c, true
+	return inner, true
 }
 
 // Run reads packets from the TUN device, routes each to the tunnel whose client
@@ -570,10 +651,7 @@ func (p *Pump) Run() {
 	for {
 		n, err := p.tun.Read(buf)
 		if err != nil {
-			p.mu.RLock()
-			closing := p.closing
-			p.mu.RUnlock()
-			if closing {
+			if p.closing.Load() {
 				return
 			}
 			if p.log != nil {
@@ -596,17 +674,8 @@ func (p *Pump) routeOutbound(pkt []byte) {
 		p.drops[DropNotIP].Add(1)
 		return // not an IP packet we can route
 	}
-	p.mu.RLock()
-	t := p.routes.lookup(dst)
-	// One pointer-keyed map read, in the RLock the lookup already takes. The
-	// route trie stores a bare Tunnel and threading counters through it would
-	// ripple into its own tests for no gain -- this path allocates in
-	// Encapsulate regardless, so it is not the allocation-free one.
-	var c *TunnelCounters
-	if t != nil {
-		c = p.stats[t]
-	}
-	p.mu.RUnlock()
+	b := p.tables.Load().routes.lookup(dst)
+	t, c := b.t, b.c
 	if t == nil {
 		p.drops[DropNoRoute].Add(1)
 		return // no tunnel carries this destination
@@ -635,7 +704,7 @@ func (p *Pump) routeOutbound(pkt []byte) {
 	// tunnel's datagram count is a property of its configured rate rather than
 	// of the traffic -- reporting the latter as TxPackets would make an idle
 	// IP-TFS tunnel look like it was moving traffic.
-	if pt, ok := t.(PacedTunnel); ok {
+	if pt := b.paced; pt != nil {
 		if !pt.Enqueue(pkt) {
 			p.drops[DropPacerFull].Add(1)
 			return
@@ -673,12 +742,12 @@ func (p *Pump) Stats() PumpStats {
 	out.Total = p.retired
 	p.retiredMu.Unlock()
 
-	p.mu.RLock()
+	p.mu.Lock()
 	out.Tunnels = len(p.stats)
 	for _, c := range p.stats {
 		out.Total.add(c.Snapshot())
 	}
-	p.mu.RUnlock()
+	p.mu.Unlock()
 	return out
 }
 
@@ -686,9 +755,9 @@ func (p *Pump) Stats() PumpStats {
 // it. A protocol's PeerDescriber calls this to fill in client.PeerInfo, which
 // is what puts a byte count in front of an operator.
 func (p *Pump) TunnelStats(t Tunnel) (TunnelStats, bool) {
-	p.mu.RLock()
+	p.mu.Lock()
 	c := p.stats[t]
-	p.mu.RUnlock()
+	p.mu.Unlock()
 	if c == nil {
 		return TunnelStats{}, false
 	}
@@ -701,25 +770,13 @@ func (p *Pump) TunnelStats(t Tunnel) (TunnelStats, bool) {
 // It is a setter rather than a constructor argument because the value can change
 // after the pump is running: an ICMP fragmentation-needed arriving from the
 // underlay lowers it, which is the outbound half of path MTU discovery.
-func (p *Pump) SetInnerMTU(mtu int) {
-	p.mu.Lock()
-	p.mtu = mtu
-	p.mu.Unlock()
-}
+func (p *Pump) SetInnerMTU(mtu int) { p.mtu.Store(int64(mtu)) }
 
 // innerMTU reads the current inner MTU.
-func (p *Pump) innerMTU() int {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.mtu
-}
+func (p *Pump) innerMTU() int { return int(p.mtu.Load()) }
 
 // Close stops the pump.
-func (p *Pump) Close() {
-	p.mu.Lock()
-	p.closing = true
-	p.mu.Unlock()
-}
+func (p *Pump) Close() { p.closing.Store(true) }
 
 // innerDest extracts the destination address from an inner IP packet, for either
 // family. The version nibble selects the layout: IPv4's 4-byte destination sits

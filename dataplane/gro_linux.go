@@ -91,7 +91,7 @@ func (t *groTable) grab() *groGroup {
 // client negotiates GSO, so the real path is this one. And a veepin-to-veepin
 // cell fails identically at both ends, which reads as "the tunnel is down"
 // rather than "the receive path is wrong".
-func (p *Pump) handleInboundBatchGRO(pkts [][]byte, froms []*net.UDPAddr) bool {
+func (p *Pump) handleInboundBatchGRO(v *view, pkts [][]byte, froms []*net.UDPAddr, now int64) bool {
 	t := &p.gro
 	t.reset()
 	for i, pkt := range pkts {
@@ -99,23 +99,27 @@ func (p *Pump) handleInboundBatchGRO(pkts [][]byte, froms []*net.UDPAddr) bool {
 		if froms != nil {
 			from = froms[i]
 		}
-		if mt, c, ok := p.multiTunnelFor(pkt); ok {
+		b, key, ok := p.lookupInbound(v, pkt)
+		if !ok {
+			continue
+		}
+		if b.multi != nil {
 			// An aggregated datagram carries several inner packets, so it
 			// cannot go through decapInbound's single-packet return. Deliver
 			// its contents through the same coalescing table as everything
 			// else -- a bulk TCP flow inside an IP-TFS tunnel deserves GRO as
 			// much as one outside it.
-			p.groMulti(t, mt, c, pkt, from)
+			p.groMulti(t, b, pkt, from, now)
 			continue
 		}
-		inner, c, ok := p.decapInbound(pkt, from)
+		inner, ok := p.decapInbound(b, key, pkt, from, now)
 		if !ok {
 			continue
 		}
 		// Counted here rather than at the TUN write, because coalescing means
 		// one write can carry several packets: counting writes would report a
 		// GRO-enabled server as moving a fraction of the traffic it moved.
-		c.countRx(len(inner))
+		b.c.countRx(len(inner), now)
 		if !t.add(p, inner) {
 			// Not coalescible (or its checksum did not verify): deliver as-is,
 			// in arrival order.
@@ -136,25 +140,18 @@ func (p *Pump) handleInboundBatchGRO(pkts [][]byte, froms []*net.UDPAddr) bool {
 // groMulti opens one aggregated datagram and offers each inner packet to the
 // coalescing table, falling back to a direct TUN write for the ones GRO does
 // not handle. It is handleInboundMulti with the table in the middle.
-func (p *Pump) groMulti(t *groTable, mt MultiTunnel, c *TunnelCounters, pkt []byte, from *net.UDPAddr) {
-	inners, err := mt.DecapsulateMulti(pkt, p.multiScratch[:0])
-	if err != nil {
-		p.drops[DropDecapFailed].Add(1)
-		if p.log != nil {
-			p.log.Warnf("dataplane: aggregated decap failed: %v", err)
-		}
+func (p *Pump) groMulti(t *groTable, b bound, pkt []byte, from *net.UDPAddr, now int64) {
+	inners, ok := p.decapMulti(b, pkt, from, now)
+	if !ok {
 		return
 	}
-	p.multiScratch = inners[:0]
-	roam(mt, from)
-	p.noteInbound()
 	for _, inner := range inners {
 		if len(inner) == 0 {
 			continue
 		}
 		// Per inner packet, as handleInboundMulti counts: counting datagrams
 		// would report an IP-TFS tunnel moving a fraction of what it moved.
-		c.countRx(len(inner))
+		b.c.countRx(len(inner), now)
 		if t.add(p, inner) {
 			continue
 		}

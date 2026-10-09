@@ -44,9 +44,9 @@ func TestRouteTableLongestPrefixWins(t *testing.T) {
 	host := &namedTunnel{name: "host"}
 
 	var rt routeTable
-	rt.insert(mustPrefix(t, "0.0.0.0/0"), def)
-	rt.insert(mustPrefix(t, "10.0.0.0/8"), lan)
-	rt.insert(mustPrefix(t, "10.1.2.3/32"), host)
+	rt.insert(mustPrefix(t, "0.0.0.0/0"), bound{t: def})
+	rt.insert(mustPrefix(t, "10.0.0.0/8"), bound{t: lan})
+	rt.insert(mustPrefix(t, "10.1.2.3/32"), bound{t: host})
 
 	for _, tc := range []struct {
 		ip   string
@@ -58,7 +58,7 @@ func TestRouteTableLongestPrefixWins(t *testing.T) {
 		{"10.1.2.4", lan},  // neighbour of the /32 falls back to /8
 		{"255.255.255.255", def},
 	} {
-		got := rt.lookup(mustIP(t, tc.ip))
+		got := rt.lookup(mustIP(t, tc.ip)).t
 		if got != Tunnel(tc.want) {
 			gotName := "<nil>"
 			if g, ok := got.(*namedTunnel); ok {
@@ -78,15 +78,15 @@ func TestRouteTableNoDefaultDropsUnmatched(t *testing.T) {
 		t.Fatal("fresh table reports non-empty")
 	}
 	peer := &namedTunnel{name: "peer"}
-	rt.insert(mustPrefix(t, "10.0.0.0/24"), peer)
+	rt.insert(mustPrefix(t, "10.0.0.0/24"), bound{t: peer})
 
-	if got := rt.lookup(mustIP(t, "10.0.0.5")); got != Tunnel(peer) {
+	if got := rt.lookup(mustIP(t, "10.0.0.5")).t; got != Tunnel(peer) {
 		t.Error("in-range address did not match")
 	}
-	if got := rt.lookup(mustIP(t, "10.0.1.5")); got != nil {
+	if got := rt.lookup(mustIP(t, "10.0.1.5")).t; got != nil {
 		t.Error("out-of-range address matched; a narrow AllowedIPs must drop it")
 	}
-	if got := rt.lookup(mustIP(t, "8.8.8.8")); got != nil {
+	if got := rt.lookup(mustIP(t, "8.8.8.8")).t; got != nil {
 		t.Error("unrelated address matched")
 	}
 }
@@ -95,19 +95,19 @@ func TestRouteTableRemove(t *testing.T) {
 	a := &namedTunnel{name: "a"}
 	b := &namedTunnel{name: "b"}
 	var rt routeTable
-	rt.insert(mustPrefix(t, "10.0.0.0/8"), a)
-	rt.insert(mustPrefix(t, "10.1.0.0/16"), b)
+	rt.insert(mustPrefix(t, "10.0.0.0/8"), bound{t: a})
+	rt.insert(mustPrefix(t, "10.1.0.0/16"), bound{t: b})
 
-	if got := rt.lookup(mustIP(t, "10.1.2.3")); got != Tunnel(b) {
+	if got := rt.lookup(mustIP(t, "10.1.2.3")).t; got != Tunnel(b) {
 		t.Fatal("more specific route did not win before removal")
 	}
 	// Removing the /16 must fall back to the /8, not to nothing.
 	rt.remove(mustPrefix(t, "10.1.0.0/16"))
-	if got := rt.lookup(mustIP(t, "10.1.2.3")); got != Tunnel(a) {
+	if got := rt.lookup(mustIP(t, "10.1.2.3")).t; got != Tunnel(a) {
 		t.Fatal("after removing the /16, the /8 should carry the address")
 	}
 	rt.remove(mustPrefix(t, "10.0.0.0/8"))
-	if got := rt.lookup(mustIP(t, "10.1.2.3")); got != nil {
+	if got := rt.lookup(mustIP(t, "10.1.2.3")).t; got != nil {
 		t.Fatal("after removing both routes the address should be unmatched")
 	}
 	// Removing a route that was never inserted is a no-op, not a panic.
@@ -121,9 +121,9 @@ func TestRouteTableInsertReplaces(t *testing.T) {
 	new := &namedTunnel{name: "new"}
 	var rt routeTable
 	p := mustPrefix(t, "10.0.0.0/24")
-	rt.insert(p, old)
-	rt.insert(p, new)
-	if got := rt.lookup(mustIP(t, "10.0.0.1")); got != Tunnel(new) {
+	rt.insert(p, bound{t: old})
+	rt.insert(p, bound{t: new})
+	if got := rt.lookup(mustIP(t, "10.0.0.1")).t; got != Tunnel(new) {
 		t.Fatal("re-inserting a prefix did not replace its tunnel")
 	}
 }
@@ -134,8 +134,8 @@ func TestRouteTableMasksHostBits(t *testing.T) {
 	peer := &namedTunnel{name: "peer"}
 	var rt routeTable
 	// 10.0.0.5/24 means the 10.0.0.0/24 network.
-	rt.insert(netip.MustParsePrefix("10.0.0.5/24"), peer)
-	if got := rt.lookup(mustIP(t, "10.0.0.200")); got != Tunnel(peer) {
+	rt.insert(netip.MustParsePrefix("10.0.0.5/24"), bound{t: peer})
+	if got := rt.lookup(mustIP(t, "10.0.0.200")).t; got != Tunnel(peer) {
 		t.Fatal("prefix with host bits set was not masked to its network")
 	}
 }
@@ -149,9 +149,9 @@ func TestRouteTableDualStack(t *testing.T) {
 	v4 := &namedTunnel{name: "v4"}
 
 	var rt routeTable
-	rt.insert(mustPrefix(t, "10.0.0.0/8"), v4)
-	rt.insert(mustPrefix(t, "::/0"), def6)
-	rt.insert(mustPrefix(t, "2001:db8::1/128"), host6)
+	rt.insert(mustPrefix(t, "10.0.0.0/8"), bound{t: v4})
+	rt.insert(mustPrefix(t, "::/0"), bound{t: def6})
+	rt.insert(mustPrefix(t, "2001:db8::1/128"), bound{t: host6})
 
 	for _, tc := range []struct {
 		ip   string
@@ -162,7 +162,7 @@ func TestRouteTableDualStack(t *testing.T) {
 		{"fe80::1", def6},      // any other v6 address hits ::/0
 		{"10.9.9.9", v4},       // v4 lookup is unaffected by the v6 routes
 	} {
-		got := rt.lookup(mustIP(t, tc.ip))
+		got := rt.lookup(mustIP(t, tc.ip)).t
 		if got != Tunnel(tc.want) {
 			gotName := "<nil>"
 			if g, ok := got.(*namedTunnel); ok {
@@ -174,8 +174,8 @@ func TestRouteTableDualStack(t *testing.T) {
 
 	// A v4-only table must not answer a v6 lookup, and vice versa.
 	var only4 routeTable
-	only4.insert(mustPrefix(t, "10.0.0.0/8"), v4)
-	if got := only4.lookup(mustIP(t, "2001:db8::1")); got != nil {
+	only4.insert(mustPrefix(t, "10.0.0.0/8"), bound{t: v4})
+	if got := only4.lookup(mustIP(t, "2001:db8::1")).t; got != nil {
 		t.Error("v6 lookup matched in a v4-only table")
 	}
 }
