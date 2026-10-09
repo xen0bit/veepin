@@ -174,6 +174,18 @@ jobs:
           # This costs nothing in the artifact: the .so links dynamically
           # against the *target's* libnm/GTK, which come from main either way.
           #
+          # Demoting security is not enough on its own once the image itself
+          # carries security updates. debian:bookworm 12.15 ships
+          # liblzma5:amd64 at 5.4.1-1+deb12u2 and libpcre2-8-0:amd64 at
+          # 10.42-1+deb12u2, both from security, and a pin below 1000 never
+          # moves an installed package, so the armel/s390x copies are still
+          # wanted at a version only amd64 has. Pinning the l=Debian suites
+          # (main and updates; security is l=Debian-Security) above 1000 lets
+          # apt downgrade those amd64 packages to the version the target can
+          # match -- the two above, at the time of writing, and nothing else.
+          # Every other arch skips this branch, so --allow-downgrades on the
+          # install below never has anything to do for them.
+          #
           # The alternative -- moving these two to trixie, as riscv64 already
           # does -- also resolves, but it would raise the runtime GLib/glibc
           # floor for armel and s390x users from Debian 12 to Debian 13, which
@@ -181,11 +193,11 @@ jobs:
           release=$(ls /var/lib/apt/lists/*-security_InRelease 2>/dev/null | head -1)
           if [ -n "$release" ] && ! sed -n 's/^Architectures: //p' "$release" | tr ' ' '\n' | grep -qx "$arch"; then
             echo "::notice::security suite carries no $arch index; resolving out of main only"
-            printf 'Package: *\nPin: release l=Debian-Security\nPin-Priority: 100\n' \
+            printf 'Package: *\nPin: release l=Debian-Security\nPin-Priority: 100\n\nPackage: *\nPin: release l=Debian\nPin-Priority: 1001\n' \
               > /etc/apt/preferences.d/no-partial-security
           fi
 
-          apt-get install -y --no-install-recommends \
+          apt-get install -y --allow-downgrades --no-install-recommends \
             make dpkg-dev crossbuild-essential-"$arch" pkg-config \
             ca-certificates git \
             libnm-dev:"$arch" libnma-dev:"$arch" \
