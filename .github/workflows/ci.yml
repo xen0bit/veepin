@@ -119,7 +119,15 @@ jobs:
           # "the Go language version (go1.26) used to build golangci-lint is
           # lower than the targeted Go version (1.27.0)" -- so the 1.27 floor
           # requires a linter built with 1.27. 2.13.1 is the first one.
-          version: v2.13.1
+          #
+          # Moved 2.13.1 -> 2.14.0 when setup-go's "1.27" started resolving to
+          # 1.27.2, whose export data is version 5. The reader is the
+          # golang.org/x/tools vendored into the linter, not the Go it was
+          # built with -- 2.13.x and 2.14.0 are all built with go1.27.0 -- and
+          # only 2.14.0's x/tools 0.50.0 reads it. Before that every package
+          # fails typecheck with "export data version 5 is greater than
+          # maximum supported version 4".
+          version: v2.14.0
 
   govulncheck:
     name: govulncheck
