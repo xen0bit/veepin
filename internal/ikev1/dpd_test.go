@@ -85,3 +85,47 @@ func TestDPDOverAnEstablishedExchange(t *testing.T) {
 		}
 	}
 }
+
+// TestOnlyAVerifiedMessageCountsAsAuthenticated pins the answer the gateways
+// move a peer's address on. An established session's messages are routed to it
+// by the initiator cookie, which is cleartext in every IKE header -- so if a
+// tampered message, or one bearing only the right cookie, came back
+// "authenticated", one datagram from anyone on the path would redirect where the
+// gateway sends that client's IKE (and, for L2TP, its ESP).
+func TestOnlyAVerifiedMessageCountsAsAuthenticated(t *testing.T) {
+	initCfg, respCfg := remoteAccessConfigs("alice", "password", []byte("group-secret"))
+	p := newPair(t, initCfg, respCfg)
+	p.run(t)
+	if p.initErr != nil || p.respErr != nil {
+		t.Fatalf("the exchange did not establish: initiator=%v responder=%v", p.initErr, p.respErr)
+	}
+
+	sent := make(chan []byte, 4)
+	tap := func(msg []byte) { sent <- msg }
+	p.tap.Store(&tap)
+	ack, err := p.initiator.Ping()
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-ack
+	ruThere := <-sent
+
+	tampered := append([]byte(nil), ruThere...)
+	tampered[len(tampered)-1] ^= 1
+	if p.responder.HandleInbound(tampered) {
+		t.Error("a DPD message that fails to decrypt and verify was reported authenticated")
+	}
+
+	cookieOnly := append([]byte(nil), ruThere[:28]...) // the header, cookies and all
+	cookieOnly = append(cookieOnly, make([]byte, 32)...)
+	if p.responder.HandleInbound(cookieOnly) {
+		t.Error("a message carrying nothing but the session's cookies was reported authenticated")
+	}
+
+	// A genuine R-U-THERE, as the initiator built it, is the one that counts.
+	// (Resent here: the responder already answered the first copy, and DPD
+	// tolerates a duplicate, which is what a retransmission looks like.)
+	if !p.responder.HandleInbound(ruThere) {
+		t.Error("a genuine DPD message under the established SA was not reported authenticated")
+	}
+}

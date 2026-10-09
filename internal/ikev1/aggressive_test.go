@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,6 +26,10 @@ type pair struct {
 	respErr error
 	settled chan struct{}
 	closed  bool
+
+	// tap, when set, sees a copy of every message the initiator sends, so a
+	// test can replay or tamper with a real one.
+	tap atomic.Pointer[func([]byte)]
 }
 
 type sideHandler struct {
@@ -77,6 +82,9 @@ func newPair(t *testing.T, initCfg, respCfg Config) *pair {
 
 	initCfg.Send = func(msg []byte, _ bool) error {
 		cp := append([]byte(nil), msg...)
+		if tap := p.tap.Load(); tap != nil {
+			(*tap)(append([]byte(nil), msg...))
+		}
 		go p.responder.HandleInbound(cp)
 		return nil
 	}

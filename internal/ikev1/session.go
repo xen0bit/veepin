@@ -307,16 +307,26 @@ func (s *Session) Start() {
 	s.state = stWaitMM2
 }
 
-// HandleInbound processes one inbound IKE datagram.
-func (s *Session) HandleInbound(pkt []byte) {
+// HandleInbound processes one inbound IKE datagram. It reports whether the
+// message authenticated under the established SA, which is the one thing a
+// caller tracking the peer's address needs to know.
+//
+// Only an established session can say yes. Before phase 2 completes, early
+// messages are plaintext and a failed one fails the whole session anyway, so
+// there is no settled peer for a forgery to hijack and the caller follows each
+// message's source as before. After it, the initiator cookie that routes a
+// datagram here is cleartext in every IKE header, so "a message arrived for
+// this session" proves nothing about who sent it: an address learned from one
+// that did not decrypt and verify is an address anyone on the path chose.
+func (s *Session) HandleInbound(pkt []byte) (authenticated bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.state == stFailed {
-		return
+		return false
 	}
 	h, first, rest, err := parseHeader(pkt)
 	if err != nil {
-		return
+		return false
 	}
 	// An established session still has one live exchange: the Informational one
 	// carrying dead-peer detection. Everything else after phase 2 is ignored.
@@ -324,13 +334,16 @@ func (s *Session) HandleInbound(pkt []byte) {
 		if h.exchange == exchangeInformational && h.flags&flagEncryption != 0 {
 			if derr := s.handleDPD(h, first, rest); derr != nil {
 				s.logger.Printf("ikev1: DPD: %v", derr)
+				return false
 			}
+			return true
 		}
-		return
+		return false
 	}
 	if err := s.dispatch(h, first, rest); err != nil {
 		s.failLocked(err)
 	}
+	return false
 }
 
 func (s *Session) dispatch(h header, first uint8, rest []byte) error {

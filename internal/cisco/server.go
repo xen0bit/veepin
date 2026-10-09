@@ -196,8 +196,20 @@ func (s *Server) dispatchIKE(msg []byte, addr *net.UDPAddr, natt bool) {
 	if p == nil {
 		return // refused by admission control; already logged
 	}
-	p.noteIKEAddr(addr, natt)
-	p.ike.HandleInbound(msg)
+	if !p.established() {
+		// Mid-handshake, replies go where the last message came from, as
+		// they always have: there is no settled peer to redirect yet.
+		p.noteIKEAddr(addr, natt)
+		p.ike.HandleInbound(msg)
+		return
+	}
+	// Established, the initiator cookie that routed this message here is
+	// cleartext, so the address moves only for a message that verified under
+	// the IKE SA. ESP's own return path is the Tunnel's, which the pump moves
+	// on authenticated ESP; this is IKE's, which carries DPD.
+	if p.ike.HandleInbound(msg) {
+		p.noteIKEAddr(addr, natt)
+	}
 }
 
 // peerFor returns the peer owning an initiator cookie, creating an IKE responder
@@ -325,6 +337,13 @@ func (p *serverPeer) noteIKEAddr(addr *net.UDPAddr, natt bool) {
 	} else {
 		p.addr = addr
 	}
+}
+
+// established reports whether phase 2 has given this peer a tunnel.
+func (p *serverPeer) established() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.tunnel != nil
 }
 
 func (p *serverPeer) sendIKE(msg []byte, natt bool) error {
