@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/ikev2/payload"
 	"github.com/xen0bit/veepin/internal/vlog"
 )
@@ -88,6 +89,12 @@ func BenchmarkFullHandshakePSK(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
+	// Every iteration is a fresh handshake from 127.0.0.1, which is exactly
+	// the pattern admission control's per-source limit exists to stop: past
+	// its burst of twenty, the server refused them and the benchmark failed on
+	// a read timeout at any -benchtime. The limit is the subject of its own
+	// tests; here it is lifted, so what is timed is the handshake.
+	srv.gate = dataplane.NewGate(dataplane.AdmissionConfig{PerSourceRate: 1e9, PerSourceBurst: 1e9})
 	go func() { _ = srv.ListenAndServe() }()
 	defer srv.Close()
 	time.Sleep(50 * time.Millisecond)
