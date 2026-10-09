@@ -150,6 +150,7 @@ type resolved struct {
 	tunName    string
 	keepalive  time.Duration
 	rekey      time.Duration // how often to re-run the handshake
+	listenPort int           // local UDP port to bind; 0 lets the kernel pick
 }
 
 // resolve decodes and validates cfg as a client config: exactly one peer, with
@@ -184,10 +185,14 @@ func (c *Config) resolve() (*resolved, error) {
 		return nil, fmt.Errorf("%s is required", OptAllowedIPs)
 	}
 
+	if c.ListenPort < 0 || c.ListenPort > 65535 {
+		return nil, fmt.Errorf("%s %d out of range", OptListenPort, c.ListenPort)
+	}
 	r := &resolved{
-		noiseCfg: noise.Config{LocalStatic: priv, RemoteStatic: pub},
-		mtu:      c.MTU,
-		tunName:  c.TUNName,
+		noiseCfg:   noise.Config{LocalStatic: priv, RemoteStatic: pub},
+		mtu:        c.MTU,
+		tunName:    c.TUNName,
+		listenPort: c.ListenPort,
 	}
 	if peer.PresharedKey != "" {
 		psk, err := decodeKey(peer.PresharedKey, OptPresharedKey)
@@ -243,6 +248,22 @@ func (c *Config) resolve() (*resolved, error) {
 	return r, nil
 }
 
+// dial opens the client's socket: connected, so the kernel filters to the
+// endpoint and every send implicitly addresses it, and the road-warrior
+// return-address handling the server side needs does not arise here.
+//
+// It binds listenPort when one is configured. The option was parsed, validated,
+// documented as fixing the source port for a stable NAT pinhole -- and then
+// never reached this call, which bound an ephemeral port regardless; a wg-quick
+// ListenPort line on a client was silently ignored the same way.
+func (r *resolved) dial() (*net.UDPConn, error) {
+	var laddr *net.UDPAddr
+	if r.listenPort != 0 {
+		laddr = &net.UDPAddr{Port: r.listenPort}
+	}
+	return net.DialUDP("udp", laddr, r.endpoint)
+}
+
 // Dial performs the handshake, opens the TUN, and starts the transport data
 // path, returning a running session and the Result the caller must apply. It
 // installs no routes or addresses. On error nothing is left running.
@@ -256,10 +277,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 	}
 	logger := vlog.From(cfg.Logger)
 
-	// A connected socket: the kernel filters to the endpoint, and every send
-	// implicitly addresses it, so the road-warrior return-address handling the
-	// server side needs does not arise here.
-	conn, err := net.DialUDP("udp", nil, r.endpoint)
+	conn, err := r.dial()
 	if err != nil {
 		return nil, client.Result{}, fmt.Errorf("wireguard: dial %s: %w", r.endpoint, err)
 	}

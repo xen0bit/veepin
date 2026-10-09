@@ -28,7 +28,7 @@ type Config struct {
 	Address    []string // our tunnel addresses in CIDR form
 	DNS        []string // DNS servers to advertise (client only, optional)
 	MTU        int      // inner MTU (optional; 0 means the default)
-	ListenPort int      // UDP port to listen on (server; 0 lets the kernel pick)
+	ListenPort int      // UDP port to bind: the server's listener, or a client's fixed source port (0 lets the kernel pick)
 
 	// RekeySeconds is how often a client re-runs the handshake to refresh its
 	// keys, in seconds. It has no wg-quick equivalent — WireGuard's own timing is

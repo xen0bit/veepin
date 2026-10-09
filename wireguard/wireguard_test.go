@@ -1,10 +1,13 @@
 package wireguard
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -224,5 +227,49 @@ func TestTheClientRefusesTwoAddressesOfOneFamily(t *testing.T) {
 		if _, err := c.resolve(); err == nil {
 			t.Errorf("%v was accepted", addrs)
 		}
+	}
+}
+
+// TestTheListenPortIsTheSourcePort: -listen-port, and a client config's
+// ListenPort line, exist to pin the source port so a NAT pinhole survives a
+// reconnect. Both were parsed and then dropped on the way to the socket, which
+// bound an ephemeral port whatever was asked -- accepted and ignored, the
+// failure this tree's flag guards exist to prevent but cannot see past the
+// option map.
+func TestTheListenPortIsTheSourcePort(t *testing.T) {
+	probe, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := probe.LocalAddr().(*net.UDPAddr).Port
+	probe.Close() // free it for the dial below
+
+	cfg := &Config{}
+	if err := cfg.applyOverrides(map[string]string{
+		OptPrivateKey: base64.StdEncoding.EncodeToString(make([]byte, 32)),
+		OptPublicKey:  base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{9}, 32)),
+		OptEndpoint:   "127.0.0.1:51820",
+		OptAddress:    "10.0.0.2/32",
+		OptAllowedIPs: "0.0.0.0/0",
+		OptListenPort: strconv.Itoa(port),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := cfg.resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := r.dial()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if got := conn.LocalAddr().(*net.UDPAddr).Port; got != port {
+		t.Fatalf("the client bound source port %d, want the configured %d", got, port)
+	}
+
+	cfg.ListenPort = 70000
+	if _, err := cfg.resolve(); err == nil {
+		t.Fatal("a listen port out of range was accepted")
 	}
 }
