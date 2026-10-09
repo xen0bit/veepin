@@ -57,8 +57,21 @@ wrong at runtime.
 - **Parsers return subslices of their input.** The inbound data path is
   allocation-free by design; a parser that copies costs one allocation per
   packet. `datapath_test.go` in each package pins this.
+- **A peer's address moves only on a packet that authenticated.** The key a
+  datagram is demuxed on — an SPI, a receiver index, an IKE cookie — is
+  cleartext, so "a packet arrived for this tunnel" proves nothing about who sent
+  it. The pump roams after `Decapsulate` succeeds; a protocol with its own
+  inbound loop must do the same, after its own decrypt. Six servers once got
+  this backwards, and every cell passed, because no test sends a forgery.
+- **The pump lends its buffers.** `Decapsulate` may open the datagram in place,
+  and an `AppendTunnel`'s output lives in a buffer the pump reuses for the next
+  packet, so a `Sender` must write or copy `pkt` before it returns. A sender that
+  queued it would send whatever came after.
 - **`internal/` is where implementations live.** The `<proto>/` package is the
-  supported surface and should be thin.
+  supported surface and should be thin: options, profile parsing, validation,
+  and a hand-off to the engine's decoded config. WireGuard and OpenVPN are the
+  pattern to copy — `internal/<proto>` exports `Dial`, `NewServer` and their
+  configs, and the facade embeds the engine's `Server` under its own name.
 
 ## The mechanical guards
 
