@@ -152,7 +152,7 @@ jobs:
           # to bump it and one that fails loudly rather than quietly: GOTOOLCHAIN
           # is local here, so a pin older than the floor cannot even load the
           # packages -- "go.mod requires go >= 1.27.0 (running go 1.26.6)".
-          go-version: "1.27.0"
+          go-version: "1.27.2"
           # Fetches from go.dev when the version is not in the manifest, which
           # is exactly the case this pin exists for.
           check-latest: true
