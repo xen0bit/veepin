@@ -391,14 +391,15 @@ func (p *Pump) IdleFor() time.Duration {
 // HandleInbound processes an inbound protected datagram (already stripped of any
 // protocol framing, such as IKEv2's UDP-encap marker). It demuxes to a tunnel,
 // decapsulates, and writes the inner IP packet to the TUN device. from, when
-// non-nil, is the datagram's UDP source: the tunnel's return address is updated
-// to it so replies reach the peer's actual data socket (a road-warrior client
+// non-nil, is the datagram's UDP source: once the datagram has authenticated,
+// the tunnel's return address is updated to it so replies reach the peer's
+// actual data socket (a road-warrior client
 // sends ESP from a different port than IKE, so the IKE peer address is not a
 // valid ESP return address). Pass nil on a connected socket where the source is
 // implicit (client mode).
 func (p *Pump) HandleInbound(pkt []byte, from *net.UDPAddr) {
-	if t, c, ok := p.multiTunnelFor(pkt, from); ok {
-		p.handleInboundMulti(t, c, pkt)
+	if t, c, ok := p.multiTunnelFor(pkt); ok {
+		p.handleInboundMulti(t, c, pkt, from)
 		return
 	}
 	inner, c, ok := p.decapInbound(pkt, from)
@@ -417,7 +418,7 @@ func (p *Pump) HandleInbound(pkt []byte, from *net.UDPAddr) {
 // multiTunnelFor resolves an inbound datagram to a MultiTunnel, if its tunnel is
 // one. It is the only extra work an ordinary tunnel pays for the aggregating
 // case: one map lookup that decapInbound would have done anyway.
-func (p *Pump) multiTunnelFor(pkt []byte, from *net.UDPAddr) (MultiTunnel, *TunnelCounters, bool) {
+func (p *Pump) multiTunnelFor(pkt []byte) (MultiTunnel, *TunnelCounters, bool) {
 	key, ok := p.demux(pkt)
 	if !ok {
 		return nil, nil, false
@@ -429,12 +430,31 @@ func (p *Pump) multiTunnelFor(pkt []byte, from *net.UDPAddr) (MultiTunnel, *Tunn
 	if !ok {
 		return nil, nil, false
 	}
-	if from != nil {
-		if u, ok := b.t.(interface{ SetPeerAddr(*net.UDPAddr) }); ok {
-			u.SetPeerAddr(from)
-		}
-	}
 	return mt, b.c, true
+}
+
+// roam repoints t's return path at from, the source of a datagram that has
+// just authenticated under t's keys. It is how a server follows a client whose
+// NAT rebinds or whose network changes.
+//
+// The order is the whole of the security property, and it is called only after
+// a successful Decapsulate for that reason. The demux key is cleartext on the
+// wire -- an ESP SPI, a WireGuard receiver index -- so anyone who can see a
+// tunnel's traffic can send a datagram that reaches it. Moving the return
+// address before the keys have vouched for the datagram let one forged packet
+// redirect every reply for that client to the forger, for as long as they kept
+// sending. WireGuard's paper (§2.1) and RFC 3948's NAT-T both update the
+// endpoint from authenticated packets only; so does this. Authentication here
+// also covers a replay: a genuine datagram captured and resent from elsewhere
+// fails the anti-replay check inside Decapsulate, so it cannot move the peer
+// either.
+func roam(t Tunnel, from *net.UDPAddr) {
+	if from == nil {
+		return
+	}
+	if u, ok := t.(interface{ SetPeerAddr(*net.UDPAddr) }); ok {
+		u.SetPeerAddr(from)
+	}
 }
 
 // noteInbound records authenticated inbound activity for the liveness check.
@@ -443,7 +463,7 @@ func (p *Pump) multiTunnelFor(pkt []byte, from *net.UDPAddr) (MultiTunnel, *Tunn
 func (p *Pump) noteInbound() { p.lastInbound.Store(time.Now().UnixNano()) }
 
 // handleInboundMulti delivers every inner packet one aggregated datagram holds.
-func (p *Pump) handleInboundMulti(t MultiTunnel, c *TunnelCounters, pkt []byte) {
+func (p *Pump) handleInboundMulti(t MultiTunnel, c *TunnelCounters, pkt []byte, from *net.UDPAddr) {
 	inners, err := t.DecapsulateMulti(pkt, p.multiScratch[:0])
 	if err != nil {
 		p.drops[DropDecapFailed].Add(1)
@@ -453,6 +473,7 @@ func (p *Pump) handleInboundMulti(t MultiTunnel, c *TunnelCounters, pkt []byte) 
 		return
 	}
 	p.multiScratch = inners[:0]
+	roam(t, from)
 	p.noteInbound()
 	for _, inner := range inners {
 		if len(inner) == 0 {
@@ -510,11 +531,6 @@ func (p *Pump) decapInbound(pkt []byte, from *net.UDPAddr) ([]byte, *TunnelCount
 		p.drops[DropUnknownKey].Add(1)
 		return nil, nil, false // unknown key
 	}
-	if from != nil {
-		if u, ok := b.t.(interface{ SetPeerAddr(*net.UDPAddr) }); ok {
-			u.SetPeerAddr(from)
-		}
-	}
 	inner, err := b.t.Decapsulate(pkt)
 	if err != nil {
 		p.drops[DropDecapFailed].Add(1)
@@ -523,6 +539,10 @@ func (p *Pump) decapInbound(pkt []byte, from *net.UDPAddr) ([]byte, *TunnelCount
 		}
 		return nil, nil, false
 	}
+	// Only now has the datagram proved it came from the peer. A keepalive
+	// counts: it authenticated, and following a roaming peer that is otherwise
+	// idle is exactly what WireGuard's keepalives are for.
+	roam(b.t, from)
 	// Authenticated inbound activity — record it for liveness before the
 	// keepalive short-circuit below, so a keepalive counts as proof of life.
 	p.lastInbound.Store(time.Now().UnixNano())

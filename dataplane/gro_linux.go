@@ -99,13 +99,13 @@ func (p *Pump) handleInboundBatchGRO(pkts [][]byte, froms []*net.UDPAddr) bool {
 		if froms != nil {
 			from = froms[i]
 		}
-		if mt, c, ok := p.multiTunnelFor(pkt, from); ok {
+		if mt, c, ok := p.multiTunnelFor(pkt); ok {
 			// An aggregated datagram carries several inner packets, so it
 			// cannot go through decapInbound's single-packet return. Deliver
 			// its contents through the same coalescing table as everything
 			// else -- a bulk TCP flow inside an IP-TFS tunnel deserves GRO as
 			// much as one outside it.
-			p.groMulti(t, mt, c, pkt)
+			p.groMulti(t, mt, c, pkt, from)
 			continue
 		}
 		inner, c, ok := p.decapInbound(pkt, from)
@@ -136,7 +136,7 @@ func (p *Pump) handleInboundBatchGRO(pkts [][]byte, froms []*net.UDPAddr) bool {
 // groMulti opens one aggregated datagram and offers each inner packet to the
 // coalescing table, falling back to a direct TUN write for the ones GRO does
 // not handle. It is handleInboundMulti with the table in the middle.
-func (p *Pump) groMulti(t *groTable, mt MultiTunnel, c *TunnelCounters, pkt []byte) {
+func (p *Pump) groMulti(t *groTable, mt MultiTunnel, c *TunnelCounters, pkt []byte, from *net.UDPAddr) {
 	inners, err := mt.DecapsulateMulti(pkt, p.multiScratch[:0])
 	if err != nil {
 		p.drops[DropDecapFailed].Add(1)
@@ -146,6 +146,7 @@ func (p *Pump) groMulti(t *groTable, mt MultiTunnel, c *TunnelCounters, pkt []by
 		return
 	}
 	p.multiScratch = inners[:0]
+	roam(mt, from)
 	p.noteInbound()
 	for _, inner := range inners {
 		if len(inner) == 0 {

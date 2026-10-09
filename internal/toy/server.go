@@ -349,17 +349,16 @@ func (s *Server) handleSealed(h Header, pkt []byte, from *net.UDPAddr) {
 		return
 	}
 
+	// Roaming for data is the pump's: it repoints the session at from only
+	// once Decapsulate has authenticated this datagram. This handler used to
+	// roam afterwards on "the session has authenticated something, at some
+	// point" -- which a forged datagram arriving after the first genuine one
+	// satisfies, so one spoofed packet could move an established peer. Whether
+	// a packet authenticated is a property of that packet, and only the code
+	// that opened it knows.
 	cp := make([]byte, len(pkt))
 	copy(cp, pkt)
 	s.pump.HandleInbound(cp, from)
-
-	// Liveness is recorded by Session.open itself, on the one code path that can
-	// vouch for it. Roaming still has to happen here, because Decapsulate never
-	// learns the source address -- but it is only safe once something on this
-	// session has authenticated, so an unopened packet cannot move a peer.
-	if !sess.LastSeen().IsZero() {
-		s.roam(h.Session, sess, from)
-	}
 }
 
 // roam follows a peer that has started arriving from a new address.

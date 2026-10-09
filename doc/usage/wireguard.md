@@ -68,11 +68,12 @@ family are refused rather than silently reduced to one.
 
 Cryptokey routing runs both ways: `AllowedIPs` selects which peer an outbound
 packet goes to, and an inbound packet whose source is outside a peer's
-`AllowedIPs` is dropped. Peers roam (the return address follows each packet's
-source), and replayed handshake initiations are rejected by their timestamp. A
-veepin client rekeys on its own — re-running the handshake roughly every two
-minutes and rotating the new keypair in without dropping traffic — so a tunnel
-stays up indefinitely; see the note under
+`AllowedIPs` is dropped. Peers roam: the return address follows the source of
+each packet that authenticates, and never one that merely carries the peer's
+receiver index, which is cleartext. Replayed handshake initiations are rejected
+by their timestamp. A veepin client rekeys on its own — re-running the
+handshake roughly every two minutes and rotating the new keypair in without
+dropping traffic — so a tunnel stays up indefinitely; see the note under
 [What it does](../../README.md#what-it-does).
 
 ## Downstream flow shaping
