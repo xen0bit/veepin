@@ -23,7 +23,8 @@
 //
 //   - ikev2, internal/ikev2/... — IKEv2 with a userspace ESP data path.
 //
-//   - wireguard, internal/wireguard/... — Noise_IKpsk2 and the transport crypto.
+//   - wireguard, internal/wireguard/... — the client session and server engine,
+//     Noise_IKpsk2 with its cookie exchange, and the transport crypto.
 //
 //   - openvpn, internal/openvpn/... — the TLS control channel and P_DATA_V2.
 //

@@ -290,8 +290,8 @@ jobs:
           ./internal/softether FuzzDecodePack
           ./internal/capture FuzzParseCorpus
           ./internal/capture FuzzReadPCAP
-          ./wireguard FuzzDeobfuscate
-          ./wireguard FuzzObfuscateRoundTrip
+          ./internal/wireguard FuzzDeobfuscate
+          ./internal/wireguard FuzzObfuscateRoundTrip
           TARGETS
 
           # Guard against the truncation described above, and against a target

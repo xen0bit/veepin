@@ -14,10 +14,10 @@ import (
 
 // Rekey timing (protocol paper §6.1). A session's keys are replaced well before
 // they would be rejected, so traffic never stops: the initiator re-handshakes
-// every rekeyAfterTime, and a key is refused for sending once it is older than
+// every RekeyAfterTime, and a key is refused for sending once it is older than
 // rejectAfterTime.
 const (
-	rekeyAfterTime  = 120 * time.Second
+	RekeyAfterTime  = 120 * time.Second
 	rejectAfterTime = 180 * time.Second
 )
 

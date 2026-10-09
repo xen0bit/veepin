@@ -33,7 +33,7 @@ type Config struct {
 	// RekeySeconds is how often a client re-runs the handshake to refresh its
 	// keys, in seconds. It has no wg-quick equivalent — WireGuard's own timing is
 	// fixed at 120s — and exists so tests can shrink the interval. 0 means the
-	// protocol default (rekeyAfterTime).
+	// protocol default (two minutes).
 	RekeySeconds int
 
 	// Peers holds one [Peer] section each. A client has exactly one (its

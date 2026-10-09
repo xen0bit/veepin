@@ -199,7 +199,7 @@ func TestARekeyAnswersACookie(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &session{
+	s := &Session{
 		conn:     conn,
 		logger:   discardLogger(),
 		noiseCfg: ls.clientConfig(t),
