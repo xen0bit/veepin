@@ -113,7 +113,10 @@ func (c *Conn) acceptLoop() {
 			select {
 			case c.incoming <- &RequestStream{qs: s}:
 			default:
-				s.Reset(quic_H3_EXCESSIVE_LOAD)
+				// Shed, not served: the stream is being dropped whatever
+				// Reset reports, and its only failure is a stream with no
+				// send side, which a bidirectional one has.
+				_ = s.Reset(quic_H3_EXCESSIVE_LOAD)
 			}
 		}
 	}
