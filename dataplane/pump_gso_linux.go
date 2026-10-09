@@ -92,6 +92,25 @@ func (p *Pump) sendSegments(segs [][]byte, outs [][]byte) [][]byte {
 		return outs[:0]
 	}
 
+	// A paced tunnel sends on its own schedule, so a super-frame is handed to
+	// it segment by segment exactly as routeOutbound hands it single packets.
+	// This branch was missing: on a GSO TUN -- which every veepin client
+	// negotiates -- bulk TCP went straight to the wire through the tunnel's
+	// Encapsulate, beside the pacer rather than through it, so a
+	// constant-rate IP-TFS tunnel sent its heaviest traffic at whatever rate
+	// that traffic arrived. That is the very signal constant-rate transmission
+	// exists to remove, leaking on exactly the flows that most reveal it.
+	if pt := b.paced; pt != nil {
+		for _, seg := range segs {
+			if !pt.Enqueue(seg) {
+				p.drops[DropPacerFull].Add(1)
+				continue
+			}
+			c.countTx(len(seg))
+		}
+		return outs[:0]
+	}
+
 	outs = outs[:0]
 	for i, seg := range segs {
 		// Each segment gets its own slot -- the burst holds every output at

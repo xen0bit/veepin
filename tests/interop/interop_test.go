@@ -1805,9 +1805,22 @@ func TestInteropIPTFSConstantRate(t *testing.T) {
 		_, _ = compose(t, file, "exec", "-T", "veepin-client",
 			"ping", "-f", "-w", "4", "10.20.30.254")
 	})
+	// And with bulk TCP, which is not the same load. A flood ping is one
+	// packet per TUN read; TCP on a GSO TUN arrives as super-frames, which
+	// take a different egress path in the pump -- one that used to send them
+	// itself, beside the pacer, so a ping-only cell measured a constant stream
+	// while the traffic that most needs hiding left at its own rate.
+	if out, err := compose(t, file, "exec", "-d", "strongswan-server", "iperf3", "-s", "-1"); err != nil {
+		t.Fatalf("starting iperf3 on the peer: %v\n%s", err, out)
+	}
+	time.Sleep(benchWarmup)
+	bulk := measureESPRate(t, file, 4*time.Second, func() {
+		_, _ = compose(t, file, "exec", "-T", "veepin-client",
+			"iperf3", "-c", "10.20.30.254", "-t", "4", "--connect-timeout", "5000")
+	})
 
-	t.Logf("ESP arriving at the peer: idle %.0f B/s, saturated %.0f B/s (configured %d)",
-		idle, busy, wantBytesPerSec)
+	t.Logf("ESP arriving at the peer: idle %.0f B/s, flood-ping %.0f B/s, bulk TCP %.0f B/s (configured %d)",
+		idle, busy, bulk, wantBytesPerSec)
 
 	if idle == 0 {
 		t.Fatal("the peer received nothing while the tunnel was idle: the sender stops " +
@@ -1819,17 +1832,17 @@ func TestInteropIPTFSConstantRate(t *testing.T) {
 	for _, m := range []struct {
 		name string
 		rate float64
-	}{{"idle", idle}, {"saturated", busy}} {
+	}{{"idle", idle}, {"flood-ping", busy}, {"bulk TCP", bulk}} {
 		if ratio := m.rate / wantBytesPerSec; ratio < 0.85 || ratio > 1.15 {
 			t.Errorf("%s rate %.0f B/s is %.2f× the configured %d",
 				m.name, m.rate, ratio, wantBytesPerSec)
 		}
-	}
-	// And the two must agree with EACH OTHER, which is the claim itself.
-	if ratio := busy / idle; ratio < 0.85 || ratio > 1.15 {
-		t.Errorf("saturated/idle = %.2f: the datagram stream follows the offered load, "+
-			"so it still carries the signal constant-rate transmission exists to remove",
-			ratio)
+		// And each must agree with idle, which is the claim itself.
+		if ratio := m.rate / idle; ratio < 0.85 || ratio > 1.15 {
+			t.Errorf("%s/idle = %.2f: the datagram stream follows the offered load, "+
+				"so it still carries the signal constant-rate transmission exists to remove",
+				m.name, ratio)
+		}
 	}
 }
 

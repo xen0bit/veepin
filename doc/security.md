@@ -596,6 +596,14 @@ GSO because `dataplane`'s batch path reached for the single-packet
 decapsulator. The second is the one worth remembering: the tunnel reported
 IP-TFS negotiated and working while carrying nothing inbound.
 
+A third was its outbound mirror, and the constant-rate cell could not see it.
+The same GSO egress path encapsulated and sent TCP super-frames itself, never
+asking whether the tunnel paces -- so on a veepin client, bulk TCP left at its
+own rate beside the pacer, while the cell, which saturated the tunnel with a
+flood ping, measured a perfectly constant stream. A ping is one packet per TUN
+read and never takes that path. The cell now saturates it with bulk TCP as well,
+and `TestAGSOSuperFrameGoesThroughThePacer` pins the routing.
+
 ## What counts as a secret option, and why the rule needs writing down
 
 Redaction — in the API, in the panel, in `veepin profile show` — is driven
