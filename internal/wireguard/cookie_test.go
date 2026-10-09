@@ -26,7 +26,7 @@ type loadedServer struct {
 	obf       ObfuscationConfig
 	// forgeFirst, when set, sends a cookie reply that does not authenticate
 	// ahead of each genuine answer.
-	forgeFirst bool
+	forgeFirst atomic.Bool
 }
 
 func newLoadedServer(t *testing.T, obf ObfuscationConfig) *loadedServer {
@@ -57,7 +57,7 @@ func newLoadedServer(t *testing.T, obf ObfuscationConfig) *loadedServer {
 			if req == nil || len(req) != wire.SizeHandshakeInitiation {
 				continue // junk, or a keepalive after the handshake
 			}
-			if ls.forgeFirst {
+			if ls.forgeFirst.Load() {
 				forged := make([]byte, wire.SizeCookieReply)
 				rand.Read(forged)
 				forged[0], forged[1], forged[2], forged[3] = wire.TypeCookieReply, 0, 0, 0
@@ -146,7 +146,7 @@ func TestTheFirstHandshakeAnswersACookie(t *testing.T) {
 // could make the client throw it away and start again, once per datagram.
 func TestAForgedCookieReplyCostsNoAttempt(t *testing.T) {
 	ls := newLoadedServer(t, ObfuscationConfig{})
-	ls.forgeFirst = true
+	ls.forgeFirst.Store(true)
 	conn, err := net.DialUDP("udp", nil, ls.addr)
 	if err != nil {
 		t.Fatal(err)
