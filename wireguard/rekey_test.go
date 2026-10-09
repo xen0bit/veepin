@@ -70,6 +70,7 @@ func TestClientRekeyDispatch(t *testing.T) {
 		conn:     conn,
 		logger:   discardLogger(),
 		noiseCfg: noise.Config{LocalStatic: clientPriv, RemoteStatic: serverPub},
+		cookies:  &cookieJar{},
 		done:     make(chan struct{}),
 		stop:     make(chan struct{}),
 	}

@@ -264,7 +264,8 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 		return nil, client.Result{}, fmt.Errorf("wireguard: dial %s: %w", r.endpoint, err)
 	}
 
-	kp, err := handshake(ctx, conn, r.noiseCfg, logger, cfg.Obfuscation)
+	jar := &cookieJar{}
+	kp, err := handshake(ctx, conn, r.noiseCfg, logger, cfg.Obfuscation, jar)
 	if err != nil {
 		conn.Close()
 		if errors.Is(err, noise.ErrDecrypt) {
@@ -297,6 +298,7 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 		noiseCfg:      r.noiseCfg,
 		rekeyInterval: r.rekey,
 		obfCfg:        cfg.Obfuscation,
+		cookies:       jar,
 		done:          make(chan struct{}),
 		stop:          make(chan struct{}),
 	}
@@ -362,12 +364,15 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 // initiation — and its ephemeral key — is single-use.
 //
 // obf, if non-zero, applies AmneziaWG wire transforms to the initiation and
-// response, and emits Jc junk datagrams ahead of each initiation.
-func handshake(ctx context.Context, conn *net.UDPConn, cfg noise.Config, logger *vlog.Logger, obf ObfuscationConfig) (*noise.Keypair, error) {
-	// The response arrives padded by S2, so the buffer must have room for it;
-	// sizing it to the stock 92 bytes silently truncates an obfuscated response
-	// and the handshake fails with a parse error that names the wrong cause.
-	buf := make([]byte, wire.SizeHandshakeResponse+obf.PadResponse)
+// response, and emits Jc junk datagrams ahead of each initiation. jar holds the
+// cookie a loaded server hands back, which every later initiation -- this
+// handshake's retries and the session's rekeys -- computes mac2 with.
+func handshake(ctx context.Context, conn *net.UDPConn, cfg noise.Config, logger *vlog.Logger, obf ObfuscationConfig, jar *cookieJar) (*noise.Keypair, error) {
+	// The response arrives padded by S2 and a cookie reply by S3, so the buffer
+	// must have room for either; sizing it to the stock 92 bytes silently
+	// truncates an obfuscated response and the handshake fails with a parse
+	// error that names the wrong cause.
+	buf := make([]byte, max(wire.SizeHandshakeResponse+obf.PadResponse, wire.SizeCookieReply+obf.PadCookie))
 	for attempt := 1; ; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -376,6 +381,7 @@ func handshake(ctx context.Context, conn *net.UDPConn, cfg noise.Config, logger 
 		if err != nil {
 			return nil, err
 		}
+		jar.apply(init)
 		msg, err := init.Initiation()
 		if err != nil {
 			return nil, err
@@ -396,19 +402,43 @@ func handshake(ctx context.Context, conn *net.UDPConn, cfg noise.Config, logger 
 		}
 		_ = conn.SetReadDeadline(deadline)
 		var n int
+		cookied := false
 		for {
 			n, err = conn.Read(buf)
 			if err != nil {
 				break
 			}
 			recv := deobfuscateRecv(buf[:n], obf)
-			if recv != nil {
-				n = copy(buf, recv)
-				break
+			if recv == nil {
+				// Junk or a stray datagram: neither an error nor a response.
+				// Read again against the same deadline rather than burning a
+				// handshake attempt or parsing it as a response.
+				continue
 			}
-			// Junk or a stray datagram: neither an error nor a response. Read
-			// again against the same deadline rather than burning a handshake
-			// attempt or parsing it as a response.
+			if t, _ := wire.Type(recv); t == wire.TypeCookieReply {
+				// The server is under load and wants proof we can receive at
+				// this address before it spends a Diffie-Hellman on us. One
+				// that does not authenticate is read past like junk, so a
+				// forged reply cannot cost an attempt.
+				if cookied = takeCookie(init, recv, jar, logger); cookied {
+					break
+				}
+				continue
+			}
+			n = copy(buf, recv)
+			break
+		}
+		if cookied {
+			// Retry at once with the cookie. wireguard-go waits for its
+			// retransmit timer instead, but nothing in the protocol asks for
+			// the wait, and it would cost every client five seconds for as
+			// long as the server is busy. A reply is bound to its
+			// initiation's mac1, so each initiation can prompt at most one
+			// retry, and every retry counts against the attempt budget.
+			if attempt >= maxAttempts {
+				return nil, fmt.Errorf("server under load: no response after %d attempts", maxAttempts)
+			}
+			continue
 		}
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
@@ -423,9 +453,6 @@ func handshake(ctx context.Context, conn *net.UDPConn, cfg noise.Config, logger 
 
 		kp, err := init.Consume(buf[:n])
 		if err != nil {
-			// A cookie reply (message type 3) lands here as a parse failure: the
-			// responder is under load and demands a cookie this build does not
-			// send. Retrying will not help until that is implemented.
 			if errors.Is(err, noise.ErrDecrypt) {
 				return nil, err
 			}
@@ -438,6 +465,20 @@ func handshake(ctx context.Context, conn *net.UDPConn, cfg noise.Config, logger 
 		_ = conn.SetReadDeadline(time.Time{}) // clear for the steady-state loop
 		return kp, nil
 	}
+}
+
+// takeCookie opens a cookie reply to init's initiation and keeps the cookie,
+// reporting whether it was one. A reply that does not open -- a stray, or a
+// forgery -- is dropped: it must not replace a cookie that works.
+func takeCookie(init *noise.Initiator, pkt []byte, jar *cookieJar, logger *vlog.Logger) bool {
+	c, err := init.ConsumeCookieReply(pkt)
+	if err != nil {
+		logger.Printf("wireguard: discarding a cookie reply that does not authenticate: %v", err)
+		return false
+	}
+	jar.keep(c)
+	logger.Warnf("wireguard: server is under load; retrying with the cookie it sent")
+	return true
 }
 
 // session is a running WireGuard tunnel: the UDP socket, the TUN device, the
@@ -466,6 +507,9 @@ type session struct {
 
 	// obfCfg is the AmneziaWG obfuscation config (zero = stock WireGuard).
 	obfCfg ObfuscationConfig
+	// cookies is the cookie a loaded server last gave us, shared with the
+	// initial handshake that created it.
+	cookies *cookieJar
 
 	closeOnce sync.Once
 	closeErr  error
@@ -474,8 +518,8 @@ type session struct {
 }
 
 // pendingHandshake links an in-flight rekey initiation to the goroutine awaiting
-// its response. readLoop matches an inbound response's receiver index against
-// localIdx and hands the packet over on ch.
+// its answer. readLoop matches an inbound response's or cookie reply's receiver
+// index against localIdx and hands the packet over on ch.
 type pendingHandshake struct {
 	localIdx uint32
 	ch       chan []byte
@@ -518,13 +562,12 @@ func (s *session) readLoop() {
 				// in place and writes the TUN before returning — bufs[i] is
 				// not touched again until the next ReadBatch.
 				data = append(data, pkt)
-			case wire.TypeHandshakeResponse:
-				// Copied: a delivered response is handed to the rekey goroutine
+			case wire.TypeHandshakeResponse, wire.TypeCookieReply:
+				// Copied: a delivered reply is handed to the rekey goroutine
 				// and outlives this batch's buffers.
 				s.deliverResponse(append([]byte(nil), pkt...))
 			default:
-				// A stray initiation or a cookie reply: nothing an established
-				// client tunnel acts on.
+				// A stray initiation: nothing a client acts on.
 			}
 		}
 		if len(data) > 0 {
@@ -536,15 +579,21 @@ func (s *session) readLoop() {
 	}
 }
 
-// deliverResponse hands a handshake response to the rekey goroutine waiting for
-// it, matched on the receiver index the response is addressed to. A response for
-// no pending handshake — a duplicate, or one that arrived after the waiter gave
-// up — is dropped.
+// deliverResponse hands a handshake response or cookie reply to the rekey
+// goroutine waiting for it, matched on the receiver index it is addressed to. A
+// reply for no pending handshake — a duplicate, or one that arrived after the
+// waiter gave up — is dropped.
 func (s *session) deliverResponse(pkt []byte) {
-	if len(pkt) != wire.SizeHandshakeResponse {
+	var receiver uint32
+	switch len(pkt) {
+	case wire.SizeHandshakeResponse:
+		receiver = binary.LittleEndian.Uint32(pkt[8:12])
+	case wire.SizeCookieReply:
+		// A different offset: a cookie reply has no sender index before it.
+		receiver = binary.LittleEndian.Uint32(pkt[4:8])
+	default:
 		return
 	}
-	receiver := binary.LittleEndian.Uint32(pkt[8:12])
 	s.hsMu.Lock()
 	p := s.pending
 	s.hsMu.Unlock()
@@ -688,6 +737,7 @@ func (s *session) doHandshake(ctx context.Context) (*noise.Keypair, error) {
 		if err != nil {
 			return nil, err
 		}
+		s.cookies.apply(init)
 		msg, err := init.Initiation()
 		if err != nil {
 			return nil, err
@@ -701,25 +751,49 @@ func (s *session) doHandshake(ctx context.Context) (*noise.Keypair, error) {
 			return nil, fmt.Errorf("send initiation: %w", err)
 		}
 
-		timer := time.NewTimer(rekeyTimeout)
+		kp, retry, err := s.awaitReply(ctx, init, ch)
+		if err != nil {
+			return nil, err
+		}
+		if retry {
+			continue
+		}
+		return kp, nil
+	}
+}
+
+// awaitReply waits up to rekeyTimeout for the answer to init's initiation. It
+// returns the keypair; or retry, when the attempt should be repeated -- the
+// timer ran out, the reply did not parse, or the server sent a cookie, in which
+// case the retry goes at once and carries it, as the first handshake's does. A
+// cookie reply that does not authenticate is waited past rather than retried
+// on, so a forgery cannot force a fresh initiation.
+func (s *session) awaitReply(ctx context.Context, init *noise.Initiator, ch <-chan []byte) (kp *noise.Keypair, retry bool, err error) {
+	timer := time.NewTimer(rekeyTimeout)
+	defer timer.Stop()
+	for {
 		select {
 		case resp := <-ch:
-			timer.Stop()
+			if t, _ := wire.Type(resp); t == wire.TypeCookieReply {
+				if takeCookie(init, resp, s.cookies, s.logger) {
+					return nil, true, nil
+				}
+				continue
+			}
 			kp, err := init.Consume(resp)
 			if err != nil {
 				if errors.Is(err, noise.ErrDecrypt) {
-					return nil, err
+					return nil, false, err
 				}
 				s.logger.Printf("wireguard: rekey: discarding unexpected reply: %v", err)
-				continue
+				return nil, true, nil
 			}
-			return kp, nil
+			return kp, false, nil
 		case <-timer.C:
 			s.logger.Warnf("wireguard: rekey attempt timed out, retrying")
-			continue
+			return nil, true, nil
 		case <-ctx.Done():
-			timer.Stop()
-			return nil, ctx.Err()
+			return nil, false, ctx.Err()
 		}
 	}
 }

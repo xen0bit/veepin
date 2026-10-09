@@ -701,7 +701,7 @@ as it was on the capture date and is never allowed to stand in for the cell. See
 | Protocol   | veepin client ↔ real server | real client ↔ veepin server | veepin ↔ veepin (self) |
 |------------|-----------------------------|-----------------------------|------------------------|
 | IKEv2 | ✓ strongSwan (PSK + pubkey ECDSA/RSA, RFC 7383 frag, AES-GCM + ChaCha20, dual-stack, v6 underlay, ML-KEM-768, IP-TFS incl. constant-rate, recorded) + libreswan (incl. RFC 8229/9329 over TCP) | ✓ strongSwan (+ EAP-MSCHAPv2, pubkey RSA, RFC 7383 frag both ways, dual-stack, v6 underlay, TFC-padded, ML-KEM-768, IP-TFS) + libreswan (incl. RFC 8229/9329 over TCP) | ✓ (+ IP-TFS) |
-| WireGuard | ✓ wireguard-go (+ IPv6 inner) | ✓ wireguard-go (+ padded, IPv6 inner, recorded) | ✓ |
+| WireGuard | ✓ wireguard-go (+ IPv6 inner) | ✓ wireguard-go (+ padded, IPv6 inner, cookie-challenged, recorded) | ✓ |
 | OpenVPN | ✓ `openvpn` (×4 variants) | ✓ `openvpn` (+ tls-auth, tls-crypt, padded, IPv6 inner) | ✓ |
 | SSTP | ✓ SoftEther | ✓ `sstpc`/pppd (+ PPP-padded) | ✓ |
 | SSH | ✓ `sshd` (PermitTunnel) | ✓ `ssh -w` | ✓ |

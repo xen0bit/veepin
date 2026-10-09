@@ -71,7 +71,7 @@ func TestHandshakeTimesOutOnSilence(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	_, err = handshake(ctx, conn, testNoiseCfg(t), discardLogger(), ObfuscationConfig{})
+	_, err = handshake(ctx, conn, testNoiseCfg(t), discardLogger(), ObfuscationConfig{}, &cookieJar{})
 	if err == nil {
 		t.Fatal("silent peer produced no error")
 	}
@@ -101,7 +101,7 @@ func TestHandshakeRetransmitsPastJunk(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	if _, err := handshake(ctx, conn, testNoiseCfg(t), discardLogger(), ObfuscationConfig{}); err == nil {
+	if _, err := handshake(ctx, conn, testNoiseCfg(t), discardLogger(), ObfuscationConfig{}, &cookieJar{}); err == nil {
 		t.Fatal("junk replies produced no error")
 	}
 	if got.Load() < 2 {

@@ -254,3 +254,38 @@ func TestTimestampEpoch(t *testing.T) {
 		t.Fatalf("TAI64N(epoch) = %x, want %x", ts, want)
 	}
 }
+
+// TestCookieReplyRoundTrips: the encoder the responder now needs must produce
+// exactly what the parser, and wireguard-go's MessageCookieReply, read back --
+// receiver little-endian at 4, nonce at 8, sealed cookie at 32.
+func TestCookieReplyRoundTrips(t *testing.T) {
+	m := CookieReply{Receiver: 0x01020304}
+	for i := range m.Nonce {
+		m.Nonce[i] = byte(i)
+	}
+	for i := range m.Cookie {
+		m.Cookie[i] = byte(0x80 + i)
+	}
+	b, err := m.Marshal(make([]byte, SizeCookieReply))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b[0] != TypeCookieReply || b[1] != 0 || b[2] != 0 || b[3] != 0 || b[4] != 0x04 || b[7] != 0x01 {
+		t.Fatalf("header = %x, want type 3, zero reserved, receiver little-endian", b[:8])
+	}
+	got, err := ParseCookieReply(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *got != m {
+		t.Fatal("the cookie reply did not round-trip")
+	}
+	for n := range SizeCookieReply {
+		if _, err := ParseCookieReply(b[:n]); err == nil {
+			t.Fatalf("a %d-octet prefix of a cookie reply parsed", n)
+		}
+	}
+	if _, err := m.Marshal(make([]byte, SizeCookieReply-1)); err == nil {
+		t.Fatal("Marshal wrote into a buffer too short for the message")
+	}
+}

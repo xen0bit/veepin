@@ -233,6 +233,21 @@ type CookieReply struct {
 	Cookie   [CookieSize + TagSize]byte
 }
 
+// Marshal writes the cookie reply into dst, which must hold SizeCookieReply
+// octets, and returns the message slice.
+func (m *CookieReply) Marshal(dst []byte) ([]byte, error) {
+	if len(dst) < SizeCookieReply {
+		return nil, ErrShort
+	}
+	b := dst[:SizeCookieReply]
+	clear(b[:4])
+	b[0] = TypeCookieReply
+	binary.LittleEndian.PutUint32(b[4:8], m.Receiver)
+	copy(b[8:32], m.Nonce[:])
+	copy(b[32:64], m.Cookie[:])
+	return b, nil
+}
+
 // ParseCookieReply decodes message type 3.
 func ParseCookieReply(pkt []byte) (*CookieReply, error) {
 	if len(pkt) != SizeCookieReply {

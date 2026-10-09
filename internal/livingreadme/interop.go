@@ -111,8 +111,9 @@ var interopMatrix = []interopRow{
 			"TestInteropWireguardClientVeepinServer",
 			"TestInteropWireguardClientVeepinServerShaped",
 			"TestInteropWireguardClientVeepinServerV6",
+			"TestInteropWireguardClientVeepinServerCookie",
 			"TestInteropWireguardCorpusStillMatchesTheLivePeer",
-		}, Label: "wireguard-go (+ padded, IPv6 inner, recorded)"},
+		}, Label: "wireguard-go (+ padded, IPv6 inner, cookie-challenged, recorded)"},
 		Self: interopCell{Tests: []string{"TestInteropWireguardSelf", "TestInteropWireguardRekey"}},
 	},
 	{

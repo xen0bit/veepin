@@ -72,6 +72,17 @@ type ServerConfig struct {
 	// dataplane.DefaultShapeBytes is a reasonable value.
 	Shape int
 
+	// CookieThreshold is how many handshake initiations a second the server
+	// takes before it is under load, and starts answering initiations that
+	// lack a valid mac2 with a cookie reply rather than a Diffie-Hellman (the
+	// protocol's own flood defence, paper §5.3). Zero means
+	// DefaultCookieThreshold; a negative value keeps the server under load
+	// permanently, so that every initiation must first prove it can receive at
+	// its source address -- a choice for a server already under attack, and
+	// what the interop cell uses to make a stock client go through the
+	// exchange.
+	CookieThreshold int
+
 	Logger *slog.Logger
 }
 
@@ -101,6 +112,7 @@ const (
 	OptServerPeerAllowedIPs   = "peer-allowed-ips"   // that peer's allowed IPs, comma-separated CIDRs
 	OptServerPeers            = "peers"              // additional peers as a JSON array of ServerPeer
 	OptServerShape            = "shape"              // per-flow downstream shaping budget in bytes (0 = off)
+	OptServerCookieThreshold  = "cookie-threshold"   // initiations/s before demanding cookies (-1 = always)
 )
 
 func init() {
@@ -127,6 +139,7 @@ func init() {
 		// comma-list editor in the panel would split it on the commas inside it.
 		{Key: OptServerPeers, Kind: client.OptStr, Help: "additional peers as a JSON array, e.g. [{\"public-key\":\"...\",\"allowed-ips\":[\"10.0.0.2/32\"]}] (managed by client-config generation)"},
 		client.ShapeOpt(OptServerShape, "downstream"),
+		{Key: OptServerCookieThreshold, Kind: client.OptInt, Default: "128", Help: "handshake initiations per second before the server is under load and demands a cookie (-1 = always)"},
 	})
 }
 
@@ -184,6 +197,19 @@ func ServerConfigFromOptions(opts map[string]string) (ServerConfig, error) {
 			return sc, fmt.Errorf("wireguard: invalid %s %q", OptServerShape, v)
 		}
 		sc.Shape = n
+	}
+	if v := opts[OptServerCookieThreshold]; v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < -1 {
+			return sc, fmt.Errorf("wireguard: invalid %s %q (a rate, or -1 for always)", OptServerCookieThreshold, v)
+		}
+		if n == 0 {
+			// Zero in a config struct means "the default", so an explicit 0
+			// here -- "demand a cookie past zero initiations a second" -- is
+			// the same as always, and is spelled as always.
+			n = -1
+		}
+		sc.CookieThreshold = n
 	}
 	if v := opts[OptServerPeerPublicKey]; v != "" {
 		sc.Peers = append(sc.Peers, ServerPeer{
@@ -284,6 +310,10 @@ type Server struct {
 	tun    *dataplane.TUN
 	// gate bounds unauthenticated handshake work; see internal admission notes.
 	gate *dataplane.Gate
+	// cookies and load are the protocol's own defence against a flood, which
+	// the gate is the floor under: see cookie.go.
+	cookies *noise.CookieChecker
+	load    handshakeLoad
 
 	mu    sync.Mutex
 	peers map[[keySize]byte]*serverPeer
@@ -341,6 +371,15 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("wireguard: %w", err)
 	}
 
+	cookies, err := noise.NewCookieChecker(priv, cfg.Obfuscation.TypeInitiation)
+	if err != nil {
+		return nil, fmt.Errorf("wireguard: %w", err)
+	}
+	threshold := cfg.CookieThreshold
+	if threshold == 0 {
+		threshold = DefaultCookieThreshold
+	}
+
 	// GSO: the kernel may hand the pump TCP super-frames to segment and batch
 	// (doc/scaling-the-data-path.md); falls back to a plain TUN transparently.
 	tun, err := dataplane.OpenTUNGSO(cfg.TUNName)
@@ -349,6 +388,8 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 
 	return &Server{
+		cookies:     cookies,
+		load:        handshakeLoad{threshold: threshold, now: time.Now},
 		localStatic: priv,
 		listenAddr:  &net.UDPAddr{IP: net.ParseIP(cfg.ListenIP), Port: cfg.ListenPort},
 		obfCfg:      cfg.Obfuscation,
@@ -481,6 +522,12 @@ func (s *Server) ListenAndServe() error {
 
 	s.logger.Printf("wireguard: serving on %s, gateway %s, %d peer(s)",
 		conn.LocalAddr(), s.gateway, len(s.peers))
+	if s.load.threshold < 0 {
+		// Said once, here, because a permanently loaded server never changes
+		// state and so never logs one -- and the operator should be able to
+		// see why every client takes an extra round trip.
+		s.logger.Printf("wireguard: cookies required on every initiation (%s -1)", OptServerCookieThreshold)
+	}
 	s.readLoop()
 	return nil
 }
@@ -546,10 +593,25 @@ func (s *Server) readLoop() {
 func (s *Server) handleInitiation(pkt []byte, from *net.UDPAddr) {
 	// A handshake initiation costs the responder two DH operations and the
 	// keypair state that follows, all for a peer that has proved nothing at an
-	// address that is spoofable. WireGuard's own answer is the cookie reply
-	// under load (which veepin does not implement, so a peer under pressure
-	// sees a refused handshake rather than a cookie); this bounds the cost in
-	// the meantime.
+	// address that is spoofable. Three gates, cheapest first.
+	//
+	// mac1 proves the sender knows our public key. It is a keyed hash, so a
+	// packet not aimed at us is refused for almost nothing -- common noise on
+	// an open port, not worth logging.
+	if !s.cookies.CheckMAC1(pkt) {
+		return
+	}
+	// Under load, mac2 proves the sender can receive at the address it sent
+	// from: it is computed with a cookie we only ever send to that address.
+	// Without it the answer is a cookie reply -- one hash and one AEAD seal,
+	// no Diffie-Hellman and no state -- and a spoofed-source flood, which
+	// never sees those replies, never gets past here.
+	if s.underLoad() && !s.cookies.CheckMAC2(pkt, from.AddrPort()) {
+		s.sendCookieReply(pkt, from)
+		return
+	}
+	// Then admission control, the floor under every protocol here. Under load
+	// its per-source limit is finally meaningful: the source has been proved.
 	//
 	// The reservation covers only the initiation: by the time this returns the
 	// work is done and the session, if any, is authenticated.
@@ -637,6 +699,32 @@ func (s *Server) handleInitiation(pkt []byte, from *net.UDPAddr) {
 		return
 	}
 	s.logger.Printf("wireguard: handshake complete with %s at %s", shortKey(peerStatic), from)
+}
+
+// underLoad counts one initiation that passed mac1 and reports whether the
+// server is under load, saying so once each time that changes.
+func (s *Server) underLoad() bool {
+	loaded, changed := s.load.observe()
+	if changed {
+		if loaded {
+			s.logger.Warnf("wireguard: under load (more than %d initiations a second); answering initiations without a valid cookie with a cookie reply", s.load.threshold)
+		} else {
+			s.logger.Printf("wireguard: no longer under load")
+		}
+	}
+	return loaded
+}
+
+// sendCookieReply answers an initiation that lacked a valid mac2 while the
+// server is under load. It does not log per reply: under a flood that would
+// be one line per spoofed datagram, which is a second flood.
+func (s *Server) sendCookieReply(init []byte, to *net.UDPAddr) {
+	reply, err := s.cookies.CookieReply(init, to.AddrPort())
+	if err != nil {
+		s.logger.Printf("wireguard: building a cookie reply: %v", err)
+		return
+	}
+	_, _ = s.conn.WriteToUDP(obfuscateSend(reply, s.obfCfg), to)
 }
 
 // Close stops the data path and releases the socket and TUN device. It is

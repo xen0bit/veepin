@@ -256,6 +256,7 @@ jobs:
           ./internal/ppp FuzzParseCHAP
           ./internal/openvpn/wire FuzzParseControl
           ./internal/wireguard/wire FuzzParseMessages
+          ./internal/wireguard/noise FuzzCookieReplies
           ./internal/sstp/wire FuzzParseControl
           ./internal/anyconnect FuzzParseHeader
           ./internal/anyconnect FuzzParseDTLS
@@ -295,7 +296,7 @@ jobs:
 
           # Guard against the truncation described above, and against a target
           # being added to the list without the loop reaching it.
-          expected=74
+          expected=75
           if [ "$ran" -ne "$expected" ]; then
             echo "::error::ran $ran fuzz targets, expected $expected -- the target list was truncated"
             exit 1

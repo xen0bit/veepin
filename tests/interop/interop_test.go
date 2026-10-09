@@ -551,6 +551,21 @@ func TestInteropWireguardClientVeepinServerShaped(t *testing.T) {
 	runInterop(t, "compose.wireguard-server-shaped.yml", "wg-client", "10.10.10.1")
 }
 
+// TestInteropWireguardClientVeepinServerCookie is the cross-implementation half
+// of the cookie exchange. The server is under load permanently, so wireguard-go
+// gets a cookie reply for its first initiation and can reach the tunnel only by
+// opening it and retrying with mac2 -- which no veepin<->veepin cell could
+// prove, since both halves of the exchange would be ours and would agree with
+// each other whatever they computed. The ping is the proof; the two log lines
+// say the server was in the mode that makes it one, and that the handshake it
+// completed was after the challenge.
+func TestInteropWireguardClientVeepinServerCookie(t *testing.T) {
+	runInteropRequiringLogFrom(t, "compose.wireguard-server-cookie.yml", "wg-client", "veepin-wg-server",
+		"10.10.10.1",
+		"cookies required on every initiation",
+		"handshake complete with")
+}
+
 // TestInteropWireguardSelf is the veepin<->veepin WireGuard sanity check: the
 // veepin client and server over real sockets and TUNs, isolating a veepin break
 // from an interop break.
