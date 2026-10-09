@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	iovpn "github.com/xen0bit/veepin/internal/openvpn"
 )
 
 // Config is a parsed OpenVPN client profile: where to connect, the TLS identity,
@@ -93,14 +95,11 @@ const (
 	OptShape        = "shape"         // per-flow upstream shaping budget in bytes (0 = off)
 )
 
-// Data ciphers this client implements. AES-256-GCM is the default and preferred
-// (AEAD, single-pass); AES-256-CBC is the older encrypt-then-MAC path for
-// servers that do not offer GCM.
+// Data ciphers this client implements, the engine's names for them.
 const (
-	cipherGCM = "AES-256-GCM"
-	cipherCBC = "AES-256-CBC"
-
-	defaultCipher = cipherGCM
+	cipherGCM     = iovpn.CipherGCM
+	cipherCBC     = iovpn.CipherCBC
+	defaultCipher = iovpn.DefaultCipher
 )
 
 // defaultPort is OpenVPN's assigned UDP port.

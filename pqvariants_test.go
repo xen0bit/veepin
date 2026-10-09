@@ -416,33 +416,71 @@ var pqPolicyExemptFacades = map[string]string{
 		"pqpolicy.SSHKeyExchanges onto the ssh.Config's KeyExchanges",
 }
 
-// pqCallsReachableFrom walks a facade package's internal call graph out from
-// each of its two entry points and reports which pqpolicy calls each can reach.
+// pqCallsReachableFrom walks a facade package's call graph out from each of its
+// two entry points and reports which pqpolicy calls each can reach.
 //
-// Package-local calls only, which is exactly the scope wanted: a facade delegates
-// its TLS setup to its own unexported helper (openvpn's serverTLSConfig,
-// masque's inline block) and nothing here needs to follow a call into another
-// package. Selector calls are recorded by their full "pkg.Func" spelling so
-// "pqpolicy.HardenTLS" is what the caller asks about.
+// It follows calls within the facade, and from the facade into that protocol's
+// own engine, internal/<pkg> -- and nowhere else. The engine is in scope
+// because the layering rule puts implementations there: openvpn's TLS setup
+// moved into internal/openvpn with the rest of its engine, and a guard that
+// stopped at the facade would then pass or fail on where code happens to sit
+// rather than on whether the role hardens. Any other package is out of scope,
+// which is what keeps the question per protocol. Selector calls are recorded by
+// their full "pkg.Func" spelling so "pqpolicy.HardenTLS" is what the caller
+// asks about.
 func pqCallsReachableFrom(t *testing.T, pkg string) map[string]map[string]bool {
 	t.Helper()
-	entries, err := os.ReadDir(pkg)
-	if err != nil {
-		t.Fatalf("reading %s: %v", pkg, err)
-	}
 	fset := token.NewFileSet()
 
 	// funcName -> the set of things its body calls, by local name for a
-	// package-local function and "pkg.Func" for a selector.
+	// package-local function and "pkg.Func" for a selector. An engine
+	// function is keyed by the alias the facade imports it under, so the
+	// facade's selector call reaches it.
 	calls := map[string]map[string]bool{}
+	engineAliases := collectPQCalls(t, fset, pkg, "", "github.com/xen0bit/veepin/internal/"+pkg, calls)
+	for alias := range engineAliases {
+		collectPQCalls(t, fset, filepath.Join("internal", pkg), alias, "", calls)
+	}
+
+	out := map[string]map[string]bool{}
+	for _, entry := range []string{"Dial", "NewServer"} {
+		if _, ok := calls[entry]; !ok {
+			t.Fatalf("%s declares no %s; this check covers nothing for that role", pkg, entry)
+		}
+		out[entry] = reachable(calls, entry)
+	}
+	return out
+}
+
+// collectPQCalls records the call edges of every function in dir's non-test
+// files into calls. prefix, when set, qualifies the package's own functions
+// ("iovpn." for an engine the facade imports as iovpn), so they share a graph
+// with the facade without colliding with its names. It returns the aliases
+// under which dir imports enginePath, when that is non-empty.
+func collectPQCalls(t *testing.T, fset *token.FileSet, dir, prefix, enginePath string, calls map[string]map[string]bool) map[string]bool {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("reading %s: %v", dir, err)
+	}
+	aliases := map[string]bool{}
 	for _, entry := range entries {
 		name := entry.Name()
 		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		file, err := parser.ParseFile(fset, filepath.Join(pkg, name), nil, 0)
+		file, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
 		if err != nil {
-			t.Fatalf("parsing %s/%s: %v", pkg, name, err)
+			t.Fatalf("parsing %s/%s: %v", dir, name, err)
+		}
+		for _, imp := range file.Imports {
+			if enginePath != "" && strings.Trim(imp.Path.Value, `"`) == enginePath {
+				alias := filepath.Base(enginePath)
+				if imp.Name != nil {
+					alias = imp.Name.Name
+				}
+				aliases[alias+"."] = true
+			}
 		}
 		for _, decl := range file.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
@@ -454,10 +492,10 @@ func pqCallsReachableFrom(t *testing.T, pkg string) map[string]map[string]bool {
 			// and every assertion is that something IS reachable, so
 			// imprecision cannot manufacture a pass for a facade that calls
 			// nothing.
-			out := calls[fn.Name.Name]
+			out := calls[prefix+fn.Name.Name]
 			if out == nil {
 				out = map[string]bool{}
-				calls[fn.Name.Name] = out
+				calls[prefix+fn.Name.Name] = out
 			}
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
@@ -466,7 +504,7 @@ func pqCallsReachableFrom(t *testing.T, pkg string) map[string]map[string]bool {
 				}
 				switch f := call.Fun.(type) {
 				case *ast.Ident:
-					out[f.Name] = true
+					out[prefix+f.Name] = true
 				case *ast.SelectorExpr:
 					if x, ok := f.X.(*ast.Ident); ok {
 						out[x.Name+"."+f.Sel.Name] = true
@@ -476,15 +514,7 @@ func pqCallsReachableFrom(t *testing.T, pkg string) map[string]map[string]bool {
 			})
 		}
 	}
-
-	out := map[string]map[string]bool{}
-	for _, entry := range []string{"Dial", "NewServer"} {
-		if _, ok := calls[entry]; !ok {
-			t.Fatalf("%s declares no %s; this check covers nothing for that role", pkg, entry)
-		}
-		out[entry] = reachable(calls, entry)
-	}
-	return out
+	return aliases
 }
 
 // reachable returns everything callable from entry, transitively, within calls.

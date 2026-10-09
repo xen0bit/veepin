@@ -46,7 +46,9 @@ packet, and an inbound anti-replay window.
   `RejectAfterMessages` is the point at which the session must be replaced.
 - **Allocation profile (guarded by `TestDataPathAllocations`):** Seal is a
   *single* allocation (the returned packet, with padding and nonce folded into
-  it); Open is *zero* — it decrypts in place. ~1.9 GB/s at 1400 B, on par with the
+  it); `AppendSeal`, into a buffer with room, is *zero* — it is what the pump's
+  `dataplane.AppendTunnel` path uses — and so is Open, which decrypts in place.
+  A reused buffer's padding is zeroed explicitly, not left to `make`. ~1.9 GB/s at 1400 B, on par with the
   AES-GCM ESP path.
 - **The nonce is built in the output buffer, not a stack array.** Passing a 12-byte
   stack nonce through `cipher.AEAD`'s `[]byte` parameter escapes it to the heap.

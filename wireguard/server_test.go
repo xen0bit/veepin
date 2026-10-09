@@ -198,3 +198,38 @@ func TestServerConfigFromFileRequiresAnIPv4Address(t *testing.T) {
 		t.Fatal("a v6-only server config was accepted")
 	}
 }
+
+// TestCookieThresholdParses holds the option to its documented values: a rate,
+// or -1 for always -- and an explicit 0, which the struct would otherwise read
+// as "the default", meaning what it says.
+func TestCookieThresholdParses(t *testing.T) {
+	base := map[string]string{OptServerPrivateKey: "x"}
+	for _, tc := range []struct {
+		in   string
+		want int
+		ok   bool
+	}{
+		{"", 0, true},
+		{"500", 500, true},
+		{"-1", -1, true},
+		{"0", -1, true},
+		{"-2", 0, false},
+		{"lots", 0, false},
+	} {
+		opts := map[string]string{}
+		for k, v := range base {
+			opts[k] = v
+		}
+		if tc.in != "" {
+			opts[OptServerCookieThreshold] = tc.in
+		}
+		sc, err := ServerConfigFromOptions(opts)
+		if (err == nil) != tc.ok {
+			t.Errorf("%q: err = %v, want ok=%v", tc.in, err, tc.ok)
+			continue
+		}
+		if tc.ok && sc.CookieThreshold != tc.want {
+			t.Errorf("%q: CookieThreshold = %d, want %d", tc.in, sc.CookieThreshold, tc.want)
+		}
+	}
+}

@@ -306,6 +306,12 @@ func (t *Tunnel) EncapsulatePadded(ipPacket []byte, minInner int) ([]byte, error
 	return t.sa.EncapsulatePadded(ipPacket, espNextHeader(ipPacket), minInner)
 }
 
+// AppendEncapsulated is EncapsulatePadded into the pump's buffer, implementing
+// dataplane.AppendTunnel.
+func (t *Tunnel) AppendEncapsulated(dst, ipPacket []byte, minInner int) ([]byte, error) {
+	return t.sa.AppendEncapsulated(dst, ipPacket, espNextHeader(ipPacket), minInner)
+}
+
 // Decapsulate opens an ESP packet, trimming any TFC padding the sender added.
 func (t *Tunnel) Decapsulate(espPkt []byte) ([]byte, error) {
 	inner, nextHeader, err := t.sa.Decapsulate(espPkt)

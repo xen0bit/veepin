@@ -169,7 +169,7 @@ func TestServerConfigRejectsBothWrappings(t *testing.T) {
 		TLSAuth:  staticKeyPEM(0),
 		TLSCrypt: staticKeyPEM(1),
 	}
-	if err := cfg.validate(); err == nil {
+	if err := cfg.Validate(); err == nil {
 		t.Error("tls-auth and tls-crypt together must be rejected")
 	}
 }

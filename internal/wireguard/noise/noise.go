@@ -7,8 +7,8 @@
 // because the only way to be sure this is right is to check it against the paper
 // line by line.
 //
-// Only the initiator role is implemented: veepin dials out. A responder needs the
-// mirror image plus cookie generation and under-load handling.
+// The responder's mirror image is responder.go, and the cookie exchange both
+// sides of it need under load is cookie.go.
 package noise
 
 import (
@@ -23,9 +23,7 @@ import (
 	"github.com/xen0bit/veepin/internal/wireguard/wire"
 )
 
-// Protocol constants (protocol paper §5.4).
-//
-// LABEL_COOKIE is absent because cookies are not implemented: see addMACs.
+// Protocol constants (protocol paper §5.4). LABEL_COOKIE is in cookie.go.
 const (
 	construction = "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s"
 	identifier   = "WireGuard v1 zx2c4 Jason@zx2c4.com"
@@ -72,8 +70,13 @@ type Initiator struct {
 	presharedKey [KeySize]byte
 
 	// mac1Key is HASH(LABEL_MAC1 || responder.static_public), precomputed since
-	// every initiation to this peer uses it.
-	mac1Key key
+	// every initiation to this peer uses it; cookieKey is the same over
+	// LABEL_COOKIE, which a cookie reply is encrypted under.
+	mac1Key   key
+	cookieKey key
+	// cookie, when non-zero, is the responder's token mac2 is computed with
+	// (SetCookie).
+	cookie Cookie
 
 	ephemeral *ecdh.PrivateKey
 	localIdx  uint32
@@ -142,6 +145,7 @@ func NewInitiator(cfg Config) (*Initiator, error) {
 		remoteStatic:   pub,
 		presharedKey:   cfg.PresharedKey,
 		mac1Key:        hashOf([]byte(labelMAC1), cfg.RemoteStatic[:]),
+		cookieKey:      hashOf([]byte(labelCookie), cfg.RemoteStatic[:]),
 		typeInitiation: cfg.TypeInitiation,
 	}
 	return i, nil
@@ -248,9 +252,9 @@ func (i *Initiator) Initiation() ([]byte, error) {
 //	msg.mac1 = MAC(HASH(LABEL_MAC1 || responder.static_public), msg[0:offsetof(msg.mac1)])
 //	msg.mac2 = MAC(last_received_cookie, msg[0:offsetof(msg.mac2)])  // or zeros
 //
-// mac2 stays zero here: it is only non-zero once the responder has sent a cookie
-// reply, which it does only under load. Milestone 1 does not answer cookies, so a
-// peer under load will reject us — a live problem, not a silent one.
+// mac2 is zero unless the caller set a cookie, which it has only if the
+// responder sent a cookie reply -- which it does only under load. The caller
+// decides whether a cookie it holds is still fresh (CookieRefreshTime).
 func (i *Initiator) addMACs(msg []byte) error {
 	over1, over2, ok := wire.MACRegions(msg)
 	if !ok {
@@ -259,8 +263,14 @@ func (i *Initiator) addMACs(msg []byte) error {
 	m1 := mac128(i.mac1Key[:], macOver(over1, i.typeInitiation))
 	copy(msg[len(over1):len(over1)+wire.MACSize], m1[:])
 	i.lastMAC1 = m1
-	// mac2 is left zero; over2 now includes the mac1 just written.
-	clear(msg[len(over2) : len(over2)+wire.MACSize])
+	// over2 now includes the mac1 just written, as the paper's offsetof says.
+	mac2 := msg[len(over2) : len(over2)+wire.MACSize]
+	if i.cookie == (Cookie{}) {
+		clear(mac2)
+		return nil
+	}
+	m2 := mac128(i.cookie[:], macOver(over2, i.typeInitiation))
+	copy(mac2, m2[:])
 	return nil
 }
 

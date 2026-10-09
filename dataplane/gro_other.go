@@ -10,4 +10,6 @@ import "net"
 // HandleInboundBatch falls through to per-packet delivery.
 type groTable struct{}
 
-func (p *Pump) handleInboundBatchGRO(pkts [][]byte, froms []*net.UDPAddr) bool { return false }
+func (p *Pump) handleInboundBatchGRO(*view, [][]byte, []*net.UDPAddr, int64) bool {
+	return false
+}

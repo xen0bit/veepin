@@ -17,6 +17,7 @@ import (
 	"crypto/cipher"
 	"encoding/binary"
 	"errors"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -109,7 +110,21 @@ func (s *Session) SealPadded(inner []byte, minInner int) ([]byte, error) {
 	return s.seal(inner, minInner)
 }
 
+// AppendSeal is SealPadded appending the message to dst rather than to a fresh
+// buffer; minInner of zero means unpadded. A caller that reuses dst -- the pump,
+// through dataplane.AppendTunnel -- seals without allocating. dst needs room for
+// twelve octets of nonce scratch past the message as well; with less, it grows.
+func (s *Session) AppendSeal(dst, inner []byte, minInner int) ([]byte, error) {
+	return s.appendSeal(dst, inner, minInner)
+}
+
 func (s *Session) seal(inner []byte, minInner int) ([]byte, error) {
+	// Sized exactly, so the one allocation Seal makes is the packet.
+	n := wire.TransportHeaderLen + paddedLen(len(inner), minInner) + wire.TagSize + nonceLen
+	return s.appendSeal(make([]byte, 0, n), inner, minInner)
+}
+
+func (s *Session) appendSeal(dst, inner []byte, minInner int) ([]byte, error) {
 	// Reserve this packet's counter. Add returns the post-increment value, so
 	// the first packet uses counter 0.
 	counter := s.counter.Add(1) - 1
@@ -119,29 +134,35 @@ func (s *Session) seal(inner []byte, minInner int) ([]byte, error) {
 
 	padded := paddedLen(len(inner), minInner)
 	msgLen := wire.TransportHeaderLen + padded + wire.TagSize
-	// One allocation for the whole packet: the header, the padded plaintext, the
+	// One buffer for the whole packet: the header, the padded plaintext, the
 	// tag, and a 12-octet nonce scratch at the tail. The plaintext is laid down
 	// in place and sealed over itself, so padding costs no separate buffer, and
 	// building the nonce in the tail keeps it from escaping through the AEAD's
 	// []byte parameter — Seal needs no shared scratch and stays safe to call
 	// concurrently with keepalives.
-	buf := make([]byte, msgLen+nonceLen)
+	start := len(dst)
+	dst = slices.Grow(dst, msgLen+nonceLen)
+	buf := dst[start : start+msgLen+nonceLen]
 	out := buf[:wire.TransportHeaderLen]
 	if err := wire.PutTransportHeader(out, s.remote, counter); err != nil {
 		return nil, err
 	}
-	// Copy the inner packet into the plaintext region; the bytes past it up to the
-	// 16-octet boundary stay zero from make — that is exactly pad's zero fill.
+	// Copy the inner packet into the plaintext region, and zero the rest up to
+	// the 16-octet boundary -- pad's zero fill. Explicitly: a reused buffer
+	// still holds whatever was last built in it, and filler is zeros by the
+	// protocol's definition, not by what the buffer happened to contain.
 	plaintext := buf[wire.TransportHeaderLen : wire.TransportHeaderLen+padded]
-	copy(plaintext, inner)
-	nonce := buf[msgLen:] // 12 octets; the leading four are already zero
+	clear(plaintext[copy(plaintext, inner):])
+	nonce := buf[msgLen:]
+	clear(nonce[:4])
 	binary.LittleEndian.PutUint64(nonce[4:], counter)
 	// Additional data is empty for transport packets; only the payload is
 	// authenticated (the header's integrity does not matter — a tampered
 	// counter simply decrypts to garbage under the wrong nonce and fails). Seal
 	// writes the ciphertext back over the plaintext it just read (exact overlap,
 	// which the AEAD permits).
-	return s.send.Seal(out, nonce, plaintext, nil), nil
+	sealed := s.send.Seal(out, nonce, plaintext, nil)
+	return dst[:start+len(sealed)], nil
 }
 
 // Open decrypts a type-4 transport message into its inner IP packet, checking

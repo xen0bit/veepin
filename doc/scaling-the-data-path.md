@@ -266,6 +266,58 @@ Crypto is 31% flat (`gcmAesEnc` + `gcmAesDec`) with the syscalls absent. In a
 deployment it is a smaller share still, which is the same conclusion from the
 other side: the cipher is not what to fix.
 
+## Taken: the allocation, the lock, the clock and the walk
+
+All four of the things above are done, and the measurement Option 2 was gated
+on has moved again.
+
+- **The per-packet allocation is gone in both directions** for every ESP
+  tunnel (IKEv2, Cisco, GlobalProtect, Pulse, and the L2TP and probe paths that
+  share `esp.SA`) and for WireGuard. Inbound, `esp.SA.Decapsulate` opens in
+  place, as WireGuard's `transport.Session.Open` always did: every read loop
+  already owned its datagram until the pump returned, and said so. Outbound,
+  `dataplane.AppendTunnel` lets a tunnel build its datagram in a buffer the
+  pump keeps -- one for the packet-at-a-time path, one per slot of a GSO burst
+  -- so `Sender` is now documented not to keep `pkt` past the call, which every
+  sender in the tree already honoured. A tunnel without the capability is sent
+  exactly as before. The CBC suite came along: its block modes are kept and
+  re-IV'd, and its MAC scratch had been escaping to the heap twice per packet.
+- **The lock is gone.** The demux map and the route trie are one immutable
+  snapshot behind an atomic pointer (`pump.go`'s `view`); writers copy and
+  publish, and the trie is persistent so that a published one is never written.
+  That is hazard 3 below, closed.
+- **The clock is read once per batch,** and **the trie walk reads the address
+  once** rather than per bit.
+- **Each inbound packet is demuxed once.** The aggregating-tunnel check used to
+  demux and look up every packet before the ordinary path did both again.
+
+Same machine, same benchmarks:
+
+| `BenchmarkPump*`, `-cpu 1` | before | after | allocs |
+|---|---|---|---|
+| Inbound 64 B | 245 ns | 188 ns | 1 → 0 |
+| Inbound 1400 B | 628 ns | 408 ns | 1 → 0 |
+| Outbound 64 B | 326 ns | 235 ns | 1 → 0 |
+| Outbound 1400 B | 735 ns | 482 ns | 1 → 0 |
+
+The inbound figures now include a 1400-byte copy per packet, because the
+benchmark has to hand the pump a fresh ciphertext each time it opens one in
+place -- the stand-in for the kernel's copy into a read buffer.
+
+And the result that mattered, `BenchmarkESPDecapParallel` with GC on:
+
+| threads | 1 | 2 | 4 | 8 | 16 | 32 |
+|---|---|---|---|---|---|---|
+| before | 2.7 GB/s | — | — | 5.9 | 6.5 | 4.3 *(regresses)* |
+| after | 4.1 GB/s | 8.2 | 16.5 | 30.9 | 56.8 | **87.8** |
+
+Linear, and past what `GOGC=off` reached before (24.1 GB/s), since that only
+stopped the collector; this stops the garbage. **So Option 2 is now worth what
+it costs**, which it was not: the per-SA work it would parallelise scales with
+cores. It is still unstarted, and still not urgent -- one core per direction is
+now around 25 Gbit/s of AES-GCM plumbing with the syscalls removed -- but the
+measured reason it was gated on no longer holds.
+
 ## Option 2 (if still CPU-bound): parallelize, with per-tunnel affinity
 
 If profiling shows the work is genuinely CPU-bound after batching — the busy
@@ -318,15 +370,19 @@ slowdowns:
 2. **Outbound ESP sequence numbers are a per-SA counter.** `Encapsulate` assigns
    the next anti-replay sequence number. Two workers encapsulating for the same SA
    assign duplicates and the peer's replay window drops one — this is the outbound
-   wrinkle above. Fixed by the hand-off, or an atomic counter. (Seal itself is
-   already concurrency-safe: the nonce is built in the output buffer's own tail,
-   no shared scratch.)
+   wrinkle above. Fixed by the hand-off, or an atomic counter. Note that ESP's
+   seal is *not* otherwise concurrency-safe, whatever an earlier version of this
+   note said: `espAEAD` builds each nonce in one reused buffer on the crypter, and
+   `espCBC` keeps its block mode and MAC scratch there too, all "single goroutine
+   per direction". (WireGuard's seal is the one that builds its nonce in the
+   output buffer's tail.) The pump's output buffers are the same shape: one per
+   TUN reader.
 
-3. **The pump's `byKey`/`routes` maps are `RWMutex`-guarded.** One reader holds the
-   `RLock` at a time today; N readers taking it per packet is read-mostly but the
-   lock traffic is real. Swap an immutable snapshot on `AddTunnel`/`RemoveTunnel`
-   (RCU-style) to remove per-packet locking entirely — a pure win, worth doing
-   before the reader count is raised.
+3. **The pump's `byKey`/`routes` maps were `RWMutex`-guarded.** *(Done.)* They
+   are now an immutable snapshot swapped on `AddTunnel`/`RemoveTunnel`, so the
+   packet path takes no lock and N readers cost what one does. What remains for
+   Option 2 is per-*reader* scratch: `multiScratch`, the GRO table, the shaper and
+   the output buffers each belong to one goroutine, and N readers need N of each.
 
 4. **Reordering within a flow.** Flow/tunnel-sharded workers keep a single
    5-tuple in order; anything that round-robins packets reintroduces reordering
@@ -343,12 +399,11 @@ slowdowns:
    `BatchConn` in every single-socket read loop, measured above. Egress:
    `OpenTUNGSO` + userspace TSO + `SetBatchSender` flush in the pump
    protocols. Inbound TUN writes: GRO coalescing via `HandleInboundBatch`.
-3. **Lock-free pump map** (hazard 3). Pure win, testable in isolation, de-risks
-   Option 2.
-4. **Remove the per-packet output allocation** (buffer reuse through
-   `Encapsulate`/`Decapsulate`). The measurement above puts this *before*
-   Option 2 rather than after it: until it lands, parallelism buys 2.4×, and
-   after it the same benchmark says 8.8× is available.
+3. **Lock-free pump map** (hazard 3) — *done.*
+4. **Remove the per-packet output allocation** — *done* for ESP and WireGuard,
+   through in-place `Decapsulate` and `AppendTunnel`. Parallel decap went from a
+   2.4× plateau that regressed to 21× at 32 threads. OpenVPN, Nebula and the toy
+   protocol still allocate per packet: the same two changes apply to each.
 5. **Option 2 — per-tunnel-affinity workers**: shared `SO_REUSEPORT` source
    inbound, multi-queue TUN with hand-off outbound. Guard with the interop matrix
    plus a new multi-reader stress test.

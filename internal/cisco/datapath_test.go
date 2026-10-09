@@ -71,12 +71,15 @@ func BenchmarkDecapsulate(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
+			// Each round opens a copy: the SA decrypts in place.
+			work := make([]byte, len(pkt))
 			b.SetBytes(int64(size))
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
+				copy(work, pkt)
 				t.sa.ResetReplayWindow()
-				if _, err := t.Decapsulate(pkt); err != nil {
+				if _, err := t.Decapsulate(work); err != nil {
 					b.Fatal(err)
 				}
 			}
@@ -129,19 +132,34 @@ func TestDataPathAllocations(t *testing.T) {
 		t.Errorf("Tunnel.Encapsulate allocates %.0f times against the SA's %.0f", wrapped, bare)
 	}
 
+	// The append form, into a buffer with room, is the one the pump uses.
+	dst := make([]byte, 0, 2048)
+	if n := testing.AllocsPerRun(200, func() {
+		if _, err := tun.AppendEncapsulated(dst, pkt, 0); err != nil {
+			t.Fatal(err)
+		}
+	}); n > 0 {
+		t.Errorf("Tunnel.AppendEncapsulated allocates %.0f times, want 0", n)
+	}
+
+	// Each open is of a fresh copy: the SA decrypts in place, so a packet can
+	// be opened only once.
 	espPkt, err = tun.Encapsulate(pkt)
 	if err != nil {
 		t.Fatal(err)
 	}
+	work := make([]byte, len(espPkt))
 	bare = testing.AllocsPerRun(200, func() {
+		copy(work, espPkt)
 		tun.sa.ResetReplayWindow()
-		if _, _, derr := tun.sa.Decapsulate(espPkt); derr != nil {
+		if _, _, derr := tun.sa.Decapsulate(work); derr != nil {
 			t.Fatal(derr)
 		}
 	})
 	wrapped = testing.AllocsPerRun(200, func() {
+		copy(work, espPkt)
 		tun.sa.ResetReplayWindow()
-		if _, derr := tun.Decapsulate(espPkt); derr != nil {
+		if _, derr := tun.Decapsulate(work); derr != nil {
 			t.Fatal(derr)
 		}
 	})

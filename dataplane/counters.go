@@ -22,14 +22,12 @@ import (
 // already doing -- not a keyed map consulted per packet, which is exactly how
 // counting undoes an allocation-free path.
 //
-//   - Inbound is free. decapInbound already resolves the demux key through
-//     p.byKey, so holding the counters in that map's value costs nothing beyond
-//     the lookup that was there.
-//   - Outbound pays one pointer-keyed map read, inside the RLock it already
-//     takes. The route trie stores a bare Tunnel and threading counters through
-//     it would ripple into the trie's own tests for no gain: the outbound path
-//     allocates in Encapsulate regardless, so this read is not on the path the
-//     AllocsPerRun guards pin.
+//   - Both directions are free. The inbound demux map and the outbound route
+//     trie each hold a bound -- the tunnel and its counters together -- so the
+//     lookup a packet already does finds its counters too. Outbound used to pay
+//     a second, pointer-keyed map read under the lock for them; the lock-free
+//     snapshot (pump.go's view) was the occasion to thread them through the
+//     trie instead.
 //
 // Both are atomics, so a reader (the management API) never blocks the data path
 // and the data path never blocks on a reader.
@@ -57,14 +55,15 @@ type TunnelCounters struct {
 	lastSeen atomic.Int64
 }
 
-// countRx records an authenticated inbound packet of n inner bytes.
-func (c *TunnelCounters) countRx(n int) {
+// countRx records an authenticated inbound packet of n inner bytes, seen at
+// now (unix nanos). The caller reads the clock once for a whole batch.
+func (c *TunnelCounters) countRx(n int, now int64) {
 	if c == nil {
 		return
 	}
 	c.rxPackets.Add(1)
 	c.rxBytes.Add(uint64(n))
-	c.lastSeen.Store(time.Now().UnixNano())
+	c.lastSeen.Store(now)
 }
 
 // countTx records an outbound packet of n inner bytes.

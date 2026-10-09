@@ -57,6 +57,9 @@ const (
 	OptServerMTU        = "mtu"
 	OptServerTUNName    = "tun"
 	OptServerShape      = "shape"
+	// The cookie reply is H3 and S3 on an AmneziaWG wire, but the mechanism is
+	// WireGuard's unchanged, and so is the option that tunes it.
+	OptServerCookieThreshold = "cookie-threshold"
 
 	OptServerPeerPublicKey    = "peer-public-key"
 	OptServerPeerPresharedKey = "peer-preshared-key"
@@ -240,6 +243,7 @@ func init() {
 		// in the panel would split on the commas inside it.
 		{Key: OptServerPeers, Kind: client.OptStr, Help: "additional peers as a JSON array (managed by client-config generation)"},
 		client.ShapeOpt(OptServerShape, "downstream"),
+		{Key: OptServerCookieThreshold, Kind: client.OptInt, Default: "128", Help: "handshake initiations per second before the server is under load and demands a cookie (-1 = always)"},
 		{Key: OptTypeInit, Kind: client.OptInt, Help: "H1: message type replacing handshake initiation (0 = stock 1)"},
 		{Key: OptTypeResp, Kind: client.OptInt, Help: "H2: message type replacing handshake response (0 = stock 2)"},
 		{Key: OptTypeCookie, Kind: client.OptInt, Help: "H3: message type replacing cookie reply (0 = stock 3)"},

@@ -83,7 +83,9 @@ func (r *Responder) Consume(pkt []byte) (peerStatic [KeySize]byte, timestamp [wi
 	}
 
 	// mac1 first: reject anything not aimed at our static key before doing any
-	// Diffie-Hellman. mac2 (the cookie) is not checked — see the package doc.
+	// Diffie-Hellman. mac2 is the caller's to check, with a CookieChecker, and
+	// only under load: it depends on the source address and on whether the
+	// server is busy, neither of which a Responder knows.
 	over1, _, ok := wire.MACRegions(pkt)
 	if !ok {
 		return peerStatic, timestamp, wire.ErrMalformed
@@ -170,7 +172,9 @@ func (r *Responder) Consume(pkt []byte) (peerStatic [KeySize]byte, timestamp [wi
 // Consume.
 //
 // The returned message's mac1 is stamped for the peer's static key; mac2 is left
-// zero (no cookies).
+// zero. A non-zero one would need a cookie the *initiator* had sent us, which it
+// does only when it is itself under load and refusing responses -- the case
+// this responder does not handle; see the package README's caveats.
 func (r *Responder) Response(psk [KeySize]byte) ([]byte, *Keypair, error) {
 	if !r.consumed {
 		return nil, nil, errors.New("noise: response before initiation was consumed")

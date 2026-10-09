@@ -1,115 +1,12 @@
 package wireguard
 
 import (
-	"context"
-	"net"
+	"bytes"
+	"encoding/base64"
 	"os"
 	"path/filepath"
-	"sync/atomic"
 	"testing"
-	"time"
-
-	"github.com/xen0bit/veepin/internal/vlog"
-	"github.com/xen0bit/veepin/internal/wireguard/noise"
-	"github.com/xen0bit/veepin/internal/wireguard/wire"
 )
-
-// testNoiseCfg is a self-consistent handshake config: a real keypair so
-// NewInitiator succeeds, which is all handshake() needs to send an initiation.
-func testNoiseCfg(t *testing.T) noise.Config {
-	t.Helper()
-	var priv [32]byte
-	for i := range priv {
-		priv[i] = byte(i + 3)
-	}
-	pub, err := noise.PublicKey(priv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return noise.Config{LocalStatic: priv, RemoteStatic: pub}
-}
-
-// udpResponder starts a UDP server on loopback that runs handle for each
-// datagram, returning the reply (or nil to stay silent). It reports the number
-// of datagrams received, so a test can assert the initiation was retransmitted.
-func udpResponder(t *testing.T, handle func(req []byte) []byte) (addr *net.UDPAddr, received *atomic.Int32) {
-	t.Helper()
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { conn.Close() })
-	received = &atomic.Int32{}
-	go func() {
-		buf := make([]byte, 65535)
-		for {
-			n, from, rerr := conn.ReadFromUDP(buf)
-			if rerr != nil {
-				return
-			}
-			received.Add(1)
-			if reply := handle(append([]byte(nil), buf[:n]...)); reply != nil {
-				_, _ = conn.WriteToUDP(reply, from)
-			}
-		}
-	}()
-	return conn.LocalAddr().(*net.UDPAddr), received
-}
-
-// TestHandshakeTimesOutOnSilence checks that a silent peer does not hang the
-// dial: the context deadline shrinks each read, and an expired context ends the
-// loop promptly rather than after the full attempt budget.
-func TestHandshakeTimesOutOnSilence(t *testing.T) {
-	addr, got := udpResponder(t, func([]byte) []byte { return nil })
-	conn, err := net.DialUDP("udp", nil, addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-
-	start := time.Now()
-	_, err = handshake(ctx, conn, testNoiseCfg(t), discardLogger(), ObfuscationConfig{})
-	if err == nil {
-		t.Fatal("silent peer produced no error")
-	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Errorf("handshake took %v; should give up when the context expires", elapsed)
-	}
-	if got.Load() == 0 {
-		t.Error("no initiation reached the peer")
-	}
-}
-
-// TestHandshakeRetransmitsPastJunk checks that an unparseable reply is discarded
-// and the initiation retransmitted, rather than the reply being mistaken for a
-// response.
-func TestHandshakeRetransmitsPastJunk(t *testing.T) {
-	// Reply to every initiation with a wrong-length datagram: not a valid
-	// response, so Consume rejects it and the loop tries again.
-	addr, got := udpResponder(t, func([]byte) []byte {
-		return make([]byte, wire.SizeHandshakeResponse-1)
-	})
-	conn, err := net.DialUDP("udp", nil, addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-
-	if _, err := handshake(ctx, conn, testNoiseCfg(t), discardLogger(), ObfuscationConfig{}); err == nil {
-		t.Fatal("junk replies produced no error")
-	}
-	if got.Load() < 2 {
-		t.Errorf("received %d initiations; junk reply should have triggered a retransmit", got.Load())
-	}
-}
-
-func discardLogger() *vlog.Logger { return vlog.Discard() }
 
 // TestParseOptionsFromFile checks the registry entry point: a wg-quick file
 // named by OptConfig is loaded, and inline options override it.
@@ -224,5 +121,37 @@ func TestTheClientRefusesTwoAddressesOfOneFamily(t *testing.T) {
 		if _, err := c.resolve(); err == nil {
 			t.Errorf("%v was accepted", addrs)
 		}
+	}
+}
+
+// TestTheListenPortReachesTheEngine: -listen-port, and a client config's
+// ListenPort line, exist to pin the source port so a NAT pinhole survives a
+// reconnect. Both were parsed and then dropped on the way to the socket, which
+// bound an ephemeral port whatever was asked -- accepted and ignored, the
+// failure this tree's flag guards exist to prevent but cannot see past the
+// option map. The engine's half, that the port is bound, is pinned in
+// internal/wireguard.
+func TestTheListenPortReachesTheEngine(t *testing.T) {
+	cfg := &Config{}
+	if err := cfg.applyOverrides(map[string]string{
+		OptPrivateKey: base64.StdEncoding.EncodeToString(make([]byte, 32)),
+		OptPublicKey:  base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{9}, 32)),
+		OptEndpoint:   "127.0.0.1:51820",
+		OptAddress:    "10.0.0.2/32",
+		OptAllowedIPs: "0.0.0.0/0",
+		OptListenPort: "40123",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := cfg.resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.listenPort != 40123 {
+		t.Fatalf("resolve kept listen port %d, want 40123", r.listenPort)
+	}
+	cfg.ListenPort = 70000
+	if _, err := cfg.resolve(); err == nil {
+		t.Fatal("a listen port out of range was accepted")
 	}
 }

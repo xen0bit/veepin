@@ -66,10 +66,11 @@ func TestClientRekeyDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &session{
+	s := &Session{
 		conn:     conn,
 		logger:   discardLogger(),
 		noiseCfg: noise.Config{LocalStatic: clientPriv, RemoteStatic: serverPub},
+		cookies:  &cookieJar{},
 		done:     make(chan struct{}),
 		stop:     make(chan struct{}),
 	}

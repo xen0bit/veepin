@@ -163,9 +163,12 @@ func (s *Server) recvNATT() {
 				s.dispatchIKE(msg, addr, true)
 				continue
 			}
-			if p := s.peerBySPI(pkt); p != nil {
+			if p := s.peerBySPI(pkt); p != nil && p.handleESP(pkt) {
+				// After, never before: the SPI that found this peer is
+				// cleartext, so only a packet that opened under its SA says
+				// where the peer really is. Noting the source first let one
+				// forged datagram point the client's ESP at the forger.
 				p.noteAddr(addr)
-				p.handleESP(pkt)
 			}
 		}
 		if err != nil {
@@ -186,8 +189,23 @@ func (s *Server) dispatchIKE(msg []byte, addr *net.UDPAddr, natt bool) {
 		// Refused by admission control; already logged.
 		return
 	}
-	p.noteIKEAddr(addr, natt)
-	p.ike.HandleInbound(msg)
+	if !p.established() {
+		// Mid-handshake, replies go where the last message came from, as
+		// they always have: there is no settled peer to redirect yet.
+		p.noteIKEAddr(addr, natt)
+		p.ike.HandleInbound(msg)
+		return
+	}
+	// Established, the NAT-T address is where ESP goes, and the initiator
+	// cookie that routed this message here is cleartext. So the address moves
+	// only for a message that verified under the IKE SA. A DPD acknowledgement
+	// for a peer that has just rebound goes to its old address and is lost;
+	// its next one arrives from the new address and is answered there, which
+	// is a cheaper failure than letting any datagram with a known cookie
+	// redirect the tunnel.
+	if p.ike.HandleInbound(msg) {
+		p.noteIKEAddr(addr, natt)
+	}
 }
 
 // peerFor returns the peer owning an initiator cookie, creating an IKE responder
@@ -395,20 +413,35 @@ func (p *serverPeer) sendIKE(msg []byte, natt bool) error {
 	return err
 }
 
-func (p *serverPeer) handleESP(pkt []byte) {
+// established reports whether phase 2 has given this peer an ESP SA, which is
+// the point from which its addresses carry traffic worth stealing.
+func (p *serverPeer) established() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.sa != nil
+}
+
+// handleESP opens one inbound ESP packet and hands its L2TP payload on. It
+// reports whether the packet authenticated under the peer's SA, so the caller
+// can follow the peer's address on that and nothing weaker.
+func (p *serverPeer) handleESP(pkt []byte) (authenticated bool) {
 	p.mu.Lock()
 	sa, tun := p.sa, p.tunnel
 	p.mu.Unlock()
 	if sa == nil || tun == nil {
-		return
+		return false
 	}
 	inner, nh, err := sa.Decapsulate(pkt)
-	if err != nil || nh != ipProtoUDP {
-		return
+	if err != nil {
+		return false
+	}
+	if nh != ipProtoUDP {
+		return true // authentic, just not L2TP: nothing to deliver
 	}
 	if l2, ok := unwrapUDP(inner); ok {
 		tun.HandleInbound(l2)
 	}
+	return true
 }
 
 // --- ikev1.Handler ---

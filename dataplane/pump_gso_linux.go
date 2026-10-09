@@ -20,10 +20,7 @@ func (p *Pump) runVnet() {
 	for {
 		n, err := p.tun.Read(buf)
 		if err != nil {
-			p.mu.RLock()
-			closing := p.closing
-			p.mu.RUnlock()
-			if closing {
+			if p.closing.Load() {
 				return
 			}
 			if p.log != nil {
@@ -74,13 +71,8 @@ func (p *Pump) sendSegments(segs [][]byte, outs [][]byte) [][]byte {
 		p.drops[DropNotIP].Add(1)
 		return outs[:0]
 	}
-	p.mu.RLock()
-	t := p.routes.lookup(dst)
-	var c *TunnelCounters
-	if t != nil {
-		c = p.stats[t]
-	}
-	p.mu.RUnlock()
+	b := p.tables.Load().routes.lookup(dst)
+	t, c := b.t, b.c
 	if t == nil {
 		p.drops[DropNoRoute].Add(1)
 		return outs[:0] // no tunnel carries this destination
@@ -100,16 +92,37 @@ func (p *Pump) sendSegments(segs [][]byte, outs [][]byte) [][]byte {
 		return outs[:0]
 	}
 
+	// A paced tunnel sends on its own schedule, so a super-frame is handed to
+	// it segment by segment exactly as routeOutbound hands it single packets.
+	// This branch was missing: on a GSO TUN -- which every veepin client
+	// negotiates -- bulk TCP went straight to the wire through the tunnel's
+	// Encapsulate, beside the pacer rather than through it, so a
+	// constant-rate IP-TFS tunnel sent its heaviest traffic at whatever rate
+	// that traffic arrived. That is the very signal constant-rate transmission
+	// exists to remove, leaking on exactly the flows that most reveal it.
+	if pt := b.paced; pt != nil {
+		for _, seg := range segs {
+			if !pt.Enqueue(seg) {
+				p.drops[DropPacerFull].Add(1)
+				continue
+			}
+			c.countTx(len(seg))
+		}
+		return outs[:0]
+	}
+
 	outs = outs[:0]
-	for _, seg := range segs {
-		// Encapsulate returns a freshly owned buffer (the data paths' one
-		// seal allocation), so the burst can hold every output at once.
+	for i, seg := range segs {
+		// Each segment gets its own slot -- the burst holds every output at
+		// once until the flush, so one shared buffer would send the last
+		// segment N times. Encapsulate's fresh buffers needed no slots; an
+		// AppendTunnel's reused ones do.
 		//
 		// Shaping is naturally inert here: the kernel only hands up a TSO
 		// super-frame for bulk transfer, and its segments already arrive at
 		// the MTU. That is the right outcome — a super-frame is never a
 		// handshake, so there is nothing for the shaper to hide.
-		out, err := p.encap(t, seg, mtu)
+		out, err := p.encap(b, seg, mtu, p.burstBuf(i))
 		if err != nil {
 			p.drops[DropEncapFailed].Add(1)
 			if p.log != nil {

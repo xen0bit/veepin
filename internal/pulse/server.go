@@ -401,12 +401,15 @@ func (s *Server) handleESP(pkt []byte, from *net.UDPAddr) {
 	if peer == nil {
 		return
 	}
-	peer.noteAddr(from)
-
 	inner, nh, err := peer.sa.Decapsulate(pkt)
 	if err != nil {
 		return
 	}
+	// After, never before: the SPI that found this peer is cleartext, so only a
+	// packet that opened under its SA says where the client really is. Noting
+	// the source first let one forged datagram point the client's ESP at the
+	// forger.
+	peer.noteAddr(from)
 	// The ESP probe is a single zero octet, and the client considers the path
 	// live when it gets that same octet back. It is not an IP packet and must
 	// not be routed — echoing it is the whole protocol.

@@ -123,6 +123,11 @@ func BenchmarkESPDecapsulate(b *testing.B) {
 					}
 					encs[i] = e
 				}
+				// Decapsulate opens in place, so each round opens a copy and the
+				// batch stays intact for the next lap. The copy is in the
+				// measurement, as the kernel's copy into a read buffer is in a
+				// real receive.
+				work := make([]byte, len(encs[0]))
 				b.SetBytes(int64(size))
 				b.ReportAllocs()
 				b.ResetTimer()
@@ -132,7 +137,8 @@ func BenchmarkESPDecapsulate(b *testing.B) {
 					if i%batch == 0 {
 						recv.ResetReplayWindow()
 					}
-					if _, _, err := recv.Decapsulate(encs[i%batch]); err != nil {
+					copy(work, encs[i%batch])
+					if _, _, err := recv.Decapsulate(work); err != nil {
 						b.Fatal(err)
 					}
 				}
@@ -189,12 +195,15 @@ func BenchmarkESPDecapParallel(b *testing.B) {
 			}
 			pkts[i] = e
 		}
+		// Each round opens a copy: Decapsulate decrypts in place.
+		work := make([]byte, len(pkts[0]))
 		i := 0
 		for pb.Next() {
 			if i%batch == 0 {
 				recv.ResetReplayWindow()
 			}
-			if _, _, err := recv.Decapsulate(pkts[i%batch]); err != nil {
+			copy(work, pkts[i%batch])
+			if _, _, err := recv.Decapsulate(work); err != nil {
 				b.Fatal(err)
 			}
 			i++

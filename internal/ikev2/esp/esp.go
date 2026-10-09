@@ -8,6 +8,7 @@ import (
 	"crypto/subtle"
 	"encoding/binary"
 	"errors"
+	"slices"
 	"sync"
 
 	"github.com/xen0bit/veepin/internal/cryptoutil"
@@ -118,7 +119,28 @@ func (s *SA) EncapsulatePadded(inner []byte, nextHeader uint8, minInner int) ([]
 	return s.encapsulate(inner, nextHeader, minInner)
 }
 
+// AppendEncapsulated is EncapsulatePadded appending the ESP packet to dst
+// rather than to a fresh buffer; minInner of zero means unpadded. A caller that
+// reuses dst across packets -- the pump, through dataplane.AppendTunnel --
+// encapsulates without allocating, which is the outbound half of the
+// allocation the scaling profile found capping multi-core throughput.
+func (s *SA) AppendEncapsulated(dst, inner []byte, nextHeader uint8, minInner int) ([]byte, error) {
+	return s.appendEncapsulated(dst, inner, nextHeader, minInner)
+}
+
 func (s *SA) encapsulate(inner []byte, nextHeader uint8, minInner int) ([]byte, error) {
+	if err := s.prepare(); err != nil {
+		return nil, err
+	}
+	// Sized exactly, so the one allocation Encapsulate makes is the packet.
+	payloadLen := max(len(inner), minInner)
+	block := max(s.outCrypter.BlockLen(), 1)
+	padLen := (block - (payloadLen+2)%block) % block
+	dst := make([]byte, 0, espHeaderLen+s.outCrypter.Overhead()+payloadLen+padLen+2)
+	return s.appendEncapsulated(dst, inner, nextHeader, minInner)
+}
+
+func (s *SA) appendEncapsulated(dst, inner []byte, nextHeader uint8, minInner int) ([]byte, error) {
 	if err := s.prepare(); err != nil {
 		return nil, err
 	}
@@ -139,9 +161,11 @@ func (s *SA) encapsulate(inner []byte, nextHeader uint8, minInner int) ([]byte, 
 	// The ESP header is written into the (heap) output buffer and that prefix is
 	// reused as the AAD, so no separate stack array escapes through the AEAD
 	// interface (that escape was the second per-packet allocation on this path).
-	out := make([]byte, espHeaderLen, espHeaderLen+s.outCrypter.Overhead()+ptLen)
-	binary.BigEndian.PutUint32(out[0:4], s.SPIOut)
-	binary.BigEndian.PutUint32(out[4:8], seq)
+	start := len(dst)
+	out := slices.Grow(dst, espHeaderLen+s.outCrypter.Overhead()+ptLen)[:start+espHeaderLen]
+	hdr := out[start:]
+	binary.BigEndian.PutUint32(hdr[0:4], s.SPIOut)
+	binary.BigEndian.PutUint32(hdr[4:8], seq)
 
 	// Build plaintext in a pooled scratch buffer to avoid a per-packet alloc.
 	ptp := ptPool.Get().(*[]byte)
@@ -162,7 +186,7 @@ func (s *SA) encapsulate(inner []byte, nextHeader uint8, minInner int) ([]byte, 
 	pt[ptLen-1] = nextHeader
 
 	// AAD covers SPI|Seq (the ESP header). Seal appends iv||ct||icv to out.
-	result, err := s.outCrypter.Seal(out, out[:espHeaderLen], pt)
+	result, err := s.outCrypter.Seal(out, hdr, pt)
 	*ptp = pt[:0]
 	ptPool.Put(ptp)
 	return result, err
@@ -173,6 +197,13 @@ var ptPool = sync.Pool{New: func() any { b := make([]byte, 0, 2048); return &b }
 
 // Decapsulate verifies and decrypts an ESP packet, returning the inner IP
 // payload and the inner next-header value.
+//
+// It decrypts in place: inner is a subslice of pkt, and pkt is overwritten
+// whether or not it authenticates. Every inbound path here already owns its
+// datagram for exactly that long -- a read buffer the pump finishes with
+// before the next read, or a copy -- and opening into a fresh buffer instead
+// was the one allocation the inbound data path made. A caller that needs the
+// ciphertext afterwards must copy it first.
 func (s *SA) Decapsulate(pkt []byte) (inner []byte, nextHeader uint8, err error) {
 	if err := s.prepare(); err != nil {
 		return nil, 0, err
@@ -189,18 +220,21 @@ func (s *SA) Decapsulate(pkt []byte) (inner []byte, nextHeader uint8, err error)
 	hdr := pkt[:espHeaderLen]
 	body := pkt[espHeaderLen:]
 
-	// Decrypt appending into a fresh buffer sized to the ciphertext.
-	plaintext, err := s.inCrypter.Open(make([]byte, 0, len(body)), hdr, body)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	// Anti-replay check only after integrity passes (RFC 4303 3.4.3).
+	// Anti-replay before integrity, but only as a check: a sequence number the
+	// window has already accepted cannot be new, so there is no point
+	// decrypting it -- and, decrypting in place, doing so would destroy a
+	// datagram for nothing. The window is advanced only after integrity passes
+	// (RFC 4303 §3.4.3), so a forged packet cannot move it.
 	s.mu.Lock()
 	replayed := s.window.check(seq)
 	s.mu.Unlock()
 	if replayed {
 		return nil, 0, errReplayed
+	}
+
+	plaintext, err := s.inCrypter.OpenInPlace(hdr, body)
+	if err != nil {
+		return nil, 0, err
 	}
 
 	// Strip trailer: last octet next-header, previous octet pad length.
@@ -219,7 +253,14 @@ func (s *SA) Decapsulate(pkt []byte) (inner []byte, nextHeader uint8, err error)
 	// header does. Stripping it therefore belongs to whoever knows what
 	// nextHeader means, not here; the ike package's espTunnel does it.
 
+	// Checked again under the same lock that advances it: two openers racing
+	// on one SA (which the data path does not do, but nothing here forbids)
+	// must not both accept the same sequence number.
 	s.mu.Lock()
+	if s.window.check(seq) {
+		s.mu.Unlock()
+		return nil, 0, errReplayed
+	}
 	s.window.advance(seq)
 	s.mu.Unlock()
 	return inner, nextHeader, nil

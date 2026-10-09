@@ -22,10 +22,13 @@ package dataplane
 //     single noisy or hostile peer cannot deny service to everyone else.
 //
 // Neither is a substitute for a protocol's own anti-DoS mechanism where one is
-// specified — IKEv2's cookie exchange (RFC 7296 §2.6) makes the initiator prove
-// return routability before the responder does any expensive work, which is
-// strictly better because it costs the responder nothing. This is the floor
-// under every protocol, including those that have no such mechanism.
+// specified — IKEv2's cookie exchange (RFC 7296 §2.6) and WireGuard's cookie
+// reply (paper §5.4.7) both make the initiator prove return routability before
+// the responder does any expensive work, which is strictly better because it
+// costs the responder nothing. It also makes the per-source limit here
+// meaningful, since the source has then been proved rather than claimed. This
+// is the floor under every protocol, including those that have no such
+// mechanism.
 
 import (
 	"net"

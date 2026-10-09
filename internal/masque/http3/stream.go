@@ -95,5 +95,6 @@ func (rs *RequestStream) Read(p []byte) (int, error) {
 // Close closes the underlying stream in both directions.
 func (rs *RequestStream) Close() error { return rs.qs.Close() }
 
-// CloseWrite half-closes the send side, signalling no more capsules.
-func (rs *RequestStream) CloseWrite() { rs.qs.CloseWrite() }
+// CloseWrite half-closes the send side, signalling no more capsules. It fails
+// only for a stream that has no send side, which a request stream always has.
+func (rs *RequestStream) CloseWrite() error { return rs.qs.CloseWrite() }
