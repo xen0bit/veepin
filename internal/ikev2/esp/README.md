@@ -39,20 +39,31 @@ rather than a raw inner IP packet.
 
 - `SA` — one directional pair: `SPIOut`/`SPIIn`, `Out`/`In` `Transform`s.
   - `Encapsulate(inner, nextHeader) ([]byte, error)`
-  - `Decapsulate(pkt) (inner []byte, nextHeader uint8, error)`
+  - `AppendEncapsulated(dst, inner, nextHeader, minInner) ([]byte, error)` —
+    the same, appended to a caller's buffer; what `dataplane.AppendTunnel` uses.
+  - `Decapsulate(pkt) (inner []byte, nextHeader uint8, error)` — **opens in
+    place**: `inner` is a subslice of `pkt`, which is overwritten.
   - `ResetReplayWindow()` — for a rekey that restarts sequence numbers.
 - `Transform` — the per-direction keyed cipher (built via
   [`transform.ESPCrypter`](../transform)).
 
 ## Implementation notes & caveats
 
-- **This is the allocation-critical path.** `Encapsulate`/`Decapsulate` append
-  into caller buffers and both AES-GCM paths are **one allocation per packet**
-  (the returned buffer). `TestDataPathAllocationsGCM` guards this via
-  `AllocsPerRun`; don't regress it. Key traps: passing a stack array as AEAD AAD
-  or nonce escapes it to the heap (write the header into the output buffer and
-  reuse that prefix as AAD instead), and reject paths use **pre-allocated sentinel
-  errors** so a flood of bad datagrams allocates nothing.
+- **This is the allocation-critical path, and it allocates nothing.**
+  `Decapsulate` opens in place and `AppendEncapsulated` builds into the caller's
+  buffer, for every suite (CBC included); `Encapsulate` allocates exactly the
+  packet it returns. `TestDataPathAllocationsGCM`, its ChaCha20 twin and
+  `TestCBCOpensWithoutAllocating` guard this via `AllocsPerRun`; don't regress
+  it. The scaling profile found this one allocation, not the cipher, to be what
+  stopped decap throughput growing with cores (doc/scaling-the-data-path.md).
+  Key traps: passing a stack array as AEAD AAD, nonce or MAC output escapes it to
+  the heap (write the header into the output buffer and reuse that prefix as
+  AAD; keep scratch on the crypter), and reject paths use **pre-allocated
+  sentinel errors** so a flood of bad datagrams allocates nothing.
+- **A replay is refused before it is decrypted.** RFC 4303 §3.4.3's order: the
+  window is consulted first, integrity is verified, and only then does the
+  window advance. Opening in place makes the first step matter — decrypting a
+  replay would destroy the datagram for a verdict the header already gave.
 - **One `SA` is driven by one goroutine per direction** (matching the pump). The
   in-place open and reused nonce/scratch buffers assume this; concurrent opens on
   one direction are unsafe. Multi-client scaling is across SAs/cores

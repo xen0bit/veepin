@@ -224,6 +224,14 @@ func TestDataPathAllocations(t *testing.T) {
 	}); n > 1 {
 		t.Errorf("Seal allocates %.0f times per packet, want 1", n)
 	}
+	dst := make([]byte, 0, 2048)
+	if n := testing.AllocsPerRun(100, func() {
+		if _, err := a.AppendSeal(dst, inner, 0); err != nil {
+			t.Fatal(err)
+		}
+	}); n != 0 {
+		t.Errorf("AppendSeal into a buffer with room allocates %.0f times per packet, want 0", n)
+	}
 
 	// Pre-seal a batch with distinct counters so Open sees fresh packets, and give
 	// each run its own buffer since Open decrypts in place.
@@ -319,5 +327,59 @@ func TestSealPaddedLeavesKeepaliveEmpty(t *testing.T) {
 	}
 	if got != nil {
 		t.Errorf("keepalive opened to %d bytes, want nil", len(got))
+	}
+}
+
+// TestAReusedBufferLeaksNothingAsPadding. Seal could rely on make to zero its
+// padding; a buffer the pump reuses still holds the last message built in it.
+// Today that is ciphertext, already on the wire, because sealing happens in
+// place -- so nothing secret leaks, but only by that accident, and the protocol
+// says the filler is zeros. A caller that ever left plaintext in its buffer
+// would turn the accident into a disclosure. The decrypted filler must be zero
+// whatever the buffer held.
+func TestAReusedBufferLeaksNothingAsPadding(t *testing.T) {
+	a, b := pair(t)
+	dst := make([]byte, 0, 2048)
+	big := ipv4(1400)
+	for i := 20; i < len(big); i++ {
+		big[i] = 0xee
+	}
+	if _, err := a.AppendSeal(dst, big, 0); err != nil {
+		t.Fatal(err)
+	}
+	small := ipv4(41) // pads to 48
+	msg, err := a.AppendSeal(dst, small, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Open trims to the IP header's length, so read the padded plaintext
+	// directly: decrypt a copy and look past the packet.
+	cp := append([]byte(nil), msg...)
+	if _, err := b.Open(cp); err != nil {
+		t.Fatal(err)
+	}
+	filler := cp[16+len(small) : 16+48]
+	if !bytes.Equal(filler, make([]byte, len(filler))) {
+		t.Fatalf("the padding carried the previous packet's bytes: %x", filler)
+	}
+}
+
+// TestAppendSealKeepsWhatDstHeld: dst may already hold bytes the caller wants
+// kept, and a dst too small to hold the message must be grown, not overrun.
+func TestAppendSealKeepsWhatDstHeld(t *testing.T) {
+	a, b := pair(t)
+	for _, capacity := range []int{4, 2048} {
+		dst := append(make([]byte, 0, capacity), "keep"...)
+		out, err := a.AppendSeal(dst, ipv4(100), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(out[:4]) != "keep" {
+			t.Fatalf("cap %d: AppendSeal overwrote what dst held", capacity)
+		}
+		inner, err := b.Open(out[4:])
+		if err != nil || !bytes.Equal(inner, ipv4(100)) {
+			t.Fatalf("cap %d: the appended message does not open: %v", capacity, err)
+		}
 	}
 }

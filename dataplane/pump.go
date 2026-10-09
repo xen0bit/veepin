@@ -75,7 +75,31 @@ type MultiTunnel interface {
 
 // Sender writes an encapsulated datagram to a peer. Any protocol-specific
 // framing (IKEv2's non-ESP marker, for instance) is the sender's business.
+//
+// pkt is only valid for the duration of the call. An AppendTunnel's datagram
+// lives in a buffer the pump reuses for the next packet, so a sender that
+// queues it rather than writing or copying it before returning would send
+// whatever came after. Every sender in this tree writes synchronously or copies
+// into its own framing; the batch sender (SetBatchSender) is held to the same
+// rule for every packet in the burst.
 type Sender func(pkt []byte, to *net.UDPAddr)
+
+// AppendTunnel is an optional Tunnel capability: encapsulating into a buffer
+// the caller owns. It returns dst extended by the protected datagram for
+// ipPacket, padded to at least minInner octets of plaintext the way
+// PaddingTunnel's is (zero means unpadded).
+//
+// It exists because returning a fresh buffer per packet -- Encapsulate's
+// contract -- was the outbound half of the one allocation the data path made,
+// and the scaling profile found that allocation, not the cipher or the locks,
+// to be what stops throughput growing with cores. A tunnel that implements it
+// has its packets built in the pump's own reused buffers, and costs nothing
+// per packet; one that does not is sent exactly as before. The pump discovers
+// it at registration, as it does the other optional capabilities.
+type AppendTunnel interface {
+	Tunnel
+	AppendEncapsulated(dst, ipPacket []byte, minInner int) ([]byte, error)
+}
 
 // PacedTunnel is a Tunnel that transmits on its OWN schedule rather than on the
 // pump's. The pump hands it each outbound packet and does not send anything;
@@ -174,6 +198,14 @@ type Pump struct {
 	// Only the single inbound goroutine touches it, so it needs no lock.
 	multiScratch [][]byte
 
+	// outBuf and burst are where an AppendTunnel's datagrams are built: one
+	// buffer for the packet-at-a-time path, one per slot of a GSO burst. Like
+	// the shaper they belong to the single TUN-reader goroutine, and each is
+	// reused as soon as the send it was handed to returns -- which is why
+	// Sender may not keep pkt.
+	outBuf []byte
+	burst  [][]byte
+
 	// drops counts discarded packets by reason (counters.go). Indexed by
 	// DropReason, so the increment is an array offset rather than a map write:
 	// this sits on the drop path, which a flood of bad packets makes the
@@ -249,9 +281,11 @@ type bound struct {
 	t Tunnel
 	c *TunnelCounters
 
-	multi MultiTunnel // t, when it aggregates; see MultiTunnel
-	paced PacedTunnel // t, when it transmits on its own schedule
-	roam  peerRoamer  // t, when its peer's address can move
+	multi    MultiTunnel   // t, when it aggregates; see MultiTunnel
+	paced    PacedTunnel   // t, when it transmits on its own schedule
+	roam     peerRoamer    // t, when its peer's address can move
+	pad      PaddingTunnel // t, when it can pad for the shaper
+	appender AppendTunnel  // t, when it can encapsulate into the pump's buffer
 }
 
 // peerRoamer is a Tunnel whose return address follows its peer. The pump calls
@@ -264,6 +298,8 @@ func bind(t Tunnel, c *TunnelCounters) bound {
 	b.multi, _ = t.(MultiTunnel)
 	b.paced, _ = t.(PacedTunnel)
 	b.roam, _ = t.(peerRoamer)
+	b.pad, _ = t.(PaddingTunnel)
+	b.appender, _ = t.(AppendTunnel)
 	return b
 }
 
@@ -326,16 +362,36 @@ func (p *Pump) SetShaper(s *Shaper) {
 }
 
 // encap encapsulates one inner packet, padding it when the shaper asks for a
-// size and the tunnel can produce one. A tunnel that implements no padding, or
-// a shaper that wants none, takes the plain path with one type assertion of
-// overhead.
-func (p *Pump) encap(t Tunnel, pkt []byte, mtu int) ([]byte, error) {
-	if target := p.shaper.Target(pkt, mtu); target > 0 {
-		if pt, ok := t.(PaddingTunnel); ok {
-			return pt.EncapsulatePadded(pkt, target)
+// size and the tunnel can produce one. An AppendTunnel builds it in *buf,
+// which grows in place when it must and is then kept at its new size. A
+// tunnel that implements no padding, or a shaper that wants none, takes the
+// plain path.
+func (p *Pump) encap(b bound, pkt []byte, mtu int, buf *[]byte) ([]byte, error) {
+	target := p.shaper.Target(pkt, mtu)
+	if b.appender != nil {
+		out, err := b.appender.AppendEncapsulated((*buf)[:0], pkt, target)
+		if cap(out) > cap(*buf) {
+			*buf = out[:0]
 		}
+		return out, err
 	}
-	return t.Encapsulate(pkt)
+	if target > 0 && b.pad != nil {
+		return b.pad.EncapsulatePadded(pkt, target)
+	}
+	return b.t.Encapsulate(pkt)
+}
+
+// outScratch is the initial size of a pump-owned output buffer: an MTU-sized
+// datagram plus any protocol's overhead, which is what a segmented packet
+// becomes. A larger one grows the buffer once, and it stays grown.
+const outScratch = 2048
+
+// burstBuf returns the reusable output buffer for slot i of a GSO burst.
+func (p *Pump) burstBuf(i int) *[]byte {
+	for len(p.burst) <= i {
+		p.burst = append(p.burst, make([]byte, 0, outScratch))
+	}
+	return &p.burst[i]
 }
 
 // writeTUN writes one inner IP packet to the TUN, vnet-framed when the device
@@ -715,7 +771,10 @@ func (p *Pump) routeOutbound(pkt []byte) {
 
 	// Encapsulate copies the inner packet into its own plaintext buffer, so
 	// passing the read buffer slice directly is safe and avoids a copy.
-	out, err := p.encap(t, pkt, mtu)
+	if p.outBuf == nil {
+		p.outBuf = make([]byte, 0, outScratch)
+	}
+	out, err := p.encap(b, pkt, mtu, &p.outBuf)
 	if err != nil {
 		p.drops[DropEncapFailed].Add(1)
 		if p.log != nil {

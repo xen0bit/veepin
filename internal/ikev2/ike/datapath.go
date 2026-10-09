@@ -142,6 +142,16 @@ func (t *aggfragTunnel) EncapsulatePadded(ipPacket []byte, minInner int) ([]byte
 	return t.espSA.Encapsulate(payload, aggfrag.ESPNextHeader)
 }
 
+// AppendEncapsulated is EncapsulatePadded into the pump's buffer. It must be
+// defined here rather than inherited: the embedded espTunnel has one too, and
+// the promoted method would put a plain inner packet on an SA that negotiated
+// AGGFRAG, silently undoing the framing the whole type exists for.
+func (t *aggfragTunnel) AppendEncapsulated(dst, ipPacket []byte, minInner int) ([]byte, error) {
+	size := max(aggfrag.HeaderLen+len(ipPacket), minInner)
+	payload, _ := t.packer.Pack([][]byte{ipPacket}, size)
+	return t.espSA.AppendEncapsulated(dst, payload, aggfrag.ESPNextHeader, 0)
+}
+
 // DecapsulateMulti opens one ESP packet and returns every inner packet the
 // AGGFRAG payload inside it held, implementing dataplane.MultiTunnel. A peer
 // that aggregates -- strongSwan does -- puts several in each ESP packet, and
@@ -176,6 +186,12 @@ func (t *aggfragTunnel) DecapsulateMulti(espPkt []byte, out [][]byte) ([][]byte,
 // confidentiality padding, implementing dataplane.PaddingTunnel.
 func (t *espTunnel) EncapsulatePadded(ipPacket []byte, minInner int) ([]byte, error) {
 	return t.espSA.EncapsulatePadded(ipPacket, espNextHeader(ipPacket), minInner)
+}
+
+// AppendEncapsulated is EncapsulatePadded into the pump's buffer, implementing
+// dataplane.AppendTunnel.
+func (t *espTunnel) AppendEncapsulated(dst, ipPacket []byte, minInner int) ([]byte, error) {
+	return t.espSA.AppendEncapsulated(dst, ipPacket, espNextHeader(ipPacket), minInner)
 }
 
 // espNextHeader picks the ESP next-header for an inner packet from its own

@@ -93,15 +93,17 @@ func (p *Pump) sendSegments(segs [][]byte, outs [][]byte) [][]byte {
 	}
 
 	outs = outs[:0]
-	for _, seg := range segs {
-		// Encapsulate returns a freshly owned buffer (the data paths' one
-		// seal allocation), so the burst can hold every output at once.
+	for i, seg := range segs {
+		// Each segment gets its own slot -- the burst holds every output at
+		// once until the flush, so one shared buffer would send the last
+		// segment N times. Encapsulate's fresh buffers needed no slots; an
+		// AppendTunnel's reused ones do.
 		//
 		// Shaping is naturally inert here: the kernel only hands up a TSO
 		// super-frame for bulk transfer, and its segments already arrive at
 		// the MTU. That is the right outcome — a super-frame is never a
 		// handshake, so there is nothing for the shaper to hide.
-		out, err := p.encap(t, seg, mtu)
+		out, err := p.encap(b, seg, mtu, p.burstBuf(i))
 		if err != nil {
 			p.drops[DropEncapFailed].Add(1)
 			if p.log != nil {

@@ -5,8 +5,21 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/subtle"
+	"errors"
 	"fmt"
 	"hash"
+	"slices"
+)
+
+// Inbound reject sentinels. Open runs on every datagram that reaches an SA,
+// forged and replayed ones included, so its failures are pre-built: a flood of
+// bad packets must cost no allocation per packet.
+var (
+	errAEADShort    = errors.New("cryptoutil: AEAD payload too short")
+	errAEADOpen     = errors.New("cryptoutil: ESP AEAD authentication failed")
+	errCBCShort     = errors.New("cryptoutil: CBC payload too short")
+	errCBCIntegrity = errors.New("cryptoutil: ESP integrity check failed")
+	errCBCAlign     = errors.New("cryptoutil: CBC ciphertext not block-aligned")
 )
 
 // ESPCrypter is an allocation-conscious cipher for the ESP data path. Unlike
@@ -31,6 +44,11 @@ type ESPCrypter interface {
 	// Open verifies and decrypts ivCtIcv (authenticating aad), appending the
 	// recovered plaintext to dst and returning the extended slice.
 	Open(dst, aad, ivCtIcv []byte) ([]byte, error)
+	// OpenInPlace is Open with the plaintext written over the ciphertext: the
+	// result is a subslice of ivCtIcv, which is overwritten whether or not it
+	// authenticates. It is what lets the inbound data path decrypt without
+	// allocating, since the datagram's own buffer is the output.
+	OpenInPlace(aad, ivCtIcv []byte) ([]byte, error)
 }
 
 // NewAESGCMESPCrypter builds a prepared AES-GCM-16 ESP crypter. keyBits is the
@@ -132,14 +150,40 @@ func (g *espAEAD) Seal(dst, aad, plaintext []byte) ([]byte, error) {
 
 func (g *espAEAD) Open(dst, aad, ivCtIcv []byte) ([]byte, error) {
 	if len(ivCtIcv) < 8+16 {
-		return nil, fmt.Errorf("cryptoutil: AEAD payload too short")
+		return nil, errAEADShort
 	}
+	g.loadNonce(ivCtIcv)
+	out, err := g.aead.Open(dst, g.nonce, ivCtIcv[8:], aad)
+	if err != nil {
+		return nil, errAEADOpen
+	}
+	return out, nil
+}
+
+// OpenInPlace decrypts over the ciphertext. The output starts exactly where
+// the ciphertext does -- after the 8-octet explicit IV -- which is the one
+// overlap cipher.AEAD permits: an output starting at the IV instead would be
+// offset by eight octets and the AEAD would refuse it.
+func (g *espAEAD) OpenInPlace(aad, ivCtIcv []byte) ([]byte, error) {
+	if len(ivCtIcv) < 8+16 {
+		return nil, errAEADShort
+	}
+	g.loadNonce(ivCtIcv)
+	ct := ivCtIcv[8:]
+	out, err := g.aead.Open(ct[:0], g.nonce, ct, aad)
+	if err != nil {
+		return nil, errAEADOpen
+	}
+	return out, nil
+}
+
+// loadNonce builds salt || explicit IV in the reused nonce buffer.
+func (g *espAEAD) loadNonce(ivCtIcv []byte) {
 	if g.nonce == nil {
 		g.nonce = make([]byte, 12)
 		copy(g.nonce[0:4], g.salt[:])
 	}
 	copy(g.nonce[4:12], ivCtIcv[:8])
-	return g.aead.Open(dst, g.nonce, ivCtIcv[8:], aad)
 }
 
 // --- AES-CBC + HMAC ESP crypter (encrypt-then-MAC) ---
@@ -149,6 +193,45 @@ type espCBC struct {
 	integ    *Integrity
 	integKey []byte
 	mac      hash.Hash // reused across calls (single-goroutine data path)
+
+	// enc and dec are the CBC modes, built on first use and re-pointed at each
+	// packet's IV. cipher.NewCBC* allocates the mode and a copy of the IV on
+	// every call; crypto/tls keeps one per direction and calls SetIV for the
+	// same reason. Nil when the block's mode does not offer SetIV, in which
+	// case every packet builds its own, as before.
+	enc, dec cbcMode
+
+	// macBuf receives each ICV. A stack array here would escape through the
+	// hash.Hash interface and cost an allocation per packet in each direction,
+	// which is what it did.
+	macBuf [64]byte
+}
+
+// cbcMode is a CBC BlockMode whose IV can be reset, which every mode
+// crypto/cipher returns provides.
+type cbcMode interface {
+	cipher.BlockMode
+	SetIV([]byte)
+}
+
+func (c *espCBC) encrypter(iv []byte) cipher.BlockMode {
+	if c.enc != nil {
+		c.enc.SetIV(iv)
+		return c.enc
+	}
+	m := cipher.NewCBCEncrypter(c.block, iv)
+	c.enc, _ = m.(cbcMode)
+	return m
+}
+
+func (c *espCBC) decrypter(iv []byte) cipher.BlockMode {
+	if c.dec != nil {
+		c.dec.SetIV(iv)
+		return c.dec
+	}
+	m := cipher.NewCBCDecrypter(c.block, iv)
+	c.dec, _ = m.(cbcMode)
+	return m
 }
 
 func (c *espCBC) Overhead() int { return aes.BlockSize + c.integ.ICVLen }
@@ -159,45 +242,67 @@ func (c *espCBC) Seal(dst, aad, plaintext []byte) ([]byte, error) {
 		return nil, fmt.Errorf("cryptoutil: CBC plaintext not block-aligned (%d)", len(plaintext))
 	}
 	start := len(dst)
-	// Reserve IV + ciphertext region, then fill.
-	dst = append(dst, make([]byte, aes.BlockSize+len(plaintext))...)
+	// Reserve IV + ciphertext region, then fill. Grown in place when dst has
+	// the room, which a caller-owned output buffer does.
+	n := aes.BlockSize + len(plaintext)
+	dst = slices.Grow(dst, n+c.integ.ICVLen)[:start+n]
 	iv := dst[start : start+aes.BlockSize]
 	if _, err := rand.Read(iv); err != nil {
 		return nil, err
 	}
 	ct := dst[start+aes.BlockSize:]
-	cipher.NewCBCEncrypter(c.block, iv).CryptBlocks(ct, plaintext)
+	c.encrypter(iv).CryptBlocks(ct, plaintext)
 	// MAC covers aad || iv || ciphertext; append the truncated ICV.
 	c.mac.Reset()
 	c.mac.Write(aad)
 	c.mac.Write(dst[start:]) // iv || ct
-	var macBuf [64]byte
-	icv := c.mac.Sum(macBuf[:0])[:c.integ.ICVLen]
+	icv := c.mac.Sum(c.macBuf[:0])[:c.integ.ICVLen]
 	dst = append(dst, icv...)
 	return dst, nil
 }
 
 func (c *espCBC) Open(dst, aad, ivCtIcv []byte) ([]byte, error) {
+	iv, ct, err := c.verify(aad, ivCtIcv)
+	if err != nil {
+		return nil, err
+	}
+	start := len(dst)
+	dst = slices.Grow(dst, len(ct))[:start+len(ct)]
+	c.decrypter(iv).CryptBlocks(dst[start:], ct)
+	return dst, nil
+}
+
+// OpenInPlace verifies, then decrypts the ciphertext over itself -- an exact
+// overlap, which CBC decryption permits. The IV is read by SetIV before the
+// first block is overwritten, and it is not part of ct, so in-place decryption
+// cannot clobber it.
+func (c *espCBC) OpenInPlace(aad, ivCtIcv []byte) ([]byte, error) {
+	iv, ct, err := c.verify(aad, ivCtIcv)
+	if err != nil {
+		return nil, err
+	}
+	c.decrypter(iv).CryptBlocks(ct, ct)
+	return ct, nil
+}
+
+// verify checks the ICV over aad || iv || ciphertext before anything is
+// decrypted, and splits out the IV and ciphertext.
+func (c *espCBC) verify(aad, ivCtIcv []byte) (iv, ct []byte, err error) {
 	if len(ivCtIcv) < aes.BlockSize+c.integ.ICVLen {
-		return nil, fmt.Errorf("cryptoutil: CBC payload too short")
+		return nil, nil, errCBCShort
 	}
 	icv := ivCtIcv[len(ivCtIcv)-c.integ.ICVLen:]
 	rest := ivCtIcv[:len(ivCtIcv)-c.integ.ICVLen]
 	c.mac.Reset()
 	c.mac.Write(aad)
 	c.mac.Write(rest)
-	var macBuf [64]byte
-	want := c.mac.Sum(macBuf[:0])[:c.integ.ICVLen]
+	want := c.mac.Sum(c.macBuf[:0])[:c.integ.ICVLen]
 	if subtle.ConstantTimeCompare(want, icv) != 1 {
-		return nil, fmt.Errorf("cryptoutil: ESP integrity check failed")
+		return nil, nil, errCBCIntegrity
 	}
-	iv := rest[:aes.BlockSize]
-	ct := rest[aes.BlockSize:]
+	iv, ct = rest[:aes.BlockSize], rest[aes.BlockSize:]
 	if len(ct)%aes.BlockSize != 0 {
-		return nil, fmt.Errorf("cryptoutil: CBC ciphertext not block-aligned")
+		return nil, nil, errCBCAlign
 	}
-	start := len(dst)
-	dst = append(dst, make([]byte, len(ct))...)
-	cipher.NewCBCDecrypter(c.block, iv).CryptBlocks(dst[start:], ct)
-	return dst, nil
+	return iv, ct, nil
 }

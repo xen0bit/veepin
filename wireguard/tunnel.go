@@ -122,6 +122,26 @@ func (t *wgTunnel) Encapsulate(p []byte) ([]byte, error) {
 // negotiated for this: the inner packet is delimited by its own IP header, so
 // the filler is inert to any conforming receiver.
 func (t *wgTunnel) EncapsulatePadded(p []byte, minInner int) ([]byte, error) {
+	sess, err := t.sendSession()
+	if err != nil {
+		return nil, err
+	}
+	return sess.SealPadded(p, minInner)
+}
+
+// AppendEncapsulated is EncapsulatePadded into the pump's buffer, implementing
+// dataplane.AppendTunnel.
+func (t *wgTunnel) AppendEncapsulated(dst, p []byte, minInner int) ([]byte, error) {
+	sess, err := t.sendSession()
+	if err != nil {
+		return nil, err
+	}
+	return sess.AppendSeal(dst, p, minInner)
+}
+
+// sendSession is the keypair outbound packets go under, refusing once it is
+// past rejectAfterTime.
+func (t *wgTunnel) sendSession() (*transport.Session, error) {
 	t.mu.RLock()
 	sess := t.current
 	expired := sess != nil && time.Since(t.established) >= rejectAfterTime
@@ -132,7 +152,7 @@ func (t *wgTunnel) EncapsulatePadded(p []byte, minInner int) ([]byte, error) {
 	if expired {
 		return nil, errSessionExpired
 	}
-	return sess.SealPadded(p, minInner)
+	return sess, nil
 }
 
 // Decapsulate opens an inbound transport packet with whichever keypair its

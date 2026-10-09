@@ -55,10 +55,12 @@ func cbcTransform(t *testing.T, ek, ik byte) Transform {
 	}
 }
 
-// TestDataPathAllocationsGCM guards the AES-GCM hot path: encapsulate and
-// decapsulate must each allocate at most once per packet (the returned buffer).
-// A regression here (e.g. an argument escaping through the AEAD interface) means
-// extra per-packet garbage on the data path.
+// TestDataPathAllocationsGCM guards the AES-GCM hot path. Encapsulate allocates
+// once, the packet it returns; into a caller's buffer it allocates nothing, and
+// neither does Decapsulate, which opens in place. A regression here (an
+// argument escaping through the AEAD interface, an open that starts copying)
+// is per-packet garbage, and the scaling profile found garbage to be what caps
+// the data path across cores.
 func TestDataPathAllocationsGCM(t *testing.T) {
 	if raceEnabled {
 		t.Skip("allocation counts are perturbed by the race detector")
@@ -82,20 +84,10 @@ func TestDataPathAllocationsGCM(t *testing.T) {
 		t.Errorf("Encapsulate allocs/op = %v, want <= 1", n)
 	}
 
-	// Decapsulate a valid packet. Reset the replay window each iteration so the
-	// decap succeeds (a replayed packet would take the error path, where
-	// fmt.Errorf allocates and would mask the data-path allocation we measure).
+	assertAppendAndOpenAllocateNothing(t, sender, receiver, msg)
 	pkt, err := sender.Encapsulate(msg, 4)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if n := testing.AllocsPerRun(200, func() {
-		receiver.ResetReplayWindow()
-		if _, _, derr := receiver.Decapsulate(pkt); derr != nil {
-			t.Fatal(derr)
-		}
-	}); n > 1 {
-		t.Errorf("Decapsulate allocs/op = %v, want <= 1", n)
 	}
 
 	// A misrouted packet (unknown SPI) must be rejected with zero allocations,
@@ -155,8 +147,7 @@ func TestESPRoundTripChaCha20(t *testing.T) {
 }
 
 // TestDataPathAllocationsChaCha20 guards the ChaCha20-Poly1305 hot path the same
-// way TestDataPathAllocationsGCM guards AES-GCM: encap and decap must each
-// allocate at most once (the returned buffer).
+// way TestDataPathAllocationsGCM guards AES-GCM.
 func TestDataPathAllocationsChaCha20(t *testing.T) {
 	if raceEnabled {
 		t.Skip("allocation counts are perturbed by the race detector")
@@ -178,17 +169,37 @@ func TestDataPathAllocationsChaCha20(t *testing.T) {
 		t.Errorf("Encapsulate allocs/op = %v, want <= 1", n)
 	}
 
+	assertAppendAndOpenAllocateNothing(t, sender, receiver, msg)
+}
+
+// assertAppendAndOpenAllocateNothing pins both zero-allocation paths. The open
+// is measured over a fresh copy of one packet each time -- it decrypts in
+// place, so a packet can be opened only once -- with the replay window reset
+// so every copy authenticates.
+func assertAppendAndOpenAllocateNothing(t *testing.T, sender, receiver *SA, msg []byte) {
+	t.Helper()
+	dst := make([]byte, 0, 2048)
+	if n := testing.AllocsPerRun(200, func() {
+		if _, err := sender.AppendEncapsulated(dst[:0], msg, 4, 0); err != nil {
+			t.Fatal(err)
+		}
+	}); n != 0 {
+		t.Errorf("AppendEncapsulated into a buffer with room: allocs/op = %v, want 0", n)
+	}
+
 	pkt, err := sender.Encapsulate(msg, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
+	work := make([]byte, len(pkt))
 	if n := testing.AllocsPerRun(200, func() {
+		copy(work, pkt)
 		receiver.ResetReplayWindow()
-		if _, _, derr := receiver.Decapsulate(pkt); derr != nil {
+		if _, _, derr := receiver.Decapsulate(work); derr != nil {
 			t.Fatal(derr)
 		}
-	}); n > 1 {
-		t.Errorf("Decapsulate allocs/op = %v, want <= 1", n)
+	}); n != 0 {
+		t.Errorf("Decapsulate allocs/op = %v, want 0: it opens in place", n)
 	}
 }
 

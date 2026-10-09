@@ -58,29 +58,30 @@ shared across every tunnel rather than being per-client:
 
 So the ceiling is roughly one core per direction for the *whole* server, not just
 per tunnel — adding clients does not add parallelism. Measured, that one core is
-17.7 Gbit/s inbound and 14.7 Gbit/s outbound at 1400-byte packets with the
-syscalls removed. The crypto is not the limit: the `ESPCrypter` holds no shared
-state and is safe to call concurrently, so it is *parallel-ready* even though the
-deployed path drives it from a single goroutine.
+about 27 Gbit/s inbound and 23 Gbit/s outbound at 1400-byte packets with the
+syscalls removed. The crypto is not the limit. Independent SAs share no state,
+so the cipher work is *parallel-ready* even though the deployed path drives it
+from a single goroutine; one SA's crypters are not concurrency-safe (each keeps
+its nonce and MAC scratch), which is why the design for adding readers pins each
+tunnel to one of them.
 
-It is worth being precise about how much that readiness is worth, because it was
-overstated here as "scales linearly with cores." It does not.
-`BenchmarkESPDecapParallel` — an independent SA per goroutine, nothing shared —
-plateaus at **2.4×** the single-core rate and regresses past sixteen threads,
-because the one allocation per packet that the data path's contract permits makes
-the collector the binding constraint before the cipher is. The same benchmark
-under `GOGC=off` reaches 8.8×. So the parallelism is available in the cipher and
-not yet reachable through the allocator; see
-[`doc/scaling-the-data-path.md`](scaling-the-data-path.md#measured-the-profile-option-2-was-gated-on-taken). The syscalls are batched to raise what
-that one core can do — inbound reads drain in `recvmmsg` batches, on
-GSO-capable TUNs one read can carry a TCP super-frame that egresses as one
-batched send, and inbound bulk TCP coalesces back into super-frames written to
-the TUN once (GRO) — without changing the boundary. Lifting the ceiling means
-adding
-readers (multi-queue TUN outbound, `SO_REUSEPORT` inbound), which brings
-packet-reordering risk and lock contention that nothing here is currently asking
-for — the approach and its costs are sketched in
-[`doc/scaling-the-data-path.md`](scaling-the-data-path.md).
+How much that readiness is worth has been overstated here once, as "scales
+linearly with cores", at a time when it did not: `BenchmarkESPDecapParallel` —
+an independent SA per goroutine — plateaued at 2.4× and regressed past sixteen
+threads, because every packet allocated and the collector bound before the
+cipher did. The data path has since stopped allocating, and the same benchmark
+now runs at 21× on 32 threads; see
+[`doc/scaling-the-data-path.md`](scaling-the-data-path.md#taken-the-allocation-the-lock-the-clock-and-the-walk).
+So the parallelism is reachable now, and still not used.
+
+The syscalls are batched to raise what that one core can do — inbound reads
+drain in `recvmmsg` batches, on GSO-capable TUNs one read can carry a TCP
+super-frame that egresses as one batched send, and inbound bulk TCP coalesces
+back into super-frames written to the TUN once (GRO) — without changing the
+boundary. Lifting the ceiling means adding readers (multi-queue TUN outbound,
+`SO_REUSEPORT` inbound), which brings packet-reordering risk and per-reader
+scratch that nothing here is currently asking for — the approach and its costs
+are sketched in [`doc/scaling-the-data-path.md`](scaling-the-data-path.md).
 
 ## veepin is a road-warrior VPN on purpose
 

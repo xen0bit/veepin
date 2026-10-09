@@ -49,6 +49,16 @@ func BenchmarkPumpInbound(b *testing.B) {
 				pkts[i] = e
 			}
 
+			// The pump opens in place, as a read loop's buffer is opened, so
+			// each round hands it a copy and the batch survives the lap. The
+			// copy is in the measurement, standing in for the kernel's copy
+			// into that buffer.
+			//
+			// The TUN write count is checked at the end because the pump
+			// drops a packet that fails to open without a word: a benchmark
+			// that reused the decrypted buffers would quietly time the drop
+			// path and report it as throughput.
+			work := make([]byte, len(pkts[0]))
 			b.SetBytes(int64(size))
 			b.ReportAllocs()
 			b.ResetTimer()
@@ -58,7 +68,12 @@ func BenchmarkPumpInbound(b *testing.B) {
 					// numbers from the batch are accepted.
 					serverSA.ResetReplayWindow()
 				}
-				pump.HandleInbound(pkts[i%batch], nil)
+				copy(work, pkts[i%batch])
+				pump.HandleInbound(work, nil)
+			}
+			b.StopTimer()
+			if tun.writes != b.N {
+				b.Fatalf("%d of %d packets reached the TUN: the benchmark measured drops", tun.writes, b.N)
 			}
 		})
 	}
@@ -93,6 +108,12 @@ func (t *benchTunnel) PeerAddr() *net.UDPAddr {
 }
 func (t *benchTunnel) Encapsulate(p []byte) ([]byte, error) {
 	return t.sa.Encapsulate(p, 4)
+}
+
+// AppendEncapsulated makes benchTunnel an AppendTunnel, as every production
+// ESP tunnel is, so the outbound benchmark times the path they take.
+func (t *benchTunnel) AppendEncapsulated(dst, p []byte, minInner int) ([]byte, error) {
+	return t.sa.AppendEncapsulated(dst, p, 4, minInner)
 }
 func (t *benchTunnel) Decapsulate(p []byte) ([]byte, error) {
 	inner, _, err := t.sa.Decapsulate(p)
