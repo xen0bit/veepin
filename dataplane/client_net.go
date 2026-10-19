@@ -37,6 +37,12 @@ type ClientNetConfig struct {
 	// FullTunnel routes all traffic through the VPN (default route). When false,
 	// only the assigned subnet is routed, plus whatever Routes names.
 	FullTunnel bool
+	// AllowUnroutedFamily leaves the family a full tunnel carries no address
+	// for on the physical link. By default it is made unreachable instead: a
+	// tunnel assigned only IPv4 that left IPv6 alone sent every IPv6 flow --
+	// and on a dual-stack host that is most of them -- out in the clear while
+	// reporting full-tunnel=true.
+	AllowUnroutedFamily bool
 
 	// Routes are extra destinations to send through the tunnel, for a split
 	// tunnel that wants to name what it carries. Before this, -full-tunnel=false
@@ -48,4 +54,16 @@ type ClientNetConfig struct {
 	// the server host route above -- a /32 beats a /1 -- and shares its code, so
 	// the one thing that has to stay true of both stays true in one place.
 	Excludes []*net.IPNet
+}
+
+// unroutedFamilies reports which address families a full tunnel must make
+// unreachable: the ones it carries no address in. hostHasV6 says whether the
+// host has IPv6 at all; where it does not, there is nothing to leak.
+func unroutedFamilies(cfg ClientNetConfig, hostHasV6 bool) (block4, block6 bool) {
+	if !cfg.FullTunnel || cfg.AllowUnroutedFamily {
+		return false, false
+	}
+	block6 = cfg.AssignedIP != nil && cfg.AssignedIP6 == nil && hostHasV6
+	block4 = cfg.AssignedIP6 != nil && cfg.AssignedIP == nil
+	return block4, block6
 }

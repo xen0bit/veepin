@@ -44,6 +44,8 @@ type ClientRouter struct {
 	addedHost bool
 	addedDef  bool
 	addedDef6 bool
+	blocked4  bool // unreachable halves for a family the full tunnel lacks
+	blocked6  bool
 	serverV6  bool
 	dns       dnsBackend
 	added     []addedRoute
@@ -130,6 +132,26 @@ func (r *ClientRouter) Apply() error {
 			}
 			r.addedDef6 = true
 		}
+		// As on Linux: the family the tunnel carries no address in is
+		// rejected rather than left on the physical link.
+		if block4, block6 := unroutedFamilies(r.cfg, true); block4 || block6 {
+			if block6 {
+				for _, half := range []string{"::/1", "8000::/1"} {
+					if err := run(routeCmd(true, "add", "-net", half, "::1", "-reject")); err != nil {
+						return fmt.Errorf("blocking IPv6 outside a v4-only tunnel: %w", err)
+					}
+				}
+				r.blocked6 = true
+			}
+			if block4 {
+				for _, half := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
+					if err := run(routeCmd(false, "add", "-net", half, "127.0.0.1", "-reject")); err != nil {
+						return fmt.Errorf("blocking IPv4 outside a v6-only tunnel: %w", err)
+					}
+				}
+				r.blocked4 = true
+			}
+		}
 	}
 
 	for _, n := range r.cfg.Routes {
@@ -200,6 +222,22 @@ func (r *ClientRouter) Revert() error {
 				errs = append(errs, err.Error())
 			}
 		}
+	}
+	if r.blocked6 {
+		for _, half := range []string{"::/1", "8000::/1"} {
+			if err := run(routeCmd(true, "delete", "-net", half)); err != nil {
+				errs = append(errs, err.Error())
+			}
+		}
+		r.blocked6 = false
+	}
+	if r.blocked4 {
+		for _, half := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
+			if err := run(routeCmd(false, "delete", "-net", half)); err != nil {
+				errs = append(errs, err.Error())
+			}
+		}
+		r.blocked4 = false
 	}
 	if r.addedHost && r.cfg.ServerIP != nil {
 		if err := run(routeCmd(r.serverV6, "delete", "-host", r.cfg.ServerIP.String())); err != nil {

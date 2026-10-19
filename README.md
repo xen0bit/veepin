@@ -488,6 +488,10 @@ the host's real address. On disconnect (Ctrl-C) both are reverted. Useful flags:
 - `-user` / `-pass` — authenticate with EAP-MSCHAPv2 username/password instead of
   the client PSK (the server PSK still authenticates the server).
 - `-full-tunnel=false` — only bring up the interface/address.
+- Under the default full tunnel, an address family the tunnel carries no
+  address in is made unreachable rather than left on the physical link: a
+  v4-only tunnel on a dual-stack host otherwise sends every IPv6 flow out in the
+  clear. `-allow-unrouted-family` restores the old behaviour.
 - `-route <cidr>` — send this prefix through the tunnel (repeatable). Implies
   `-full-tunnel=false`, since naming what to route means not routing everything.
 - `-exclude <cidr>` — keep this prefix off the tunnel (repeatable), by routing it

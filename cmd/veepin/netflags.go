@@ -24,8 +24,11 @@ type netFlags struct {
 	retry      bool
 	retryMax   int
 	killSwitch bool
-	routes     cidrList
-	excludes   cidrList
+	// allowUnrouted keeps the old full-tunnel behaviour for the family the
+	// tunnel has no address in: left on the physical link.
+	allowUnrouted bool
+	routes        cidrList
+	excludes      cidrList
 }
 
 // cidrList is a repeatable CIDR flag. It parses on Set rather than at apply
@@ -71,6 +74,10 @@ func bindNetFlags(fs *flag.FlagSet) *netFlags {
 	n := &netFlags{}
 	fs.BoolVar(&n.fullTunnel, "full-tunnel", true,
 		"route all traffic through the VPN (default route)")
+	fs.BoolVar(&n.allowUnrouted, "allow-unrouted-family", false,
+		"under -full-tunnel, leave the address family the tunnel carries no address "+
+			"in on the physical link; by default it is made unreachable, because a "+
+			"v4-only tunnel otherwise sends every IPv6 flow out in the clear")
 	fs.BoolVar(&n.noRoute, "no-route", false,
 		"do not modify routing, addresses or DNS (diagnostic)")
 	fs.BoolVar(&n.noDNS, "no-dns", false,

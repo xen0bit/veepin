@@ -324,8 +324,11 @@ func oneSession(
 			DNS:         res.DNS,
 			NoDNS:       netCfg.noDNS,
 			FullTunnel:  fullTunnel,
-			Routes:      netCfg.routes,
-			Excludes:    netCfg.excludes,
+			// Read before Apply: the router makes the untunnelled family
+			// unreachable unless asked not to.
+			AllowUnroutedFamily: netCfg.allowUnrouted,
+			Routes:              netCfg.routes,
+			Excludes:            netCfg.excludes,
 		})
 		// Revert is deferred before the result of Apply is examined, not after.
 		// Apply installs several pieces of host state in sequence and can fail
