@@ -4,7 +4,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"net"
+	"net/netip"
 	"sync"
+	"sync/atomic"
 
 	"github.com/xen0bit/veepin/dataplane"
 	"github.com/xen0bit/veepin/internal/ikev1"
@@ -376,6 +378,13 @@ type serverPeer struct {
 	tunnel   *Tunnel
 	ppp      *ppp.ServerSession
 	innerIP  net.IP
+
+	// up is set when PPP reports the network up, which it does only after
+	// MS-CHAPv2 has succeeded and IPCP has opened. Until then no IP frame from
+	// this peer reaches the TUN and the TUN routes nothing back to it; the
+	// group PSK that got the peer this far authenticates no user.
+	up     atomic.Bool
+	inner4 netip.Addr
 }
 
 // noteIKEAddr records where a peer's IKE now comes from. After the float that is
@@ -483,6 +492,7 @@ func (p *serverPeer) SessionUp() {
 	}
 	p.mu.Lock()
 	p.innerIP = ip
+	p.inner4, _ = netip.AddrFromSlice(ip.To4())
 	p.ppp = ppp.NewServer(ppp.ServerConfig{
 		ClientIP: ip,
 		ServerIP: p.srv.gateway,
@@ -491,14 +501,15 @@ func (p *serverPeer) SessionUp() {
 	}, p.tunnel, serverPPP{p})
 	ps := p.ppp
 	p.mu.Unlock()
-	p.srv.mapIP(ip, p)
 	p.srv.logger.Printf("l2tp: L2TP session up for %s, assigning %s", p.addr, ip)
 	ps.Start()
 }
 
 func (p *serverPeer) DataFrame(frame []byte) {
 	if ip, ok := ppp.IsIP(frame); ok {
-		_, _ = p.srv.tun.Write(ip)
+		if p.up.Load() && dataplane.SourceIs(ip, p.inner4) {
+			_, _ = p.srv.tun.Write(ip)
+		}
 		return
 	}
 	p.mu.Lock()
@@ -516,6 +527,13 @@ type serverPPP struct{ p *serverPeer }
 
 func (h serverPPP) Authenticated(u, pw string, nt [mschap.NTResponseLen]byte) {}
 func (h serverPPP) NetworkUp() {
+	h.p.mu.Lock()
+	ip := h.p.innerIP
+	h.p.mu.Unlock()
+	h.p.up.Store(true)
+	// Mapped only now, so the TUN routes nothing to a peer that has not
+	// authenticated.
+	h.p.srv.mapIP(ip, h.p)
 	h.p.srv.logger.Printf("l2tp: PPP up for %s", h.p.addr)
 }
 func (h serverPPP) Closed(err error) { h.p.srv.removePeer(h.p, err) }
