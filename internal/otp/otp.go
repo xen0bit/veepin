@@ -138,9 +138,19 @@ func TOTP(secret []byte, t time.Time, cfg Config) (string, error) {
 // its step, and leaking how much of a guess was right would let an attacker
 // find it digit by digit.
 func Verify(secret []byte, code string, t time.Time, cfg Config) bool {
+	_, ok := VerifyCounter(secret, code, t, cfg)
+	return ok
+}
+
+// VerifyCounter is Verify that also returns the time step the code matched.
+// A verifier that remembers the last step it accepted per user and refuses any
+// code at or below it is what RFC 6238 §5.2 asks for: without that, one code
+// is good for every login inside its window, so seeing it used once is enough
+// to use it again.
+func VerifyCounter(secret []byte, code string, t time.Time, cfg Config) (uint64, bool) {
 	code = strings.TrimSpace(code)
 	if code == "" {
-		return false
+		return 0, false
 	}
 	step := int64(cfg.period().Seconds())
 	counter := t.Unix() / step
@@ -149,6 +159,7 @@ func Verify(secret []byte, code string, t time.Time, cfg Config) bool {
 	// Every candidate is checked even after one matches, so the work done does
 	// not reveal which step was accepted.
 	var ok int
+	var matched uint64
 	for i := -skew; i <= skew; i++ {
 		c := counter + int64(i)
 		if c < 0 {
@@ -156,11 +167,13 @@ func Verify(secret []byte, code string, t time.Time, cfg Config) bool {
 		}
 		want, err := HOTP(secret, uint64(c), cfg)
 		if err != nil {
-			return false
+			return 0, false
 		}
-		ok |= subtle.ConstantTimeCompare([]byte(want), []byte(code))
+		eq := subtle.ConstantTimeCompare([]byte(want), []byte(code))
+		matched = uint64(subtle.ConstantTimeSelect(eq, int(c), int(matched)))
+		ok |= eq
 	}
-	return ok == 1
+	return matched, ok == 1
 }
 
 // DecodeSecret decodes a base32 shared secret as authenticator apps present it:
