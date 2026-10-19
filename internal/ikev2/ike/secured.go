@@ -20,14 +20,6 @@ func (s *Server) handleSecured(pkt []byte, hdr payload.Header, remote *net.UDPAd
 
 	sa.mu.Lock()
 	defer sa.mu.Unlock()
-	sa.touch()
-
-	// Track the peer floating to port 4500 (NAT-T) and any address change so
-	// responses and ESP go to the right place.
-	if on4500 && !sa.OnPort4500 {
-		sa.OnPort4500 = true
-	}
-	sa.RemoteAddr = remote
 
 	if hdr.MessageID != sa.RecvMsgID {
 		s.log.Printf("ikev2: %s from %s bad msgid %d (want %d)", ex, remote, hdr.MessageID, sa.RecvMsgID)
@@ -76,9 +68,34 @@ func (s *Server) handleSecured(pkt []byte, hdr payload.Header, remote *net.UDPAd
 		firstInner, inner = fi, in
 	}
 
+	// Only now has the datagram proved it came from the holder of this SA's
+	// keys. The SPI, message ID and source address it arrived with are all
+	// cleartext, so moving the SA's return address -- or counting it as a sign
+	// of life -- any earlier would let a forger with a copy of the SPI steer
+	// our responses somewhere else.
+	sa.touch()
+	if on4500 && !sa.OnPort4500 {
+		sa.OnPort4500 = true
+	}
+	sa.RemoteAddr = remote
+
 	inners, err := parseInnerPayloads(firstInner, inner)
 	if err != nil {
 		s.log.Printf("ikev2: %s from %s inner parse: %v", ex, remote, err)
+		return
+	}
+
+	// RFC 7296 §1.2: until IKE_AUTH completes, the only protected exchanges an
+	// initiator may run are IKE_AUTH itself and RFC 9242's IKE_INTERMEDIATE.
+	// The keys that decrypted this message come from an unauthenticated
+	// Diffie-Hellman, so before then they prove only that the sender is the
+	// party who ran IKE_SA_INIT -- anyone. A CREATE_CHILD_SA accepted at this
+	// point would key a Child SA off SK_d for a peer who never authenticated
+	// and put its ESP straight onto the TUN. And once IKE_AUTH has completed,
+	// a second one is refused, so it cannot re-run the authentication against
+	// an SA that already carries an identity and an address.
+	if !exchangeAllowed(sa.State, ex) {
+		s.log.Warnf("ikev2: refusing %s from %s in state %s", ex, remote, sa.State)
 		return
 	}
 
@@ -134,4 +151,24 @@ func (s *Server) respondEncryptedNotify(sa *IKESA, ex payload.ExchangeType, msgI
 		Protocol: payload.ProtoNone, Type: nt,
 	}))
 	s.respondEncrypted(sa, ex, msgID, b.FirstType(), b.Bytes(), remote)
+}
+
+// exchangeAllowed reports whether a protected exchange of type ex may be
+// processed on an IKE SA in state st. It is the whole of the responder's
+// exchange-ordering policy, so it lives in one place rather than at the top of
+// each handler, where a new handler could forget it.
+func exchangeAllowed(st SAState, ex payload.ExchangeType) bool {
+	switch ex {
+	case payload.IKE_AUTH:
+		return st == StateSAInitDone || st == StateIntermediate
+	case payload.IKE_INTERMEDIATE:
+		return st == StateSAInitDone || st == StateIntermediate
+	case payload.CREATE_CHILD_SA:
+		return st == StateEstablished
+	case payload.INFORMATIONAL:
+		// StateDeleting is an SA that was established and then rekeyed: the
+		// peer's INFORMATIONAL{D(IKE)} for it arrives under its keys.
+		return st == StateEstablished || st == StateDeleting
+	}
+	return false
 }

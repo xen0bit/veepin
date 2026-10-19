@@ -61,6 +61,16 @@ func (s *Server) handleIKEAuth(sa *IKESA, hdr payload.Header, inners []payload.R
 			s.respondEncryptedNotify(sa, payload.IKE_AUTH, hdr.MessageID, payload.AuthenticationFailed, remote)
 			return
 		}
+		if len(s.cfg.PSK) == 0 {
+			// The server's own AUTH in an EAP exchange is PSK-keyed (see
+			// handleEAPStart). With no PSK that AUTH would be prf("", ...),
+			// which anyone can compute, so an EAP client would have no way
+			// to tell this server from an impostor harvesting its MSCHAPv2.
+			s.log.Warnf("ikev2: refusing EAP from %s: the server authenticates itself "+
+				"to EAP clients with the PSK, and none is configured", remote)
+			s.respondEncryptedNotify(sa, payload.IKE_AUTH, hdr.MessageID, payload.AuthenticationFailed, remote)
+			return
+		}
 		s.handleEAPStart(sa, hdr, inners, remote)
 		return
 	}
