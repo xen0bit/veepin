@@ -188,8 +188,9 @@ Three clarifications that are part of the contract, not caveats on it:
   protocols (anyconnect, fortinet, gp, pulse, sstp, softether) the user's
   password travels inside the post-quantum channel; passwords are not a
   quantum-broken primitive, so this is genuinely the whole handshake and not a
-  half-measure. For mutual-TLS protocols (openvpn, masque) **both** certificates
-  must be ML-DSA.
+  half-measure. For the mutual-TLS protocol (openvpn) **both** certificates
+  must be ML-DSA. (masque was listed here too, but its proxy never requested
+  a client certificate; its clients authenticate with a bearer token.)
 - **The base protocol is untouched.** `ikev2` keeps negotiating exactly what it
   negotiates today. `pq-` adds a name, never subtracts a capability.
 
