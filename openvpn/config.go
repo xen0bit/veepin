@@ -68,6 +68,19 @@ type Config struct {
 	// Logger receives progress logs; nil discards them.
 	Logger *slog.Logger
 
+	// VerifyX509Name and VerifyX509Type are verify-x509-name's two arguments:
+	// the name the server's certificate must carry, and whether it is the
+	// whole subject (the default), the common name, or a common-name prefix.
+	VerifyX509Name string
+	VerifyX509Type string
+	// RemoteCertTLSServer is remote-cert-tls server: the server's certificate
+	// must carry the server-authentication extended key usage.
+	RemoteCertTLSServer bool
+	// CRL is crl-verify's revocation list.
+	CRL []byte
+	// MinTLS13 is tls-version-min 1.3.
+	MinTLS13 bool
+
 	// PostQuantumOnly requires a post-quantum key exchange and ML-DSA
 	// authentication, refusing anything less rather than negotiating down. It is
 	// what the pq-openvpn registry name sets; see internal/pqpolicy for the contract
@@ -122,8 +135,11 @@ func ParseConfigFile(path string) (*Config, error) {
 
 // parseConfig reads the subset of the OpenVPN config format a UDP client needs:
 // remote, proto, dev, cipher, and the ca/cert/key material (inline blocks or
-// file paths resolved against baseDir). Unknown directives are ignored, as
-// OpenVPN's own parser tolerates options it does not use in a given mode.
+// file paths resolved against baseDir), plus the directives that constrain
+// which server certificate is acceptable. Directives that configure a kernel
+// client rather than the tunnel are ignored. A security directive this client
+// does not implement is an error instead: a profile relying on it would
+// otherwise connect without the check it asked for.
 func parseConfig(r io.Reader, baseDir string) (*Config, error) {
 	cfg := &Config{KeyDirection: -1}
 	sc := bufio.NewScanner(r)
@@ -233,6 +249,58 @@ func (c *Config) setDirective(text, baseDir string) error {
 		}
 	case "auth-user-pass":
 		// Credentials from a file are out of scope; they come from options.
+	case "verify-x509-name":
+		if len(args) < 1 {
+			return fmt.Errorf("verify-x509-name needs a name")
+		}
+		name, rest, err := quotedArg(args)
+		if err != nil {
+			return fmt.Errorf("verify-x509-name: %w", err)
+		}
+		c.VerifyX509Name, c.VerifyX509Type = name, "subject"
+		switch {
+		case len(rest) == 0:
+		case len(rest) == 1 && (rest[0] == "subject" || rest[0] == "name" || rest[0] == "name-prefix"):
+			c.VerifyX509Type = rest[0]
+		default:
+			return fmt.Errorf("verify-x509-name: unexpected %q", strings.Join(rest, " "))
+		}
+	case "remote-cert-tls":
+		if len(args) != 1 || args[0] != "server" {
+			return fmt.Errorf("remote-cert-tls %v: only \"server\" makes sense for a client", args)
+		}
+		c.RemoteCertTLSServer = true
+	case "remote-cert-eku":
+		if len(args) < 1 || !iovpn.IsServerAuthEKU(strings.Join(args, " ")) {
+			return fmt.Errorf("remote-cert-eku %v: only server authentication is supported", args)
+		}
+		c.RemoteCertTLSServer = true
+	case "crl-verify":
+		if len(args) >= 2 && args[1] == "dir" {
+			return fmt.Errorf("crl-verify dir is not supported; give a CRL file")
+		}
+		if len(args) < 1 {
+			return fmt.Errorf("crl-verify needs a file")
+		}
+		return c.setPEMFile("crl-verify", args, baseDir)
+	case "tls-version-min":
+		if len(args) < 1 {
+			return fmt.Errorf("tls-version-min needs a version")
+		}
+		switch args[0] {
+		case "1.0", "1.1", "1.2":
+			// The floor here is already 1.2.
+		case "1.3":
+			c.MinTLS13 = true
+		default:
+			return fmt.Errorf("tls-version-min %q is not supported", args[0])
+		}
+	case "tls-verify", "verify-hash", "peer-fingerprint", "tls-crypt-v2",
+		"ns-cert-type", "remote-cert-ku", "pkcs12", "tls-export-cert":
+		// Each of these constrains or supplies the TLS identity of one end,
+		// and none is implemented. Ignoring one would dial with less checking
+		// than the profile asked for, so the profile is refused instead.
+		return fmt.Errorf("%s is not supported by this client, and ignoring it would weaken the connection", key)
 	default:
 		// Ignored: dev, nobind, resolv-retry, verb, and the many directives that
 		// configure a kernel client rather than the tunnel itself.
@@ -269,10 +337,31 @@ func (c *Config) setPEM(kind string, pem []byte) error {
 		c.TLSAuth = pem
 	case "tls-crypt":
 		c.TLSCrypt = pem
+	case "crl-verify":
+		c.CRL = pem
 	default:
 		return fmt.Errorf("unknown inline block <%s>", kind)
 	}
 	return nil
+}
+
+// quotedArg takes the first argument from args, rejoining one that was quoted
+// and contained spaces -- strings.Fields has split it -- and returns it
+// unquoted with the arguments that follow it.
+func quotedArg(args []string) (string, []string, error) {
+	q := args[0][0]
+	if q != '\'' && q != '"' {
+		return args[0], args[1:], nil
+	}
+	var parts []string
+	for i, a := range args {
+		parts = append(parts, a)
+		if (i > 0 || len(a) > 1) && a[len(a)-1] == q {
+			joined := strings.Join(parts, " ")
+			return joined[1 : len(joined)-1], args[i+1:], nil
+		}
+	}
+	return "", nil, fmt.Errorf("unterminated quote")
 }
 
 // setKeyDirection parses a --key-direction / tls-auth direction argument.

@@ -84,8 +84,8 @@ func (c *CBCCipher) SealPadded(plaintext []byte, minInner int) ([]byte, error) {
 }
 
 func (c *CBCCipher) seal(plaintext []byte, minInner int) ([]byte, error) {
-	id := c.counter.Add(1)
-	if id == 0 {
+	id, ok := nextPacketID(&c.counter)
+	if !ok {
 		return nil, errCounterExhausted
 	}
 

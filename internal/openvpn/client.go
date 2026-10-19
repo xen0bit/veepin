@@ -90,6 +90,12 @@ type ClientConfig struct {
 	Shape   int
 	Logger  *vlog.Logger
 
+	// Peer is what the profile requires of the server's certificate past
+	// chaining to CA: verify-x509-name, remote-cert-tls, crl-verify.
+	Peer PeerPolicy
+	// MinTLS13 raises the control channel's TLS floor from 1.2 to 1.3.
+	MinTLS13 bool
+
 	PostQuantumOnly bool
 }
 
@@ -216,7 +222,10 @@ func clientTLSConfig(cfg *ClientConfig) (*tls.Config, error) {
 		Certificates:          []tls.Certificate{cert},
 		MinVersion:            tls.VersionTLS12,
 		InsecureSkipVerify:    true, // hostname is not verified; the chain check below is
-		VerifyPeerCertificate: verifyChainToCA(pool),
+		VerifyPeerCertificate: verifyChainToCA(pool, cfg.Peer),
+	}
+	if cfg.MinTLS13 {
+		tlsCfg.MinVersion = tls.VersionTLS13
 	}
 	if cfg.PostQuantumOnly {
 		// OpenVPN is mutual TLS, so this covers both directions at once: the
@@ -231,8 +240,9 @@ func clientTLSConfig(cfg *ClientConfig) (*tls.Config, error) {
 }
 
 // verifyChainToCA verifies the server certificate chains to the CA, ignoring the
-// hostname (which OpenVPN does not bind to the transport address).
-func verifyChainToCA(pool *x509.CertPool) func([][]byte, [][]*x509.Certificate) error {
+// hostname (which OpenVPN does not bind to the transport address), and then
+// applies the profile's own checks on top.
+func verifyChainToCA(pool *x509.CertPool, peer PeerPolicy) func([][]byte, [][]*x509.Certificate) error {
 	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 		if len(rawCerts) == 0 {
 			return errors.New("server sent no certificate")
@@ -249,8 +259,15 @@ func verifyChainToCA(pool *x509.CertPool) func([][]byte, [][]*x509.Certificate) 
 		for _, c := range certs[1:] {
 			opts.Intermediates.AddCert(c)
 		}
-		_, err := certs[0].Verify(opts)
-		return err
+		chains, err := certs[0].Verify(opts)
+		if err != nil {
+			return err
+		}
+		var issuer *x509.Certificate
+		if len(chains) > 0 && len(chains[0]) > 1 {
+			issuer = chains[0][1]
+		}
+		return peer.check(certs[0], issuer)
 	}
 }
 

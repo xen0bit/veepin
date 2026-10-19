@@ -50,6 +50,20 @@ server assigned.
 
 - **UDP only.** TCP transport is refused at profile parse; there is no
   stream framing here.
+- **No data-channel rekey.** Soft reset (`P_CONTROL_SOFT_RESET_V1`) is not
+  implemented, so a session keeps one data key for its life. The send packet
+  counter refuses to wrap: after 2^32 packets every further send fails and the
+  session ends, rather than reuse an AES-GCM nonce. Against a stock server with
+  its default `reneg-sec 3600` the session ends at the server's first
+  renegotiation instead.
+- **Server-certificate directives.** `verify-x509-name` (subject, name,
+  name-prefix), `remote-cert-tls server`, `remote-cert-eku` (server auth only),
+  `crl-verify` (a file, not `dir`) and `tls-version-min` are enforced. The
+  identity directives this client does not implement -- `tls-verify`,
+  `verify-hash`, `peer-fingerprint`, `tls-crypt-v2`, `ns-cert-type`,
+  `remote-cert-ku`, `pkcs12`, `tls-export-cert` -- make the profile fail to
+  parse rather than being dropped, since a profile relying on one would
+  otherwise connect without the check it asked for.
 - **No compression.** The client's peer info advertises none (no `IV_LZO`, no
   `IV_COMP_STUB`), and a profile's `compress` or `comp-lzo` line is ignored like
   every directive this client does not use. A server that compresses anyway
