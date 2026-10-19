@@ -103,7 +103,7 @@ func Dial(ctx context.Context, cfg ClientConfig) (*Session, error) {
 		return nil, fmt.Errorf("wireguard: open TUN: %w", err)
 	}
 
-	tunnel := newTunnel(sess, cfg.AllowedIPs, cfg.Endpoint, false)
+	tunnel := newTunnel(sess, cfg.AllowedIPs, cfg.Endpoint, true)
 
 	s := &Session{
 		conn:          conn,

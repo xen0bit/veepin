@@ -55,8 +55,12 @@ type wgTunnel struct {
 
 	// verifySource enables the inbound half of cryptokey routing: a decrypted
 	// packet whose source is not within this peer's AllowedIPs is dropped, so one
-	// peer cannot spoof another's address. A client trusts its single server for
-	// everything and leaves this off.
+	// peer cannot spoof another's address. Both roles set it. A client used to
+	// leave it off on the grounds that it trusts its one server, but a split
+	// tunnel's AllowedIPs is exactly the limit of that trust, and with the
+	// check off the server could put packets on the client's TUN claiming to
+	// come from its LAN. A full tunnel's 0.0.0.0/0, ::/0 passes everything, as
+	// before.
 	verifySource bool
 
 	mu          sync.RWMutex
