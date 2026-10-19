@@ -1,6 +1,7 @@
 package ike
 
 import (
+	"bytes"
 	"net"
 
 	"github.com/xen0bit/veepin/internal/ikev2/payload"
@@ -151,6 +152,17 @@ func (s *Server) handleCreateChildSA(sa *IKESA, hdr payload.Header, inners []pay
 		s.respondEncryptedNotify(sa, payload.CREATE_CHILD_SA, hdr.MessageID, payload.InvalidSyntax, remote)
 		return
 	}
+	// The new Child SA may carry only the address this peer was assigned. A
+	// proposal whose TSi does not cover the lease is refused rather than
+	// narrowed to it: narrowing may only pick a subset of what was proposed
+	// (RFC 7296 §2.9), and an initiator answered with a selector outside its
+	// own proposal does not install the SA -- strongSwan's trap policies
+	// propose the outer address this way -- leaving this end routing replies
+	// into an SA the peer never accepted.
+	if tsi, perr := payload.ParseTS(tsiPay.Body); perr != nil || !tsiCoversLease(tsi, sa) {
+		s.respondEncryptedNotify(sa, payload.CREATE_CHILD_SA, hdr.MessageID, payload.TSUnacceptable, remote)
+		return
+	}
 	espSA := reqSA
 	es, accepted, err := SelectESPSuite(espSA)
 	if err != nil {
@@ -279,4 +291,30 @@ func (s *Server) handleInformational(sa *IKESA, hdr payload.Header, inners []pay
 		s.deleteSA(sa)
 		s.log.Printf("ikev2: IKE SA with %s deleted at peer request", remote)
 	}
+}
+
+// tsiCoversLease reports whether some selector in tsi contains an address this
+// SA's peer was assigned.
+func tsiCoversLease(tsi payload.TSPayload, sa *IKESA) bool {
+	for _, sel := range tsi.Selectors {
+		for _, lease := range []net.IP{sa.ClientIP, sa.ClientIP6} {
+			if lease == nil {
+				continue
+			}
+			if ipInRange(lease, sel.StartAddr, sel.EndAddr) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func ipInRange(ip, start, end net.IP) bool {
+	if v4 := ip.To4(); v4 != nil {
+		s4, e4 := start.To4(), end.To4()
+		return s4 != nil && e4 != nil && bytes.Compare(v4, s4) >= 0 && bytes.Compare(v4, e4) <= 0
+	}
+	s16, e16, i16 := start.To16(), end.To16(), ip.To16()
+	return start.To4() == nil && s16 != nil && e16 != nil &&
+		bytes.Compare(i16, s16) >= 0 && bytes.Compare(i16, e16) <= 0
 }
