@@ -53,6 +53,10 @@ type Config struct {
 	MTU int
 	// HandshakeTimeout bounds the whole handshake.
 	HandshakeTimeout time.Duration
+
+	// forceSuite, set only by tests, makes a server choose this suite whatever
+	// the client offered: the behaviour of a server the client must refuse.
+	forceSuite uint16
 }
 
 // offeredSuites is the cipher-suite list a client offers, chosen by config: a
