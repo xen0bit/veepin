@@ -915,7 +915,13 @@ func (h *Host) install(t *tunnel, from netip.AddrPort) {
 	// relay receives, and the relay drops, because it holds no tunnel index
 	// matching it. The tunnel reports itself up, the send succeeds, and
 	// nothing arrives.
-	if !viaRelay {
+	//
+	// And only when the new tunnel is the one kept. A handshake that loses
+	// the collision proves nothing about where the live tunnel's peer is --
+	// on the responder side it has not even shown it holds the peer's key
+	// yet, since Noise IX's first message carries none -- so it must not move
+	// that tunnel's traffic to wherever it came from.
+	if !viaRelay && keep == t {
 		p.underlay = append([]netip.AddrPort{from}, filterOut(p.underlay, from)...)
 	}
 	p.mu.Unlock()
