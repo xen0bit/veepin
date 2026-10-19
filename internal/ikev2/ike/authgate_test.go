@@ -272,3 +272,25 @@ func TestRequirePostQuantumRefusesAClassicalResponder(t *testing.T) {
 		}
 	}
 }
+
+// TestNarrowingKeepsTheSelectorThatHoldsTheLease: strongSwan proposes a trap
+// policy's ICMP-echo-only selector ahead of the full one. If this fails, a
+// second Child SA is narrowed to echo requests, the server routes all of the
+// lease's replies into it, and the peer drops them by policy.
+func TestNarrowingKeepsTheSelectorThatHoldsTheLease(t *testing.T) {
+	sa := newIKESA()
+	sa.ClientIP = net.IPv4(10, 10, 10, 2).To4()
+	tsi := payload.TSPayload{Selectors: []payload.TrafficSelector{
+		{Type: payload.TSIPv4AddrRange, IPProtocol: 1, StartPort: 0x0800, EndPort: 0x0800,
+			StartAddr: net.IPv4(172, 18, 0, 3).To4(), EndAddr: net.IPv4(172, 18, 0, 3).To4()},
+		{Type: payload.TSIPv4AddrRange, StartPort: 0, EndPort: 0xffff,
+			StartAddr: net.IPv4(10, 10, 10, 2).To4(), EndAddr: net.IPv4(10, 10, 10, 2).To4()},
+	}}
+	got, _ := narrowTSiToAssignment(tsi, sa)
+	if len(got.Selectors) != 1 {
+		t.Fatalf("got %d selectors", len(got.Selectors))
+	}
+	if s := got.Selectors[0]; s.IPProtocol != 0 || s.EndPort != 0xffff || !s.StartAddr.Equal(sa.ClientIP) {
+		t.Fatalf("narrowed to %+v, want the lease with any protocol and port", s)
+	}
+}

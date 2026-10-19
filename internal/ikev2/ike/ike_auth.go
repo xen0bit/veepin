@@ -483,14 +483,32 @@ func narrowTSiToAssignment(tsi payload.TSPayload, sa *IKESA) (payload.TSPayload,
 		if want.addr == nil {
 			continue
 		}
-		for _, sel := range tsi.Selectors {
+		// The template is the selector that already contains the address,
+		// when there is one; only an initiator that could not know its address
+		// yet (the IKE_AUTH placeholder case) falls back to the first of the
+		// family. Taking the first one regardless picked up the protocol and
+		// ports of whatever the initiator listed first -- strongSwan lists a
+		// trap policy's ICMP-echo-only selector ahead of the full one -- and
+		// narrowed a whole Child SA down to echo requests.
+		var tmpl *payload.TrafficSelector
+		for i := range tsi.Selectors {
+			sel := &tsi.Selectors[i]
 			if sel.Type != want.typ {
 				continue
 			}
+			if ipInRange(want.addr, sel.StartAddr, sel.EndAddr) {
+				tmpl = sel
+				break
+			}
+			if tmpl == nil {
+				tmpl = sel
+			}
+		}
+		if tmpl != nil {
+			sel := *tmpl
 			sel.StartAddr = want.addr
 			sel.EndAddr = want.addr
 			out = append(out, sel)
-			break
 		}
 	}
 	if len(out) == 0 {
