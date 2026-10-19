@@ -8,6 +8,7 @@ import (
 	"crypto/subtle"
 	"encoding/binary"
 	"errors"
+	"math"
 	"slices"
 	"sync"
 
@@ -26,6 +27,10 @@ var (
 	errReplayed     = errors.New("esp: replayed sequence")
 	errShortTrailer = errors.New("esp: plaintext too short for trailer")
 	errBadPadLength = errors.New("esp: bad pad length")
+	// errSeqExhausted is the 32-bit sequence number spent. RFC 4303 §3.3.3:
+	// without extended sequence numbers the sender must not let it cycle,
+	// since the receiver's replay window would then drop everything after.
+	errSeqExhausted = errors.New("esp: sequence number exhausted; rekey required")
 )
 
 // Transform is the negotiated ESP algorithm configuration for one direction of
@@ -146,6 +151,10 @@ func (s *SA) appendEncapsulated(dst, inner []byte, nextHeader uint8, minInner in
 	}
 
 	s.mu.Lock()
+	if s.seqOut == math.MaxUint32 {
+		s.mu.Unlock()
+		return nil, errSeqExhausted
+	}
 	s.seqOut++
 	seq := s.seqOut
 	s.mu.Unlock()

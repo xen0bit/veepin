@@ -2,6 +2,7 @@ package esp
 
 import (
 	"bytes"
+	"math"
 	"testing"
 
 	"github.com/xen0bit/veepin/internal/ikev2/payload"
@@ -354,5 +355,19 @@ func TestPaddedDataPathAllocations(t *testing.T) {
 		}
 	}); n > 1 {
 		t.Errorf("EncapsulatePadded allocs/op = %v, want <= 1", n)
+	}
+}
+
+// TestSequenceNumberRefusesToWrap: RFC 4303 §3.3.3 forbids cycling the 32-bit
+// sequence number without ESN. If this fails, a sender wraps to 1 and the
+// receiver's replay window drops everything it sends afterwards.
+func TestSequenceNumberRefusesToWrap(t *testing.T) {
+	sa := &SA{SPIOut: 1, SPIIn: 2, Out: gcmTransform(t, 1), In: gcmTransform(t, 2)}
+	if _, err := sa.Encapsulate([]byte{0x45}, 4); err != nil {
+		t.Fatal(err)
+	}
+	sa.seqOut = math.MaxUint32
+	if _, err := sa.Encapsulate([]byte{0x45}, 4); err == nil {
+		t.Fatal("the sequence number wrapped")
 	}
 }
