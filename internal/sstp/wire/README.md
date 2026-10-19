@@ -38,9 +38,11 @@ flowchart TD
   to pull one packet; a truncated stream yields `ErrMalformed` rather than a
   partial packet. Callers must read packets, not raw bytes.
 - **The crypto-binding attribute is the security-critical one** — it ties the PPP
-  authentication (via [`internal/mschap`](../../mschap)'s HLAK) to the TLS channel,
-  so SSTP's MS-CHAPv2 is not an unauthenticated tunnel even with a self-signed cert.
-  This package only lays the attribute out; the binding computation lives above.
+  authentication (via [`internal/mschap`](../../mschap)'s HLAK) to the TLS channel.
+  It protects a client only when the server *requires* it, which veepin's server
+  does; a client that skips certificate verification cannot tell whether the
+  server it reached enforces the binding. This package only lays the attribute
+  out; the binding computation lives above.
 - Data packets carry PPP frames handed to [`internal/ppp`](../../ppp).
 - **`pq-sstp` has no third-party peer and none in prospect.** `sstp-client` links
   OpenSSL 3.0, which has neither ML-KEM nor ML-DSA, so `TestInteropPQSSTPSelf` is

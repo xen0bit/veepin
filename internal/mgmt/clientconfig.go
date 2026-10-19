@@ -175,7 +175,9 @@ var clientProtoMaps = map[string]clientProtoMap{
 	},
 	"sstp": {
 		endpointKey: "server", serverPort: "port", clientDefaultPort: "443",
-		carry: map[string]string{"user": "user", "password": "password"},
+		// The server's certificate goes to the client as its trust anchor, so
+		// a generated profile verifies the server rather than needing -insecure.
+		carry: map[string]string{"user": "user", "password": "password", "ca": "cert"},
 	},
 	"l2tp": {
 		endpointKey: "server", serverPort: "port", clientDefaultPort: "500",

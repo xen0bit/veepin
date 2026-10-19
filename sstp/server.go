@@ -9,10 +9,12 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xen0bit/veepin/client"
@@ -109,7 +111,7 @@ type Server struct {
 	shaper *dataplane.Shaper
 
 	listenAddr *net.TCPAddr
-	tun        *dataplane.TUN
+	tun        tunDevice
 	listener   net.Listener
 
 	mu      sync.Mutex
@@ -117,6 +119,15 @@ type Server struct {
 
 	closeOnce sync.Once
 	closed    chan struct{}
+}
+
+// tunDevice is the part of *dataplane.TUN the server uses, so a test can stand
+// in for the device without CAP_NET_ADMIN.
+type tunDevice interface {
+	Read([]byte) (int, error)
+	Write([]byte) (int, error)
+	Close() error
+	Name() string
 }
 
 // NewServer builds a server from cfg: it parses the certificate and pool and
@@ -296,7 +307,8 @@ func (s *Server) handleConn(conn *tls.Conn) {
 	}
 	defer s.pool.Release(ip)
 
-	cl := &sstpClient{conn: conn, srv: s, assignedIP: ip}
+	addr, _ := netip.AddrFromSlice(ip.To4())
+	cl := &sstpClient{conn: conn, srv: s, assignedIP: ip, assigned: addr, nonce: nonce}
 	cl.ppp = ppp.NewServer(ppp.ServerConfig{
 		ClientIP: ip,
 		ServerIP: s.gateway,
@@ -304,6 +316,7 @@ func (s *Server) handleConn(conn *tls.Conn) {
 		Auth:     s.authenticate,
 	}, cl, cl)
 	defer s.unregister(cl)
+	defer cl.stopBindingTimer()
 
 	cl.ppp.Start()
 	_ = conn.SetDeadline(time.Time{})
@@ -378,6 +391,8 @@ type sstpClient struct {
 	ppp  *ppp.ServerSession
 
 	assignedIP net.IP
+	assigned   netip.Addr
+	nonce      []byte // sent in CALL_CONNECT_ACK; the binding must carry it
 
 	writeMu sync.Mutex
 
@@ -385,6 +400,20 @@ type sstpClient struct {
 	password   string
 	ntResponse [mschap.NTResponseLen]byte
 	authed     bool
+
+	// The data path opens only when all three conditions hold: MS-CHAPv2
+	// succeeded, IPCP is up, and the client's crypto binding verified. Until
+	// then every IP frame is dropped and the TUN routes nothing to this
+	// client. The binding is what ties the PPP authentication to this TLS
+	// session (MS-SSTP §3.2.5.2.3); a server that brings the link up
+	// without one gives up the protection the binding exists to provide.
+	networkUp atomic.Bool
+	bound     atomic.Bool
+	up        atomic.Bool
+	upOnce    sync.Once
+
+	bindingMu    sync.Mutex
+	bindingTimer *time.Timer
 }
 
 // SendPPP frames a PPP payload in an SSTP data packet and writes it to the client.
@@ -421,12 +450,44 @@ func (c *sstpClient) Authenticated(_, password string, ntResponse [mschap.NTResp
 	c.password = password
 	c.ntResponse = ntResponse
 	c.authed = true
+	// MS-SSTP gives the client a bounded time after authentication to send
+	// CALL_CONNECTED. A client that never does is not carried.
+	c.bindingMu.Lock()
+	c.bindingTimer = time.AfterFunc(handshakeTimeout, func() {
+		if !c.bound.Load() {
+			c.srv.logger.Warnf("sstp: %s sent no crypto binding within %s; closing", c.conn.RemoteAddr(), handshakeTimeout)
+			c.conn.Close()
+		}
+	})
+	c.bindingMu.Unlock()
 }
 
-// NetworkUp registers the client so the TUN loop routes its address to it.
+func (c *sstpClient) stopBindingTimer() {
+	c.bindingMu.Lock()
+	if c.bindingTimer != nil {
+		c.bindingTimer.Stop()
+	}
+	c.bindingMu.Unlock()
+}
+
+// NetworkUp records that IPCP has opened. The client is registered once its
+// crypto binding has also verified; see maybeUp.
 func (c *sstpClient) NetworkUp() {
-	c.srv.register(c)
-	c.srv.logger.Printf("sstp: client %s up, assigned %s", c.conn.RemoteAddr(), c.assignedIP)
+	c.networkUp.Store(true)
+	c.maybeUp()
+}
+
+// maybeUp opens the data path once IPCP is up and the binding has verified,
+// whichever of the two happens last.
+func (c *sstpClient) maybeUp() {
+	if !c.networkUp.Load() || !c.bound.Load() {
+		return
+	}
+	c.upOnce.Do(func() {
+		c.up.Store(true)
+		c.srv.register(c)
+		c.srv.logger.Printf("sstp: client %s up, assigned %s", c.conn.RemoteAddr(), c.assignedIP)
+	})
 }
 
 // Closed ends the connection, unblocking the read loop.
@@ -459,6 +520,9 @@ func (c *sstpClient) readLoop() {
 					return
 				}
 				c.srv.logger.Printf("sstp: crypto binding verified for %s", c.conn.RemoteAddr())
+				c.bound.Store(true)
+				c.stopBindingTimer()
+				c.maybeUp()
 			case wire.MsgCallDisconnect:
 				return
 			case wire.MsgEchoRequest:
@@ -469,6 +533,12 @@ func (c *sstpClient) readLoop() {
 		}
 
 		if ipPacket, ok := ppp.IsIP(body); ok {
+			// Nothing reaches the TUN before the link is fully up, and then
+			// only as the address IPCP assigned: every client shares the one
+			// TUN, so this is the only place the sender is still known.
+			if !c.up.Load() || !dataplane.SourceIs(ipPacket, c.assigned) {
+				continue
+			}
 			if _, err := c.srv.tun.Write(ipPacket); err != nil {
 				c.srv.logger.Printf("sstp: TUN write: %v", err)
 			}
@@ -487,7 +557,7 @@ func (c *sstpClient) verifyBinding(body []byte) error {
 		return errors.New("crypto binding before authentication")
 	}
 	hlak := mschap.ClientHLAK(c.password, c.ntResponse)
-	return VerifyCryptoBinding(body, hlak, c.srv.serverCertDER)
+	return VerifyCryptoBinding(body, hlak, c.srv.serverCertDER, c.nonce)
 }
 
 // serverHTTPHandshake reads the client's SSTP_DUPLEX_POST request and answers 200,

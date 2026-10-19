@@ -10,9 +10,11 @@ package sstp
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -38,6 +40,7 @@ const (
 	OptPassword = "password"
 	OptTUNName  = "tun"
 	OptInsecure = "insecure"
+	OptCA       = "ca" // PEM bundle to verify the server against
 )
 
 // Config holds the parameters for a single SSTP tunnel.
@@ -47,12 +50,18 @@ type Config struct {
 	Username string
 	Password string
 	TUNName  string
-	// SkipVerify disables TLS certificate verification. It is safe for SSTP:
-	// MS-CHAPv2 mutually authenticates the peers (the client checks the server's
-	// authenticator response), so a server that cannot prove it knows the password
-	// cannot complete the handshake even without a trusted certificate. Needed for
-	// the self-signed certificates most SSTP servers ship with.
+	// SkipVerify disables TLS certificate verification. It is not free of
+	// cost. With it, the crypto binding is the only thing tying this TLS
+	// session to the PPP authentication, and the binding protects the client
+	// only from a server that enforces it -- the client cannot tell whether
+	// one does. A relay in the middle also sees the MS-CHAPv2 exchange, which
+	// can be attacked offline. Prefer RootCAs naming the server's CA (or its
+	// self-signed certificate).
 	SkipVerify bool
+	// RootCAs, if set, verifies the server's certificate instead of the
+	// system roots. Pointing it at a self-signed server's own certificate is
+	// how to trust that one server without SkipVerify.
+	RootCAs *x509.CertPool
 	Logger     *slog.Logger
 
 	// PostQuantumOnly requires a post-quantum key exchange and ML-DSA
@@ -89,6 +98,17 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 	cfg.Password = opts[OptPassword]
 	cfg.TUNName = opts[OptTUNName]
 	cfg.SkipVerify = opts[OptInsecure] == "true"
+	if path := opts[OptCA]; path != "" {
+		pem, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("sstp: reading CA %q: %w", path, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("sstp: CA %q contains no certificates", path)
+		}
+		cfg.RootCAs = pool
+	}
 	cfg.PostQuantumOnly = pqpolicy.Requested(opts)
 	if cfg.Port == 0 {
 		cfg.Port = 443
@@ -117,7 +137,11 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 
 	tlsCfg := &tls.Config{
 		ServerName:         cfg.Server,
-		InsecureSkipVerify: cfg.SkipVerify, //nolint:gosec // opt-in; MS-CHAPv2 mutually authenticates the peers.
+		RootCAs:            cfg.RootCAs,
+		InsecureSkipVerify: cfg.SkipVerify, //nolint:gosec // opt-in, and logged at Warn below.
+	}
+	if cfg.SkipVerify {
+		logger.Warnf("sstp: -insecure: the server's certificate is not verified")
 	}
 	if cfg.PostQuantumOnly {
 		pqpolicy.HardenTLS(tlsCfg)
@@ -395,5 +419,9 @@ func (s *session) Close() error {
 			_ = s.tlsConn.Close()
 		}
 	})
+	// Under mu: fail records closeErr there, and a Close from the caller can
+	// race the read loop's fail.
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.closeErr
 }

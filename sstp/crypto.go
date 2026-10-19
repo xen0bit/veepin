@@ -67,11 +67,16 @@ func BuildCBValue(nonce, certHash, compoundMAC []byte) []byte {
 // SSTP_MSG_CALL_CONNECTED control message body: the certificate hash matches the
 // server's own certificate, and the compound MAC over the whole packet (the
 // 4-octet packet header prepended to body, with the MAC field zeroed) reproduces
-// under the CMK derived from the client's HLAK.
-func VerifyCryptoBinding(body []byte, hlak [mschap.HLAKLen]byte, serverCertDER []byte) error {
+// under the CMK derived from the client's HLAK. nonce is the one this server
+// sent in CALL_CONNECT_ACK; a binding carrying any other was made for some
+// other connection.
+func VerifyCryptoBinding(body []byte, hlak [mschap.HLAKLen]byte, serverCertDER, nonce []byte) error {
 	cb, mac, err := extractAndZeroMAC(body)
 	if err != nil {
 		return fmt.Errorf("sstp: crypto binding: %w", err)
+	}
+	if len(nonce) != wire.NonceLen || !hmac.Equal(cb[4:36], nonce) {
+		return fmt.Errorf("sstp: crypto binding nonce is not the one this server issued")
 	}
 
 	expectedHash := sha256.Sum256(serverCertDER)
