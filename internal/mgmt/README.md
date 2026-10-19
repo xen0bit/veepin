@@ -141,12 +141,15 @@ A bearer token, 256 bits of `crypto/rand`, generated on first run into
 `<config>/mgmt/token` mode 0600 and compared with `subtle.ConstantTimeCompare`.
 That is the boundary for `/api/*`.
 
-The panel at `/` has no token, necessarily — it is the thing that *hands* the
-browser one, by writing it into the page. Its boundary is `RequireHost`, which
-answers 403 unless the `Host` header names loopback, `localhost`, or the exact
-`-listen` address. Without it, a page that rebinds its own hostname to
-`127.0.0.1` becomes same-origin with the panel, reads the token out of the DOM,
-and drives every endpoint. `doc/security.md` has the long form.
+The panel at `/` has no token, necessarily — a browser loads it before it has
+one — and its pages carry none either: a loopback port answers every local
+account, so a page holding the token would hand root's credential to any of
+them. The operator supplies it as `#token=` in the URL or at the panel's prompt,
+and `panel.js` keeps it in `sessionStorage`. The panel's other boundary is
+`RequireHost`, which answers 403 unless the `Host` header names loopback,
+`localhost`, or the exact `-listen` address, so a page that rebinds its own
+hostname to `127.0.0.1` cannot become same-origin with it. `doc/security.md`
+has the long form.
 
 ## PATCH is presence-aware
 

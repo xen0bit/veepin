@@ -708,8 +708,25 @@ The supervisor (`veepin serve -config <dir>`) starts a management HTTP API and
 an embedded web panel, listening on `127.0.0.1:8443` by default. The API is
 authenticated with a bearer token generated on first run into
 `<config>/mgmt/token` mode `0600` root-only — the same filesystem-protection
-posture the protocol facades' PEM and key files already rely on. That posture
-holds because the panel is reachable only from the host itself.
+posture the protocol facades' PEM and key files already rely on.
+
+A loopback TCP port is reachable by **every account on the host**, not only by
+root, so the file's permissions are the boundary only if nothing served on that
+port gives the token away. Nothing does: the panel's pages carry no token (an
+earlier version embedded it in every page, which made any local user
+root-equivalent), and the startup log names the token file rather than its
+contents. The operator opens the panel as
+`http://127.0.0.1:8443/#token=<contents of <config>/mgmt/token>`, or pastes the
+token when the panel asks for it; the browser keeps it in `sessionStorage` for
+that tab. A URL fragment is never sent to the server, and the panel removes it
+from the address bar as soon as it has read it.
+
+`POST /api/listeners/<name>/client-config` bundles certificate files into the
+profile it returns. Whoever holds the token also writes the listener options
+those paths come from, so the endpoint reads only inside that listener's own
+directory (`<config>/<name>/`, where key generation writes) and returns only
+the certificate blocks of what it reads. It cannot be pointed at an arbitrary
+file the supervisor can read.
 
 If you bind the management API to a routable interface, the token file's
 filesystem protection is no longer the boundary: anyone with network access can
@@ -722,19 +739,20 @@ including protocol keys and PSKs.
 
 ### The panel is unauthenticated, and the `Host` check is what makes that safe
 
-The panel at `/` is served without a bearer token, necessarily: it is the thing
-that hands the browser the token, which it does by writing it into the page. The
-token is then the per-request boundary for `/api/*`.
+The panel at `/` is served without a bearer token, necessarily: a browser loads
+it before it has one. The pages contain nothing secret; the token, which the
+operator supplies, is the per-request boundary for `/api/*`.
 
 That arrangement survives ordinary cross-origin abuse. JavaScript on another
 site cannot set an `Authorization` header without a CORS preflight the
 supervisor never grants, so it cannot call the API — and it cannot read `/`
 either, because the same-origin policy stops it seeing the response.
 
-It does not survive **DNS rebinding**. A page the operator visits can rebind its
-own hostname to `127.0.0.1`, at which point it is same-origin with the panel: it
-fetches `/`, reads the token straight out of the DOM, and drives every endpoint
-with the operator's full authority. No CORS involved.
+It does not, on its own, survive **DNS rebinding**. A page the operator visits
+can rebind its own hostname to `127.0.0.1`, at which point it is same-origin
+with the panel's address and can send it requests. With the token no longer in
+the page there is nothing to read out of `/`, but the API is still worth
+protecting from a hostile origin. No CORS involved.
 
 What gives a rebound request away is that the browser sends the name it dialled,
 so it arrives as `Host: attacker.example` rather than a loopback literal. The
@@ -746,9 +764,9 @@ in the upstream `Host`.
 
 The dashboard escapes every value it renders into a row, `error` most of all:
 protocol errors quote the option values that caused them, so an operator-supplied
-path or hostname reaches the page as text. Since the page holds the token in its
-DOM, markup landing in a row would be a token-exfiltration path rather than a
-cosmetic bug.
+path or hostname reaches the page as text. Since the page's script holds the
+token once the operator has supplied it, markup landing in a row would be a
+token-exfiltration path rather than a cosmetic bug.
 
 Operate the management plane behind one of:
 

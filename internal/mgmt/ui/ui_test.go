@@ -22,7 +22,7 @@ import (
 // references a field pageData does not have, or a {{range}} over a nil, fails at
 // execute time -- which is what this reaches.
 func TestEveryPanelPageRenders(t *testing.T) {
-	h, err := NewHandler("test-token", nil)
+	h, err := NewHandler(nil)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestEveryPanelPageRenders(t *testing.T) {
 // straight into the ResponseWriter meant a failure halfway through had already
 // sent 200 and a truncated page, and the handler could only log about it.
 func TestARenderFailureIsA500WithABody(t *testing.T) {
-	h, err := NewHandler("test-token", nil)
+	h, err := NewHandler(nil)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -72,24 +72,31 @@ func TestARenderFailureIsA500WithABody(t *testing.T) {
 	}
 }
 
-func TestDashboardRendersToken(t *testing.T) {
-	h, _ := NewHandler("test-token", nil)
+// TestNoPageCarriesTheToken: the pages are served without authentication to
+// anyone who can reach the port, which on loopback is every local user. If
+// this fails, any account on the host can read the operator's token out of a
+// page and drive the root supervisor with it.
+func TestNoPageCarriesTheToken(t *testing.T) {
+	h, _ := NewHandler(nil)
+	for _, path := range []string{"/", "/listeners/new", "/profiles/new", "/listeners/site-a", "/profiles/home", "/assets/panel.js"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if strings.Contains(rec.Body.String(), "{{") {
+			t.Errorf("GET %s: unrendered template action in the body", path)
+		}
+		if strings.Contains(rec.Body.String(), "VEEPIN_TOKEN = \"") {
+			t.Errorf("GET %s: the page assigns a token literal", path)
+		}
+	}
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
-	if rec.Code != 200 {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	body := rec.Body.String()
-	if !strings.Contains(body, "test-token") {
-		t.Errorf("dashboard page does not include the token: %s", body[:min(len(body), 200)])
-	}
-	if !strings.Contains(body, "veepin supervisor") {
+	if !strings.Contains(rec.Body.String(), "veepin supervisor") {
 		t.Errorf("dashboard page does not include its title")
 	}
 }
 
 func TestNewListenerFormRenders(t *testing.T) {
-	h, _ := NewHandler("test-token", nil)
+	h, _ := NewHandler(nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/listeners/new", nil))
 	if rec.Code != 200 {
@@ -101,7 +108,7 @@ func TestNewListenerFormRenders(t *testing.T) {
 }
 
 func TestEditListenerFormRendersName(t *testing.T) {
-	h, _ := NewHandler("test-token", nil)
+	h, _ := NewHandler(nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/listeners/site-a", nil))
 	if rec.Code != 200 {
@@ -291,7 +298,7 @@ func TestFormEscapesTheProtocolOptionsItBuilds(t *testing.T) {
 // substring test for "profile" on the whole hint pointed the entire form --
 // load, save, delete -- at /api/profiles for those names.
 func TestFormRoutesAListenerNamedProfileAsAListener(t *testing.T) {
-	h, _ := NewHandler("test-token", nil)
+	h, _ := NewHandler(nil)
 	for _, name := range []string{"profiles", "vpn-profile", "profile-a"} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest("GET", "/listeners/"+name, nil))
@@ -313,7 +320,7 @@ func TestFormRoutesAListenerNamedProfileAsAListener(t *testing.T) {
 // TestProfileRoutesCarryTheProfileEditHint pins the profile add/edit routes that the
 // dashboard's profile table links to.
 func TestProfileRoutesCarryTheProfileEditHint(t *testing.T) {
-	h, _ := NewHandler("test-token", nil)
+	h, _ := NewHandler(nil)
 	for _, path := range []string{"/profiles/new", "/profiles/home"} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
@@ -364,7 +371,7 @@ func TestDashboardRestartConfirms(t *testing.T) {
 
 // TestPanelJSIsServedAsJavaScriptAndNotSniffable pins the shared-asset route both templates load.
 func TestPanelJSIsServedAsJavaScriptAndNotSniffable(t *testing.T) {
-	h, _ := NewHandler("test-token", nil)
+	h, _ := NewHandler(nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/assets/panel.js", nil))
 	if rec.Code != 200 {
@@ -382,7 +389,7 @@ func TestPanelJSIsServedAsJavaScriptAndNotSniffable(t *testing.T) {
 // uptime fetched from /api/health, so a dead management plane is visible in the
 // page rather than silently freezing the listener table.
 func TestDashboardRendersHealthHeader(t *testing.T) {
-	h, _ := NewHandler("test-token", nil)
+	h, _ := NewHandler(nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
 	if rec.Code != 200 {
@@ -539,7 +546,7 @@ func TestDashboardOffersPeerRemoval(t *testing.T) {
 // TestUnknownPathReturns404 checks that paths the panel does not own are not
 // silently swallowed.
 func TestUnknownPathReturns404(t *testing.T) {
-	h, _ := NewHandler("test-token", nil)
+	h, _ := NewHandler(nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/nope", nil))
 	if rec.Code != http.StatusNotFound {

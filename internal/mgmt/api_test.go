@@ -1065,14 +1065,20 @@ var ovpnClientIdentity = map[string]string{
 
 func TestClientConfigBundlesFileCompanions(t *testing.T) {
 	s := newTestServer(t, map[string]supervisor.Status{})
-	caPath := filepath.Join(s.dir, "ca.crt")
+	// In the listener's own directory, where keygen writes: the only place a
+	// bundled file may come from.
+	ldir := filepath.Join(s.dir, "site-a")
+	if err := os.MkdirAll(ldir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	caPath := filepath.Join(ldir, "ca.crt")
 	if err := os.WriteFile(caPath, []byte("-----BEGIN CERTIFICATE-----\nMOCK\n-----END CERTIFICATE-----\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// All three of x509-chain's outputs, not just the CA: the generator is
 	// all-or-nothing, so a partial supply is refused rather than half-honoured.
-	certPath := filepath.Join(s.dir, "server.crt")
-	keyPath := filepath.Join(s.dir, "server.key")
+	certPath := filepath.Join(ldir, "server.crt")
+	keyPath := filepath.Join(ldir, "server.key")
 	for _, p := range []string{certPath, keyPath} {
 		if err := os.WriteFile(p, []byte("-----BEGIN CERTIFICATE-----\nMOCK\n-----END CERTIFICATE-----\n"), 0o600); err != nil {
 			t.Fatal(err)
@@ -1214,14 +1220,18 @@ func TestL2TPv3ClientConfigSwapsTheEndsOfEverySymmetricPair(t *testing.T) {
 // rather than provision a peer.
 func TestNebulaClientConfigCarriesTheCAButNotTheLighthouseIdentity(t *testing.T) {
 	s := newTestServer(t, map[string]supervisor.Status{})
+	ldir := filepath.Join(s.dir, "mesh")
+	if err := os.MkdirAll(ldir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	write := func(name, body string) string {
-		p := filepath.Join(s.dir, name)
+		p := filepath.Join(ldir, name)
 		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		return p
 	}
-	caPath := write("ca.crt", "CA-BUNDLE")
+	caPath := write("ca.crt", "-----BEGIN NEBULA CERTIFICATE-----\nQ0FCVU5ETEU=\n-----END NEBULA CERTIFICATE-----\n")
 	certPath := write("lighthouse.crt", "LIGHTHOUSE-CERT")
 	keyPath := write("lighthouse.key", "LIGHTHOUSE-KEY")
 	s.do("POST", "/api/listeners", map[string]any{"name": "mesh", "protocol": "nebula",
@@ -2009,5 +2019,69 @@ func TestFailedRequestsAreStillLogged(t *testing.T) {
 	}
 	if !sawDelete {
 		t.Errorf("a mutation was not logged")
+	}
+}
+
+// TestClientConfigReadsNothingOutsideTheListenerDirectory: whoever holds the
+// token writes the listener's options, so a listener whose ca names some other
+// file must not turn client-config into a read of that file as root. If this
+// fails, the endpoint returns any file the supervisor can read.
+func TestClientConfigReadsNothingOutsideTheListenerDirectory(t *testing.T) {
+	s := newTestServer(t, map[string]supervisor.Status{})
+	secret := filepath.Join(t.TempDir(), "elsewhere.crt")
+	if err := os.WriteFile(secret, []byte("-----BEGIN CERTIFICATE-----\nU0VDUkVU\n-----END CERTIFICATE-----\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ldir := filepath.Join(s.dir, "site-b")
+	if err := os.MkdirAll(ldir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A symlink inside the directory pointing out of it is refused as well.
+	link := filepath.Join(ldir, "ca.crt")
+	if err := os.Symlink(secret, link); err != nil {
+		t.Fatal(err)
+	}
+	for _, ca := range []string{secret, link, filepath.Join(ldir, "..", "..", filepath.Base(filepath.Dir(secret)), "elsewhere.crt")} {
+		s.do("DELETE", "/api/listeners/site-b", nil)
+		s.do("POST", "/api/listeners", map[string]any{"name": "site-b", "protocol": "openvpn",
+			"options": map[string]string{"ca": ca, "cert": "/a", "key": "/b"}, "enabled": false})
+		resp, body := s.do("POST", "/api/listeners/site-b/client-config",
+			map[string]any{"overrides": ovpnClientIdentity, "endpoint": "vpn.example.com"})
+		if resp.StatusCode != 200 {
+			t.Fatalf("ca=%s: status = %d: %s", ca, resp.StatusCode, body)
+		}
+		if strings.Contains(string(body), "U0VDUkVU") {
+			t.Fatalf("ca=%s: a file outside the listener's directory was bundled", ca)
+		}
+	}
+}
+
+// TestClientConfigBundlesOnlyCertificateBlocks: every file a profile carries
+// is trust material, so a listener path that names a key -- or a key block
+// sitting next to a certificate -- contributes only its certificates.
+func TestClientConfigBundlesOnlyCertificateBlocks(t *testing.T) {
+	s := newTestServer(t, map[string]supervisor.Status{})
+	ldir := filepath.Join(s.dir, "site-c")
+	if err := os.MkdirAll(ldir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mixed := filepath.Join(ldir, "ca.crt")
+	body := "-----BEGIN PRIVATE KEY-----\nS0VZS0VZ\n-----END PRIVATE KEY-----\n" +
+		"-----BEGIN CERTIFICATE-----\nQ0VSVA==\n-----END CERTIFICATE-----\n"
+	if err := os.WriteFile(mixed, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.do("POST", "/api/listeners", map[string]any{"name": "site-c", "protocol": "openvpn",
+		"options": map[string]string{"ca": mixed, "cert": "/a", "key": "/b"}, "enabled": false})
+	resp, out := s.do("POST", "/api/listeners/site-c/client-config",
+		map[string]any{"overrides": ovpnClientIdentity, "endpoint": "vpn.example.com"})
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d: %s", resp.StatusCode, out)
+	}
+	if strings.Contains(string(out), "S0VZS0VZ") || strings.Contains(string(out), "PRIVATE KEY") {
+		t.Fatal("a private key block was bundled")
+	}
+	if !strings.Contains(string(out), "Q0VSVA==") {
+		t.Fatal("the certificate block was not bundled")
 	}
 }
