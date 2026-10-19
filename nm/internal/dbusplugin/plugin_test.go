@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -507,4 +508,54 @@ func TestPublishStateSurvivesAClosedBus(t *testing.T) {
 		}()
 		p.props.SetMust(Iface, "State", StateStopped)
 	}()
+}
+
+// TestNewSecretsTakesOnlyTheSecrets: the reply to SecretsRequired must not be
+// able to change where the tunnel goes. If this fails, whoever answers first
+// chooses the endpoint and keys of a connection the user started.
+func TestNewSecretsTakesOnlyTheSecrets(t *testing.T) {
+	pending := settings(map[string]string{nmconfig.KeyGateway: "real.example"}, map[string]string{"a": "1"})
+	reply := settings(map[string]string{nmconfig.KeyGateway: "attacker.example"}, map[string]string{"b": "2"})
+	got := withSecretsFrom(pending, reply)
+	data := got["vpn"]["data"].Value().(map[string]string)
+	if data[nmconfig.KeyGateway] != "real.example" {
+		t.Fatalf("the reply rewrote the gateway to %q", data[nmconfig.KeyGateway])
+	}
+	sec := got["vpn"]["secrets"].Value().(map[string]string)
+	if sec["a"] != "1" || sec["b"] != "2" {
+		t.Fatalf("secrets not merged: %v", sec)
+	}
+	if _, ok := pending["vpn"]["secrets"].Value().(map[string]string)["b"]; ok {
+		t.Fatal("the pending settings were modified in place")
+	}
+}
+
+// TestAServiceDialsOnlyItsOwnProtocol: each service name is one protocol's.
+func TestAServiceDialsOnlyItsOwnProtocol(t *testing.T) {
+	p := New(nil, BusNameFor("wireguard"), vlog.Discard())
+	err := p.Connect(settings(map[string]string{nmconfig.KeyProtocol: "ikev2",
+		nmconfig.KeyGateway: "g.example", nmconfig.KeyLocalID: "id"}, map[string]string{nmconfig.KeyPSK: "p"}))
+	if err == nil {
+		t.Fatal("the wireguard service accepted an ikev2 connection")
+	}
+}
+
+// TestBusPolicyLetsOnlyRootCall: the services run as root and dial what they
+// are told. If this fails, any local user can start or tear down a tunnel
+// through them.
+func TestBusPolicyLetsOnlyRootCall(t *testing.T) {
+	raw, err := os.ReadFile("../../data/nm-veepin-service.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conf := string(raw)
+	i := strings.Index(conf, `<policy context="default">`)
+	if i < 0 {
+		t.Fatal("no default-context policy")
+	}
+	def := conf[i:]
+	def = def[:strings.Index(def, "</policy>")]
+	if strings.Contains(def, "<allow") {
+		t.Fatalf("the default context allows something:\n%s", def)
+	}
 }
