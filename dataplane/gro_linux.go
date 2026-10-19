@@ -146,7 +146,7 @@ func (p *Pump) groMulti(t *groTable, b bound, pkt []byte, from *net.UDPAddr, now
 		return
 	}
 	for _, inner := range inners {
-		if len(inner) == 0 {
+		if len(inner) == 0 || !p.sourceOK(b, inner) {
 			continue
 		}
 		// Per inner packet, as handleInboundMulti counts: counting datagrams

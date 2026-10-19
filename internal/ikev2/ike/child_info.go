@@ -176,7 +176,14 @@ func (s *Server) handleCreateChildSA(sa *IKESA, hdr payload.Header, inners []pay
 		Proposals: []payload.Proposal{acceptedESP},
 	}))
 	b.Add(payload.TypeNonce, false, payload.MarshalNonce(respNonce))
-	b.Add(payload.TypeTSi, false, tsiPay.Body)
+	// Narrowed to the lease exactly as IKE_AUTH narrows it, so a rekeyed or
+	// additional Child SA cannot agree a wider TSi than the first one did.
+	tsiBody := tsiPay.Body
+	if narrowed, ok := narrowTSiToAssignment(child.TSi, sa); ok {
+		child.TSi = narrowed
+		tsiBody = payload.MarshalTS(narrowed)
+	}
+	b.Add(payload.TypeTSi, false, tsiBody)
 	b.Add(payload.TypeTSr, false, tsrPay.Body)
 
 	child.UDPEncap = s.udpEncap(sa, remote)

@@ -400,6 +400,7 @@ func (p *serverPeer) Established(r ikev1.Result) {
 	// The tunnel carries exactly this client's address: that is what routes TUN
 	// egress back to the peer it belongs to.
 	t := NewTunnel(newESPSA(r), r.InSPI, []netip.Prefix{netip.PrefixFrom(addr, 32)}, to)
+	t.checkSource = true
 
 	p.mu.Lock()
 	p.tunnel = t
