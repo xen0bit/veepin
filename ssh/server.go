@@ -264,13 +264,21 @@ func (s *Server) serveTunnel(ch cryptossh.Channel, remote net.Addr) {
 		if !ok {
 			continue
 		}
-		// Learn the client's address on first sight (and on change), accepting only
-		// addresses within the pool that are not the gateway.
-		if src != cl.ip {
+		// The tunnel protocol assigns no address, so the client's is learned
+		// from its first packet: an in-pool address that is not the gateway
+		// and that no other live connection holds. From then on it is fixed.
+		// Rebinding on every new source let one user take another's address
+		// with a single packet and receive everything sent to it.
+		if cl.ip == 0 {
 			if !s.network.Contains(u32IP(src)) || src == binary.BigEndian.Uint32(s.gateway.To4()) {
 				continue
 			}
-			s.rebind(cl, src, remote)
+			if !s.bind(cl, src, remote) {
+				continue
+			}
+		}
+		if src != cl.ip {
+			continue
 		}
 		if _, err := s.tun.Write(pkt); err != nil {
 			s.logger.Printf("ssh: TUN write: %v", err)
@@ -278,16 +286,23 @@ func (s *Server) serveTunnel(ch cryptossh.Channel, remote net.Addr) {
 	}
 }
 
-// rebind points the routing map at cl for address src.
-func (s *Server) rebind(cl *sshClient, src uint32, remote net.Addr) {
+// bind gives cl the address src, unless another live connection already
+// holds it.
+func (s *Server) bind(cl *sshClient, src uint32, remote net.Addr) bool {
 	s.mu.Lock()
-	if cl.ip != 0 {
-		delete(s.clients, cl.ip)
+	if other := s.clients[src]; other != nil && other != cl {
+		s.mu.Unlock()
+		if !cl.refusedLogged {
+			cl.refusedLogged = true
+			s.logger.Warnf("ssh: client %s sent as %s, which another connection holds; dropping", remote, u32IP(src))
+		}
+		return false
 	}
 	cl.ip = src
 	s.clients[src] = cl
 	s.mu.Unlock()
 	s.logger.Printf("ssh: client %s using %s", remote, u32IP(src))
+	return true
 }
 
 // Close stops the server: the listener, the TUN, and every client channel.
@@ -333,6 +348,9 @@ type sshClient struct {
 	srv     *Server
 	writeMu sync.Mutex
 	ip      uint32
+	// refusedLogged keeps a client retrying a taken address from filling the
+	// log; serveTunnel is its only writer.
+	refusedLogged bool
 }
 
 // write frames an IP packet and sends it to the client, serialized against the
