@@ -122,7 +122,7 @@ func (s *Server) handleIKESAInit(pkt []byte, hdr payload.Header, remote *net.UDP
 	// initiator both proposed it in an ADDKE1 transform and advertised
 	// INTERMEDIATE_EXCHANGE_SUPPORTED, since the exchange that carries it is
 	// the one thing it cannot be done without.
-	if hasIntermediateSupport(msg) {
+	if hasIntermediateSupport(msg) && !s.cfg.classicalOnly {
 		for _, p := range sa.Proposals {
 			if p.Num != accepted.Num {
 				continue

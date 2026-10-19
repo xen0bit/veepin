@@ -231,3 +231,44 @@ func TestRequireServerUsageRefusesAClientOnlyCertificate(t *testing.T) {
 		}
 	}
 }
+
+// TestRequirePostQuantumRefusesAClassicalResponder: pq-ikev2 promises a
+// post-quantum key exchange or none. If this fails, the client completes a
+// classical-only IKE SA while its name says otherwise, and a recording of the
+// session is decryptable by whoever later breaks the classical group.
+func TestRequirePostQuantumRefusesAClassicalResponder(t *testing.T) {
+	p500, p4500 := freeUDPPort(t), freeUDPPort(t)
+	srv, err := NewServer(Config{
+		ListenIP: "127.0.0.1", Port500: p500, Port4500: p4500,
+		PSK: []byte("test-psk"), LocalID: FQDNIdentity("vpn.example"),
+		PublicIP: net.ParseIP("127.0.0.1"), Logger: vlog.Discard(),
+		AssignAddr: func(AddressRequest) (Assignment, error) {
+			return Assignment{IP4: net.IPv4(10, 8, 8, 8), Netmask: net.IPv4(255, 255, 255, 0)}, nil
+		},
+		classicalOnly: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	defer srv.Close()
+	time.Sleep(50 * time.Millisecond)
+
+	for _, require := range []bool{false, true} {
+		client := NewClient(ClientConfig{
+			ServerHost: "127.0.0.1", ServerPort: p500, NATTPort: p4500,
+			PSK: []byte("test-psk"), LocalID: FQDNIdentity("client.example"),
+			PostQuantum: true, RequirePostQuantum: require, Logger: vlog.Discard(),
+		})
+		_, err := client.Connect()
+		if err == nil {
+			client.Close()
+		}
+		switch {
+		case require && err == nil:
+			t.Fatal("a client requiring post-quantum completed a classical-only handshake")
+		case !require && err != nil:
+			t.Fatalf("plain PostQuantum must still fall back: %v", err)
+		}
+	}
+}

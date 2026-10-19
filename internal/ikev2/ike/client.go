@@ -79,6 +79,10 @@ type ClientConfig struct {
 	// It says nothing about PSK: a pre-shared key is symmetric and is not broken
 	// by a quantum adversary, which is the premise RFC 8784 rests on.
 	PostQuantumAuth bool
+	// RequirePostQuantum refuses a responder that does not negotiate the
+	// ML-KEM additional key exchange, where PostQuantum alone falls back to
+	// the classical group. The pq-ikev2 name sets it.
+	RequirePostQuantum bool
 
 	// IPTFS enables AGGFRAG aggregation and fragmentation (RFC 9347) for the
 	// Child SA. When set, USE_AGGFRAG is advertised in IKE_AUTH.
@@ -585,6 +589,17 @@ func (c *Client) saInit() error {
 		}
 	}
 	if c.cfg.PostQuantum && c.addkeGroup == 0 {
+		if c.cfg.RequirePostQuantum {
+			// pq-ikev2 promises a post-quantum key exchange or none at all.
+			// The responder's SA_INIT is covered by its AUTH, so this cannot
+			// be forced from the path; it is a responder that does not do
+			// ML-KEM, and a session with it would be classical only.
+			missing := "accepted no ADDKE1 ML-KEM-768 transform"
+			if !c.peerIntermediate {
+				missing = "did not send INTERMEDIATE_EXCHANGE_SUPPORTED"
+			}
+			return fmt.Errorf("ike: post-quantum key exchange required, but the responder %s (RFC 9242/9370)", missing)
+		}
 		c.log.Printf("ikev2 client: server declined the post-quantum key exchange; continuing with the classical group only")
 	}
 

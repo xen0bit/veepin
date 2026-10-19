@@ -423,9 +423,11 @@ client. Under `pq-ikev2`:
   of the two was missing. The distinction matters diagnostically: a peer that
   proposed ML-KEM without the intermediate exchange is misconfigured
   differently from one that proposed no ML-KEM at all.
-- The client already errors when it asked for PQ and the responder did not
-  accept (`internal/ikev2/ike/client.go:579`). `pq-ikev2`'s client sets the same
-  flag; that path is reused, not rewritten.
+- The client refuses a responder that did not accept ML-KEM when
+  `ClientConfig.RequirePostQuantum` is set, which `pq-ikev2` sets. (This line
+  once said the client already did so; it did not -- it logged and continued
+  classically -- and the flag was added when that was found.) Plain
+  `-post-quantum` still falls back, which is what it promises.
 
 ### 6.2 The authentication half — H3b, and it is now in scope
 

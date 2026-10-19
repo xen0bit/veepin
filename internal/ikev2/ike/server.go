@@ -86,6 +86,10 @@ type Config struct {
 	// it.
 	RequirePostQuantumAuth bool
 
+	// classicalOnly, set only by tests, makes the server decline ADDKE the way
+	// a responder without RFC 9370 does.
+	classicalOnly bool
+
 	// TCP additionally listens for RFC 8229/9329 TCP-encapsulated IKE and ESP on
 	// Port4500. It is additive: the UDP sockets stay bound, so a peer reaches
 	// this server on whichever transport its network allows and is answered on

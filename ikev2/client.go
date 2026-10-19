@@ -264,6 +264,11 @@ func (cfg Config) validate() error {
 		return fmt.Errorf("%s is required", OptLocalID)
 	case cfg.CertFile != "" && cfg.KeyFile == "":
 		return fmt.Errorf("%s requires %s", OptCert, OptKey)
+	case cfg.PostQuantumOnly && cfg.EAPUser != "":
+		// The server side refuses it for the same reason: EAP-MSCHAPv2 is
+		// keyed by MD4 and single-DES, and a name promising maximum assurance
+		// should not offer it.
+		return fmt.Errorf("pq-ikev2 does not offer EAP-MSCHAPv2; authenticate with a certificate or PSK")
 	case cfg.CertFile == "" && cfg.PSK == "":
 		// Without a certificate the PSK is what authenticates the server (and the
 		// client, unless EAP is used).
@@ -328,10 +333,13 @@ func Dial(ctx context.Context, cfg Config) (client.Session, client.Result, error
 		EAPPassword:     cfg.EAPPassword,
 		PostQuantum:     cfg.PostQuantum || cfg.PostQuantumOnly,
 		PostQuantumAuth: cfg.PostQuantumOnly,
-		IPTFS:           cfg.IPTFS,
-		IPTFSRate:       cfg.IPTFSRate,
-		TCP:             cfg.TCP,
-		Logger:          logger,
+		// The guarantee a pq- name makes: anything less is refused rather
+		// than negotiated down. See internal/pqpolicy.
+		RequirePostQuantum: cfg.PostQuantumOnly,
+		IPTFS:              cfg.IPTFS,
+		IPTFSRate:          cfg.IPTFSRate,
+		TCP:                cfg.TCP,
+		Logger:             logger,
 	}
 	if cfg.ServerID != "" {
 		id := parseIdentity(cfg.ServerID)
