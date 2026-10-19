@@ -1,7 +1,10 @@
 # veepin server as a systemd template unit. Enable one instance per config:
 #
 #   /etc/veepin/ikev2.conf:
-#     VEEPIN_ARGS=ikev2 -id vpn.example.com -psk change-me -pool 10.10.10.0/24 -setup-nat
+#     VEEPIN_ARGS=ikev2 -id vpn.example.com -psk-file /etc/veepin/ikev2.psk -pool 10.10.10.0/24 -setup-nat
+#
+# Secrets go in files (every secret flag has a -<flag>-file form), never on
+# VEEPIN_ARGS: the arguments become the daemon's command line.
 #
 #   systemctl enable --now veepin@ikev2
 #
@@ -37,6 +40,11 @@ ProtectHome=yes
 PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectControlGroups=yes
+# Other users cannot see this process in /proc, so its command line -- which
+# carries whatever VEEPIN_ARGS names -- is not world-readable. A secret passed
+# inline is still on argv; ProcSubset additionally hides the rest of /proc.
+ProtectProc=invisible
+ProcSubset=pid
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 DeviceAllow=/dev/net/tun rw
 

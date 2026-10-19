@@ -6,8 +6,13 @@
 #
 # One instance per protocol/config. Examples:
 #
-# IKEv2 with a pre-shared key:
-#VEEPIN_ARGS=ikev2 -id vpn.example.com -psk change-me -pool 10.10.10.0/24 -setup-nat
+# Keep this file, and any key files it names, root:root mode 0600.
+#
+# IKEv2 with a pre-shared key. The key lives in its own file, not here: these
+# arguments become the daemon's command line, which is readable in /proc. Every
+# secret flag has a -<flag>-file form for exactly this.
+#   install -m 0600 /dev/null /etc/veepin/ikev2.psk && $EDITOR /etc/veepin/ikev2.psk
+#VEEPIN_ARGS=ikev2 -id vpn.example.com -psk-file /etc/veepin/ikev2.psk -pool 10.10.10.0/24 -setup-nat
 #
 # WireGuard from a wg-quick style config:
 #VEEPIN_ARGS=wireguard -config /etc/veepin/wg-server.conf

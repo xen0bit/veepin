@@ -794,13 +794,18 @@ a listener whose private key was the eleven characters `<redacted>`.
 
 `veepin serve <proto> -psk …`, `veepin profile add … -password …` and the
 `-set key=value` overrides all take secret values on argv. On Linux that means
-the value is in `/proc/<pid>/cmdline`, readable by any process of the same user
-(and by root), and it lands in the invoking shell's history file. There is no
-`@/path/to/file` indirection and no interactive prompt; adding one is worthwhile
-and has not been done.
+the value is in `/proc/<pid>/cmdline`, which **every local user** can read
+unless `/proc` is mounted `hidepid` or the unit sets `ProtectProc=invisible`,
+and it lands in the invoking shell's history file.
 
-Until then, the two surfaces that avoid argv entirely are the ones to prefer for
-key material:
+Every secret flag of `veepin connect` and `veepin serve` has a `-<flag>-file`
+companion (`-psk-file`, `-pass-file`, `-token-file`, …) that reads the value
+from a file instead, and that is the form to use. The packaged
+`veepin@.service` and `veepin.conf.example` use it, and the unit sets
+`ProtectProc=invisible` so a secret passed inline anyway is not readable by
+other users.
+
+The other surfaces that avoid argv entirely:
 
 - **`veepin profile add` reading a JSON document on stdin** — the whole config,
   secrets included, arrives through a pipe. `veepin profile show` redacts by
