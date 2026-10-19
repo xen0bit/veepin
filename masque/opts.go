@@ -11,6 +11,7 @@ func init() {
 		{Key: OptAuthority, Kind: client.OptStr, Help: "HTTP :authority to present (default: server host)"},
 		{Key: OptServerCA, Kind: client.OptFilePath, Help: "PEM bundle to verify the proxy against"},
 		{Key: OptInsecure, Kind: client.OptBool, Help: "skip proxy certificate verification (self-signed proxies)"},
+		{Key: OptToken, Kind: client.OptStr, Secret: true, Help: "bearer token the proxy requires"},
 		client.TUNOpt(OptTUN),
 	})
 }

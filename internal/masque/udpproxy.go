@@ -37,6 +37,7 @@ type UDPForwarder struct {
 	host      string
 	port      int
 	authority string
+	token     string
 	logger    *vlog.Logger
 
 	mu     sync.Mutex
@@ -56,17 +57,17 @@ type udpFlow struct {
 // NewUDPForwarderOverQUIC performs the HTTP/3 client setup over an established
 // QUIC connection and returns a forwarder. It keeps the http3 types inside this
 // package, so the public facade deals only in net and quic.
-func NewUDPForwarderOverQUIC(ctx context.Context, qc *quic.Conn, local *net.UDPConn, host string, port int, authority string, logger *vlog.Logger) (*UDPForwarder, error) {
+func NewUDPForwarderOverQUIC(ctx context.Context, qc *quic.Conn, local *net.UDPConn, host string, port int, authority, token string, logger *vlog.Logger) (*UDPForwarder, error) {
 	h3conn, err := http3.Client(ctx, qc)
 	if err != nil {
 		return nil, err
 	}
-	return NewUDPForwarder(h3conn, local, host, port, authority, logger), nil
+	return NewUDPForwarder(h3conn, local, host, port, authority, token, logger), nil
 }
 
 // NewUDPForwarder builds a forwarder over an established HTTP/3 connection to the
 // proxy and a bound local socket, targeting host:port.
-func NewUDPForwarder(h3conn *http3.Conn, local *net.UDPConn, host string, port int, authority string, logger *vlog.Logger) *UDPForwarder {
+func NewUDPForwarder(h3conn *http3.Conn, local *net.UDPConn, host string, port int, authority, token string, logger *vlog.Logger) *UDPForwarder {
 	if logger == nil {
 		logger = vlog.Discard()
 	}
@@ -76,6 +77,7 @@ func NewUDPForwarder(h3conn *http3.Conn, local *net.UDPConn, host string, port i
 		host:      host,
 		port:      port,
 		authority: authority,
+		token:     token,
 		logger:    logger,
 		flows:     map[string]*udpFlow{},
 		done:      make(chan struct{}),
@@ -129,7 +131,7 @@ func (f *UDPForwarder) flowFor(src *net.UDPAddr) (*udpFlow, error) {
 
 	ctx := context.Background()
 	path := ConnectUDPPath(f.host, f.port)
-	rs, err := f.h3.OpenConnect(ctx, ConnectUDPHeaders(f.authority, path))
+	rs, err := f.h3.OpenConnect(ctx, WithToken(ConnectUDPHeaders(f.authority, path), f.token))
 	if err != nil {
 		return nil, err
 	}
@@ -139,6 +141,9 @@ func (f *UDPForwarder) flowFor(src *net.UDPAddr) (*udpFlow, error) {
 	}
 	if status := fieldValue(resp, ":status"); status != "200" {
 		_ = rs.Close()
+		if status == "407" {
+			return nil, fmt.Errorf("%w: proxy refused CONNECT-UDP: status %q", ErrAuth, status)
+		}
 		return nil, fmt.Errorf("proxy refused CONNECT-UDP: status %q", status)
 	}
 

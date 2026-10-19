@@ -207,7 +207,7 @@ var clientProtoMaps = map[string]clientProtoMap{
 	},
 	"masque": {
 		endpointKey: "server", serverPort: "port", clientDefaultPort: "443",
-		carry: map[string]string{"ca": "cert"},
+		carry: map[string]string{"ca": "cert", "token": "token"},
 	},
 	"ssh": {
 		endpointKey: "server", serverPort: "port", clientDefaultPort: "22",

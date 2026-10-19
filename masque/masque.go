@@ -61,6 +61,7 @@ const (
 	OptAuthority = "authority" // :authority to present (default: server host)
 	OptServerCA  = "ca"        // PEM bundle to verify the proxy against
 	OptInsecure  = "insecure"  // "true" to skip proxy certificate verification
+	OptToken     = "token"     // bearer credential the proxy requires
 	OptTUN       = "tun"       // TUN interface name
 )
 
@@ -77,6 +78,8 @@ type Config struct {
 	// Insecure skips proxy certificate verification. It is for testing against a
 	// self-signed proxy and says so, loudly, in the logs.
 	Insecure bool
+	// Token is the bearer credential the proxy requires; empty sends none.
+	Token string
 	// TUNName is the interface to open; empty picks the next free one.
 	TUNName string
 	// Logger receives progress messages; nil discards them.
@@ -146,11 +149,12 @@ func Dial(ctx context.Context, cfg Config) (*Session, client.Result, error) {
 	}
 	h3conn, rs, assigned, routes, err := imasque.Connect(ctx, qc, imasque.ClientConfig{
 		Authority: authority,
+		Token:     cfg.Token,
 		Logger:    logger,
 	})
 	if err != nil {
 		_ = end.Close(context.Background())
-		return nil, client.Result{}, err
+		return nil, client.Result{}, client.WrapAuth(err, imasque.ErrAuth)
 	}
 
 	tun, err := dataplane.OpenTUN(cfg.TUNName)
@@ -194,6 +198,7 @@ func parseOptions(opts map[string]string) (client.Dialer, error) {
 		Authority: opts[OptAuthority],
 		TUNName:   opts[OptTUN],
 		Insecure:  opts[OptInsecure] == "true",
+		Token:     opts[OptToken],
 		Logger:    slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
 
 		PostQuantumOnly: pqpolicy.Requested(opts),

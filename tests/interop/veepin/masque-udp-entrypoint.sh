@@ -14,6 +14,7 @@ while [ "$i" -le 40 ]; do
         -server "$SERVER" \
         -port "${PORT:-443}" \
         -insecure \
+        -token "${TOKEN:-interop-masque-token}" \
         -listen "127.0.0.1:${LISTEN_PORT:-5353}" \
         -target "$TARGET"
     echo "veepin-masque-udp: attempt $i ended; retrying in 3s"

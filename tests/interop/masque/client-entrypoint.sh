@@ -14,7 +14,8 @@ while [ "$i" -le 40 ]; do
     masquepeer client \
         --tun masque0 \
         --server "$SERVER" \
-        --port "${PORT:-443}"
+        --port "${PORT:-443}" \
+        --token "${TOKEN:-interop-masque-token}"
     echo "aioquic-masque-client: attempt $i ended; retrying in 3s"
     i=$((i + 1))
     sleep 3

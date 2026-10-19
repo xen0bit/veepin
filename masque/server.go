@@ -16,7 +16,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/xen0bit/veepin/client"
@@ -37,6 +39,9 @@ func init() {
 		{Key: OptServerPool, Kind: client.OptCIDR, Default: "10.30.0.0/24", Help: "internal address pool handed to clients (default 10.30.0.0/24)"},
 		{Key: OptServerMTU, Kind: client.OptInt, Default: "1350", Help: "inner MTU offered to clients (default 1350)"},
 		{Key: OptServerShape, Kind: client.OptInt, Default: "0", Help: "per-flow downstream shaping budget in bytes; pads inside the DATAGRAM capsule (0 = off)"},
+		{Key: OptServerToken, Kind: client.OptStr, Secret: true, Generate: "psk", Help: "bearer token every client must present (required unless -allow-anonymous)"},
+		{Key: OptServerAllowAnonymous, Kind: client.OptBool, Help: "serve clients that present no token: an open proxy"},
+		{Key: OptServerUDPAllow, Kind: client.OptStr, Help: "comma-separated non-public CIDRs CONNECT-UDP may reach (default: public destinations only)"},
 		client.TUNOpt(OptServerTUN),
 	})
 }
@@ -53,6 +58,10 @@ const (
 	OptServerMTU    = "mtu"    // inner MTU
 	OptServerShape  = "shape"  // per-flow downstream shaping budget in bytes (0 = off)
 	OptServerTUN    = "tun"    // TUN interface name
+
+	OptServerToken          = "token"           // bearer token clients must present
+	OptServerAllowAnonymous = "allow-anonymous" // "true" to serve clients with no token
+	OptServerUDPAllow       = "udp-allow"       // private CIDRs CONNECT-UDP may reach
 )
 
 // ServerConfig configures a MASQUE proxy.
@@ -74,6 +83,19 @@ type ServerConfig struct {
 	Shape int
 	// Logger receives progress messages.
 	Logger *slog.Logger
+
+	// Token is the bearer credential every client must present. A proxy that
+	// checks nothing gives any host that reaches it an address behind it and
+	// a UDP relay into its network, so NewServer refuses an empty Token
+	// unless AllowAnonymous is set.
+	Token string
+	// AllowAnonymous serves clients that present no token, for a proxy that
+	// is meant to be open.
+	AllowAnonymous bool
+	// UDPAllow lists the non-public destinations CONNECT-UDP may reach:
+	// loopback, link-local, private ranges, the pool, the host's own
+	// addresses. Public destinations always may.
+	UDPAllow []netip.Prefix
 
 	// PostQuantumOnly requires a post-quantum key exchange and ML-DSA
 	// authentication, refusing anything less rather than negotiating down. It is
@@ -138,6 +160,10 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		pqpolicy.HardenTLS(tlsCfg)
 	}
 
+	if cfg.Token == "" && !cfg.AllowAnonymous {
+		return nil, errors.New("masque: a client token is required (-token), or -allow-anonymous for an open proxy")
+	}
+
 	tun, err := dataplane.OpenTUN(cfg.TUNName)
 	if err != nil {
 		return nil, fmt.Errorf("masque: opening TUN: %w", err)
@@ -187,11 +213,17 @@ func (s *Server) ListenAndServe() error {
 	}
 
 	logger := vlog.From(s.cfg.Logger)
+	if s.cfg.Token == "" {
+		logger.Warnf("masque: -allow-anonymous: any client that reaches this proxy is served")
+	}
 	engine, err := imasque.NewServer(end, s.tun, imasque.ServerConfig{
-		Pool:   s.pool,
-		MTU:    s.serverMTU(),
-		Shape:  s.cfg.Shape,
-		Logger: logger,
+		Pool:           s.pool,
+		MTU:            s.serverMTU(),
+		Shape:          s.cfg.Shape,
+		Logger:         logger,
+		Token:          []byte(s.cfg.Token),
+		AllowAnonymous: s.cfg.AllowAnonymous,
+		UDPAllow:       s.cfg.UDPAllow,
 	})
 	if err != nil {
 		_ = end.Close(context.Background())
@@ -284,6 +316,9 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 		TUNName:  opts[OptServerTUN],
 		Logger:   vlog.SlogText(logDest()),
 
+		Token:          opts[OptServerToken],
+		AllowAnonymous: opts[OptServerAllowAnonymous] == "true",
+
 		PostQuantumOnly: pqpolicy.Requested(opts),
 	}
 	if v := opts[OptServerPort]; v != "" {
@@ -306,6 +341,17 @@ func parseServerOptions(opts map[string]string) (client.Server, error) {
 			return nil, fmt.Errorf("masque: invalid shape %q", v)
 		}
 		cfg.Shape = sh
+	}
+
+	for c := range strings.SplitSeq(opts[OptServerUDPAllow], ",") {
+		if c = strings.TrimSpace(c); c == "" {
+			continue
+		}
+		p, err := netip.ParsePrefix(c)
+		if err != nil {
+			return nil, fmt.Errorf("masque: invalid udp-allow entry %q: %w", c, err)
+		}
+		cfg.UDPAllow = append(cfg.UDPAllow, p.Masked())
 	}
 
 	var err error

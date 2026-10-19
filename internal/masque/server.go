@@ -16,6 +16,7 @@ package masque
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"net"
@@ -46,6 +47,21 @@ type ServerConfig struct {
 	// inside the DATAGRAM capsule's value, after the inner packet -- see
 	// DatagramEncoder.EncodePadded.
 	Shape int
+
+	// Token is the bearer credential a client must present in its CONNECT's
+	// proxy-authorization field. A proxy that checks nothing hands every
+	// host on the internet an address on its network and a UDP relay into
+	// it, so an empty Token is refused at construction unless AllowAnonymous
+	// says that is intended.
+	Token []byte
+	// AllowAnonymous serves clients that present no credential. It exists for
+	// a deliberately open proxy, and the facade logs it at Warn.
+	AllowAnonymous bool
+	// UDPAllow lists the non-public destinations (loopback, link-local,
+	// RFC 1918, ULA, CGNAT, the pool, the host's own addresses) a CONNECT-UDP
+	// request may name. Public destinations are always allowed. See
+	// udpTargetAllowed.
+	UDPAllow []netip.Prefix
 }
 
 // peer is one established client.
@@ -87,6 +103,9 @@ type Server struct {
 func NewServer(end *quic.Endpoint, tun tunDevice, cfg ServerConfig) (*Server, error) {
 	if cfg.Pool == nil {
 		return nil, errors.New("masque: no address pool configured")
+	}
+	if len(cfg.Token) == 0 && !cfg.AllowAnonymous {
+		return nil, errors.New("masque: a client token is required (or AllowAnonymous for a deliberately open proxy)")
 	}
 	logger := cfg.Logger
 	gate := cfg.Gate
@@ -163,6 +182,12 @@ func (s *Server) handleConn(qc *quic.Conn) {
 	rs, fields, err := h3conn.AcceptConnect(ctx)
 	if err != nil {
 		s.log.Printf("masque: awaiting CONNECT from %v: %v", remote, err)
+		_ = h3conn.Close()
+		return
+	}
+	if !s.authorized(fields) {
+		_ = rs.WriteResponse([]http3.Field{{Name: ":status", Value: "407"}})
+		s.log.Warnf("masque: refusing unauthenticated CONNECT from %v", remote)
 		_ = h3conn.Close()
 		return
 	}
@@ -297,7 +322,8 @@ func (s *Server) serveClient(p *peer, remote *net.UDPAddr) {
 // The proxy dials the target itself, so a client can reach a UDP service it has
 // no route to. It only ever sends to the one target the path named -- there is
 // no address in the datagrams to spoof, unlike CONNECT-IP -- so the check that
-// matters here is refusing a target the proxy is configured not to reach.
+// matters here is refusing a target the proxy is configured not to reach:
+// udpTargetAllowed.
 func (s *Server) serveConnectUDP(remote *net.UDPAddr, h3conn *http3.Conn, rs *http3.RequestStream, fields []http3.Field, release func()) {
 	defer func() { _ = h3conn.Close() }()
 
@@ -311,6 +337,14 @@ func (s *Server) serveConnectUDP(remote *net.UDPAddr, h3conn *http3.Conn, rs *ht
 	if err != nil {
 		_ = rs.WriteResponse([]http3.Field{{Name: ":status", Value: "502"}})
 		s.log.Printf("masque: CONNECT-UDP resolve %s:%d from %v: %v", host, port, remote, err)
+		return
+	}
+	// Judged on the resolved address, which is the one dialled below, so a
+	// name that resolves somewhere else between check and dial cannot slip
+	// past.
+	if !s.udpTargetAllowed(target.IP) {
+		_ = rs.WriteResponse([]http3.Field{{Name: ":status", Value: "403"}})
+		s.log.Warnf("masque: refusing CONNECT-UDP from %v to %v: destination not permitted", remote, target)
 		return
 	}
 	conn, err := net.DialUDP("udp", nil, target)
@@ -472,4 +506,68 @@ var errServerBusy = errors.New("masque: server busy")
 // keys on.
 func udpAddrOf(ap netip.AddrPort) *net.UDPAddr {
 	return net.UDPAddrFromAddrPort(ap)
+}
+
+// authorized reports whether a CONNECT request carries this proxy's bearer
+// token. The comparison is over the whole field value and constant-time, so
+// neither a prefix nor the timing of a mismatch says anything about the token.
+func (s *Server) authorized(fields []http3.Field) bool {
+	if len(s.cfg.Token) == 0 {
+		return s.cfg.AllowAnonymous
+	}
+	want := append([]byte("Bearer "), s.cfg.Token...)
+	got := fieldValue(fields, ProxyAuthorizationField)
+	return subtle.ConstantTimeCompare([]byte(got), want) == 1
+}
+
+// cgnat is RFC 6598 shared address space, which netip.Addr.IsPrivate does not
+// cover but which is as internal as RFC 1918 to whoever runs it.
+var cgnat = netip.MustParsePrefix("100.64.0.0/10")
+
+// udpTargetAllowed is the CONNECT-UDP destination policy.
+//
+// A proxy dials from inside the network it sits on, so a client that names a
+// destination is asking to be put there. Public destinations are what a proxy
+// is for and are always allowed. Everything else -- loopback, link-local,
+// private and CGNAT ranges, the client pool, the host's own addresses --
+// reaches services that were never meant to face the network the client came
+// from, and is refused unless the operator listed it in UDPAllow. Unspecified,
+// multicast and broadcast destinations are refused whatever UDPAllow says.
+func (s *Server) udpTargetAllowed(ip net.IP) bool {
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	addr = addr.Unmap()
+	if !addr.IsValid() || addr.IsUnspecified() || addr.IsMulticast() ||
+		addr == netip.AddrFrom4([4]byte{255, 255, 255, 255}) {
+		return false
+	}
+	for _, p := range s.cfg.UDPAllow {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	internal := addr.IsLoopback() || addr.IsLinkLocalUnicast() || addr.IsPrivate() ||
+		cgnat.Contains(addr) || (s.cfg.Pool != nil && s.cfg.Pool.Network().Contains(ip)) ||
+		isLocalAddr(addr)
+	return !internal
+}
+
+// isLocalAddr reports whether addr is assigned to one of this host's
+// interfaces. Read per request rather than cached, since a CONNECT-UDP setup
+// is rare next to its datagrams and the host's addresses can change.
+func isLocalAddr(addr netip.Addr) bool {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return true // cannot tell, so refuse
+	}
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok {
+			if local, ok := netip.AddrFromSlice(n.IP); ok && local.Unmap() == addr {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/xen0bit/veepin/internal/vlog"
@@ -32,6 +33,8 @@ func runUDPProxy(args []string) error {
 		authority = fs.String("authority", "", "HTTP :authority to present (default: server host)")
 		ca        = fs.String("ca", "", "PEM bundle to verify the proxy against")
 		insecure  = fs.Bool("insecure", false, "skip proxy certificate verification (self-signed proxies)")
+		token     = fs.String("token", "", "bearer token the proxy requires")
+		tokenFile = fs.String("token-file", "", "read -token from this file, so it is not in the process table")
 		listen    = fs.String("listen", "", "local UDP address to bind, e.g. 127.0.0.1:5353 (required)")
 		target    = fs.String("target", "", "remote UDP target host:port to proxy to (required)")
 		// udp-proxy is a standalone subcommand rather than a registered
@@ -57,11 +60,20 @@ func runUDPProxy(args []string) error {
 		return fmt.Errorf("udp-proxy: -target port %q is not valid", portStr)
 	}
 
+	if *tokenFile != "" {
+		b, err := os.ReadFile(*tokenFile)
+		if err != nil {
+			return fmt.Errorf("udp-proxy: reading -token-file: %w", err)
+		}
+		*token = strings.TrimSpace(string(b))
+	}
+
 	cfg := masque.UDPProxyConfig{
 		Server:     *server,
 		Port:       *port,
 		Authority:  *authority,
 		Insecure:   *insecure,
+		Token:      *token,
 		Listen:     *listen,
 		TargetHost: host,
 		TargetPort: targetPort,
