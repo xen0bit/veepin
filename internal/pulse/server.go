@@ -76,6 +76,10 @@ type espPeer struct {
 	sa   *esp.SA
 	addr *net.UDPAddr
 	mu   sync.Mutex
+	// inner is the address the client was assigned. The ESP path holds it to
+	// the same rule the IF-T/TLS link does (link.allowed): a client sends as
+	// itself, or not at all.
+	inner netip.Addr
 }
 
 func (p *espPeer) send(pkt []byte, minInner int) error {
@@ -349,7 +353,7 @@ func (s *Server) awaitESPResponse(st *stream, sess *session, serverKeys *Keys, c
 				s.logger.Printf("pulse: %s: ESP keys: %v", sess.info.User, serr)
 				return
 			}
-			peer := &espPeer{srv: s, sa: sa}
+			peer := &espPeer{srv: s, sa: sa, inner: sess.inner}
 			sess.esp = peer
 			s.mu.Lock()
 			s.bySPI[serverKeys.SPI] = peer
@@ -427,6 +431,11 @@ func (s *Server) handleESP(pkt []byte, from *net.UDPAddr) {
 		if inner = dataplane.TrimToIP(inner); inner == nil {
 			return
 		}
+	default:
+		return
+	}
+	if !dataplane.SourceIs(inner, peer.inner) {
+		return
 	}
 	_, _ = s.tun.Write(inner)
 }
