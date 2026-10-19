@@ -62,7 +62,7 @@ type Config struct {
 	// system roots. Pointing it at a self-signed server's own certificate is
 	// how to trust that one server without SkipVerify.
 	RootCAs *x509.CertPool
-	Logger     *slog.Logger
+	Logger  *slog.Logger
 
 	// PostQuantumOnly requires a post-quantum key exchange and ML-DSA
 	// authentication, refusing anything less rather than negotiating down. It is
