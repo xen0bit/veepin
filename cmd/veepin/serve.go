@@ -301,17 +301,16 @@ func runSupervisorMode(args []string) error {
 		}
 		mux := http.NewServeMux()
 		mux.Handle("/api/", mgmtServer.Handler())
-		uiHandler, err := ui.NewHandler(string(mgmtServer.Token()), logger)
+		uiHandler, err := ui.NewHandler(logger)
 		if err != nil {
 			_ = mgr.Close()
 			return fmt.Errorf("ui: %w", err)
 		}
 		mux.Handle("/", uiHandler)
 		// The Host guard wraps panel and API together. The panel cannot require
-		// a token -- it is what hands the browser one -- so without this a page
-		// that rebinds its own hostname to the loopback address becomes
-		// same-origin with the panel, reads the token out of the DOM, and drives
-		// every endpoint. See mgmt.RequireHost.
+		// a token -- a browser loads it before it has one -- so without this a
+		// page that rebinds its own hostname to the loopback address becomes
+		// same-origin with the panel and the API. See mgmt.RequireHost.
 		//
 		// -allow-host is the escape hatch the guard needs to be usable off
 		// loopback. The allow set is seeded from the literal -listen address, so
@@ -337,7 +336,11 @@ func runSupervisorMode(args []string) error {
 			ErrorLog: slog.NewLogLogger(logHandler, slog.LevelError),
 		}
 		go func() {
-			logger.Printf("management API + panel at http://%s/", *listenAddr)
+			// The token is not in the page and not in this log, which may be
+			// readable by more accounts than the token file is. The operator
+			// supplies it from the root-only file.
+			logger.Printf("management API + panel at http://%s/ -- open it as http://%s/#token=<contents of %s>",
+				*listenAddr, *listenAddr, filepath.Join(configDir, "mgmt", "token"))
 			if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				logger.Printf("management API: %v", err)
 			}

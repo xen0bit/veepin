@@ -20,6 +20,19 @@ func ConnectIPPath(target, ipproto string) string {
 	return "/.well-known/masque/ip/" + target + "/" + ipproto + "/"
 }
 
+// ProxyAuthorizationField carries the client's bearer token in a CONNECT
+// request (RFC 9110 §11.7.1). HTTP/3 field names are lower-case.
+const ProxyAuthorizationField = "proxy-authorization"
+
+// WithToken appends the proxy-authorization field to a CONNECT request's
+// fields when token is non-empty.
+func WithToken(fields []http3.Field, token string) []http3.Field {
+	if token == "" {
+		return fields
+	}
+	return append(fields, http3.Field{Name: ProxyAuthorizationField, Value: "Bearer " + token})
+}
+
 // ConnectIPHeaders builds the pseudo-header set for a CONNECT-IP request. The
 // capsule-protocol field is mandatory: it is what tells the proxy the stream
 // body is capsules rather than an opaque payload.

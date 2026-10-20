@@ -31,6 +31,9 @@ fi
 # everything after the context ID to its TUN and the kernel delimits the real
 # packet by the inner header's Total Length. The shaped cell exists to prove
 # aioquic does exactly that without being told anything.
+# Every client in these cells presents TOKEN, and -udp-allow admits the
+# private Docker network the CONNECT-UDP echo target sits on: without it the
+# proxy refuses any destination that is not public.
 echo "veepin-masque-server: serving ${PROTOCOL:-masque} on 0.0.0.0:${PORT:-443}, pool ${POOL}, shape ${SHAPE:-0}"
 exec veepin serve "${PROTOCOL:-masque}" \
     -listen 0.0.0.0 \
@@ -38,5 +41,7 @@ exec veepin serve "${PROTOCOL:-masque}" \
     -pool "$POOL" \
     -shape "${SHAPE:-0}" \
     -cert "$CERT" -key "$KEY" \
+    -token "${TOKEN:-interop-masque-token}" \
+    -udp-allow "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16" \
     -tun masque0 \
     -setup-nat -wan eth0

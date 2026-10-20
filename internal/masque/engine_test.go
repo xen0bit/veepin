@@ -114,7 +114,7 @@ func TestClientServerDataPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	srvTUN := newFakeTUN()
-	srv, err := NewServer(srvEnd, srvTUN, ServerConfig{Pool: pool, MTU: 1350})
+	srv, err := NewServer(srvEnd, srvTUN, ServerConfig{Pool: pool, MTU: 1350, Token: []byte("test-token")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestClientServerDataPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h3conn, rs, assigned, routes, err := Connect(ctx, qc, ClientConfig{Authority: "proxy.example"})
+	h3conn, rs, assigned, routes, err := Connect(ctx, qc, ClientConfig{Authority: "proxy.example", Token: "test-token"})
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestServerDropsSpoofedSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	srvTUN := newFakeTUN()
-	srv, err := NewServer(srvEnd, srvTUN, ServerConfig{Pool: pool})
+	srv, err := NewServer(srvEnd, srvTUN, ServerConfig{Pool: pool, Token: []byte("test-token")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +208,7 @@ func TestServerDropsSpoofedSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h3conn, rs, assigned, routes, err := Connect(ctx, qc, ClientConfig{})
+	h3conn, rs, assigned, routes, err := Connect(ctx, qc, ClientConfig{Token: "test-token"})
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}

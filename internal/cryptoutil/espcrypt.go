@@ -5,9 +5,11 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/subtle"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash"
+	"math"
 	"slices"
 )
 
@@ -15,11 +17,13 @@ import (
 // forged and replayed ones included, so its failures are pre-built: a flood of
 // bad packets must cost no allocation per packet.
 var (
-	errAEADShort    = errors.New("cryptoutil: AEAD payload too short")
-	errAEADOpen     = errors.New("cryptoutil: ESP AEAD authentication failed")
-	errCBCShort     = errors.New("cryptoutil: CBC payload too short")
-	errCBCIntegrity = errors.New("cryptoutil: ESP integrity check failed")
-	errCBCAlign     = errors.New("cryptoutil: CBC ciphertext not block-aligned")
+	errAEADShort = errors.New("cryptoutil: AEAD payload too short")
+	errAEADOpen  = errors.New("cryptoutil: ESP AEAD authentication failed")
+	// errAEADExhausted is the IV counter spent: 2^64 packets under one key.
+	errAEADExhausted = errors.New("cryptoutil: ESP AEAD IV space exhausted; rekey required")
+	errCBCShort      = errors.New("cryptoutil: CBC payload too short")
+	errCBCIntegrity  = errors.New("cryptoutil: ESP integrity check failed")
+	errCBCAlign      = errors.New("cryptoutil: CBC ciphertext not block-aligned")
 )
 
 // ESPCrypter is an allocation-conscious cipher for the ESP data path. Unlike
@@ -120,6 +124,13 @@ type espAEAD struct {
 	aead  cipher.AEAD
 	salt  [4]byte
 	nonce []byte // reused 12-octet nonce buffer (single-goroutine per direction)
+	// iv is the last explicit IV sealed under this key. It is a counter rather
+	// than random: RFC 4106 §3.1 requires the IV never repeat for a key, and
+	// 64 random bits make a repeat likely within 2^32 packets -- a busy SA
+	// reaches that between rekeys -- while a counter cannot repeat at all. The
+	// receiver treats the IV as opaque, so this changes nothing on the wire
+	// that a peer checks; it is what strongSwan and the Linux kernel do.
+	iv uint64
 }
 
 func newESPAEAD(aead cipher.AEAD, salt []byte) *espAEAD {
@@ -138,9 +149,11 @@ func (g *espAEAD) Seal(dst, aad, plaintext []byte) ([]byte, error) {
 		g.nonce = make([]byte, 12)
 		copy(g.nonce[0:4], g.salt[:])
 	}
-	if _, err := rand.Read(g.nonce[4:12]); err != nil {
-		return nil, err
+	if g.iv == math.MaxUint64 {
+		return nil, errAEADExhausted
 	}
+	g.iv++
+	binary.BigEndian.PutUint64(g.nonce[4:12], g.iv)
 	// Write the explicit IV first, then seal appending the ciphertext+tag
 	// directly after it in dst.
 	dst = append(dst, g.nonce[4:12]...)

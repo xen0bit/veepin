@@ -81,6 +81,7 @@
 #define KEY_TOTP          "totp"
 /* MASQUE. */
 #define KEY_AUTHORITY     "authority"
+#define KEY_TOKEN         "token"
 
 #define KEY_GROUP         "group"
 #define KEY_GROUP_PSK     "group-psk"
@@ -210,6 +211,7 @@ static const FieldDef masque_fields[] = {
     { "Port",           KEY_PORT,      F_DATA },
     { "Authority",      KEY_AUTHORITY, F_DATA },
     { "CA (path)",      KEY_CA,        F_DATA },
+    { "Token",          KEY_TOKEN,     F_SECRET },
 };
 
 static const FieldDef fortinet_fields[] = {

@@ -15,8 +15,6 @@
 // built on the standard library's AES-GCM, HMAC and SHA-2.
 package dtls
 
-import "fmt"
-
 // Protocol versions, on the wire as 1's-complement of the TLS version.
 const (
 	version1_0 uint16 = 0xfeff
@@ -59,8 +57,10 @@ const (
 // Cipher suites. The PSK AEAD suites are what AnyConnect negotiates; the ECDHE
 // suite is what Fortinet's certificate-based DTLS uses. Which set a connection
 // offers is decided by its configuration, not mixed: a PSK connection never
-// offers ECDHE and vice versa, so neither protocol can be steered onto the
-// other's key exchange.
+// offers ECDHE and vice versa. The client also accepts only a suite it
+// offered (see offered), and that second half is what stops either protocol
+// being steered onto the other's key exchange; limiting the offer alone does
+// not.
 const (
 	tlsPSKWithAES256GCMSHA384        uint16 = 0x00a9
 	tlsPSKWithAES128GCMSHA256        uint16 = 0x00a8
@@ -107,16 +107,16 @@ var ecdheSuites = []suite{
 	{id: tlsECDHEECDSAWithAES128GCMSHA256, kx: kxECDHE, keyLen: 16, ivLen: 4, hash: hashSHA256, prfHash: hashSHA256},
 }
 
-// suiteByID looks up a negotiated suite across both sets.
-func suiteByID(id uint16) (suite, error) {
-	for _, list := range [][]suite{pskSuites, ecdheSuites} {
-		for _, s := range list {
-			if s.id == id {
-				return s, nil
-			}
+// offered looks up id among the suites a connection offered. It is the only
+// way a client resolves the server's choice, so a suite from the other set --
+// the other key exchange -- is never found.
+func offered(list []suite, id uint16) (suite, bool) {
+	for _, s := range list {
+		if s.id == id {
+			return s, true
 		}
 	}
-	return suite{}, fmt.Errorf("dtls: unsupported cipher suite %#04x", id)
+	return suite{}, false
 }
 
 // Fixed sizes.

@@ -117,14 +117,17 @@ func ParseConfig(r io.Reader) (*Config, error) {
 				sec = sectionPeer
 				cfg.Peers = append(cfg.Peers, Peer{})
 			default:
-				return nil, fmt.Errorf("line %d: unknown section %q", line, text)
+				// The line itself is not quoted back: a path that named the
+				// wrong file would otherwise copy that file's contents into
+				// the error, and from there into a log.
+				return nil, fmt.Errorf("line %d: unknown section", line)
 			}
 			continue
 		}
 
 		key, val, ok := splitKV(text)
 		if !ok {
-			return nil, fmt.Errorf("line %d: not a key = value: %q", line, text)
+			return nil, fmt.Errorf("line %d: not a key = value", line)
 		}
 		if err := cfg.set(sec, key, val); err != nil {
 			return nil, fmt.Errorf("line %d: %w", line, err)

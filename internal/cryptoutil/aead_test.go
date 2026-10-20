@@ -3,6 +3,7 @@ package cryptoutil
 import (
 	"bytes"
 	"encoding/hex"
+	"math"
 	"testing"
 )
 
@@ -160,5 +161,32 @@ func TestBLAKE2s128MACWidth(t *testing.T) {
 	if bytes.Equal(sum, h256.Sum(nil)[:16]) {
 		t.Fatal("BLAKE2s-128 equals the truncated 256-bit digest; " +
 			"the digest length must be bound into the parameter block")
+	}
+}
+
+// TestESPAEADIVsNeverRepeatUnderOneKey: RFC 4106 forbids a repeated IV under a
+// key, and with GCM one repeat gives away the authentication key. Random
+// 64-bit IVs made a repeat likely on a busy SA. If this fails, they are back.
+func TestESPAEADIVsNeverRepeatUnderOneKey(t *testing.T) {
+	c, err := NewAESGCMESPCrypter(256, make([]byte, 36))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[[8]byte]bool{}
+	for range 1000 {
+		out, err := c.Seal(nil, []byte("aad"), []byte("p"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		iv := [8]byte(out[:8])
+		if seen[iv] {
+			t.Fatalf("IV %x repeated", iv)
+		}
+		seen[iv] = true
+	}
+	g := c.(*espAEAD)
+	g.iv = math.MaxUint64
+	if _, err := c.Seal(nil, nil, []byte("p")); err == nil {
+		t.Fatal("an exhausted IV counter sealed again")
 	}
 }

@@ -83,6 +83,9 @@ type Tunnel struct {
 	// closedFlag lets the lock-free data path (SendPPP) short-circuit without
 	// racing the control channel's state field.
 	closedFlag atomic.Bool
+	// established is set once the session is up, and read by the data path
+	// without taking mu. Data messages are carried only after it is set.
+	established atomic.Bool
 
 	mu             sync.Mutex
 	state          state
@@ -157,6 +160,14 @@ func (t *Tunnel) HandleInbound(pkt []byte) {
 		return
 	}
 	if !h.isControl {
+		// A data message is carried only on an established session, and only
+		// when it names this end's own tunnel and session (RFC 2661 §3.1: the
+		// peer addresses us by the IDs we assigned). Anything else is not part
+		// of the call the control channel set up.
+		if !t.established.Load() || t.closedFlag.Load() ||
+			h.tunnelID != t.localTunnelID || h.sessionID != t.localSessionID {
+			return
+		}
 		if len(h.payload) > 0 {
 			t.h.DataFrame(h.payload)
 		}
@@ -211,6 +222,9 @@ func (t *Tunnel) handleControl(h header) {
 	// unacknowledged; send a bare ZLB ack.
 	if t.ns == prevNs && !closed {
 		t.sendZLB()
+	}
+	if up {
+		t.established.Store(true)
 	}
 	t.mu.Unlock()
 

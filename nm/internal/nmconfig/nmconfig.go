@@ -308,7 +308,9 @@ func missingSecrets(protocol string, opts map[string]string) []string {
 		// Static pseudowire: no secrets needed.
 		return nil
 	case "nebula", "masque":
-		// Authenticated by a certificate / TLS only: no NM-prompted secret.
+		// Nebula authenticates by certificate. A MASQUE proxy usually wants a
+		// token, which travels in vpn.secrets like any other, but one serving
+		// with -allow-anonymous wants none, so its absence is not prompted for.
 		return nil
 	default:
 		return nil

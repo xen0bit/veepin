@@ -91,6 +91,10 @@ type Server struct {
 	links      map[netip.Addr]*pppLink    // assigned address -> active tunnel
 	byCookie   map[string]*pppLink        // cookie -> active tunnel, so a later DTLS
 	//                                 session can attach to the link it belongs to
+	// lastTOTP is the last time step each user's second factor was accepted
+	// at. A code at or below it is refused, so one observed code cannot be
+	// used for a second login inside its window (RFC 6238 §5.2).
+	lastTOTP map[string]uint64
 	closed   bool
 	closedCh chan struct{}
 }
@@ -125,6 +129,7 @@ func NewServer(cfg ServerConfig, tun io.ReadWriteCloser) (*Server, error) {
 		shaper:     shaper,
 		pending:    map[string]net.IP{},
 		pending2FA: map[string]*challengeState{},
+		lastTOTP:   map[string]uint64{},
 		links:      map[netip.Addr]*pppLink{},
 		byCookie:   map[string]*pppLink{},
 		closedCh:   make(chan struct{}),
@@ -250,7 +255,25 @@ func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request, body st
 	}
 
 	secret, err := otp.DecodeSecret(s.cfg.TOTPSecrets[state.username])
-	if err != nil || !otp.Verify(secret, req.Code, time.Now(), s.cfg.TOTP) {
+	step, ok := uint64(0), false
+	if err == nil {
+		step, ok = otp.VerifyCounter(secret, req.Code, time.Now(), s.cfg.TOTP)
+	}
+	if ok {
+		// Checked and recorded under one lock, so two requests carrying the
+		// same code cannot both get through.
+		s.mu.Lock()
+		if last, seen := s.lastTOTP[state.username]; seen && step <= last {
+			ok = false
+		} else {
+			s.lastTOTP[state.username] = step
+		}
+		s.mu.Unlock()
+		if !ok {
+			s.log.Warnf("fortinet: %q presented a code already used", state.username)
+		}
+	}
+	if !ok {
 		s.log.Warnf("fortinet: second factor rejected for %q", state.username)
 		http.Error(w, "ret=4", http.StatusForbidden)
 		return

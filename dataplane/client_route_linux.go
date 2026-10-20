@@ -3,6 +3,7 @@ package dataplane
 import (
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -18,8 +19,12 @@ type ClientRouter struct {
 	addedHost bool
 	addedDef  bool
 	addedDef6 bool
-	serverV6  bool       // the server's outer address is IPv6 (host route uses `ip -6`)
-	dns       dnsBackend // nil until Apply installs resolvers; see client_dns.go
+	// blocked4/blocked6 record the unreachable halves installed for a family
+	// the full tunnel carries no address for.
+	blocked4 bool
+	blocked6 bool
+	serverV6 bool       // the server's outer address is IPv6 (host route uses `ip -6`)
+	dns      dnsBackend // nil until Apply installs resolvers; see client_dns.go
 	// added are the -route and -exclude prefixes this router installed, in the
 	// order it installed them, so Revert removes exactly those and no more. A
 	// prefix that failed to install is not in here, which is what stops Revert
@@ -125,6 +130,28 @@ func (r *ClientRouter) Apply() error {
 			}
 			r.addedDef6 = true
 		}
+		// The family the tunnel has no address in must not fall through to
+		// the physical link. Unreachable rather than blackhole, so an
+		// application gets an immediate error and falls back to the family
+		// the tunnel does carry.
+		if block4, block6 := unroutedFamilies(r.cfg, ipv6Usable()); block4 || block6 {
+			if block6 {
+				for _, half := range []string{"::/1", "8000::/1"} {
+					if err := run([]string{"ip", "-6", "route", "add", "unreachable", half}); err != nil {
+						return fmt.Errorf("blocking IPv6 outside a v4-only tunnel: %w", err)
+					}
+				}
+				r.blocked6 = true
+			}
+			if block4 {
+				for _, half := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
+					if err := run([]string{"ip", "route", "add", "unreachable", half}); err != nil {
+						return fmt.Errorf("blocking IPv4 outside a v6-only tunnel: %w", err)
+					}
+				}
+				r.blocked4 = true
+			}
+		}
 	}
 
 	// Split-tunnel routes, before DNS so that a resolver reached through one of
@@ -215,6 +242,22 @@ func (r *ClientRouter) Revert() error {
 			}
 		}
 	}
+	if r.blocked6 {
+		for _, half := range []string{"::/1", "8000::/1"} {
+			if err := run([]string{"ip", "-6", "route", "del", "unreachable", half}); err != nil {
+				errs = append(errs, err.Error())
+			}
+		}
+		r.blocked6 = false
+	}
+	if r.blocked4 {
+		for _, half := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
+			if err := run([]string{"ip", "route", "del", "unreachable", half}); err != nil {
+				errs = append(errs, err.Error())
+			}
+		}
+		r.blocked4 = false
+	}
 	if r.addedHost && r.cfg.ServerIP != nil {
 		del := append(ipCmd(r.serverV6), "route", "del", r.cfg.ServerIP.String())
 		if err := run(del); err != nil {
@@ -286,4 +329,11 @@ func run(args []string) error {
 		return fmt.Errorf("%s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// ipv6Usable reports whether this host has IPv6 at all. On one where it is
+// disabled there is nothing to leak and no table to add a route to.
+func ipv6Usable() bool {
+	b, err := os.ReadFile("/proc/sys/net/ipv6/conf/all/disable_ipv6")
+	return err == nil && strings.TrimSpace(string(b)) == "0"
 }

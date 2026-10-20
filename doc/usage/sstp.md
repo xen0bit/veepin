@@ -11,10 +11,13 @@ setup that every TUN-based protocol needs.
 sudo ./veepin connect sstp \
   -server vpn.example.com -user alice -pass secret
 
-# For a server with a self-signed certificate (SSTP still mutually authenticates
-# via MS-CHAPv2, so the tunnel is not unauthenticated):
-sudo ./veepin connect sstp -server 10.0.0.1 -user alice -pass secret -insecure
+# For a server with a self-signed certificate, trust that certificate itself:
+sudo ./veepin connect sstp -server 10.0.0.1 -user alice -pass secret -ca server.crt
 ```
+
+`-insecure` skips certificate verification altogether. Avoid it: the crypto
+binding then protects the client only against a server that enforces it, and
+anything relaying the connection still sees the MS-CHAPv2 exchange.
 
 The client opens the TLS carrier, performs the `SSTP_DUPLEX_POST` HTTP handshake,
 exchanges CALL_CONNECT with the server's crypto-binding nonce, authenticates the
@@ -29,8 +32,14 @@ trace the control and PPP exchange.
 `veepin serve sstp` is the responder: it terminates TLS with the given
 certificate, answers the `SSTP_DUPLEX_POST` handshake, sends the CALL_CONNECT_ACK
 nonce, authenticates the inner PPP link as the MS-CHAPv2 authenticator, verifies
-the client's CALL_CONNECTED crypto binding against its own certificate, and
-assigns an address over IPCP. Each client rides its own TLS/TCP connection.
+the client's CALL_CONNECTED crypto binding against its own certificate and that
+nonce, and assigns an address over IPCP. Each client rides its own TLS/TCP
+connection.
+
+No IP packet from a client reaches the TUN until all three of MS-CHAPv2, IPCP
+and the crypto binding have succeeded, and then only with the source address
+IPCP assigned. A client that authenticates but sends no binding within 30
+seconds is disconnected.
 
 ```sh
 sudo ./veepin serve sstp \

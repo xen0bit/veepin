@@ -37,5 +37,9 @@ sudo ./veepin serve ssh \
 ```
 
 A stock `ssh -w 0:0 -N user@host` also connects to it. Clients pick addresses
-within `-pool` (statically); the server accepts and routes any in-range address.
+within `-pool` (statically), since the tunnel protocol has no way to assign
+one. The server binds a connection to the address its first packet carries,
+provided no other live connection holds it, and from then on drops anything the
+connection sends from another address. Give each user their own address: two
+clients configured with the same one cannot both be connected.
 It is verified in Docker against both `ssh -w` and the veepin client.

@@ -120,7 +120,16 @@ On first start, the supervisor:
 4. Generates a 32-byte hex bearer token at `/etc/veepin/mgmt/token` (mode
    `0600`) if one is not already present, and logs that fact exactly once.
 
-The dashboard is at `http://127.0.0.1:8443/`. Status, the listeners list, and
+The dashboard is at `http://127.0.0.1:8443/`. The pages carry no token, so open
+it with the token in the URL fragment, which the browser does not send to the
+server:
+
+```sh
+xdg-open "http://127.0.0.1:8443/#token=$(sudo cat /etc/veepin/mgmt/token)"
+```
+
+or paste the token when the panel asks for it. It is kept for that browser tab
+only. Status, the listeners list, and
 restart / delete actions are there; new and existing listener forms are
 server-rendered directly from each protocol's option metadata. Each row expands
 to show the listener's redacted config and its connected peers (for a protocol
@@ -133,12 +142,12 @@ flag below.
 
 ## Reaching the panel from anywhere but the host
 
-The panel is unauthenticated by necessity — it is the thing that hands the
-browser the token — so its boundary is the `Host` header. `mgmt.RequireHost`
-answers 403 unless `Host` names loopback, `localhost`, or the exact `-listen`
-address. That is what stops a page the operator visits from rebinding its own
-hostname to `127.0.0.1`, becoming same-origin with the panel, and reading the
-token out of the DOM.
+The panel's pages are unauthenticated by necessity — a browser loads them before
+it has the token — so besides the token its boundary is the `Host` header.
+`mgmt.RequireHost` answers 403 unless `Host` names loopback, `localhost`, or the
+exact `-listen` address. That is what stops a page the operator visits from
+rebinding its own hostname to `127.0.0.1` and becoming same-origin with the
+panel.
 
 Seeding the allow-list from `-listen` alone makes any non-loopback bind
 unusable, because the Host a browser sends is a name and the bind is a literal:

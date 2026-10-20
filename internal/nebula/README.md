@@ -40,6 +40,17 @@ flowchart TD
 
 ## Implementation notes & caveats
 
+- **A responder installs a tunnel when it answers message 1.** Noise IX's first
+  message carries no proof that the sender holds the static key it presents,
+  so a replayed or forged first message from someone holding a peer's (public)
+  certificate can replace a responder-side tunnel and redirect that peer's
+  traffic until the next handshake. The attacker gets ciphertext it cannot
+  open and cannot answer: it is a denial of service, not a disclosure. A
+  handshake that *loses* a collision no longer moves the live tunnel's address,
+  and lighthouse answers are accepted only from configured lighthouses and do
+  not displace a live tunnel's address. Promoting a responder tunnel only on
+  its first authenticated packet, as WireGuard does, would close the rest and
+  is not done.
 - **The Noise pattern is plain `IX`, not `IXpsk0`** — despite what several names in
   Nebula's own source suggest. The **protocol name string seeds the handshake
   hash**, so getting this wrong makes every handshake fail with a peer. This was a

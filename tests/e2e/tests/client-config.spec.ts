@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from '../lib/test';
 import { api } from '../lib/api';
 import { uniqueName } from '../lib/unique';
 

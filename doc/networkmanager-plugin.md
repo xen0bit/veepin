@@ -364,8 +364,15 @@ the set is `nmconfig.SupportedProtocols`:
 
 File-path credentials (CA/cert/key PEMs, wg-quick/`.ovpn` files, an SSH identity
 key) live in `vpn.data`, not `vpn.secrets`, so they are not treated as
-NM-prompted secrets. The insecure `toy` example protocol is intentionally not
-offered.
+NM-prompted secrets. The service opens them as root, so on a **private**
+connection (one whose `connection.permissions` names a user) each must be
+readable by that user through its own permission bits, or the connection is
+refused; otherwise any user could point a connection at a root-only key and
+bring up a tunnel authenticated as the machine. Files a config file itself
+references — the `ca`/`cert`/`key` lines of an `.ovpn` — are not checked; they
+are chosen by whoever owns that file. A system connection is not checked: only
+an administrator can create one. The insecure `toy` example protocol is
+intentionally not offered.
 
 `protocol` defaults to `ikev2`, so profiles written before veepin gained more
 protocols keep working unchanged. An unsupported value is rejected in `Parse`
@@ -417,9 +424,10 @@ bulk of the daemon's correctness tests live here.
 ### 5.4 D-Bus system policy (`nm/data/nm-veepin-service.conf`)
 
 Installed to `/usr/share/dbus-1/system.d/`. Allows `root` to own the well-known
-names and NM to call them. `own_prefix` rather than `own`, because there is one
-name per protocol — so adding a protocol stays a change to the Makefile's list
-alone. The stock openvpn and pptp policies do the same for the same reason:
+names and only `root` — NetworkManager — to call them. `own_prefix` rather than
+`own`, because there is one name per protocol — so adding a protocol stays a
+change to the Makefile's list alone. The stock openvpn and pptp policies do the
+same for the same reason:
 
 ```xml
 <!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-BUS Bus Configuration 1.0//EN"
@@ -428,13 +436,22 @@ alone. The stock openvpn and pptp policies do the same for the same reason:
   <policy user="root">
     <allow own_prefix="org.freedesktop.NetworkManager.veepin"/>
     <allow send_destination="org.freedesktop.NetworkManager.veepin"/>
+    <allow send_interface="org.freedesktop.NetworkManager.VPN.Plugin"/>
   </policy>
   <policy context="default">
     <deny own_prefix="org.freedesktop.NetworkManager.veepin"/>
-    <allow send_destination="org.freedesktop.NetworkManager.veepin"/>
   </policy>
 </busconfig>
 ```
+
+The default context allows nothing. An earlier version also allowed
+`send_interface` there, which — having no destination — matched every service
+implementing the interface, and let any local user call `Connect`,
+`NewSecrets` and `Disconnect` on the root service. `TestBusPolicyLetsOnlyRootCall`
+pins this. As defence in depth the service also refuses a connection whose
+protocol is not the one its bus name serves, and `NewSecrets` takes only
+`vpn.secrets` from its reply, keeping the connection ConnectInteractive was
+given.
 
 ### 5.5 Connection provisioning (Phase 0, no editor)
 

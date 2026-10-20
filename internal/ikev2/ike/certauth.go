@@ -10,6 +10,8 @@ import (
 	"crypto/sha1"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/asn1"
+	"errors"
 	"fmt"
 	"net"
 	"slices"
@@ -466,4 +468,42 @@ func certMatchesID(cert *x509.Certificate, id payload.IDPayload) error {
 		// No identity constraint we can check; trust rests on the chain alone.
 		return nil
 	}
+}
+
+// checkableIDType reports whether certMatchesID can actually compare an
+// identity of type t against a certificate. For any other type (KEY_ID, for
+// one) it returns nil without looking, which is right for a server deciding
+// what a client may call itself but not for a client deciding who it reached.
+func checkableIDType(t payload.IDType) bool {
+	switch t {
+	case payload.IDFQDN, payload.IDRFC822, payload.IDIPv4Addr, payload.IDIPv6Addr, payload.IDDERASN1DN:
+		return true
+	}
+	return false
+}
+
+// oidIPsecIKE is id-kp-ipsecIKE (RFC 4945 §5.1.3.12).
+var oidIPsecIKE = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 17}
+
+// requireServerUsage refuses a responder certificate whose extended key usage
+// confines it to some other role -- typically a client certificate issued by
+// the same CA. A certificate with no EKU extension, or one listing serverAuth,
+// ipsecIKE or anyExtendedKeyUsage, is accepted; RFC 4945 §5.1.3.12 is explicit
+// that an absent EKU must not be held against an IKE peer, and requiring one
+// would reject most gateway PKIs in use.
+func requireServerUsage(cert *x509.Certificate) error {
+	if len(cert.ExtKeyUsage) == 0 && len(cert.UnknownExtKeyUsage) == 0 {
+		return nil
+	}
+	for _, u := range cert.ExtKeyUsage {
+		if u == x509.ExtKeyUsageServerAuth || u == x509.ExtKeyUsageAny {
+			return nil
+		}
+	}
+	for _, oid := range cert.UnknownExtKeyUsage {
+		if oid.Equal(oidIPsecIKE) {
+			return nil
+		}
+	}
+	return errors.New("ike: server certificate's extended key usage does not permit server use")
 }

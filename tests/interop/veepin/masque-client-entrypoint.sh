@@ -18,6 +18,7 @@ while [ "$i" -le 40 ]; do
         -server "$SERVER" \
         -port "${PORT:-443}" \
         -insecure \
+        -token "${TOKEN:-interop-masque-token}" \
         -tun masque0 \
         -full-tunnel=false
     echo "veepin-masque-client: attempt $i ended; retrying in 3s"

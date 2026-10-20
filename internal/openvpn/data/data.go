@@ -23,6 +23,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 
@@ -54,8 +55,10 @@ var (
 	// errReplay reports a packet whose ID falls outside the replay window or
 	// repeats one already seen.
 	errReplay = errors.New("data: replayed or too-old packet")
-	// errCounterExhausted reports the 32-bit send counter wrapping, which needs a
-	// rekey this build does not do.
+	// errCounterExhausted reports the 32-bit send counter spent, which needs a
+	// rekey this build does not do. It is permanent for the Cipher: every later
+	// Seal fails the same way, and the session ends when the peer's liveness
+	// check gives up on it.
 	errCounterExhausted = errors.New("data: packet counter exhausted, rekey required")
 	// errAuth reports a data packet whose HMAC did not verify (the CBC path; the
 	// GCM path surfaces the AEAD's own error).
@@ -161,8 +164,8 @@ func (c *Cipher) SealPadded(plaintext []byte, minInner int) ([]byte, error) {
 var ptPool = sync.Pool{New: func() any { b := make([]byte, 0, 2048); return &b }}
 
 func (c *Cipher) seal(plaintext []byte, minInner int) ([]byte, error) {
-	id := c.counter.Add(1)
-	if id == 0 {
+	id, ok := nextPacketID(&c.counter)
+	if !ok {
 		return nil, errCounterExhausted
 	}
 	if minInner > len(plaintext) {
@@ -287,4 +290,25 @@ func (w *replayWindow) accept(id uint32) bool {
 	}
 	w.bitmap |= mask
 	return true
+}
+
+// nextPacketID claims the next send packet ID, or reports the counter spent.
+//
+// It never wraps. The packet ID is the variable half of the AES-GCM nonce,
+// under a key that lasts the whole session, so a counter that went round to 1
+// again would seal with nonces already used -- which gives away the XOR of
+// the two plaintexts and the GHASH key, and with it the ability to forge.
+// Refusing only the one packet that landed on 0, as this once did, still
+// reused every nonce after it. The compare-and-swap keeps it from overshooting
+// when several goroutines seal at once.
+func nextPacketID(c *atomic.Uint32) (uint32, bool) {
+	for {
+		cur := c.Load()
+		if cur == math.MaxUint32 {
+			return 0, false
+		}
+		if c.CompareAndSwap(cur, cur+1) {
+			return cur + 1, true
+		}
+	}
 }

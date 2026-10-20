@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/binary"
 	"errors"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -624,4 +625,43 @@ func TestLogoutEndsTheSession(t *testing.T) {
 	if sessions != 0 {
 		t.Errorf("%d sessions survived the logout", sessions)
 	}
+}
+
+// TestASecondTunnelOnOneSessionCannotOutliveTheAddress: a session has one data
+// path. A second tunnel on the same cookie replaces the first, and the first
+// closing must not return the address to the pool while the second still uses
+// it. If this fails, the next user to log in is handed an address another
+// connection still sends and receives as.
+func TestASecondTunnelOnOneSessionCannotOutliveTheAddress(t *testing.T) {
+	h := newHarness(t, ServerConfig{}, false)
+	info, cfg := mustLogin(t, h)
+
+	first, err := tls.Dial("tcp", h.host, &tls.Config{InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	if _, err := first.Write(TunnelRequest(h.host, info)); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReadTunnelStart(first); err != nil {
+		t.Fatal(err)
+	}
+
+	clientTUN := newFakeTUN()
+	h.dialSSL(t, info, cfg, clientTUN)
+
+	// The first tunnel is closed by the server once the second replaces it.
+	_ = first.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := io.ReadAll(first); err != nil && !errors.Is(err, io.EOF) {
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			t.Fatal("the superseded tunnel was left open")
+		}
+	}
+	if h.waitForRelease(cfg.AssignedIP, 300*time.Millisecond) {
+		t.Fatal("the address went back to the pool while the second tunnel still held it")
+	}
+	h.serverTUN.inbound <- ipv4(h.gateway, cfg.AssignedIP, "to-the-second")
+	expectPacket(t, clientTUN.outbound, "to-the-second")
 }

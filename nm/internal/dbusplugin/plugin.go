@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"strings"
@@ -182,6 +183,17 @@ func (p *Plugin) Connect(settings nmconfig.Settings) *dbus.Error {
 		p.log.Printf("Connect: bad settings: %v", err)
 		return dbus.MakeFailedError(err)
 	}
+	if err := checkFileAccess(settings, conn); err != nil {
+		p.log.Warnf("Connect: %v", err)
+		return dbus.MakeFailedError(err)
+	}
+	// Each service is registered for one protocol; a connection naming
+	// another is not this service's to dial.
+	if p.busName != BusNamePrefix && BusNameFor(conn.Protocol) != p.busName {
+		err := fmt.Errorf("this service serves %s, not protocol %q", p.busName, conn.Protocol)
+		p.log.Warnf("Connect: %v", err)
+		return dbus.MakeFailedError(err)
+	}
 
 	p.mu.Lock()
 	if p.session != nil || p.dialCancel != nil {
@@ -250,6 +262,11 @@ func (p *Plugin) NewSecrets(settings nmconfig.Settings) *dbus.Error {
 	if pending == nil {
 		return dbus.MakeFailedError(errNoSecretsPending)
 	}
+	// Only the secrets are taken from the reply. The connection itself --
+	// endpoint, protocol, keys, every data option -- is the one
+	// ConnectInteractive was given; a reply that also rewrote those would let
+	// whoever answered choose where the tunnel goes.
+	settings = withSecretsFrom(pending, settings)
 
 	hints, err := nmconfig.MissingSecretHints(settings)
 	if err != nil {
@@ -505,4 +522,33 @@ func prefixFromMask(mask net.IP) uint32 {
 	}
 	ones, _ := net.IPMask(v4).Size()
 	return uint32(ones)
+}
+
+// withSecretsFrom is pending with its vpn.secrets updated from reply's: every
+// other setting and every vpn.data value is pending's. Neither map is
+// modified.
+func withSecretsFrom(pending, reply nmconfig.Settings) nmconfig.Settings {
+	out := make(nmconfig.Settings, len(pending))
+	for sec, kv := range pending {
+		inner := make(map[string]dbus.Variant, len(kv))
+		for k, v := range kv {
+			inner[k] = v
+		}
+		out[sec] = inner
+	}
+	secrets := map[string]string{}
+	for _, src := range []nmconfig.Settings{pending, reply} {
+		if v, ok := src["vpn"]["secrets"]; ok {
+			if m, ok := v.Value().(map[string]string); ok {
+				for k, val := range m {
+					secrets[k] = val
+				}
+			}
+		}
+	}
+	if out["vpn"] == nil {
+		out["vpn"] = map[string]dbus.Variant{}
+	}
+	out["vpn"]["secrets"] = dbus.MakeVariant(secrets)
+	return out
 }

@@ -285,3 +285,29 @@ func TestWrongPasswordIsRefused(t *testing.T) {
 		t.Errorf("the gateway kept %d sessions after a rejected login", srv.Sessions())
 	}
 }
+
+// TestSpoofedSourceIsDroppedOverESP is TestSpoofedSourceIsDropped on the ESP
+// path, which is the default one and has its own write to the TUN. If this
+// fails, a client on ESP can send as any address while the TLS path refuses
+// the same packet.
+func TestSpoofedSourceIsDroppedOverESP(t *testing.T) {
+	h := newHarness(t, true, 0)
+	if !h.client.OverESP() {
+		t.Fatal("the ESP path did not come up, so this would test the TLS path")
+	}
+	cfg := h.client.AssignedConfig()
+
+	h.clientTUN.in <- makeIPv4(net.IPv4(10, 70, 0, 254), net.IPv4(203, 0, 113, 5), 32)
+	select {
+	case got := <-h.serverTUN.out:
+		t.Fatalf("a spoofed packet reached the gateway TUN over ESP: %x", got[:20])
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	h.clientTUN.in <- makeIPv4(cfg.Address, net.IPv4(203, 0, 113, 5), 32)
+	select {
+	case <-h.serverTUN.out:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the honest packet did not get through either")
+	}
+}

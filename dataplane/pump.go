@@ -286,6 +286,10 @@ type bound struct {
 	roam     peerRoamer    // t, when its peer's address can move
 	pad      PaddingTunnel // t, when it can pad for the shaper
 	appender AppendTunnel  // t, when it can encapsulate into the pump's buffer
+
+	// srcRoutes is t's Routes, captured once, when t asks for its inbound
+	// sources to be checked against them (SourceCheckedTunnel); nil otherwise.
+	srcRoutes []netip.Prefix
 }
 
 // peerRoamer is a Tunnel whose return address follows its peer. The pump calls
@@ -300,6 +304,11 @@ func bind(t Tunnel, c *TunnelCounters) bound {
 	b.roam, _ = t.(peerRoamer)
 	b.pad, _ = t.(PaddingTunnel)
 	b.appender, _ = t.(AppendTunnel)
+	if sc, ok := t.(SourceCheckedTunnel); ok && sc.VerifyInboundSource() {
+		// A tunnel with no routes yet owns no source address, so it may send
+		// nothing: an empty, non-nil slice, which SourceWithin never matches.
+		b.srcRoutes = append(make([]netip.Prefix, 0, len(t.Routes())), t.Routes()...)
+	}
 	return b
 }
 
@@ -598,7 +607,7 @@ func (p *Pump) handleInboundMulti(b bound, pkt []byte, from *net.UDPAddr, now in
 		return
 	}
 	for _, inner := range inners {
-		if len(inner) == 0 {
+		if len(inner) == 0 || !p.sourceOK(b, inner) {
 			continue
 		}
 		// Counted per inner packet, not per datagram: an aggregating format
@@ -689,6 +698,9 @@ func (p *Pump) decapInbound(b bound, key uint32, pkt []byte, from *net.UDPAddr, 
 		// nothing to deliver to the TUN -- but it is proof of life, so the
 		// tunnel's last-seen moves even though its byte count does not.
 		b.c.countRx(0, now)
+		return nil, false
+	}
+	if !p.sourceOK(b, inner) {
 		return nil, false
 	}
 	return inner, true

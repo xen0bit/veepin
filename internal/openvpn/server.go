@@ -849,6 +849,11 @@ func (t *serverTunnel) Routes() []netip.Prefix               { return t.routes }
 func (t *serverTunnel) PeerAddr() *net.UDPAddr               { return t.peer.Load() }
 func (t *serverTunnel) Encapsulate(p []byte) ([]byte, error) { return t.cipher.Seal(p) }
 
+// VerifyInboundSource implements dataplane.SourceCheckedTunnel: a client may
+// send only as the address(es) it was assigned, which are this tunnel's
+// routes. Stock OpenVPN enforces the same rule ("bad source address").
+func (t *serverTunnel) VerifyInboundSource() bool { return true }
+
 // EncapsulatePadded implements dataplane.PaddingTunnel. The data channel
 // length-delimits its payload, so filler past the inner IP packet is delimited
 // by that packet's own header and is inert to any conforming receiver.

@@ -232,6 +232,13 @@ func (c *Conn) serverHandshake() error {
 // selectSuite picks the first suite this server supports, in our preference
 // order rather than the client's. The supported set is PSK or ECDHE by config.
 func (c *Conn) selectSuite(offered []uint16) (suite, error) {
+	if c.cfg.forceSuite != 0 {
+		for _, s := range append(append([]suite(nil), pskSuites...), ecdheSuites...) {
+			if s.id == c.cfg.forceSuite {
+				return s, nil
+			}
+		}
+	}
 	for _, s := range c.serverSuites() {
 		for _, id := range offered {
 			if id == s.id {

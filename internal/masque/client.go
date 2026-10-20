@@ -12,6 +12,7 @@ package masque
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/netip"
@@ -35,10 +36,15 @@ type tunDevice interface {
 
 // ClientConfig is what the client engine needs beyond an established QUIC
 // connection and a TUN.
+// ErrAuth is the proxy refusing the client's credential (status 407).
+var ErrAuth = errors.New("masque: the proxy refused the client's token")
+
 type ClientConfig struct {
 	// Authority is the :authority the CONNECT request carries — the proxy's
 	// host, which it may use to select a tunnel endpoint.
 	Authority string
+	// Token is the bearer credential the proxy requires; empty sends none.
+	Token string
 	// Logger receives progress messages; nil discards them.
 	Logger *vlog.Logger
 }
@@ -74,7 +80,7 @@ func Connect(ctx context.Context, qc *quic.Conn, cfg ClientConfig) (*http3.Conn,
 	}
 
 	path := ConnectIPPath("*", "*")
-	rs, err := h3conn.OpenConnect(ctx, ConnectIPHeaders(cfg.Authority, path))
+	rs, err := h3conn.OpenConnect(ctx, WithToken(ConnectIPHeaders(cfg.Authority, path), cfg.Token))
 	if err != nil {
 		return nil, nil, netip.Prefix{}, nil, fmt.Errorf("masque: opening CONNECT-IP: %w", err)
 	}
@@ -84,7 +90,11 @@ func Connect(ctx context.Context, qc *quic.Conn, cfg ClientConfig) (*http3.Conn,
 		return nil, nil, netip.Prefix{}, nil, fmt.Errorf("masque: reading CONNECT response: %w", err)
 	}
 	if status := fieldValue(resp, ":status"); status != "200" {
-		return nil, nil, netip.Prefix{}, nil, fmt.Errorf("masque: proxy refused CONNECT-IP: status %q", status)
+		err := fmt.Errorf("masque: proxy refused CONNECT-IP: status %q", status)
+		if status == "407" {
+			err = fmt.Errorf("%w: %w", ErrAuth, err)
+		}
+		return nil, nil, netip.Prefix{}, nil, err
 	}
 
 	// Ask for an address with no preference, so a proxy that waits for a request

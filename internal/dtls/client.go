@@ -83,9 +83,17 @@ func (c *Conn) clientHandshake() error {
 	if err != nil {
 		return err
 	}
-	s, err := suiteByID(hello2.cipherSuite)
-	if err != nil {
-		return err
+	if hello2.version != version1_2 {
+		return fmt.Errorf("dtls: server chose version %#04x, not DTLS 1.2", hello2.version)
+	}
+	// The suite must be one this client offered. The key exchange that
+	// follows is the chosen suite's, so accepting any suite the server names
+	// would let it pick a PSK exchange for a client that has no PSK (whose
+	// premaster is then a constant) or a certificate exchange for one whose
+	// security rests on the PSK.
+	s, ok := offered(c.offeredSuites(), hello2.cipherSuite)
+	if !ok {
+		return fmt.Errorf("dtls: server chose cipher suite %#04x, which this client did not offer", hello2.cipherSuite)
 	}
 	c.suite = s
 	hs.serverRand = hello2.random
@@ -116,6 +124,9 @@ func (c *Conn) clientHandshake() error {
 			return err
 		}
 	} else {
+		if len(c.cfg.PSK) == 0 {
+			return errors.New("dtls: a PSK key exchange with no PSK configured")
+		}
 		cke = handshakeMsg{typ: handshakeClientKeyExchange, seq: hs.sendSeq, body: pskClientKeyExchange{identity: c.cfg.PSKIdentity}.marshal()}
 		premaster = pskPremaster(c.cfg.PSK)
 	}
@@ -215,6 +226,11 @@ func (c *Conn) verifyServerCertificate(chain [][]byte) error {
 	}
 	if c.cfg.InsecureSkipVerify {
 		return nil
+	}
+	if c.cfg.ServerName == "" && c.cfg.VerifyPeerCertificate == nil {
+		// x509.Verify skips the hostname check for an empty DNSName, which
+		// would accept any certificate that chains to a trusted root.
+		return errors.New("dtls: no ServerName to verify the server's certificate against")
 	}
 	leaf, err := x509.ParseCertificate(chain[0])
 	if err != nil {

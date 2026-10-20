@@ -2,15 +2,16 @@
 // html/template and inlined vanilla JavaScript over an embed.FS; no npm, no
 // bundle step, no third-party dependency. The browser talks to the same
 // /api/* endpoints the CLI does, authenticating each fetch with the bearer
-// token this package embeds into the dashboard as a JS global.
+// token.
 //
-// The panel is served at the root of the management HTTP server; /api/* is
-// reserved for the data plane. The panel itself is reachable without a token
-// because the management server binds to localhost by default -- the bearer
-// token is then the per-request boundary, sent from the browser on each fetch
-// against /api/*. Operators who bind to a routable interface are expected to
-// stand up mTLS or SSH-tunnel in front of the panel: that posture is the
-// subject of doc/security.md.
+// The pages carry no token. They are served without authentication, and a
+// loopback TCP port answers every user on the host, not only the one who owns
+// the token file -- so a page that embedded the token handed root's
+// credential to any local account that asked for it. The operator brings the
+// token to the browser instead: in the URL fragment (#token=..., which a
+// browser never sends to the server), or pasted into the prompt the panel
+// shows when it has none. panel.js keeps it in sessionStorage for the tab.
+// See doc/security.md.
 package ui
 
 import (
@@ -29,21 +30,18 @@ var templatesFS embed.FS
 
 // Handler is the http.Handler that serves the panel pages.
 type Handler struct {
-	token string
-	tmpl  *template.Template
-	log   *vlog.Logger
+	tmpl *template.Template
+	log  *vlog.Logger
 }
 
-// NewHandler parses the embedded templates once and stores the bearer token
-// for injection into the dashboard; the browser uses it for its /api fetches.
-// Returns an error if the embedded templates fail to parse, which a build
+// NewHandler parses the embedded templates once. Returns an error if the embedded templates fail to parse, which a build
 // embeds once and which should therefore never happen.
 //
 // logger is the supervisor's logger -- the same one feeding mgmt.LogRing, so a
 // render failure shows up in the panel's own /api/logs tail. It was an
 // fmt.Printf to stdout, which meant the panel's one failure mode was the one
 // thing the panel could not show you. A nil logger discards.
-func NewHandler(token string, logger *vlog.Logger) (*Handler, error) {
+func NewHandler(logger *vlog.Logger) (*Handler, error) {
 	tmpl, err := template.ParseFS(templatesFS, "templates/*.html")
 	if err != nil {
 		return nil, fmt.Errorf("ui: parsing embedded templates: %w", err)
@@ -51,13 +49,12 @@ func NewHandler(token string, logger *vlog.Logger) (*Handler, error) {
 	if logger == nil {
 		logger = vlog.Discard()
 	}
-	return &Handler{token: token, tmpl: tmpl, log: logger}, nil
+	return &Handler{tmpl: tmpl, log: logger}, nil
 }
 
-// pageData is the dashboard render context. The Token field is the only
-// secret; everything else is decorative.
+// pageData is the render context. It holds nothing secret, and must not: the
+// pages are served to anyone who can reach the port.
 type pageData struct {
-	Token     string
 	InitialJS string
 }
 
@@ -77,23 +74,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case p == "/assets/panel.js":
 		h.serveAsset(w, r, "templates/panel.js", "text/javascript; charset=utf-8")
 	case p == "/listeners/new":
-		h.render(w, "form.html", pageData{Token: h.token, InitialJS: "new"})
+		h.render(w, "form.html", pageData{InitialJS: "new"})
 	case p == "/profiles/new":
-		h.render(w, "form.html", pageData{Token: h.token, InitialJS: "new-profile"})
+		h.render(w, "form.html", pageData{InitialJS: "new-profile"})
 	case strings.HasPrefix(p, "/listeners/"):
 		name := p[len("/listeners/"):]
 		if name == "" || strings.Contains(name, "/") {
 			http.NotFound(w, r)
 			return
 		}
-		h.render(w, "form.html", pageData{Token: h.token, InitialJS: "edit:" + name})
+		h.render(w, "form.html", pageData{InitialJS: "edit:" + name})
 	case strings.HasPrefix(p, "/profiles/"):
 		name := p[len("/profiles/"):]
 		if name == "" || strings.Contains(name, "/") {
 			http.NotFound(w, r)
 			return
 		}
-		h.render(w, "form.html", pageData{Token: h.token, InitialJS: "edit-profile:" + name})
+		h.render(w, "form.html", pageData{InitialJS: "edit-profile:" + name})
 	default:
 		http.NotFound(w, r)
 	}
@@ -101,8 +98,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // serveAsset writes one file from the embedded tree with the given content type.
 // nosniff because the declared type is the correct one and a browser that
-// second-guesses it on a page holding the bearer token is not a trade worth
-// making.
+// second-guesses it on a page holding the bearer token in its script state is
+// not a trade worth making.
 func (h *Handler) serveAsset(w http.ResponseWriter, r *http.Request, name, ctype string) {
 	body, err := templatesFS.ReadFile(name)
 	if err != nil {
@@ -126,7 +123,6 @@ func (h *Handler) render(w http.ResponseWriter, name string, data ...pageData) {
 	if len(data) > 0 {
 		ctx = data[0]
 	}
-	ctx.Token = h.token
 
 	var buf bytes.Buffer
 	if err := h.tmpl.ExecuteTemplate(&buf, name, ctx); err != nil {

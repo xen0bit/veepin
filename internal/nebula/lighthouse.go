@@ -28,6 +28,7 @@ package nebula
 import (
 	"encoding/binary"
 	"net/netip"
+	"slices"
 	"time"
 )
 
@@ -355,10 +356,21 @@ func (h *Host) handleLighthouse(pkt []byte, hdr header, from netip.AddrPort) {
 	case metaHostQuery:
 		h.answerHostQuery(t, m, from)
 	case metaHostQueryReply:
+		// Only a lighthouse answers queries. A reply from any other member is
+		// that member claiming to know where a third host is, which is how it
+		// would put itself on the path between two others.
+		if !h.isLighthouse(t.PeerAddr()) {
+			h.log.Warnf("nebula: ignoring a host query reply from %v, which is not a lighthouse", t.PeerAddr())
+			return
+		}
 		h.learnAddresses(m)
 	case metaHostUpdateNotification:
 		h.recordUpdate(t, m, from)
 	case metaHostPunchNotification:
+		if !h.isLighthouse(t.PeerAddr()) {
+			h.log.Warnf("nebula: ignoring a punch notification from %v, which is not a lighthouse", t.PeerAddr())
+			return
+		}
 		h.punch(m)
 	case metaHostWhoami:
 		h.answerWhoami(t, from)
@@ -416,9 +428,16 @@ func (h *Host) learnAddresses(m metaMessage) {
 	}
 	p := h.peerFor(m.VpnAddr)
 	p.mu.Lock()
-	p.underlay = mergeAddrs(p.underlay, m.AddrPorts)
-	p.relayVia = append([]netip.Addr(nil), m.RelayVpnAddrs...)
 	up := p.tun != nil
+	if up {
+		// A live tunnel's address is the one its own authenticated traffic
+		// came from (noteRoam). A lighthouse's answer may add candidates for
+		// the next handshake, but does not displace that.
+		p.underlay = mergeAddrs(nil, append(append([]netip.AddrPort(nil), p.underlay...), m.AddrPorts...))
+	} else {
+		p.underlay = mergeAddrs(p.underlay, m.AddrPorts)
+		p.relayVia = append([]netip.Addr(nil), m.RelayVpnAddrs...)
+	}
 	direct := len(p.underlay) > 0
 	relays := append([]netip.Addr(nil), p.relayVia...)
 	p.mu.Unlock()
@@ -549,4 +568,10 @@ func mergeAddrs(existing, incoming []netip.AddrPort) []netip.AddrPort {
 		out = append(out, a)
 	}
 	return out
+}
+
+// isLighthouse reports whether addr is one of this host's configured
+// lighthouses.
+func (h *Host) isLighthouse(addr netip.Addr) bool {
+	return slices.Contains(h.lighthouses, addr)
 }

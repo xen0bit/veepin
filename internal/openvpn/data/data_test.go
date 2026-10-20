@@ -2,6 +2,8 @@ package data
 
 import (
 	"bytes"
+	"math"
+	"sync/atomic"
 	"testing"
 
 	"github.com/xen0bit/veepin/internal/openvpn/keys"
@@ -281,5 +283,21 @@ func TestPaddedDataPathAllocations(t *testing.T) {
 		}
 	}); n > 1 {
 		t.Errorf("SealPadded allocates %.0f times per packet, want 1", n)
+	}
+}
+
+// TestSendCounterNeverWraps: the packet ID is half of the GCM nonce under a
+// session-long key. If this fails, a session that sends 2^32 packets starts
+// sealing with nonces it has already used.
+func TestSendCounterNeverWraps(t *testing.T) {
+	var c atomic.Uint32
+	c.Store(math.MaxUint32 - 1)
+	if id, ok := nextPacketID(&c); !ok || id != math.MaxUint32 {
+		t.Fatalf("last ID: got %d, %v", id, ok)
+	}
+	for range 3 {
+		if id, ok := nextPacketID(&c); ok {
+			t.Fatalf("an exhausted counter issued %d", id)
+		}
 	}
 }

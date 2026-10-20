@@ -31,7 +31,15 @@ type Tunnel struct {
 	inSPI  uint32
 	routes []netip.Prefix
 	peer   atomic.Pointer[net.UDPAddr]
+
+	// checkSource makes the pump drop inbound packets whose source is not
+	// one of routes. A server sets it, because its routes are the address
+	// Mode-Config assigned; see dataplane.SourceCheckedTunnel.
+	checkSource bool
 }
+
+// VerifyInboundSource implements dataplane.SourceCheckedTunnel.
+func (t *Tunnel) VerifyInboundSource() bool { return t.checkSource }
 
 // NewTunnel wraps an SA for the pump. routes are the inner destinations this
 // tunnel carries; peer is where ESP is sent.

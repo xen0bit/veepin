@@ -108,8 +108,8 @@ veepin connect pq-sstp -server vpn.example -user alice
 | Variant | Forces | Also forces |
 |---|---|---|
 | `pq-ikev2` | ML-KEM-768 via ADDKE1 (RFC 9370), ML-DSA in the RFC 7427 AUTH payload | refuses EAP-MSCHAPv2 |
-| `pq-openvpn`, `pq-masque` | TLS 1.3, ML-KEM key exchange, ML-DSA certificates **both ends** (mutual TLS) | |
-| `pq-sstp`, `pq-gp`, `pq-pulse`, `pq-softether` | TLS 1.3, ML-KEM key exchange, ML-DSA server certificate | |
+| `pq-openvpn` | TLS 1.3, ML-KEM key exchange, ML-DSA certificates **both ends** (mutual TLS) | |
+| `pq-sstp`, `pq-gp`, `pq-pulse`, `pq-softether`, `pq-masque` | TLS 1.3, ML-KEM key exchange, ML-DSA server certificate | `pq-masque` clients authenticate with a bearer token, not a certificate |
 | `pq-anyconnect`, `pq-fortinet` | the same | `-no-dtls`, because the DTLS 1.2 data channel has no post-quantum path |
 | `pq-ssh` | `mlkem768x25519-sha256` | **key exchange only** — see below |
 
@@ -488,6 +488,10 @@ the host's real address. On disconnect (Ctrl-C) both are reverted. Useful flags:
 - `-user` / `-pass` — authenticate with EAP-MSCHAPv2 username/password instead of
   the client PSK (the server PSK still authenticates the server).
 - `-full-tunnel=false` — only bring up the interface/address.
+- Under the default full tunnel, an address family the tunnel carries no
+  address in is made unreachable rather than left on the physical link: a
+  v4-only tunnel on a dual-stack host otherwise sends every IPv6 flow out in the
+  clear. `-allow-unrouted-family` restores the old behaviour.
 - `-route <cidr>` — send this prefix through the tunnel (repeatable). Implies
   `-full-tunnel=false`, since naming what to route means not routing everything.
 - `-exclude <cidr>` — keep this prefix off the tunnel (repeatable), by routing it

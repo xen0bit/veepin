@@ -72,11 +72,17 @@ type espTunnel struct {
 	inSPI  uint32
 	routes []netip.Prefix
 	peer   atomic.Pointer[net.UDPAddr]
+
+	// server marks a responder-side tunnel, whose inbound packets must come
+	// from the address the peer was assigned (RFC 4301 §5.2's inbound
+	// selector check). See dataplane.SourceCheckedTunnel.
+	server bool
 }
 
-func (t *espTunnel) InboundKey() uint32     { return t.inSPI }
-func (t *espTunnel) Routes() []netip.Prefix { return t.routes }
-func (t *espTunnel) PeerAddr() *net.UDPAddr { return t.peer.Load() }
+func (t *espTunnel) InboundKey() uint32        { return t.inSPI }
+func (t *espTunnel) VerifyInboundSource() bool { return t.server }
+func (t *espTunnel) Routes() []netip.Prefix    { return t.routes }
+func (t *espTunnel) PeerAddr() *net.UDPAddr    { return t.peer.Load() }
 
 // SetPeerAddr updates the ESP return address, but only when it actually changes,
 // to keep the inbound data-path hot loop free of needless atomic stores.
@@ -273,6 +279,7 @@ func (d *PumpDataPath) AddChild(sa *IKESA, child *ChildSA) {
 		// assigned, so its routes are that host's /32 and, for a dual-stack peer,
 		// its /128.
 		routes: append(hostRoute(child.ClientIP), hostRoute6(child.ClientIP6)...),
+		server: true,
 	}
 	t.peer.Store(child.PeerAddr) // initial return address, refined per inbound ESP
 

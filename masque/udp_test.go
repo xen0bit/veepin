@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"math/big"
 	"net"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -67,7 +68,10 @@ func TestUDPProxyEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := imasque.NewServer(srvEnd, newTestTUN(), imasque.ServerConfig{Pool: pool})
+	srv, err := imasque.NewServer(srvEnd, newTestTUN(), imasque.ServerConfig{
+		Pool: pool, Token: []byte("test-token"),
+		UDPAllow: []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,6 +86,7 @@ func TestUDPProxyEndToEnd(t *testing.T) {
 		Server:     proxyHost,
 		Port:       pp,
 		Insecure:   true,
+		Token:      "test-token",
 		Listen:     "127.0.0.1:0",
 		TargetHost: "127.0.0.1",
 		TargetPort: echoPort,

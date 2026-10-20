@@ -38,6 +38,8 @@ type UDPProxyConfig struct {
 	RootCAs *x509.CertPool
 	// Insecure skips proxy certificate verification (testing only).
 	Insecure bool
+	// Token is the bearer credential the proxy requires; empty sends none.
+	Token string
 
 	// Listen is the local UDP address to bind, e.g. "127.0.0.1:5353".
 	Listen string
@@ -123,7 +125,7 @@ func NewUDPProxy(ctx context.Context, cfg UDPProxyConfig) (*UDPProxy, error) {
 	if authority == "" {
 		authority = cfg.Server
 	}
-	fwd, err := imasque.NewUDPForwarderOverQUIC(ctx, qc, local, cfg.TargetHost, cfg.TargetPort, authority, logger)
+	fwd, err := imasque.NewUDPForwarderOverQUIC(ctx, qc, local, cfg.TargetHost, cfg.TargetPort, authority, cfg.Token, logger)
 	if err != nil {
 		_ = local.Close()
 		_ = end.Close(context.Background())

@@ -234,3 +234,22 @@ func TestTwoFactorChallengeExpires(t *testing.T) {
 		t.Fatal("no challenge was issued at all")
 	}
 }
+
+// TestTwoFactorCodeIsSingleUse: RFC 6238 §5.2 -- a verifier must not accept a
+// code a second time once it has succeeded. If this fails, anyone who has the
+// password and sees one code in use can log in with it again inside its window.
+func TestTwoFactorCodeIsSingleUse(t *testing.T) {
+	base, _ := twoFactorServer(t)
+	code := currentCode(t)
+	login := func() error {
+		_, _, err := Login(twoFactorClient(), base, "alice", "s3cret", "",
+			func(Challenge) (string, error) { return code, nil })
+		return err
+	}
+	if err := login(); err != nil {
+		t.Fatalf("first use of the code: %v", err)
+	}
+	if err := login(); err == nil {
+		t.Fatal("the same code logged in a second time")
+	}
+}

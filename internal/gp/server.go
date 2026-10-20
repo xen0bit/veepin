@@ -87,6 +87,11 @@ type session struct {
 	// return to the gate exactly once, whichever of the several ends gets there
 	// first.
 	releaseOnce sync.Once
+	// link is the session's one data path, ESP or SSL, guarded by Server.mu.
+	// One owner per session is what keeps the address and the route to it in
+	// step: a second tunnel replaces the first rather than outliving it, and
+	// the address goes back to the pool only once nothing routes it.
+	link clientLink
 }
 
 // clientLink is one client's data path, whichever kind it is. minInner pads the
@@ -389,8 +394,9 @@ func (s *Server) offerESP(sess *session, req GetConfigRequest, r *http.Request) 
 	s.bySPI[esp.C2SSPI] = peer
 	// The client is only put on the ESP path here if it is not already on the SSL
 	// tunnel; opening that tunnel is what says it chose the other one.
-	if _, onSSL := s.links[na].(*tunnelLink); !onSSL {
+	if _, onSSL := sess.link.(*tunnelLink); !onSSL {
 		s.links[na] = peer
+		sess.link = peer
 	}
 	s.mu.Unlock()
 	return esp
@@ -432,13 +438,28 @@ func (s *Server) runSSLLink(conn net.Conn, reader io.Reader, sess *session, cook
 
 	na := addrKey(sess.addr)
 	s.mu.Lock()
+	if s.sessions[cookie] != sess {
+		// Released while this request was on its way here.
+		s.mu.Unlock()
+		_ = conn.Close()
+		return
+	}
 	if esp := sess.esp; esp != nil {
 		// The SSL tunnel invalidates the keying block this session was given.
 		delete(s.bySPI, esp.C2SSPI)
 		sess.esp = nil
 	}
+	// A second tunnel on one session replaces the first. Leaving both up let
+	// the first one's end release the address while the second still sent
+	// and received as it, so the next user handed that address shared it.
+	prev, _ := sess.link.(*tunnelLink)
+	sess.link = link
 	s.links[na] = link
 	s.mu.Unlock()
+	if prev != nil {
+		s.log.Printf("gp: a second tunnel for %s replaces the first", sess.addr)
+		_ = prev.Close()
+	}
 	s.log.Printf("gp: tunnel up for %s over TLS", sess.addr)
 
 	go link.readLoop()
@@ -448,7 +469,15 @@ func (s *Server) runSSLLink(conn net.Conn, reader io.Reader, sess *session, cook
 	if s.links[na] == clientLink(link) {
 		delete(s.links, na)
 	}
+	owner := sess.link == clientLink(link)
+	if owner {
+		sess.link = nil
+	}
 	s.mu.Unlock()
+	if !owner {
+		// Superseded: the session lives on in the link that replaced this one.
+		return
+	}
 	s.release(cookie, sess)
 	s.log.Printf("gp: tunnel for %s closed", sess.addr)
 }
@@ -638,7 +667,17 @@ func (s *Server) release(cookie string, sess *session) {
 		if sess.esp != nil {
 			delete(s.bySPI, sess.esp.C2SSPI)
 		}
+		// Nothing may route the address once it is back in the pool.
+		na := addrKey(sess.addr)
+		if l := s.links[na]; l != nil && l == sess.link {
+			delete(s.links, na)
+		}
+		tl, _ := sess.link.(*tunnelLink)
+		sess.link = nil
 		s.mu.Unlock()
+		if tl != nil {
+			_ = tl.Close()
+		}
 		s.cfg.Pool.Release(sess.addr)
 		s.gate.Done()
 	})

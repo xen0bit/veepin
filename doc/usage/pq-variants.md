@@ -17,7 +17,7 @@ See the [README](../../README.md#run) for the one-time `CAP_NET_ADMIN` /
 |---|---|---|
 | `pq-ikev2` | `ikev2` | ML-KEM-768 as an additional key exchange (RFC 9370); ML-DSA in the RFC 7427 AUTH payload |
 | `pq-openvpn` | `openvpn` | TLS 1.3, ML-KEM key exchange, ML-DSA certificates at **both** ends |
-| `pq-masque` | `masque` | the same (mutual TLS) |
+| `pq-masque` | `masque` | TLS 1.3, ML-KEM key exchange, ML-DSA proxy certificate; clients authenticate with a bearer token |
 | `pq-sstp` | `sstp` | TLS 1.3, ML-KEM key exchange, ML-DSA server certificate |
 | `pq-gp` | `gp` | the same — and the pushed ESP keys inherit it, since they travel inside that session |
 | `pq-pulse` | `pulse` | the same, for the same reason |

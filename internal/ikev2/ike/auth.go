@@ -1,7 +1,8 @@
 package ike
 
 import (
-	"bytes"
+	"crypto/hmac"
+	"errors"
 	"fmt"
 	"net"
 
@@ -50,11 +51,23 @@ func computePSKAuth(prf *cryptoutil.PRF, psk, realMessage, peerNonce, skp, idBod
 // verifyPeerPSKAuth checks the peer's AUTH payload under PSK.
 //
 // The peer signs: peerRealMessage | ourNonce | prf(peerSK_p, peerIDbody).
+//
+// An empty PSK is refused outright rather than computed with. A side configured
+// for certificates alone has no PSK, and prf("", ...) is something anyone can
+// evaluate: every other input to the AUTH value is either the peer's own
+// message or a key it derived from its own Diffie-Hellman. Accepting method 2
+// there would let any peer authenticate by naming it.
 func verifyPeerPSKAuth(prf *cryptoutil.PRF, psk, peerRealMessage, ourNonce, peerSKp, peerIDBody, intAuth, gotAuth []byte) error {
+	if len(psk) == 0 {
+		return errNoPSK
+	}
 	octets := AuthOctets(prf, peerRealMessage, ourNonce, peerSKp, peerIDBody, intAuth)
 	want := PSKAuth(prf, psk, octets)
-	if !bytes.Equal(want, gotAuth) {
+	if !hmac.Equal(want, gotAuth) {
 		return fmt.Errorf("ike: PSK authentication failed")
 	}
 	return nil
 }
+
+// errNoPSK is the refusal of PSK authentication by a side that has no PSK.
+var errNoPSK = errors.New("ike: PSK authentication offered but no PSK is configured")

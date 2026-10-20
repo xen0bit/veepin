@@ -166,6 +166,10 @@ const (
 	// the rate is set below what the traffic wants, and folding it into
 	// encap_failed would present a configuration choice as a fault.
 	DropPacerFull
+	// DropSpoofedSource: an authenticated packet whose inner source address is
+	// not one its tunnel was assigned. A client sending as another client, or
+	// as an address behind the server. See SourceCheckedTunnel.
+	DropSpoofedSource
 	numDropReasons
 )
 
@@ -191,6 +195,8 @@ func (r DropReason) String() string {
 		return "tun_write"
 	case DropPacerFull:
 		return "pacer_full"
+	case DropSpoofedSource:
+		return "spoofed_source"
 	default:
 		return "unknown"
 	}

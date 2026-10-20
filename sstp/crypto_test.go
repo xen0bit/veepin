@@ -137,20 +137,43 @@ func TestVerifyCryptoBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := VerifyCryptoBinding(body, hlak, serverCert); err != nil {
+	if err := VerifyCryptoBinding(body, hlak, serverCert, nonce); err != nil {
 		t.Fatalf("verification failed: %v", err)
 	}
 
 	// A tampered cert hash must be rejected.
-	if err := VerifyCryptoBinding(body, hlak, []byte("different-cert")); err == nil {
+	_, body, _ = wire.ReadPacket(bytes.NewReader(pkt))
+	if err := VerifyCryptoBinding(body, hlak, []byte("different-cert"), nonce); err == nil {
 		t.Error("verification accepted a wrong certificate")
+	}
+}
+
+// TestVerifyCryptoBindingRefusesAnotherConnectionsNonce: the binding names the
+// nonce from CALL_CONNECT_ACK so it cannot be carried to a different
+// connection. If this fails, a binding computed for one session verifies on
+// another.
+func TestVerifyCryptoBindingRefusesAnotherConnectionsNonce(t *testing.T) {
+	var hlak [mschap.HLAKLen]byte
+	hlak[0] = 7
+	serverCert := []byte("cert")
+	pkt, err := buildCallConnected(bytes.Repeat([]byte{0xcc}, wire.NonceLen), serverCert, hlak)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, body, err := wire.ReadPacket(bytes.NewReader(pkt))
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := bytes.Repeat([]byte{0xdd}, wire.NonceLen)
+	if err := VerifyCryptoBinding(body, hlak, serverCert, other); err == nil {
+		t.Fatal("a binding carrying another connection's nonce verified")
 	}
 }
 
 func TestVerifyCryptoBindingWrongCert(t *testing.T) {
 	var hlak [32]byte
 	hlak[0] = 1
-	err := VerifyCryptoBinding(make([]byte, 200), hlak, []byte("wrong-cert"))
+	err := VerifyCryptoBinding(make([]byte, 200), hlak, []byte("wrong-cert"), make([]byte, wire.NonceLen))
 	if err == nil {
 		t.Fatal("expected error for wrong cert hash")
 	}
@@ -158,7 +181,7 @@ func TestVerifyCryptoBindingWrongCert(t *testing.T) {
 
 func TestVerifyCryptoBindingShortBody(t *testing.T) {
 	var hlak [32]byte
-	err := VerifyCryptoBinding([]byte{0, 0, 0, 1}, hlak, []byte("cert"))
+	err := VerifyCryptoBinding([]byte{0, 0, 0, 1}, hlak, []byte("cert"), make([]byte, wire.NonceLen))
 	if err == nil {
 		t.Fatal("expected error for short body")
 	}

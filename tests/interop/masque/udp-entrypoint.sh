@@ -12,6 +12,7 @@ while [ "$i" -le 40 ]; do
     masquepeer udp \
         --server "$SERVER" \
         --port "${PORT:-443}" \
+        --token "${TOKEN:-interop-masque-token}" \
         --listen "0.0.0.0:${LISTEN_PORT:-5353}" \
         --target "$TARGET"
     echo "aioquic-masque-udp: attempt $i ended; retrying in 3s"

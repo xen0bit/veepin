@@ -175,7 +175,9 @@ var clientProtoMaps = map[string]clientProtoMap{
 	},
 	"sstp": {
 		endpointKey: "server", serverPort: "port", clientDefaultPort: "443",
-		carry: map[string]string{"user": "user", "password": "password"},
+		// The server's certificate goes to the client as its trust anchor, so
+		// a generated profile verifies the server rather than needing -insecure.
+		carry: map[string]string{"user": "user", "password": "password", "ca": "cert"},
 	},
 	"l2tp": {
 		endpointKey: "server", serverPort: "port", clientDefaultPort: "500",
@@ -205,7 +207,7 @@ var clientProtoMaps = map[string]clientProtoMap{
 	},
 	"masque": {
 		endpointKey: "server", serverPort: "port", clientDefaultPort: "443",
-		carry: map[string]string{"ca": "cert"},
+		carry: map[string]string{"ca": "cert", "token": "token"},
 	},
 	"ssh": {
 		endpointKey: "server", serverPort: "port", clientDefaultPort: "22",
@@ -403,6 +405,13 @@ func applyOverrides(opts map[string]string, derived map[string]bool, overrides m
 // listener whose protocol declares a file-path option and read the file out of
 // the response. Overridden paths are passed through into the profile untouched
 // instead -- the operator named a file they already have.
+//
+// That alone was not enough, because the same token holder writes the
+// listener's config: setting a listener's ca to /etc/shadow made it "derived".
+// So a derived path is opened only inside that listener's own directory,
+// where keygen writes, and only certificate blocks are returned from it. Every
+// file a client profile carries is trust material; nothing else belongs in a
+// bundle.
 func (s *Server) bundleClientConfig(cfg supervisor.ListenerConfig, req ClientConfigRequest, opts map[string]string, derived map[string]bool, peersAdded int) (*clientConfigResponse, error) {
 	fileOpts := map[string]bool{}
 	if specs, ok := client.ClientOptsFor(cfg.Protocol); ok {
@@ -421,12 +430,16 @@ func (s *Server) bundleClientConfig(cfg supervisor.ListenerConfig, req ClientCon
 		if !fileOpts[k] || v == "" || !derived[k] {
 			continue
 		}
-		body, err := os.ReadFile(v)
+		body, err := readInListenerDir(filepath.Join(s.dir, cfg.Name), v)
 		if err != nil {
 			// Left pointing at the server's path, and said so: the previous
 			// version swallowed this, so an unreadable CA produced a profile
 			// referencing an absolute path on the server with no companion file
 			// and nothing to tell the operator the bundle was incomplete.
+			warnings = append(warnings, fmt.Sprintf("%s: %s not bundled: %v", k, v, err))
+			continue
+		}
+		if body, err = certificatesOnly(body); err != nil {
 			warnings = append(warnings, fmt.Sprintf("%s: %s not bundled: %v", k, v, err))
 			continue
 		}
@@ -724,4 +737,47 @@ func validateOverrides(protocol string, overrides map[string]string) error {
 		}
 	}
 	return nil
+}
+
+// readInListenerDir reads path, which must lie inside dir. It goes through
+// os.Root, so a symlink inside dir that points out of it is refused too.
+func readInListenerDir(dir, path string) ([]byte, error) {
+	rel, err := filepath.Rel(dir, filepath.Clean(path))
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return nil, fmt.Errorf("outside the listener's directory %s", dir)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	return root.ReadFile(rel)
+}
+
+// bundleableBlocks are the PEM types a client profile may carry.
+var bundleableBlocks = map[string]bool{
+	"CERTIFICATE":           true,
+	"NEBULA CERTIFICATE":    true,
+	"NEBULA CERTIFICATE V2": true,
+}
+
+// certificatesOnly re-encodes the certificate blocks of a PEM file and drops
+// everything else, so a path that names a key, or a file that is not PEM at
+// all, contributes nothing to a bundle.
+func certificatesOnly(body []byte) ([]byte, error) {
+	var out []byte
+	for {
+		var blk *pem.Block
+		blk, body = pem.Decode(body)
+		if blk == nil {
+			break
+		}
+		if bundleableBlocks[blk.Type] {
+			out = append(out, pem.EncodeToMemory(&pem.Block{Type: blk.Type, Bytes: blk.Bytes})...)
+		}
+	}
+	if len(out) == 0 {
+		return nil, errors.New("contains no certificate")
+	}
+	return out, nil
 }

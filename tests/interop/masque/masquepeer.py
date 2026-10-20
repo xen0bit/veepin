@@ -183,6 +183,13 @@ def encode_route_full():
 # ---------------------------------------------------------------------------
 
 
+def auth_headers(token):
+    """The proxy-authorization field veepin's proxy requires, when a token is set."""
+    if not token:
+        return []
+    return [(b"proxy-authorization", b"Bearer " + token.encode())]
+
+
 def parse_udp_target(path):
     """Return (host, port) from /.well-known/masque/udp/{host}/{port}/ or None."""
     prefix = "/.well-known/masque/udp/"
@@ -408,6 +415,7 @@ class ClientProtocol(QuicConnectionProtocol):
         self.tun_fd = None
         self.tun_name = None
         self.stream_id = None
+        self.token = ""
         self.assigned_event = asyncio.Event()
 
     def quic_event_received(self, event: QuicEvent):
@@ -427,7 +435,8 @@ class ClientProtocol(QuicConnectionProtocol):
                 (b":path", b"/.well-known/masque/ip/*/*/"),
                 (b":protocol", b"connect-ip"),
                 (b"capsule-protocol", b"?1"),
-            ],
+            ]
+            + auth_headers(self.token),
             end_stream=False,
         )
         self.tunnel = Tunnel(self, self._h3, self.stream_id, None)
@@ -482,6 +491,7 @@ class UDPForwardProtocol(QuicConnectionProtocol):
 
     target_host = None
     target_port = None
+    token = ""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -524,7 +534,8 @@ class UDPForwardProtocol(QuicConnectionProtocol):
                     (b":path", path.encode()),
                     (b":protocol", b"connect-udp"),
                     (b"capsule-protocol", b"?1"),
-                ],
+                ]
+                + auth_headers(self.token),
                 end_stream=False,
             )
             self.flows[src] = stream_id
@@ -550,6 +561,7 @@ def run_udp_client(args):
         ) as protocol:
             protocol.target_host = target_host
             protocol.target_port = target_port
+            protocol.token = args.token
             await protocol.wait_connected()
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -581,6 +593,7 @@ def run_client(args):
             args.server, args.port, configuration=config, create_protocol=ClientProtocol
         ) as protocol:
             protocol.tun_name = args.tun
+            protocol.token = args.token
             await protocol.wait_connected()
             protocol.send_connect(args.authority or args.server)
             log(f"connected to {args.server}:{args.port}, sent CONNECT-IP")
@@ -609,12 +622,14 @@ def main():
     c.add_argument("--server", required=True)
     c.add_argument("--port", type=int, default=443)
     c.add_argument("--authority", default="")
+    c.add_argument("--token", default="", help="bearer token the proxy requires")
 
     u = sub.add_parser("udp")
     u.add_argument("--server", required=True)
     u.add_argument("--port", type=int, default=443)
     u.add_argument("--listen", required=True, help="local host:port to bind")
     u.add_argument("--target", required=True, help="remote host:port to proxy to")
+    u.add_argument("--token", default="", help="bearer token the proxy requires")
 
     args = ap.parse_args()
     if args.mode == "server":

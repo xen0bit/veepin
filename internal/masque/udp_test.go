@@ -3,6 +3,7 @@ package masque
 import (
 	"context"
 	"net"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -48,7 +49,10 @@ func TestServerConnectUDPRelay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := NewServer(srvEnd, newFakeTUN(), ServerConfig{Pool: pool})
+	srv, err := NewServer(srvEnd, newFakeTUN(), ServerConfig{
+		Pool: pool, Token: []byte("test-token"),
+		UDPAllow: []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +74,7 @@ func TestServerConnectUDPRelay(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := ConnectUDPPath("127.0.0.1", echo.Port)
-	rs, err := h3conn.OpenConnect(ctx, ConnectUDPHeaders("proxy.example", path))
+	rs, err := h3conn.OpenConnect(ctx, WithToken(ConnectUDPHeaders("proxy.example", path), "test-token"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +130,7 @@ func TestServerConnectUDPRejectsBadTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, _ := NewServer(srvEnd, newFakeTUN(), ServerConfig{Pool: pool})
+	srv, _ := NewServer(srvEnd, newFakeTUN(), ServerConfig{Pool: pool, AllowAnonymous: true})
 	go func() { _ = srv.Run() }()
 	t.Cleanup(func() { _ = srv.Close() })
 
